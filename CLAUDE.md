@@ -53,6 +53,12 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 
 ## What lake is built on
 
+- **Control plane: Postgres, for now.** The operator provisions a CloudNativePG cluster per
+  `Lake` (`spec.postgres`, on by default) and injects `LAKE_CONTROL_DB_URI` /
+  `LAKE_CONTROL_DB_PASSWORD` into the pod (optional refs: the pod starts before the DB is
+  bootstrapped, so treat an empty value as "not yet"). **Data plane: Zetta.** Recorded in the
+  bridge `decisions.md` §6; "for now" is deliberate.
+
 **lake is the enterprise product and builds on Zetta as much as possible** — control
 plane, operational state, clustering, and **its web-serving approach**. lake must also
 host liquid repositories, so it consumes **liquid's store as a library** for repository

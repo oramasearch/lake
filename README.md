@@ -73,9 +73,10 @@ by default, no args needed.
 
 ## What this is
 
-One binary, C++26. **Enterprise; built on Zetta** — control plane, state, clustering and
-web serving — and consuming liquid's open-source store as a library for repository
-data. It runs on [`oramasearch/k0s`](https://github.com/oramasearch/k0s) and is deployed
+One binary, C++26. **Enterprise.** Control plane on **Postgres** (for now; provisioned per `Lake`
+by the operator through CloudNativePG, reaching lake as `LAKE_CONTROL_DB_URI`), data plane on
+**Zetta** (the content-addressed store, drips, search), web serving in Zetta's style, and
+liquid's open-source store consumed as a library (`liquid::liquid`) for repository data. It runs on [`oramasearch/k0s`](https://github.com/oramasearch/k0s) and is deployed
 by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator) (as a `Lake` CR).
 
 | Surface | What it answers |
