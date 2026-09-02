@@ -1,0 +1,6 @@
+# Local build trees (Boost _deps alone is hundreds of MB) and VCS metadata stay out of the context.
+build/
+build-*/
+.cache/
+.git/
+compile_commands.json

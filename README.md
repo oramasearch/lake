@@ -10,8 +10,8 @@ liquid is the tool. lake is where it collects.
 > every miss with a JSON 404. The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
-> Next, per the bridge's action plan (Phase 0.5): a container image so the `Lake` CR on
-> `orama-operator` runs this binary instead of a placeholder.
+> The image `oramasearch/lake` (private) runs under the `Lake` CR on `orama-operator`; see
+> **Container image** below.
 
 ## Build and run
 
@@ -38,6 +38,27 @@ ctest --test-dir build
 `--node NAME` names the node on the page and in `/v1/server_info`. SIGINT/SIGTERM stop
 it cleanly.
 
+## Container image
+
+`Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14
+and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++) as user `lake`,
+`ENTRYPOINT lake`, `CMD --listen 0.0.0.0:4900`, port 4900 exposed. It is Zetta's headless-image
+recipe minus the GUI and Postgres deps. Images go to the **private** Docker Hub repo
+`oramasearch/lake`: the mutable `v1-sandbox` tag plus an immutable date or commit tag.
+
+Build it **natively on amd64** — a C++26 build under QEMU on Apple Silicon is far too slow. From an
+Apple Silicon Mac, use a BuildKit builder running on the AKS node (see `CLAUDE.md`), then push:
+
+```sh
+docker buildx build --builder aks-amd64 --platform linux/amd64 \
+  -t oramasearch/lake:v1-sandbox -t oramasearch/lake:<tag> --load .
+docker push --all-tags oramasearch/lake
+```
+
+The `Lake` CR on `orama-operator` runs it: `spec.image: oramasearch/lake:<tag>`,
+`spec.pullSecretName: oramasearch-dockerhub` (the Secret must exist in `spec.namespace`), port 4900
+by default, no args needed.
+
 ## Layout
 
 | Path | Role |
@@ -48,6 +69,7 @@ it cleanly.
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `capy`, `corosio`, `http`, `beast2` — vendored at Zetta's exact pins |
+| `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
 
 ## What this is
 

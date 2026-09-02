@@ -11,8 +11,9 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 **Hello world serves** (bridge `docs/action-plan.md`, Phase 0.5). `./build/lake` binds,
 serves `GET /`, `GET /style.css`, `GET /v1/server_info`, 404s everything else, and stops
 cleanly on SIGINT/SIGTERM; `ctest` is green. The specification is in
-`oramasearch/liquid/docs/features/`. Next: a container image so the `Lake` CR on
-`orama-operator` runs this binary instead of a placeholder.
+`oramasearch/liquid/docs/features/`. The container image exists (`oramasearch/lake`, built
+natively on the AKS node, see below) and the `Lake` CR on `orama-operator` runs it. Next: Phase 6
+work proper, starting with how lake obtains Zetta (open decision below).
 
 ## Where to read Zetta
 
@@ -68,6 +69,29 @@ that licence boundary.
 - `std::expected` at every public boundary; no exceptions across public APIs.
 - Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended);
   runs on `oramasearch/k0s`, and on our AKS cluster for now.
+
+## Container image
+
+- `Dockerfile` = Zetta's headless recipe (Ubuntu 24.04, clang-19 from apt.llvm.org, CMake 3.31
+  because 24.04's 3.28 does not know `cxx_std_26`) minus GUI/Postgres deps, **plus
+  `libstdc++-14-dev`**: 24.04 defaults to libstdc++ 13, which has no `<print>`, and lake uses
+  `std::println`. Runtime image = `libssl3 libstdc++6 ca-certificates`, non-root user `lake`.
+- **Build natively on amd64.** QEMU emulation of a C++26 build on Apple Silicon is far too slow
+  and hits `Illegal instruction` (zetta-bridge learned this). From this Mac, build on the AKS
+  node with buildx's kubernetes driver (rootless BuildKit pod in namespace `buildkit`):
+
+  ```sh
+  kubectl create namespace buildkit
+  docker buildx create --name aks-amd64 --driver kubernetes --platform linux/amd64 --bootstrap \
+    --driver-opt namespace=buildkit,replicas=1,rootless=true,requests.cpu=2,requests.memory=4Gi,limits.cpu=6,limits.memory=12Gi
+  docker buildx build --builder aks-amd64 --platform linux/amd64 -t oramasearch/lake:v1-sandbox -t oramasearch/lake:<tag> --load .
+  docker push --all-tags oramasearch/lake
+  ```
+
+  `docker buildx rm aks-amd64` removes the pod when done. `--load` then a separate `docker push`
+  keeps registry writes explicit.
+- Tags: `v1-sandbox` (mutable, what the sample CR pulls) plus an immutable tag per build. The Docker
+  Hub repo is private; the `Lake` CR needs `spec.pullSecretName` and the Secret in `spec.namespace`.
 
 ## Open decisions
 
