@@ -58,6 +58,18 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `LAKE_CONTROL_DB_PASSWORD` into the pod (optional refs: the pod starts before the DB is
   bootstrapped, so treat an empty value as "not yet"). **Data plane: Zetta.** Recorded in the
   bridge `decisions.md` §6; "for now" is deliberate.
+- **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
+  vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
+  owned `PostgresSchema` (one transaction, guarded on `customers`, versioned by content hash).
+  Change the schema HERE, then copy it into the operator in the same change; the operator's test
+  checks the copy carries the source-of-truth header. Migrations are single-shot today
+  (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
+  a new guard/version and idempotent SQL (`IF NOT EXISTS`). Migrations never run in lake pods, so
+  replica count cannot duplicate them.
+- **Tenant model.** user and organization are identity (TAAP `taap_id`); the customer owns
+  everything: individual xor organization (`customer_type_check`), one customer per identity,
+  one global lowercase handle namespace (`customer_name_unique` + `customer_name_format`); the
+  app generates handles and must pre-check to answer 409.
 
 **lake is the enterprise product and builds on Zetta as much as possible** — control
 plane, operational state, clustering, and **its web-serving approach**. lake must also

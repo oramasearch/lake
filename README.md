@@ -70,6 +70,7 @@ by default, no args needed.
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `capy`, `corosio`, `http`, `beast2` — vendored at Zetta's exact pins |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
+| `db/schema.sql` | **the control-plane schema, source of truth.** `users`, `organizations`, `customers` (uuid-v4 keys; the customer is the tenant). The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 
