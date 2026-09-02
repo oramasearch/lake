@@ -27,6 +27,7 @@ Lake requeues every 20 s until `status.readyInstances ≥ 1`, and shows it as th
 crashing the manager.
 
 **Schema.** Applied by the operator through a `PostgresSchema`; see [`schema.md`](schema.md).
+`Lake/prod` has migrations `0001` and `0002` applied.
 
 **Verify.**
 
