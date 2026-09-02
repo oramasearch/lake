@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <map>
 #include <vector>
 
 #include <boost/beast2/http_server.hpp>
@@ -34,6 +35,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
+#include "lake/control/store.hpp"
 #include "lake/version.hpp"
 
 namespace lake::api {
@@ -75,6 +77,90 @@ bool constant_time_equal(std::string_view a, std::string_view b) {
     return diff == 0;
 }
 
+// A capy WriteSink that collects a request body into a std::string — for the form-urlencoded
+// bodies the server-rendered sign-in posts (json_sink parses JSON, which form bodies are not).
+struct StringBodySink {
+    std::string data;
+    template <boost::capy::ConstBufferSequence CB>
+    boost::capy::immediate<boost::capy::io_result<std::size_t>> write_some(const CB& buffers) {
+        std::size_t total = 0;
+        for (auto it = boost::capy::begin(buffers); it != boost::capy::end(buffers); ++it) {
+            const boost::capy::const_buffer buffer(*it);
+            data.append(static_cast<const char*>(buffer.data()), buffer.size());
+            total += buffer.size();
+        }
+        return {{{}, total}};
+    }
+    template <boost::capy::ConstBufferSequence CB>
+    boost::capy::immediate<boost::capy::io_result<std::size_t>> write(const CB& buffers) {
+        return write_some(buffers);
+    }
+    boost::capy::immediate<boost::capy::io_result<>> write_eof() { return {{}}; }
+};
+
+std::string cookie_value(const boost::http::route_params& route, std::string_view name) {
+    if (route.req.count(boost::http::field::cookie) == 0) return {};
+    std::string_view header = route.req.at(boost::http::field::cookie);
+    std::size_t pos = 0;
+    while (pos < header.size()) {
+        const std::size_t semi = header.find(';', pos);
+        std::string_view pair = header.substr(pos, semi == std::string_view::npos ? std::string_view::npos : semi - pos);
+        while (!pair.empty() && pair.front() == ' ') pair.remove_prefix(1);
+        const std::size_t eq = pair.find('=');
+        if (eq != std::string_view::npos && pair.substr(0, eq) == name) return std::string(pair.substr(eq + 1));
+        if (semi == std::string_view::npos) break;
+        pos = semi + 1;
+    }
+    return {};
+}
+
+// Percent-decode an application/x-www-form-urlencoded token ('+' → space, %XX → byte).
+std::string form_decode(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '+') {
+            out += ' ';
+        } else if (in[i] == '%' && i + 2 < in.size() && hex(in[i + 1]) >= 0 && hex(in[i + 2]) >= 0) {
+            out += static_cast<char>((hex(in[i + 1]) << 4) | hex(in[i + 2]));
+            i += 2;
+        } else {
+            out += in[i];
+        }
+    }
+    return out;
+}
+
+std::string form_field(std::string_view body, std::string_view name) {
+    std::size_t pos = 0;
+    while (pos < body.size()) {
+        const std::size_t amp = body.find('&', pos);
+        std::string_view pair = body.substr(pos, amp == std::string_view::npos ? std::string_view::npos : amp - pos);
+        const std::size_t eq = pair.find('=');
+        if (eq != std::string_view::npos && form_decode(pair.substr(0, eq)) == name) return form_decode(pair.substr(eq + 1));
+        if (amp == std::string_view::npos) break;
+        pos = amp + 1;
+    }
+    return {};
+}
+
+bool request_is_https(const boost::http::route_params& route) {
+    return route.req.count("x-forwarded-proto") != 0 && std::string_view(route.req.at("x-forwarded-proto")) == "https";
+}
+
+std::string query_value(const boost::http::route_params& route, std::string_view name) {
+    for (const auto& parameter : route.url.params()) {
+        if (parameter.key == name) return std::string(parameter.value);
+    }
+    return {};
+}
+
 nlohmann::json to_nlohmann(const boost::json::value& value) {
     return nlohmann::json::parse(boost::json::serialize(value), nullptr, false);
 }
@@ -107,7 +193,11 @@ struct ApiServer::Impl {
         ApiContext ctx;
         ctx.store = options.store.get();
         ctx.node_name = options.node_name;
-        const std::string bearer = bearer_of(route);
+        // Authorization: the bearer wins; else the HttpOnly session cookie (its value IS the admin
+        // token, validated identically), so the server-rendered pages authenticate with the cookie
+        // set by POST /session and the token never touches the page.
+        std::string bearer = bearer_of(route);
+        if (bearer.empty()) bearer = cookie_value(route, "lake_session");
         if (!options.admin_token.empty() && !bearer.empty() && constant_time_equal(bearer, options.admin_token)) {
             ctx.authorized = true;
             ctx.acting_identity = "admin";
@@ -116,7 +206,92 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_web_root(boost::http::route_params& route) {
-        return send_text(route, boost::http::status::ok, web_ui_hello(options.node_name, version_string()),
+        return send_text(route, boost::http::status::ok,
+                         web_ui_hello(options.node_name, version_string(), context_for(route).authorized),
+                         "text/html; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task redirect(boost::http::route_params& route, std::string_view location,
+                                     std::string_view set_cookie = {}) {
+        namespace http = boost::http;
+        route.status(http::status::found);
+        route.res.set(http::field::location, location);
+        if (!set_cookie.empty()) route.res.set(http::field::set_cookie, set_cookie);
+        route.res.set(http::field::cache_control, "no-store");
+        stamp_response_headers(route, "");
+        auto [send_error] = co_await route.send("");
+        if (send_error) co_return http::route_error(send_error);
+        co_return http::route_done;
+    }
+
+    boost::http::route_task serve_login(boost::http::route_params& route) {
+        if (context_for(route).authorized) return redirect(route, "/repositories");
+        return send_text(route, boost::http::status::ok, web_ui_login(""), "text/html; charset=utf-8", "no-store");
+    }
+
+    // POST /session — the sign-in form. A matching token becomes the HttpOnly lake_session cookie.
+    boost::http::route_task serve_session(boost::http::route_params& route) {
+        namespace http = boost::http;
+        StringBodySink sink;
+        auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        if (read_error) co_return http::route_error(read_error);
+        const std::string token = form_field(sink.data, "token");
+        const bool ok = !options.admin_token.empty() && !token.empty() && constant_time_equal(token, options.admin_token);
+        if (!ok) {
+            const std::string body = web_ui_login("That token did not match.");
+            route.status(http::status::unauthorized);
+            route.res.set(http::field::content_type, "text/html; charset=utf-8");
+            route.res.set(http::field::cache_control, "no-store");
+            stamp_response_headers(route, body);
+            auto [send_error] = co_await route.send(body);
+            if (send_error) co_return http::route_error(send_error);
+            co_return http::route_done;
+        }
+        std::string cookie = "lake_session=" + token + "; HttpOnly; SameSite=Strict; Path=/";
+        if (request_is_https(route)) cookie += "; Secure";
+        co_return co_await redirect(route, "/repositories", cookie);
+    }
+
+    boost::http::route_task serve_logout(boost::http::route_params& route) {
+        return redirect(route, "/", "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    }
+
+    boost::http::route_task serve_customers_page(boost::http::route_params& route) {
+        const ApiContext ctx = context_for(route);
+        if (!ctx.authorized) return redirect(route, "/login");
+        std::vector<control::Customer> customers;
+        if (ctx.store) {
+            if (auto rows = ctx.store->list_customers(500)) customers = std::move(*rows);
+        }
+        return send_text(route, boost::http::status::ok, web_ui_customers(customers), "text/html; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_repositories_page(boost::http::route_params& route) {
+        const ApiContext ctx = context_for(route);
+        if (!ctx.authorized) return redirect(route, "/login");
+        std::vector<control::Repository> repositories;
+        std::map<std::string, control::Customer> owners;
+        if (ctx.store) {
+            if (auto rows = ctx.store->list_repositories(query_value(route, "customer_id"), 500)) repositories = std::move(*rows);
+            if (auto customers = ctx.store->list_customers(1000)) {
+                for (auto& c : *customers) owners.emplace(c.id, std::move(c));
+            }
+        }
+        return send_text(route, boost::http::status::ok, web_ui_repositories(repositories, owners), "text/html; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_repository_page(boost::http::route_params& route) {
+        const ApiContext ctx = context_for(route);
+        if (!ctx.authorized) return redirect(route, "/login");
+        const std::string id = query_value(route, "id");
+        if (!ctx.store || id.empty()) return redirect(route, "/repositories");
+        auto repository = ctx.store->get_repository(id);
+        if (!repository) {
+            return send_text(route, boost::http::status::not_found, error_body("not_found", repository.error().message),
+                             "application/json; charset=utf-8", "no-store");
+        }
+        auto owner = ctx.store->get_customer(repository->customer_id);
+        return send_text(route, boost::http::status::ok, web_ui_repository(*repository, owner ? &*owner : nullptr),
                          "text/html; charset=utf-8", "no-store");
     }
 
@@ -230,6 +405,12 @@ bool ApiServer::start() {
     router.add(http::method::get, "/style.css", [&impl](http::route_params& route) -> http::route_task {
         return impl.serve_style(route);
     });
+    router.add(http::method::get, "/login", [&impl](http::route_params& route) -> http::route_task { return impl.serve_login(route); });
+    router.add(http::method::post, "/session", [&impl](http::route_params& route) -> http::route_task { return impl.serve_session(route); });
+    router.add(http::method::post, "/logout", [&impl](http::route_params& route) -> http::route_task { return impl.serve_logout(route); });
+    router.add(http::method::get, "/customers", [&impl](http::route_params& route) -> http::route_task { return impl.serve_customers_page(route); });
+    router.add(http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task { return impl.serve_repositories_page(route); });
+    router.add(http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task { return impl.serve_repository_page(route); });
     router.add(http::method::get, "/v1/openapi.json", [&impl](http::route_params& route) -> http::route_task {
         return impl.serve_openapi(route);
     });

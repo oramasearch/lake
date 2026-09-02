@@ -21,3 +21,27 @@ TEST(WebUi, HelloEscapesNodeName) {
     EXPECT_EQ(html.find("<b>evil</b>"), std::string::npos);
     EXPECT_NE(html.find("&lt;b&gt;evil&lt;/b&gt;"), std::string::npos);
 }
+
+TEST(WebUi, NavigationAndSession) {
+    const std::string out = lake::api::web_ui_hello("n", "0.0.1", false);
+    EXPECT_NE(out.find("href=\"/customers\""), std::string::npos);
+    EXPECT_NE(out.find("href=\"/repositories\""), std::string::npos);
+    EXPECT_NE(out.find("href=\"/login\""), std::string::npos);
+    const std::string in = lake::api::web_ui_hello("n", "0.0.1", true);
+    EXPECT_NE(in.find("action=\"/logout\""), std::string::npos);
+    EXPECT_EQ(in.find("<script"), std::string::npos);
+}
+
+TEST(WebUi, RepositoriesListEscapesAndLinks) {
+    lake::control::Customer ada{"c1", "individual", "u1", "", "ada", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"};
+    lake::control::Repository repo{"r1", "c1", "liquid", "<b>the tool</b>", "public", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"};
+    const std::string out = lake::api::web_ui_repositories({repo}, {{"c1", ada}});
+    EXPECT_NE(out.find("ada/liquid"), std::string::npos);
+    EXPECT_NE(out.find("href=\"/repository?id=r1\""), std::string::npos);
+    EXPECT_NE(out.find("&lt;b&gt;the tool&lt;/b&gt;"), std::string::npos);
+    EXPECT_EQ(out.find("<b>the tool</b>"), std::string::npos);
+    EXPECT_NE(lake::api::web_ui_repositories({}, {}).find("No repositories yet"), std::string::npos);
+    const std::string page = lake::api::web_ui_repository(repo, &ada);
+    EXPECT_NE(page.find("<h1>ada/liquid</h1>"), std::string::npos);
+    EXPECT_NE(lake::api::web_ui_login("bad token").find("bad token"), std::string::npos);
+}

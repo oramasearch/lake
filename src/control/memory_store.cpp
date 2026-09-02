@@ -59,6 +59,12 @@ nlohmann::json to_json(const Customer& c) {
             {"updated_at", c.updated_at}};
 }
 
+nlohmann::json to_json(const Repository& r) {
+    return {{"id", r.id},           {"customer_id", r.customer_id}, {"name", r.name},
+            {"description", r.description}, {"visibility", r.visibility}, {"created_at", r.created_at},
+            {"updated_at", r.updated_at}};
+}
+
 Result<User> InMemoryStore::create_user(const NewUser& in) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_) {
@@ -143,6 +149,46 @@ Result<Customer> InMemoryStore::get_customer(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& c : customers_) if (c.id == id) return c;
     return std::unexpected(StoreError{"not_found", "no customer " + id});
+}
+
+}  // namespace lake::control
+
+namespace lake::control {
+
+Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
+    std::lock_guard lock(mutex_);
+    if (std::none_of(customers_.begin(), customers_.end(), [&](const Customer& c) { return c.id == in.customer_id; })) {
+        return std::unexpected(StoreError{"invalid_input", "customer_id does not reference a customer"});
+    }
+    if (!valid_handle(in.name)) return std::unexpected(StoreError{"invalid_input", "name must match repository_name_format"});
+    const std::string visibility = in.visibility.empty() ? "private" : in.visibility;
+    if (visibility != "private" && visibility != "public") {
+        return std::unexpected(StoreError{"invalid_input", "visibility must be private or public"});
+    }
+    for (const auto& r : repositories_) {
+        if (r.customer_id == in.customer_id && r.name == in.name) {
+            return std::unexpected(StoreError{"conflict", "this customer already has a repository named " + in.name});
+        }
+    }
+    const std::string now = now_iso8601();
+    repositories_.push_back(Repository{new_uuid_v4(), in.customer_id, in.name, in.description, visibility, now, now});
+    return repositories_.back();
+}
+
+Result<std::vector<Repository>> InMemoryStore::list_repositories(const std::string& customer_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<Repository> out;
+    for (auto it = repositories_.rbegin(); it != repositories_.rend(); ++it) {
+        if (customer_id.empty() || it->customer_id == customer_id) out.push_back(*it);
+    }
+    if (limit > 0 && out.size() > static_cast<std::size_t>(limit)) out.resize(static_cast<std::size_t>(limit));
+    return out;
+}
+
+Result<Repository> InMemoryStore::get_repository(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    for (const auto& r : repositories_) if (r.id == id) return r;
+    return std::unexpected(StoreError{"not_found", "no repository " + id});
 }
 
 }  // namespace lake::control

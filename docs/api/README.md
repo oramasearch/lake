@@ -28,6 +28,9 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |
 | `get_customer` | read | `id` | customer | [customers.md](customers.md) |
 | `create_customer` | action | `customer_type`, `user_id?`, `organization_id?`, `name?` | customer | [customers.md](customers.md) |
+| `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
+| `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
+| `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

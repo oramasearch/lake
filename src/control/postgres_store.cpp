@@ -24,6 +24,14 @@ constexpr const char* customer_columns =
     "id::text, customer_type, coalesce(user_id::text,''), coalesce(organization_id::text,''), name, "
     "created_at::text, updated_at::text";
 
+constexpr const char* repository_columns =
+    "id::text, customer_id::text, name, description, visibility, created_at::text, updated_at::text";
+
+Repository repository_of(const pqxx::row& r) {
+    return Repository{r[0].as<std::string>(), r[1].as<std::string>(), r[2].as<std::string>(), r[3].as<std::string>(),
+                      r[4].as<std::string>(), r[5].as<std::string>(), r[6].as<std::string>()};
+}
+
 User user_of(const pqxx::row& r) {
     return User{r[0].as<std::string>(), r[1].as<std::string>(), r[2].as<std::string>(),
                 r[3].as<std::string>(), r[4].as<std::string>(), r[5].as<std::string>()};
@@ -118,6 +126,36 @@ public:
                 std::string("SELECT ") + customer_columns + " FROM customers WHERE id = $1::uuid", id);
             if (rows.empty()) return std::unexpected(StoreError{"not_found", "no customer " + id});
             return customer_of(rows[0]);
+        });
+    }
+
+    Result<Repository> create_repository(const NewRepository& in) override {
+        return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO repositories (customer_id, name, description, visibility) "
+                            "VALUES ($1::uuid, $2, $3, $4) RETURNING ") + repository_columns,
+                in.customer_id, in.name, in.description, in.visibility.empty() ? std::string("private") : in.visibility);
+            return repository_of(rows[0]);
+        });
+    }
+    Result<std::vector<Repository>> list_repositories(const std::string& customer_id, int limit) override {
+        return with_tx<std::vector<Repository>>([&](pqxx::work& tx) -> Result<std::vector<Repository>> {
+            const pqxx::result rows = customer_id.empty()
+                ? tx.exec_params(std::string("SELECT ") + repository_columns + " FROM repositories ORDER BY created_at DESC LIMIT $1", limit)
+                : tx.exec_params(std::string("SELECT ") + repository_columns +
+                                     " FROM repositories WHERE customer_id = $1::uuid ORDER BY created_at DESC LIMIT $2",
+                                 customer_id, limit);
+            std::vector<Repository> out;
+            for (const auto& r : rows) out.push_back(repository_of(r));
+            return out;
+        });
+    }
+    Result<Repository> get_repository(const std::string& id) override {
+        return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + repository_columns + " FROM repositories WHERE id = $1::uuid", id);
+            if (rows.empty()) return std::unexpected(StoreError{"not_found", "no repository " + id});
+            return repository_of(rows[0]);
         });
     }
 

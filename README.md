@@ -6,7 +6,7 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (users, organizations, customers over the Postgres control plane), the OpenAPI
+> capabilities (users, organizations, customers, repositories over the Postgres control plane), the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), behind the admin bearer. The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
@@ -32,7 +32,8 @@ ctest --test-dir build
 | `GET /` | the hello page — server-rendered, self-contained, no script |
 | `GET /style.css` | the stylesheet (`public, max-age=86400`) |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: `list_users`, `get_user`, `create_user`, the same for organizations and customers; bearer required |
+| `GET /customers`, `/repositories`, `/repository?id=` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: list / get / create for users, organizations, customers and repositories; bearer required |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |

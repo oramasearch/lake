@@ -45,6 +45,13 @@ json customer_schema() {
               {"user_id", {{"type", json::array({"string", "null"})}}}, {"organization_id", {{"type", json::array({"string", "null"})}}},
               {"name", {{"type", "string"}}}, {"created_at", {{"type", "string"}}}, {"updated_at", {{"type", "string"}}}}}};
 }
+json repository_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"id", {{"type", "string"}}}, {"customer_id", {{"type", "string"}}}, {"name", {{"type", "string"}}},
+              {"description", {{"type", "string"}}}, {"visibility", {{"type", "string"}, {"enum", json::array({"private", "public"})}}},
+              {"created_at", {{"type", "string"}}}, {"updated_at", {{"type", "string"}}}}}};
+}
 json list_schema(json item) { return {{"type", "object"}, {"properties", {{"items", {{"type", "array"}, {"items", std::move(item)}}}}}}; }
 
 int limit_of(const json& input) {
@@ -162,6 +169,39 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
                 }
             }
             return ApiResult::failure("conflict", "could not find a free generated handle; pass name");
+        }});
+
+    // ---- repositories ----
+    registry.add(Capability{
+        .name = "list_repositories", .title = "List repositories",
+        .description = "The most recent repositories, newest first; customer_id narrows to one tenant.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"customer_id", {{"type", "string"}}}, {"limit", {{"type", "integer"}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = list_schema(repository_schema()), .kind = CapabilityKind::Read,
+        .handler = [](const json& in, ApiContext& ctx) {
+            return ctx.store ? list_result(ctx.store->list_repositories(in.value("customer_id", ""), limit_of(in))) : no_store();
+        }});
+    registry.add(Capability{
+        .name = "get_repository", .title = "Get repository", .description = "One repository by id.",
+        .input_schema = id_input(), .output_schema = repository_schema(), .kind = CapabilityKind::Read,
+        .handler = [](const json& in, ApiContext& ctx) { return ctx.store ? one_result(ctx.store->get_repository(in["id"])) : no_store(); }});
+    registry.add(Capability{
+        .name = "create_repository", .title = "Create repository",
+        .description = "Create a repository owned by a customer: name is a slug unique within that customer "
+                       "(the address is <customer handle>/<name>); visibility private (default) or public.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}}, {"name", {{"type", "string"}}},
+                           {"description", {{"type", "string"}}},
+                           {"visibility", {{"type", "string"}, {"enum", json::array({"private", "public"})}}}}},
+                         {"required", json::array({"customer_id", "name"})},
+                         {"additionalProperties", false}},
+        .output_schema = repository_schema(), .kind = CapabilityKind::Action,
+        .handler = [](const json& in, ApiContext& ctx) {
+            if (!ctx.store) return no_store();
+            return one_result(ctx.store->create_repository(control::NewRepository{
+                in.value("customer_id", ""), in.value("name", ""), in.value("description", ""), in.value("visibility", "")}));
         }});
 }
 

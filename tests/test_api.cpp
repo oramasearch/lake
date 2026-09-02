@@ -167,3 +167,33 @@ TEST(Mcp, InitializeListAndCall) {
     const auto unknown = json::parse(*mcp_dispatch(s.registry, {{"jsonrpc", "2.0"}, {"id", 4}, {"method", "nope"}}, s.ctx, "0.0.1"));
     EXPECT_EQ(unknown["error"]["code"], -32601);
 }
+
+TEST(Repositories, OwnedByACustomerNamedWithinIt) {
+    Surface s;
+    const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});
+    const ApiResult customer = s.call("create_customer", {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok);
+    const std::string cid = customer.value["id"];
+
+    ApiResult repo = s.call("create_repository", {{"customer_id", cid}, {"name", "liquid"}, {"description", "the tool"}});
+    ASSERT_TRUE(repo.ok) << repo.error.message;
+    EXPECT_EQ(repo.value["visibility"], "private");
+    EXPECT_EQ(repo.value["customer_id"], cid);
+
+    EXPECT_EQ(s.call("create_repository", {{"customer_id", cid}, {"name", "liquid"}}).error.code, "conflict");
+    EXPECT_EQ(s.call("create_repository", {{"customer_id", cid}, {"name", "Bad Name"}}).error.code, "invalid_input");
+    EXPECT_EQ(s.call("create_repository", {{"customer_id", "nope"}, {"name", "x"}}).error.code, "invalid_input");
+    EXPECT_EQ(s.call("create_repository", {{"customer_id", cid}, {"name", "y"}, {"visibility", "secret"}}).error.code, "invalid_input");
+    ASSERT_TRUE(s.call("create_repository", {{"customer_id", cid}, {"name", "lake"}, {"visibility", "public"}}).ok);
+
+    const ApiResult all = s.call("list_repositories");
+    ASSERT_TRUE(all.ok);
+    EXPECT_EQ(all.value["items"].size(), 2u);
+    EXPECT_EQ(all.value["items"][0]["name"], "lake");  // newest first
+    const ApiResult mine = s.call("list_repositories", {{"customer_id", cid}, {"limit", 1}});
+    EXPECT_EQ(mine.value["items"].size(), 1u);
+    const ApiResult none = s.call("list_repositories", {{"customer_id", "other"}});
+    EXPECT_EQ(none.value["items"].size(), 0u);
+    EXPECT_EQ(s.call("get_repository", {{"id", repo.value["id"]}}).value["name"], "liquid");
+    EXPECT_EQ(s.call("get_repository", {{"id", "missing"}}).error.code, "not_found");
+}

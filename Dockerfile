@@ -55,7 +55,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /src/build/lake /usr/local/bin/lake
 
-USER lake
+# Numeric so a runAsNonRoot pod security context can verify it (a named USER cannot be).
+USER 10001:10001
 WORKDIR /home/lake
 # 4900 = the lake HTTP port (web UI + /v1 REST).
 EXPOSE 4900

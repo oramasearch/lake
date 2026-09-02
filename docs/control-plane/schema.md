@@ -27,7 +27,17 @@ CASCADE`):
 | `customer_type_check` | a customer is one or the other, never both: the type ties to exactly one non-null identity column |
 | `name varchar(256) NOT NULL` | the handle: **one global namespace** shared by individuals and organizations (`customer_name_unique`); lowercase letters, digits, inner hyphens, 1–256 chars (`customer_name_format`), so uniqueness is effectively case-insensitive and a handle can never carry spaces or uppercase. No default: the application generates handles (`{adjective}-{noun}-{number}`) and must pre-check uniqueness to answer 409 rather than 500 |
 
-`updated_at` is maintained by a trigger (`set_updated_at()`).
+**Repositories** (migration `0002_repositories`):
+
+| `repositories` | |
+|---|---|
+| `id uuid` | v4 |
+| `customer_id uuid NOT NULL` → `customers` | the owner; `ON DELETE CASCADE`; indexed |
+| `name varchar(256) NOT NULL` | slug in the handle format (`repository_name_format`); `UNIQUE (customer_id, name)` so the address is `<customer>/<name>` |
+| `description text` | default empty |
+| `visibility text` | `private` (default) or `public` (`repository_visibility_check`) |
+
+`updated_at` is maintained by a trigger (`set_updated_at()`) on every table.
 
 This mirrors the Orama Cloud v1 tenant model (user and organization are identity, customer is
 the tenant, one handle namespace) and fixes its two known gotchas at the constraint level:
@@ -37,8 +47,10 @@ case-sensitivity and unvalidated handle format.
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
-Job: wait for the DB, skip if the guard table (`customers`) exists, apply the whole file in **one
-transaction** with `psql --single-transaction`. The version is a content hash of the SQL
+Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
+with `psql --single-transaction`. **The guard is the table the newest migration creates**
+(`repositories` today), so a new migration means a new guard and the next Job re-runs the
+idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
 **Migrations never run in lake pods**, so the replica count cannot duplicate or race them.
@@ -51,8 +63,10 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
 1. Edit `db/schema.sql` idempotently (`IF NOT EXISTS`, `CREATE OR REPLACE`, `DROP … IF EXISTS`
    before `CREATE TRIGGER`), append a new `INSERT INTO schema_migrations`.
 2. Copy to the operator's `assets/lake-schema.sql`; the version hash changes automatically.
-3. For an existing database, apply by hand once (`psql --single-transaction -f`) or delete the
-   `PostgresSchema` so its Job re-runs with the guard satisfied by a *new* guard table.
+3. Set the operator's `GuardTable` to the new migration's table.
+4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
+   lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a
+   reconcile and the new Job applies the file.
 
 ## Verify
 
