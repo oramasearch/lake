@@ -15,7 +15,7 @@ liquid is the tool. lake is where it collects.
 One binary, C++26. **Enterprise; built on Zetta** — control plane, state, clustering and
 web serving — and consuming liquid's open-source store as a library for repository
 data. It runs on [`oramasearch/k0s`](https://github.com/oramasearch/k0s) and is deployed
-by [`oramasearch/lake-operator`](https://github.com/oramasearch/lake-operator).
+by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator) (as a `Lake` CR).
 
 | Surface | What it answers |
 |---|---|

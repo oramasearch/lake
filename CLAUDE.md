@@ -24,7 +24,7 @@ that licence boundary.
 - **Boost.Capy** coroutines, **Corosio** networking — via `oramasearch/corosio`, never
   `cppalliance` directly.
 - `std::expected` at every public boundary; no exceptions across public APIs.
-- Deployed by `oramasearch/lake-operator`; runs on `oramasearch/k0s`.
+- Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended); runs on `oramasearch/k0s`, and on our AKS cluster for now.
 
 ## Never
 
