@@ -5,17 +5,17 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 
 liquid is the tool. lake is where it collects.
 
-> **Status: design.** No code yet. The specification lives in
+> **Status: bootstrap.** The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
-> This repository becomes the implementation once the storage decision recorded there
-> is made. Do not add source before then.
+> Hello world first, per the bridge's action plan.
 
 ## What this is
 
-One binary, C++26, sharing the chunk store and CRDT datastore with liquid. It runs on
-[`oramasearch/k0s`](https://github.com/oramasearch/k0s) and is deployed by
-[`oramasearch/lake-operator`](https://github.com/oramasearch/lake-operator).
+One binary, C++26. **Enterprise; built on Zetta** — control plane, state, clustering and
+web serving — and consuming liquid's open-source store as a library for repository
+data. It runs on [`oramasearch/k0s`](https://github.com/oramasearch/k0s) and is deployed
+by [`oramasearch/lake-operator`](https://github.com/oramasearch/lake-operator).
 
 | Surface | What it answers |
 |---|---|

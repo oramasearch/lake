@@ -8,16 +8,22 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-**Design. No code.** The specification is in `oramasearch/liquid/docs/features/`. This
-repository holds the implementation once the Zetta/liquid storage decision is made
-(liquid `CLAUDE.md`, *Decisions not to drift past*). Until then, do not add source,
-build files or CI here.
+**Bootstrap.** The specification is in `oramasearch/liquid/docs/features/`. The Phase 0
+gate is lifted; hello world comes first (bridge `docs/action-plan.md`, Phase 0.5).
 
-## When code arrives
+## What lake is built on
 
-- **C++26**, CMake ≥ 3.28 + Ninja, Catch2 — matching `oramacore-cpp` and `zetta`.
+**lake is the enterprise product and builds on Zetta as much as possible** — control
+plane, operational state, clustering, and **its web-serving approach**. lake must also
+host liquid repositories, so it consumes **liquid's store as a library** for repository
+data. liquid is open source and never depends on Zetta; lake sits on the other side of
+that licence boundary.
+
+- **C++26**, CMake ≥ 3.28 + Ninja, Clang 17+ auto-selected as Zetta's `CMakeLists.txt`
+  does, Catch2.
+- **Boost.Capy** coroutines, **Corosio** networking — via `oramasearch/corosio`, never
+  `cppalliance` directly.
 - `std::expected` at every public boundary; no exceptions across public APIs.
-- Shares the chunk store and CRDT datastore with liquid. There is one store, not two.
 - Deployed by `oramasearch/lake-operator`; runs on `oramasearch/k0s`.
 
 ## Never
