@@ -8,8 +8,11 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-**Bootstrap.** The specification is in `oramasearch/liquid/docs/features/`. The Phase 0
-gate is lifted; hello world comes first (bridge `docs/action-plan.md`, Phase 0.5).
+**Hello world serves** (bridge `docs/action-plan.md`, Phase 0.5). `./build/lake` binds,
+serves `GET /`, `GET /style.css`, `GET /v1/server_info`, 404s everything else, and stops
+cleanly on SIGINT/SIGTERM; `ctest` is green. The specification is in
+`oramasearch/liquid/docs/features/`. Next: a container image so the `Lake` CR on
+`orama-operator` runs this binary instead of a placeholder.
 
 ## Where to read Zetta
 
@@ -21,9 +24,31 @@ bridge:**
 ```
 
 Never from a standalone clone — one under `~/dev/oramasearch/zetta` was 1,053 commits
-behind and lacked the entire HTTP layer lake borrows. The web-serving stack to copy is
+behind and lacked the entire HTTP layer lake borrows. The web-serving stack lake copies is
 `include/zetta/api/server.hpp` + `src/core/api/http_server.cpp` (Beast2 on capy/corosio,
 one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
+
+## How the server is built (and the rules that keep it Zetta-shaped)
+
+- `include/lake/api/server.hpp` exposes `ApiServer` / `ServerOptions` and **no HTTP
+  type** — no beast2, `boost::http` or Boost.JSON name may appear in a public header.
+- `src/api/http_server.cpp` is the **one** adapter TU. Handlers are `Impl` members
+  returning `boost::http::route_task`; every response goes through `send_text`, which
+  stamps headers Zetta's way (`erase(etag)`, `erase(content_length)`,
+  `set_payload_size`) — Beast2 frames from the declared size, never set those by hand.
+- Routes are registered in `ApiServer::start()`: `router.use(http::cors())`, the
+  `router.add(...)` list, then a **trailing `router.use` 404 handler**. The router falls
+  through (`route_next`) past the last route and nothing answers otherwise — without the
+  trailing handler an unmatched request hangs. Keep it last.
+- Lifecycle is Zetta's: construct `beast2::http_server(io_context, workers, router,
+  parser_cfg, serializer_cfg)` → `bind` → `local_endpoint().port()` → `start()` →
+  `io_thread` runs `io_context.run()`; `stop()` = `server->stop()`, `io_context.stop()`,
+  join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
+  placeholders until lake has a node to marshal onto.
+- Pages are **server-rendered, self-contained, no script**; renderers in `web_ui.cpp`
+  are pure functions and are the unit-tested surface.
+- Expected stderr noise: beast2 logs `read_header error: end of stream` once per
+  keep-alive connection a client closes. Not a bug.
 
 ## What lake is built on
 
@@ -34,13 +59,33 @@ data. liquid is open source and never depends on Zetta; lake sits on the other s
 that licence boundary.
 
 - **C++26**, CMake ≥ 3.28 + Ninja, Clang 17+ auto-selected as Zetta's `CMakeLists.txt`
-  does, Catch2.
-- **Boost.Capy** coroutines, **Corosio** networking — via `oramasearch/corosio`, never
-  `cppalliance` directly.
+  does, OpenSSL 3 from Homebrew. GoogleTest v1.17.0 via FetchContent (as Zetta), not Catch2.
+- **Boost.Capy** coroutines, **Corosio** networking, **Boost.HTTP** router, **Beast2**
+  HTTP/1 server — vendored under `modules/` at **Zetta's exact pins**, from the same
+  remotes Zetta uses: `capy` (cppalliance `develop`), `corosio` (`oramasearch/corosio`
+  `orama-main`), `http` (`oramasearch/http` `zetta-patches`), `beast2` (cppalliance).
+  Bump a pin only to a commit Zetta has moved to; never take `cppalliance` corosio or http.
 - `std::expected` at every public boundary; no exceptions across public APIs.
-- Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended); runs on `oramasearch/k0s`, and on our AKS cluster for now.
+- Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended);
+  runs on `oramasearch/k0s`, and on our AKS cluster for now.
+
+## Open decisions
+
+- **Port.** 4900 for now (Zetta is 4800). Settle it before the container image.
+- **Copy the pattern vs link `zetta-api`.** Today lake copies Zetta's serving shape and has
+  no source dependency on Zetta. Linking Zetta as a library (control plane, state, auth,
+  Clerk issuer) means adding Zetta as a module of lake — decide how lake obtains Zetta
+  before Phase 6 work starts.
 
 ## Never
 
 - Never add a second attestation or signing framework. TAAP/1 is the security model.
 - Never make this repository public.
+- Never let an HTTP type leak out of `src/api/http_server.cpp`.
+
+## Before finishing any change
+
+1. Does `README.md` still describe what builds and serves? Update the status line and tables.
+2. Does this file's **Status** and **Open decisions** still hold?
+3. `cmake --build build && ctest --test-dir build` green, and the binary smoke-tested by hand.
+4. Commit means push.
