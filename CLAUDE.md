@@ -8,7 +8,9 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-**Hello world serves** (bridge `docs/action-plan.md`, Phase 0.5). `./build/lake` binds,
+**The control surface serves.** REST `/v1`, OpenAPI and MCP from one capability registry over
+the Postgres control plane, behind the admin bearer; `Lake/prod` runs it on AKS (see
+`docs/deployment/aks.md`). Earlier: hello world (bridge `docs/action-plan.md`, Phase 0.5). `./build/lake` binds,
 serves `GET /`, `GET /style.css`, `GET /v1/server_info`, 404s everything else, and stops
 cleanly on SIGINT/SIGTERM; `ctest` is green. The specification is in
 `oramasearch/liquid/docs/features/`. The container image exists (`oramasearch/lake`, built
@@ -48,6 +50,11 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   placeholders until lake has a node to marshal onto.
 - Pages are **server-rendered, self-contained, no script**; renderers in `web_ui.cpp`
   are pure functions and are the unit-tested surface.
+- **One registry.** Every capability is a `Capability` in `src/api/capabilities.cpp`; REST,
+  OpenAPI and MCP are renderings of it and never special-case an entry. `Registry::call` is the
+  only path that authorizes and validates. Recipe: `docs/api/README.md`.
+- **Two TUs name third parties:** `src/api/http_server.cpp` (Beast2, boost::http, Boost.JSON)
+  and `src/control/postgres_store.cpp` (libpqxx). nlohmann::json is the API document type.
 - Expected stderr noise: beast2 logs `read_header error: end of stream` once per
   keep-alive connection a client closes. Not a bug.
 
@@ -82,7 +89,8 @@ that licence boundary.
 - **Boost.Capy** coroutines, **Corosio** networking, **Boost.HTTP** router, **Beast2**
   HTTP/1 server — vendored under `modules/` at **Zetta's exact pins**, from the same
   remotes Zetta uses: `capy` (cppalliance `develop`), `corosio` (`oramasearch/corosio`
-  `orama-main`), `http` (`oramasearch/http` `zetta-patches`), `beast2` (cppalliance).
+  `orama-main`), `http` (`oramasearch/http` `zetta-patches`), `beast2` (cppalliance),
+  `libpqxx` (jtv, 7.10.7 at `853bc0a4`, on libpq). nlohmann/json 3.11.3 via FetchContent.
   Bump a pin only to a commit Zetta has moved to; never take `cppalliance` corosio or http.
 - `std::expected` at every public boundary; no exceptions across public APIs.
 - Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended);

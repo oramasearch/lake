@@ -3,6 +3,10 @@
 #include <memory>
 #include <string>
 
+namespace lake::control {
+class Store;
+}
+
 // The embedded HTTP server, in Zetta's shape (zetta/api/server.hpp): Beast2 on the
 // capy/corosio runtime, confined entirely to the adapter TU (src/api/http_server.cpp).
 // No beast2 / http / Boost.JSON type appears here.
@@ -17,6 +21,12 @@ struct ServerOptions {
     unsigned short port = 4900;  // 0 = pick an ephemeral port
     int worker_coroutines = 32;
     std::string node_name = "lake";
+    // The control-plane store the capabilities call; null = none configured (capabilities answer
+    // store_unavailable). Owned by the caller for the server's lifetime.
+    std::shared_ptr<control::Store> store;
+    // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except server_info
+    // refuses with unauthorized.
+    std::string admin_token;
 };
 
 class ApiServer {

@@ -36,5 +36,10 @@ kubectl get clusters.postgresql.cnpg.io -n <namespace>    # Cluster in healthy s
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake -c '\dt'
 ```
 
+**lake's side.** `main.cpp` builds the Postgres store from `LAKE_CONTROL_DB_URI` (or
+`--control-db`); `src/control/postgres_store.cpp` is the one TU that names libpqxx. Each call is one
+connection (reused) and one transaction, inline on the io thread. `server_info` reports
+`"store": "postgres" | "memory" | "none"`.
+
 **Not yet.** Backups (CNPG can ship WAL and base backups to blob storage), a second instance,
-connection pooling. lake itself does not open the connection yet.
+connection pooling or offloading the blocking calls.

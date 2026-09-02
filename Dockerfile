@@ -21,7 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg lsb-release software-properties-common \
       build-essential ninja-build git \
-      libstdc++-14-dev zlib1g-dev libssl-dev \
+      libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev \
  && wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 19 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -49,7 +49,7 @@ RUN cmake -S . -B build -G Ninja \
 FROM ubuntu:24.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libssl3 libstdc++6 ca-certificates \
+      libssl3 libstdc++6 libpq5 ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u 10001 -s /usr/sbin/nologin lake
 

@@ -1,62 +1,105 @@
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <memory>
 #include <print>
-#include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "lake/api/server.hpp"
+#include "lake/control/memory_store.hpp"
+#include "lake/control/postgres_store.hpp"
 #include "lake/version.hpp"
 
 namespace {
 
-volatile std::sig_atomic_t g_stop = 0;
-void on_signal(int) { g_stop = 1; }
+std::atomic<bool> stop_requested{false};
+void on_signal(int) { stop_requested.store(true); }
+
+std::string env_or(const char* name, std::string fallback) {
+    const char* value = std::getenv(name);
+    return value && *value ? std::string(value) : std::move(fallback);
+}
 
 int usage() {
-    std::println("lake {} — the hosted liquid service. liquid is the tool; lake is where it collects.",
-                 lake::version_string());
+    std::println("lake {}", lake::version_string());
+    std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] [--admin-token TOKEN] [--memory-store]");
+    std::println("  lake version");
     std::println("");
-    std::println("usage: lake [--listen HOST:PORT] [--node NAME]");
-    std::println("       lake version");
-    std::println("");
-    std::println("  --listen HOST:PORT  HTTP bind (default 127.0.0.1:4900)");
-    std::println("  --node NAME         this node's display name (default: lake)");
+    std::println("  --control-db   Postgres URI of the control plane (default $LAKE_CONTROL_DB_URI)");
+    std::println("  --admin-token  bearer for /v1 capabilities and MCP tools (default $LAKE_ADMIN_TOKEN)");
+    std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::span<char*> args(argv, static_cast<std::size_t>(argc));
     lake::api::ServerOptions opts;
-    for (std::size_t i = 1; i < args.size(); ++i) {
-        const std::string_view a = args[i];
-        if (a == "version" || a == "--version") { std::println("lake {}", lake::version_string()); return 0; }
-        if (a == "--help" || a == "-h") return usage();
-        if (a == "--listen" && i + 1 < args.size()) {
-            const std::string_view v = args[++i];
-            const auto colon = v.rfind(':');
-            if (colon == std::string_view::npos) return usage();
-            opts.listen_address = std::string(v.substr(0, colon));
-            opts.port = static_cast<unsigned short>(std::atoi(std::string(v.substr(colon + 1)).c_str()));
+    std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
+    opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");
+    bool memory_store = false;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg = argv[i];
+        auto value = [&](const char* flag) -> std::string {
+            if (i + 1 >= argc) {
+                std::println(stderr, "lake: {} needs a value", flag);
+                std::exit(2);
+            }
+            return argv[++i];
+        };
+        if (arg == "version" || arg == "--version") {
+            std::println("lake {}", lake::version_string());
+            return 0;
+        }
+        if (arg == "--help" || arg == "-h") return usage() == 2 ? 0 : 0;
+        if (arg == "--listen") {
+            const std::string spec = value("--listen");
+            const auto colon = spec.rfind(':');
+            if (colon == std::string::npos) {
+                std::println(stderr, "lake: --listen wants HOST:PORT");
+                return 2;
+            }
+            opts.listen_address = spec.substr(0, colon);
+            opts.port = static_cast<unsigned short>(std::atoi(spec.c_str() + colon + 1));
             continue;
         }
-        if (a == "--node" && i + 1 < args.size()) { opts.node_name = args[++i]; continue; }
+        if (arg == "--node") { opts.node_name = value("--node"); continue; }
+        if (arg == "--control-db") { control_db = value("--control-db"); continue; }
+        if (arg == "--admin-token") { opts.admin_token = value("--admin-token"); continue; }
+        if (arg == "--memory-store") { memory_store = true; continue; }
+        std::println(stderr, "lake: unknown argument {}", arg);
         return usage();
     }
+
+    std::string store_kind = "none";
+    if (memory_store) {
+        opts.store = std::make_shared<lake::control::InMemoryStore>();
+        store_kind = "memory";
+    } else if (!control_db.empty()) {
+        opts.store = lake::control::make_postgres_store(control_db);
+        store_kind = "postgres";
+    }
+
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
 
     lake::api::ApiServer server(opts);
     if (!server.start()) {
         std::println(stderr, "lake: cannot start: {}", server.reason());
         return 1;
     }
-    std::println("lake {} — http://{}:{}/  (node {})", lake::version_string(), opts.listen_address,
-                 server.port(), opts.node_name);
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
-    while (!g_stop) {
+    std::println("lake {} — http://{}:{}/  (node {})", lake::version_string(), opts.listen_address, server.port(),
+                 opts.node_name);
+    std::println("  control-plane store: {}", store_kind);
+    std::println("  admin token: {}", opts.admin_token.empty()
+                                          ? "NOT SET — every capability except server_info refuses (unauthorized)"
+                                          : "set");
+    std::println("  API: /v1/openapi.json   MCP: POST /mcp");
+    while (!stop_requested.load()) {
         server.wait_for_work(std::chrono::milliseconds(100));
         server.drain();
     }

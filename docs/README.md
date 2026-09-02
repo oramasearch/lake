@@ -10,7 +10,7 @@ the same change (bridge `CLAUDE.md`, *Documentation is part of every change*). `
 | [`control-plane/`](control-plane/) | [`postgres.md`](control-plane/postgres.md) — the Postgres the operator provisions per Lake; [`schema.md`](control-plane/schema.md) — tables, the tenant model, how the schema is applied and changed |
 | [`deployment/`](deployment/) | [`aks.md`](deployment/aks.md) — `Lake/prod` on AKS: what exists, how it was built, how to roll, how to verify, what is not production-grade yet |
 | [`build/`](build/) | [`container-image.md`](build/container-image.md) — the Linux/amd64 image and the on-node builder |
-| [`api/`](api/) | [`README.md`](api/README.md) — the `/v1` REST + OpenAPI + MCP surface: what exists, what is next |
+| [`api/`](api/) | [`README.md`](api/README.md) — the registry, REST + OpenAPI + MCP, the envelope, adding a capability; [`auth.md`](api/auth.md) — the admin bearer; [`customers.md`](api/customers.md) — users, organizations, customers; [`mcp.md`](api/mcp.md) — JSON-RPC methods |
 
 The product specification is in `oramasearch/liquid` `docs/features/18-lake-service.md`; the
 cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
