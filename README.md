@@ -89,6 +89,12 @@ by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator)
 | Identity, secrets, PKI | TAAP/1 identities, dynamic secrets, one CA |
 | Search | BM25F plus a positional trigram index, over history and inside artifacts |
 
+## Internal documentation
+
+[`docs/`](docs/) — one folder per topic: [serving](docs/serving/), [control-plane](docs/control-plane/),
+[deployment](docs/deployment/), [build](docs/build/), [api](docs/api/). Every change to the system lands
+its doc there in the same change; this README is the summary.
+
 ## Where this sits
 
 Part of the liquid project. See
