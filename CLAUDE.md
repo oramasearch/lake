@@ -8,14 +8,15 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-**The control surface serves.** REST `/v1`, OpenAPI and MCP from one capability registry over
-the Postgres control plane, behind the admin bearer; `Lake/prod` runs it on AKS (see
-`docs/deployment/aks.md`). Earlier: hello world (bridge `docs/action-plan.md`, Phase 0.5). `./build/lake` binds,
-serves `GET /`, `GET /style.css`, `GET /v1/server_info`, 404s everything else, and stops
-cleanly on SIGINT/SIGTERM; `ctest` is green. The specification is in
-`oramasearch/liquid/docs/features/`. The container image exists (`oramasearch/lake`, built
-natively on the AKS node, see below) and the `Lake` CR on `orama-operator` runs it. Next: Phase 6
-work proper, starting with how lake obtains Zetta (open decision below).
+**The control surface serves, in production.** `Lake/prod` on AKS (3 replicas, image
+`oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
+(`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
+the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages
+(`/customers`, `/repositories`, `/repository?id=`) behind the admin sign-in; everything behind the
+admin bearer except `server_info`. State and runbook: `docs/deployment/aks.md`; the specification
+is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
+identities in place of the single admin token (lake #4), repositories with content once liquid
+Phase 1 lands, incremental migrations (operator #126).
 
 ## Where to read Zetta
 
@@ -49,7 +50,11 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
   placeholders until lake has a node to marshal onto.
 - Pages are **server-rendered, self-contained, no script**; renderers in `web_ui.cpp`
-  are pure functions and are the unit-tested surface.
+  are pure functions and are the unit-tested surface. Pages read the `Store` directly and can
+  never do what the API cannot.
+- **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
+  `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
+  never add a second path. Pages that read the store redirect to `/login` without it.
 - **One registry.** Every capability is a `Capability` in `src/api/capabilities.cpp`; REST,
   OpenAPI and MCP are renderings of it and never special-case an entry. `Registry::call` is the
   only path that authorizes and validates. Recipe: `docs/api/README.md`.
@@ -63,15 +68,18 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Control plane: Postgres, for now.** The operator provisions a CloudNativePG cluster per
   `Lake` (`spec.postgres`, on by default) and injects `LAKE_CONTROL_DB_URI` /
   `LAKE_CONTROL_DB_PASSWORD` into the pod (optional refs: the pod starts before the DB is
-  bootstrapped, so treat an empty value as "not yet"). **Data plane: Zetta.** Recorded in the
+  bootstrapped, so treat an empty value as "not yet"), and `LAKE_ADMIN_TOKEN` from the
+  minted-once `lake-<name>-admin` Secret. **Data plane: Zetta.** Recorded in the
   bridge `decisions.md` §6; "for now" is deliberate.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
-  owned `PostgresSchema` (one transaction, guarded on `customers`, versioned by content hash).
+  owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
+  `repositories` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
-  a new guard/version and idempotent SQL (`IF NOT EXISTS`). Migrations never run in lake pods, so
+  a new guard (the operator's `GuardTable`), idempotent SQL (`IF NOT EXISTS`), and on an existing
+  Lake deleting its `PostgresSchema` so the owned object is recreated and the Job re-runs. Migrations never run in lake pods, so
   replica count cannot duplicate them.
 - **Tenant model.** user and organization are identity (TAAP `taap_id`); the customer owns
   everything: individual xor organization (`customer_type_check`), one customer per identity,
@@ -84,8 +92,9 @@ host liquid repositories, so it consumes **liquid's store as a library** for rep
 data. liquid is open source and never depends on Zetta; lake sits on the other side of
 that licence boundary.
 
+- **Port 4900** (decided; Zetta is 4800). The `Lake` CR's `spec.port` defaults to it.
 - **C++26**, CMake ≥ 3.28 + Ninja, Clang 17+ auto-selected as Zetta's `CMakeLists.txt`
-  does, OpenSSL 3 from Homebrew. GoogleTest v1.17.0 via FetchContent (as Zetta), not Catch2.
+  does, OpenSSL 3 and libpq from Homebrew. GoogleTest v1.17.0 via FetchContent (as Zetta), not Catch2.
 - **Boost.Capy** coroutines, **Corosio** networking, **Boost.HTTP** router, **Beast2**
   HTTP/1 server — vendored under `modules/` at **Zetta's exact pins**, from the same
   remotes Zetta uses: `capy` (cppalliance `develop`), `corosio` (`oramasearch/corosio`
@@ -101,7 +110,9 @@ that licence boundary.
 - `Dockerfile` = Zetta's headless recipe (Ubuntu 24.04, clang-19 from apt.llvm.org, CMake 3.31
   because 24.04's 3.28 does not know `cxx_std_26`) minus GUI/Postgres deps, **plus
   `libstdc++-14-dev`**: 24.04 defaults to libstdc++ 13, which has no `<print>`, and lake uses
-  `std::println`. Runtime image = `libssl3 libstdc++6 ca-certificates`, non-root user `lake`.
+  `std::println`, and `libpq-dev` for libpqxx. Runtime image = `libssl3 libstdc++6 libpq5
+  ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot satisfy a
+  `runAsNonRoot` pod security context).
 - **Build natively on amd64.** QEMU emulation of a C++26 build on Apple Silicon is far too slow
   and hits `Illegal instruction` (zetta-bridge learned this). From this Mac, build on the AKS
   node with buildx's kubernetes driver (rootless BuildKit pod in namespace `buildkit`):
@@ -121,7 +132,8 @@ that licence boundary.
 
 ## Open decisions
 
-- **Port.** 4900 for now (Zetta is 4800). Settle it before the container image.
+- **Blocking store calls run inline on the io thread** (one statement each). Offload to a
+  pool, as Zetta does, when latency shows; not before.
 - **Copy the pattern vs link `zetta-api`.** Today lake copies Zetta's serving shape and has
   no source dependency on Zetta. Linking Zetta as a library (control plane, state, auth,
   Clerk issuer) means adding Zetta as a module of lake — decide how lake obtains Zetta
@@ -129,6 +141,8 @@ that licence boundary.
 
 ## Never
 
+- Never run schema migrations from lake pods (the operator's PostgresSchema Job does, once).
+- Never add an auth path the API does not have; the UI session is the API bearer.
 - Never add a second attestation or signing framework. TAAP/1 is the security model.
 - Never make this repository public.
 - Never let an HTTP type leak out of `src/api/http_server.cpp`.
