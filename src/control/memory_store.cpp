@@ -65,6 +65,8 @@ nlohmann::json to_json(const Repository& r) {
             {"updated_at", r.updated_at}};
 }
 
+Result<void> InMemoryStore::ping() { return {}; }
+
 Result<User> InMemoryStore::create_user(const NewUser& in) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_) {

@@ -56,6 +56,18 @@ TEST(Telemetry, PrometheusCounterAndHistogram) {
     EXPECT_NE(text.find("test_duration_seconds_count{operation=\"read\"} 1\n"), std::string::npos);
 }
 
+TEST(Telemetry, StorePingIsMeasured) {
+    lake::telemetry::Metrics metrics;
+    auto store = lake::telemetry::instrument_store(std::make_shared<lake::control::InMemoryStore>(), metrics);
+    ASSERT_TRUE(store->ping());
+
+    const std::string text = metrics.prometheus_text();
+    EXPECT_NE(text.find("lake_store_calls_total{store=\"memory\",operation=\"ping\",result=\"ok\"} 1\n"),
+              std::string::npos);
+    EXPECT_NE(text.find("lake_store_call_duration_seconds_count{store=\"memory\",operation=\"ping\",result=\"ok\"} 1\n"),
+              std::string::npos);
+}
+
 TEST(Registry, EverythingElseNeedsAuth) {
     Surface s;
     s.ctx.authorized = false;

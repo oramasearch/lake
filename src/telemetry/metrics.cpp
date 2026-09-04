@@ -166,6 +166,8 @@ public:
 
     std::string kind() const override { return kind_; }
 
+    control::Result<void> ping() override { return call("ping", [&] { return store_->ping(); }); }
+
     control::Result<control::User> create_user(const control::NewUser& value) override {
         return call("create_user", [&] { return store_->create_user(value); });
     }

@@ -11,6 +11,10 @@ The store decorator records every control-store operation in
 `lake_store_call_duration_seconds{store,operation,result}`. `result` is `ok` on success and the
 store error code on failure.
 
+The control-store interface also exposes `ping()`. The in-memory store always succeeds. The
+Postgres store runs `SELECT 1` with a one-second transaction-local statement timeout and maps any
+failure to `store_unavailable`; this is the readiness check used by the HTTP server.
+
 ## Why
 
 The registry keeps operational measurements in `lake-core`, free of the HTTP and Postgres client
@@ -18,8 +22,9 @@ types, and gives the server one source for Prometheus output.
 
 ## How to verify
 
-Build and run `ctest --test-dir build --output-on-failure`. The `Telemetry` test checks a counter
-and the cumulative fixed buckets, count and infinite bucket of a histogram.
+Build and run `ctest --test-dir build --output-on-failure`. The `Telemetry` tests check a counter,
+the cumulative fixed buckets, count and infinite bucket of a histogram, and a measured in-memory
+store ping.
 
 ## How to change
 

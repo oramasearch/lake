@@ -52,6 +52,7 @@ class Store {
 public:
     virtual ~Store() = default;
     [[nodiscard]] virtual std::string kind() const = 0;  // "postgres" | "memory"
+    virtual Result<void> ping() = 0;
 
     virtual Result<User> create_user(const NewUser&) = 0;
     virtual Result<std::vector<User>> list_users(int limit) = 0;

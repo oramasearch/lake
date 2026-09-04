@@ -50,6 +50,16 @@ public:
     explicit PostgresStore(std::string uri) : uri_(std::move(uri)) {}
     std::string kind() const override { return "postgres"; }
 
+    Result<void> ping() override {
+        Result<void> result = with_tx<void>([](pqxx::work& tx) -> Result<void> {
+            tx.exec("SET LOCAL statement_timeout = '1000ms'");
+            tx.exec("SELECT 1");
+            return {};
+        });
+        if (!result) return std::unexpected(StoreError{"store_unavailable", result.error().message});
+        return {};
+    }
+
     Result<User> create_user(const NewUser& in) override {
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
             const pqxx::result rows = tx.exec_params(
