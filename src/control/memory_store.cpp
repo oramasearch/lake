@@ -2665,6 +2665,85 @@ Result<std::string> InMemoryStore::customer_kek_locked(const std::string& custom
     return key;
 }
 
+Result<PkiAuthorityRecord> InMemoryStore::create_pki_authority(const NewPkiAuthorityRecord& input,
+                                                               const std::string& instance_kek) {
+    static_cast<void>(instance_kek);
+    std::lock_guard lock(mutex_);
+    const auto customer = std::ranges::find_if(
+        customers_, [&](const Customer& value) { return value.id == input.customer_id; });
+    if (customer == customers_.end()) {
+        return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+    }
+    if (std::ranges::any_of(pki_authorities_, [&](const PkiAuthorityRecord& value) {
+            return value.customer_id == input.customer_id;
+        })) {
+        return std::unexpected(StoreError{"conflict", "customer authority already exists"});
+    }
+    auto raw_kek = customer_kek_locked(input.customer_id, true);
+    if (!raw_kek || raw_kek->size() != secrets_crypto::Key{}.size()) {
+        return std::unexpected(raw_kek ? StoreError{"store_error", "customer key is invalid"}
+                                       : raw_kek.error());
+    }
+    secrets_crypto::Key kek{};
+    std::copy(raw_kek->begin(), raw_kek->end(), kek.begin());
+    const std::string root_associated = "lake pki authority/" + input.customer_id + "/root";
+    const std::string intermediate_associated =
+        "lake pki authority/" + input.customer_id + "/intermediate";
+    auto root = secrets_crypto::seal(kek, input.root_private_key_pem, root_associated);
+    auto intermediate =
+        secrets_crypto::seal(kek, input.intermediate_private_key_pem, intermediate_associated);
+    secrets_crypto::cleanse(kek);
+    if (!root || !intermediate) {
+        return std::unexpected(!root ? root.error() : intermediate.error());
+    }
+    const std::string now = now_iso8601();
+    PkiAuthorityRecord record{new_uuid_v4(),
+                              input.customer_id,
+                              input.root_certificate_pem,
+                              input.intermediate_chain_pem,
+                              *root,
+                              *intermediate,
+                              now,
+                              now};
+    pki_authorities_.push_back(record);
+    return record;
+}
+
+Result<PkiAuthorityMaterial> InMemoryStore::get_pki_authority(const std::string& customer_id,
+                                                              const std::string& instance_kek) {
+    static_cast<void>(instance_kek);
+    std::lock_guard lock(mutex_);
+    const auto record =
+        std::ranges::find_if(pki_authorities_, [&](const PkiAuthorityRecord& value) {
+            return value.customer_id == customer_id;
+        });
+    if (record == pki_authorities_.end()) {
+        return std::unexpected(StoreError{"not_found", "customer authority does not exist"});
+    }
+    auto raw_kek = customer_kek_locked(customer_id, false);
+    if (!raw_kek || raw_kek->size() != secrets_crypto::Key{}.size()) {
+        return std::unexpected(raw_kek ? StoreError{"store_error", "customer key is invalid"}
+                                       : raw_kek.error());
+    }
+    secrets_crypto::Key kek{};
+    std::copy(raw_kek->begin(), raw_kek->end(), kek.begin());
+    const std::string root_associated = "lake pki authority/" + customer_id + "/root";
+    const std::string intermediate_associated =
+        "lake pki authority/" + customer_id + "/intermediate";
+    auto root = secrets_crypto::open(kek, record->root_key_ciphertext, root_associated);
+    auto intermediate =
+        secrets_crypto::open(kek, record->intermediate_key_ciphertext, intermediate_associated);
+    secrets_crypto::cleanse(kek);
+    if (!root || !intermediate) {
+        return std::unexpected(!root ? root.error() : intermediate.error());
+    }
+    return PkiAuthorityMaterial{record->customer_id,
+                                record->root_certificate_pem,
+                                record->intermediate_chain_pem,
+                                std::move(*root),
+                                std::move(*intermediate)};
+}
+
 Result<void> InMemoryStore::store_data_key_locked(const std::string& customer_id,
                                                   const std::string& owner_id,
                                                   std::uint64_t version,
@@ -3438,11 +3517,49 @@ Result<CustomerKekRotation> InMemoryStore::rotate_customer_kek(const std::string
         }
         replacements.push_back(*wrapped);
     }
+    std::vector<std::pair<std::string, std::string>> authority_replacements;
+    authority_replacements.reserve(pki_authorities_.size());
+    for (const PkiAuthorityRecord& record : pki_authorities_) {
+        if (record.customer_id != customer_id) {
+            authority_replacements.emplace_back();
+            continue;
+        }
+        const std::string root_associated = "lake pki authority/" + customer_id + "/root";
+        const std::string intermediate_associated =
+            "lake pki authority/" + customer_id + "/intermediate";
+        auto root = secrets_crypto::open(old_key, record.root_key_ciphertext, root_associated);
+        auto intermediate = secrets_crypto::open(
+            old_key, record.intermediate_key_ciphertext, intermediate_associated);
+        if (!root || !intermediate) {
+            secrets_crypto::cleanse(old_key);
+            secrets_crypto::cleanse(*generated);
+            return std::unexpected(!root ? root.error() : intermediate.error());
+        }
+        auto wrapped_root = secrets_crypto::seal(*generated, *root, root_associated);
+        auto wrapped_intermediate =
+            secrets_crypto::seal(*generated, *intermediate, intermediate_associated);
+        if (!wrapped_root || !wrapped_intermediate) {
+            secrets_crypto::cleanse(old_key);
+            secrets_crypto::cleanse(*generated);
+            return std::unexpected(!wrapped_root ? wrapped_root.error()
+                                                 : wrapped_intermediate.error());
+        }
+        authority_replacements.emplace_back(*wrapped_root, *wrapped_intermediate);
+    }
     secrets_crypto::cleanse(old_key);
     std::uint64_t rewrapped = 0;
     for (std::size_t index = 0; index < data_keys_.size(); ++index) {
         if (!replacements[index].empty()) {
             data_keys_[index].wrapped_key = std::move(replacements[index]);
+            ++rewrapped;
+        }
+    }
+    for (std::size_t index = 0; index < pki_authorities_.size(); ++index) {
+        if (!authority_replacements[index].first.empty()) {
+            pki_authorities_[index].root_key_ciphertext =
+                std::move(authority_replacements[index].first);
+            pki_authorities_[index].intermediate_key_ciphertext =
+                std::move(authority_replacements[index].second);
             ++rewrapped;
         }
     }

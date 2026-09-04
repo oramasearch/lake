@@ -3871,6 +3871,92 @@ public:
             });
     }
 
+    Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& input,
+                                                    const std::string& instance_kek) override {
+        if (input.customer_id.empty() || input.root_certificate_pem.empty() ||
+            input.intermediate_chain_pem.empty() || input.root_private_key_pem.empty() ||
+            input.intermediate_private_key_pem.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "customer and authority material are required"});
+        }
+        return with_tx<PkiAuthorityRecord>([&](pqxx::work& tx) -> Result<PkiAuthorityRecord> {
+            auto customer_key = customer_kek_tx(tx, input.customer_id, instance_kek, true);
+            if (!customer_key) {
+                return std::unexpected(customer_key.error());
+            }
+            const std::string root_associated = "lake pki authority/" + input.customer_id + "/root";
+            const std::string intermediate_associated =
+                "lake pki authority/" + input.customer_id + "/intermediate";
+            auto root =
+                secrets_crypto::seal(*customer_key, input.root_private_key_pem, root_associated);
+            auto intermediate = secrets_crypto::seal(
+                *customer_key, input.intermediate_private_key_pem, intermediate_associated);
+            secrets_crypto::cleanse(*customer_key);
+            if (!root || !intermediate) {
+                return std::unexpected(!root ? root.error() : intermediate.error());
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO pki_authorities "
+                "(customer_id, root_key_ciphertext, intermediate_ciphertext, "
+                "root_certificate_pem, intermediate_chain_pem) "
+                "VALUES ($1::uuid, $2, $3, $4, $5) "
+                "ON CONFLICT (customer_id) DO NOTHING "
+                "RETURNING id::text, customer_id::text, root_certificate_pem, "
+                "intermediate_chain_pem, root_key_ciphertext, intermediate_ciphertext, "
+                "created_at::text, updated_at::text",
+                input.customer_id,
+                *root,
+                *intermediate,
+                input.root_certificate_pem,
+                input.intermediate_chain_pem);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"conflict", "customer authority already exists"});
+            }
+            return PkiAuthorityRecord{rows[0][0].as<std::string>(),
+                                      rows[0][1].as<std::string>(),
+                                      rows[0][2].as<std::string>(),
+                                      rows[0][3].as<std::string>(),
+                                      rows[0][4].as<std::string>(),
+                                      rows[0][5].as<std::string>(),
+                                      rows[0][6].as<std::string>(),
+                                      rows[0][7].as<std::string>()};
+        });
+    }
+
+    Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
+                                                   const std::string& instance_kek) override {
+        return with_tx<PkiAuthorityMaterial>([&](pqxx::work& tx) -> Result<PkiAuthorityMaterial> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT root_certificate_pem, intermediate_chain_pem, root_key_ciphertext, "
+                "intermediate_ciphertext FROM pki_authorities WHERE customer_id = $1::uuid",
+                customer_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "customer authority does not exist"});
+            }
+            auto customer_key = customer_kek_tx(tx, customer_id, instance_kek, false);
+            if (!customer_key) {
+                return std::unexpected(customer_key.error());
+            }
+            const std::string root_associated = "lake pki authority/" + customer_id + "/root";
+            const std::string intermediate_associated =
+                "lake pki authority/" + customer_id + "/intermediate";
+            auto root =
+                secrets_crypto::open(*customer_key, rows[0][2].as<std::string>(), root_associated);
+            auto intermediate = secrets_crypto::open(
+                *customer_key, rows[0][3].as<std::string>(), intermediate_associated);
+            secrets_crypto::cleanse(*customer_key);
+            if (!root || !intermediate) {
+                return std::unexpected(!root ? root.error() : intermediate.error());
+            }
+            return PkiAuthorityMaterial{customer_id,
+                                        rows[0][0].as<std::string>(),
+                                        rows[0][1].as<std::string>(),
+                                        std::move(*root),
+                                        std::move(*intermediate)};
+        });
+    }
+
     Result<SecretMount> create_secret_mount(const NewSecretMount& input,
                                             const std::string& instance_kek) override {
         if (!valid_handle(input.name)) {
@@ -4529,6 +4615,38 @@ public:
                                key_version,
                                *wrapped);
             }
+            const pqxx::result authorities =
+                tx.exec_params("SELECT id::text, root_key_ciphertext, intermediate_ciphertext "
+                               "FROM pki_authorities WHERE customer_id = $1::uuid FOR UPDATE",
+                               customer_id);
+            for (const pqxx::row& row : authorities) {
+                const std::string root_associated = "lake pki authority/" + customer_id + "/root";
+                const std::string intermediate_associated =
+                    "lake pki authority/" + customer_id + "/intermediate";
+                auto root =
+                    secrets_crypto::open(*old_key, row[1].as<std::string>(), root_associated);
+                auto intermediate = secrets_crypto::open(
+                    *old_key, row[2].as<std::string>(), intermediate_associated);
+                if (!root || !intermediate) {
+                    secrets_crypto::cleanse(*old_key);
+                    secrets_crypto::cleanse(*new_key);
+                    return std::unexpected(!root ? root.error() : intermediate.error());
+                }
+                auto wrapped_root = secrets_crypto::seal(*new_key, *root, root_associated);
+                auto wrapped_intermediate =
+                    secrets_crypto::seal(*new_key, *intermediate, intermediate_associated);
+                if (!wrapped_root || !wrapped_intermediate) {
+                    secrets_crypto::cleanse(*old_key);
+                    secrets_crypto::cleanse(*new_key);
+                    return std::unexpected(!wrapped_root ? wrapped_root.error()
+                                                         : wrapped_intermediate.error());
+                }
+                tx.exec_params("UPDATE pki_authorities SET root_key_ciphertext = $2, "
+                               "intermediate_ciphertext = $3 WHERE id = $1::uuid",
+                               row[0].as<std::string>(),
+                               *wrapped_root,
+                               *wrapped_intermediate);
+            }
             secrets_crypto::cleanse(*old_key);
             const std::string raw_new(reinterpret_cast<const char*>(new_key->data()),
                                       new_key->size());
@@ -4546,7 +4664,9 @@ public:
                            *wrapped_customer,
                            version);
             return CustomerKekRotation{
-                customer_id, version, static_cast<std::uint64_t>(data_keys.size())};
+                customer_id,
+                version,
+                static_cast<std::uint64_t>(data_keys.size() + authorities.size())};
         });
     }
 

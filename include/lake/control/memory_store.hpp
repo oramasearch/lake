@@ -83,6 +83,10 @@ public:
     Result<audit::Event> latest_audit_event() override;
     Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) override;
     Result<void> set_audit_retention_days(const std::string& customer_id, int days) override;
+    Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
+                                                    const std::string& instance_kek) override;
+    Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
+                                                   const std::string& instance_kek) override;
     Result<SecretMount> create_secret_mount(const NewSecretMount& value,
                                             const std::string& instance_kek) override;
     Result<std::vector<SecretMount>> list_secret_mounts(const std::string& customer_id,
@@ -253,6 +257,7 @@ private:
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
+    std::vector<PkiAuthorityRecord> pki_authorities_;
     struct CustomerKekRecord {
         std::string customer_id;
         std::string key;

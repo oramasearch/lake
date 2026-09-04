@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -7,6 +8,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/pki.hpp"
+#include "lake/control/postgres_store.hpp"
 
 namespace {
 
@@ -54,7 +56,7 @@ TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
     context.pki = &pki;
     context.authorized = true;
     context.acting_identity = "admin";
-    context.instance_kek = "0123456789abcdef0123456789abcdef";
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
     const auto organization =
         store.create_organization({"taap:1:ed25519:organization", "Organization", ""});
@@ -76,6 +78,64 @@ TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.kind, "certificate");
     EXPECT_EQ(event->draft.action, "issue_x509_svid");
+}
+
+TEST(Pki, PersistsAuthorityKeysThroughTheCustomerKeystore) {
+    lake::control::InMemoryStore store;
+    const auto organization =
+        store.create_organization({"taap:1:ed25519:pki-persistence", "PKI persistence", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto customer =
+        store.create_customer({"organization", "", organization->id, "pki-persistence"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const std::string instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    lake::control::pki::Service creator;
+    ASSERT_TRUE(creator.create_authority(store, customer->id, instance_kek));
+
+    lake::control::pki::Service after_restart;
+    auto issued = after_restart.issue_x509_svid(
+        store, customer->id, "spiffe://lake.test/persisted", instance_kek);
+    ASSERT_TRUE(issued) << issued.error().message;
+    ASSERT_TRUE(store.rotate_customer_kek(customer->id, instance_kek));
+    EXPECT_TRUE(after_restart.issue_jwt_svid(
+        store, customer->id, "spiffe://lake.test/persisted", "lake", instance_kek));
+}
+
+TEST(PostgresPki, PersistsAndRewrapsCustomerAuthority) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri);
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto organization =
+        store->create_organization({"taap:1:ed25519:pki-postgres-" + suffix, "PKI PostgreSQL", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto customer =
+        store->create_customer({"organization", "", organization->id, "pki-pg-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const std::string instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    lake::control::pki::Service creator;
+    ASSERT_TRUE(creator.create_authority(*store, customer->id, instance_kek));
+    lake::control::pki::Service after_restart;
+    auto svid = after_restart.issue_x509_svid(
+        *store, customer->id, "spiffe://lake.test/postgres", instance_kek);
+    ASSERT_TRUE(svid) << svid.error().message;
+    const auto authority = store->get_pki_authority(customer->id, instance_kek);
+    ASSERT_TRUE(authority) << authority.error().message;
+    EXPECT_TRUE(lake::control::pki::verify_x509_svid({authority->root_certificate_pem,
+                                                      authority->intermediate_chain_pem,
+                                                      authority->root_private_key_pem,
+                                                      authority->intermediate_private_key_pem},
+                                                     *svid));
+    ASSERT_TRUE(store->rotate_customer_kek(customer->id, instance_kek));
+    EXPECT_TRUE(after_restart.issue_jwt_svid(
+        *store, customer->id, "spiffe://lake.test/postgres", "lake", instance_kek));
 }
 
 } // namespace

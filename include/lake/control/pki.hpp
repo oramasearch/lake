@@ -8,6 +8,10 @@
 #include <string_view>
 #include <vector>
 
+namespace lake::control {
+class Store;
+}
+
 namespace lake::control::pki {
 
 struct Error {
@@ -71,12 +75,25 @@ Result<std::vector<std::byte>> recover_secret(const std::vector<ShamirShare>& sh
 class Service {
 public:
     Result<AuthorityPublic> create_authority(std::string_view customer_id);
+    Result<AuthorityPublic>
+    create_authority(Store& store, std::string_view customer_id, std::string_view instance_kek);
     Result<X509Svid> issue_x509_svid(std::string_view customer_id,
                                      std::string_view spiffe_id,
+                                     int lifetime_seconds = 3600);
+    Result<X509Svid> issue_x509_svid(Store& store,
+                                     std::string_view customer_id,
+                                     std::string_view spiffe_id,
+                                     std::string_view instance_kek,
                                      int lifetime_seconds = 3600);
     Result<JwtSvid> issue_jwt_svid(std::string_view customer_id,
                                    std::string_view spiffe_id,
                                    std::string_view audience,
+                                   int lifetime_seconds = 900);
+    Result<JwtSvid> issue_jwt_svid(Store& store,
+                                   std::string_view customer_id,
+                                   std::string_view spiffe_id,
+                                   std::string_view audience,
+                                   std::string_view instance_kek,
                                    int lifetime_seconds = 900);
     Result<RecoveryCeremony>
     begin_recovery(std::string_view customer_id, int threshold, int share_count);
@@ -85,6 +102,8 @@ public:
                               const std::vector<ShamirShare>& shares);
 
 private:
+    Result<Authority>
+    load_authority(Store& store, std::string_view customer_id, std::string_view instance_kek);
     std::mutex mutex_;
     std::map<std::string, Authority> authorities_;
 };

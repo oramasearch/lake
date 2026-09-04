@@ -74,8 +74,8 @@ void register_pki_capabilities(Registry& registry) {
             if (!context.pki) {
                 return no_pki();
             }
-            auto authority =
-                context.pki->create_authority(input.at("customer_id").get<std::string>());
+            auto authority = context.pki->create_authority(
+                *context.store, input.at("customer_id").get<std::string>(), context.instance_kek);
             if (!authority) {
                 return from_pki_error(authority.error());
             }
@@ -106,8 +106,10 @@ void register_pki_capabilities(Registry& registry) {
             if (!context.pki) {
                 return no_pki();
             }
-            auto svid = context.pki->issue_x509_svid(input.at("customer_id").get<std::string>(),
+            auto svid = context.pki->issue_x509_svid(*context.store,
+                                                     input.at("customer_id").get<std::string>(),
                                                      input.at("spiffe_id").get<std::string>(),
+                                                     context.instance_kek,
                                                      input.value("lifetime_seconds", 3600));
             if (!svid) {
                 return from_pki_error(svid.error());
@@ -144,9 +146,11 @@ void register_pki_capabilities(Registry& registry) {
             if (!context.pki) {
                 return no_pki();
             }
-            auto svid = context.pki->issue_jwt_svid(input.at("customer_id").get<std::string>(),
+            auto svid = context.pki->issue_jwt_svid(*context.store,
+                                                    input.at("customer_id").get<std::string>(),
                                                     input.at("spiffe_id").get<std::string>(),
                                                     input.at("audience").get<std::string>(),
+                                                    context.instance_kek,
                                                     input.value("lifetime_seconds", 900));
             if (!svid) {
                 return from_pki_error(svid.error());

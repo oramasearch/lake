@@ -175,7 +175,7 @@ comments. `forge_records` is the area prefix for parallel Phase 6 schema work.
 
 | Table | Purpose |
 |---|---|
-| `pki_authorities` | One private CA hierarchy per customer. Root and online-intermediate private keys are envelope-encrypted; only the public chain is readable from the row. |
+| `pki_authorities` | One private CA hierarchy per customer. Root and online-intermediate private keys are ciphertext wrapped by the customer KEK; only the public chain is readable from the row. Customer-KEK rotation rewraps both ciphertext columns. |
 | `pki_certificates` | Issued short-lived X.509, JWT, ACME, SSH, client, and device credential metadata and public output. |
 | `pki_acme_orders` | ACME order state, identifiers, account key reference, expiry, and issued certificate link. |
 | `pki_callers` | Short-lived workload credentials minted after Kubernetes, federation, AWS, or Azure attestation. |

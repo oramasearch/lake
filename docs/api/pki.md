@@ -13,13 +13,14 @@ or failure. The X.509 response contains a newly generated workload private key; 
 persist that leaf key.
 
 The API server owns the PKI service for its process and supplies it to every registry call. The
-customer authority record is the next persistence integration point; callers must not substitute
-an HTTP-local signer for that record.
+service creates and loads customer authority records through the control-plane store; callers must
+not substitute an HTTP-local signer for that record.
 
 Private CA material is envelope-encrypted through the control-plane key store. The root is kept
-out of ordinary issuance and the online intermediate signs leaf credentials. X.509 profiles
-default to one hour; JWT SVIDs default to fifteen minutes. A caller requesting a longer lifetime
-must supply a justification, which is retained in the signed audit event.
+out of ordinary issuance and the online intermediate signs leaf credentials. Customer-KEK rotation
+rewraps PKI private-key ciphertext. X.509 profiles default to one hour; JWT SVIDs default to
+fifteen minutes. A caller requesting a longer lifetime must supply a justification, which is
+retained in the signed audit event.
 
 The cryptographic authority builder creates a P-256 root and intermediate, verifies each X.509
 SVID through that chain, and signs compact ES256 JWT SVIDs. Persistence and API dispatch bind

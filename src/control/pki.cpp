@@ -1,5 +1,7 @@
 #include "lake/control/pki.hpp"
 
+#include "lake/control/store.hpp"
+
 #include <array>
 #include <chrono>
 #include <memory>
@@ -651,6 +653,39 @@ Result<AuthorityPublic> Service::create_authority(std::string_view customer_id) 
     return output;
 }
 
+Result<AuthorityPublic> Service::create_authority(::lake::control::Store& store,
+                                                  std::string_view customer_id,
+                                                  std::string_view instance_kek) {
+    auto generated = pki::create_authority(customer_id);
+    if (!generated) {
+        return std::unexpected(generated.error());
+    }
+    auto persisted =
+        store.create_pki_authority(NewPkiAuthorityRecord{std::string(customer_id),
+                                                         generated->root_certificate_pem,
+                                                         generated->intermediate_certificate_pem,
+                                                         generated->root_private_key_pem,
+                                                         generated->intermediate_private_key_pem},
+                                   std::string(instance_kek));
+    if (!persisted) {
+        return std::unexpected(Error{persisted.error().code, persisted.error().message});
+    }
+    return AuthorityPublic{persisted->root_certificate_pem, persisted->intermediate_chain_pem};
+}
+
+Result<Authority> Service::load_authority(::lake::control::Store& store,
+                                          std::string_view customer_id,
+                                          std::string_view instance_kek) {
+    auto persisted = store.get_pki_authority(std::string(customer_id), std::string(instance_kek));
+    if (!persisted) {
+        return std::unexpected(Error{persisted.error().code, persisted.error().message});
+    }
+    return Authority{persisted->root_certificate_pem,
+                     persisted->intermediate_chain_pem,
+                     persisted->root_private_key_pem,
+                     persisted->intermediate_private_key_pem};
+}
+
 Result<X509Svid> Service::issue_x509_svid(std::string_view customer_id,
                                           std::string_view spiffe_id,
                                           int lifetime_seconds) {
@@ -660,6 +695,18 @@ Result<X509Svid> Service::issue_x509_svid(std::string_view customer_id,
         return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
     }
     return pki::issue_x509_svid(authority->second, spiffe_id, lifetime_seconds);
+}
+
+Result<X509Svid> Service::issue_x509_svid(::lake::control::Store& store,
+                                          std::string_view customer_id,
+                                          std::string_view spiffe_id,
+                                          std::string_view instance_kek,
+                                          int lifetime_seconds) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    return pki::issue_x509_svid(*authority, spiffe_id, lifetime_seconds);
 }
 
 Result<JwtSvid> Service::issue_jwt_svid(std::string_view customer_id,
@@ -672,6 +719,19 @@ Result<JwtSvid> Service::issue_jwt_svid(std::string_view customer_id,
         return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
     }
     return pki::issue_jwt_svid(authority->second, spiffe_id, audience, lifetime_seconds);
+}
+
+Result<JwtSvid> Service::issue_jwt_svid(::lake::control::Store& store,
+                                        std::string_view customer_id,
+                                        std::string_view spiffe_id,
+                                        std::string_view audience,
+                                        std::string_view instance_kek,
+                                        int lifetime_seconds) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    return pki::issue_jwt_svid(*authority, spiffe_id, audience, lifetime_seconds);
 }
 
 Result<RecoveryCeremony>

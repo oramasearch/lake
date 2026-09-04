@@ -271,6 +271,35 @@ struct ProvisioningLog {
     std::string created_at;
 };
 
+// Private certificate-authority material is ciphertext at the store boundary.
+// The concrete store envelopes each key using the owning customer's KEK.
+struct PkiAuthorityRecord {
+    std::string id;
+    std::string customer_id;
+    std::string root_certificate_pem;
+    std::string intermediate_chain_pem;
+    std::string root_key_ciphertext;
+    std::string intermediate_key_ciphertext;
+    std::string created_at;
+    std::string updated_at;
+};
+
+struct NewPkiAuthorityRecord {
+    std::string customer_id;
+    std::string root_certificate_pem;
+    std::string intermediate_chain_pem;
+    std::string root_private_key_pem;
+    std::string intermediate_private_key_pem;
+};
+
+struct PkiAuthorityMaterial {
+    std::string customer_id;
+    std::string root_certificate_pem;
+    std::string intermediate_chain_pem;
+    std::string root_private_key_pem;
+    std::string intermediate_private_key_pem;
+};
+
 nlohmann::json to_json(const User&);
 nlohmann::json to_json(const Organization&);
 nlohmann::json to_json(const Customer&);
@@ -375,6 +404,11 @@ public:
     virtual Result<audit::Event> latest_audit_event() = 0;
     virtual Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) = 0;
     virtual Result<void> set_audit_retention_days(const std::string& customer_id, int days) = 0;
+
+    virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
+                                                            const std::string& instance_kek) = 0;
+    virtual Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
+                                                           const std::string& instance_kek) = 0;
 
     virtual Result<SecretMount> create_secret_mount(const NewSecretMount& value,
                                                     const std::string& instance_kek) = 0;
