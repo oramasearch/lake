@@ -103,6 +103,7 @@ repository and its content; all other repository visibility levels remain protec
 | `issue_acme_certificate` | action | customer, subject, optional lifetime | short-lived ACME-profile X.509 certificate, private key, and chain | [pki.md](pki.md) |
 | `begin_root_recovery`, `complete_root_recovery` | action | customer, configured quorum; then ceremony and shares | recovery shares, then rehearsal confirmation | [break-glass.md](break-glass.md) |
 | `exchange_kubernetes_attestation` | action, public entry | customer, organization, projected token, workload TAAP ID, audiences | short-lived workload credential | [callers.md](callers.md) |
+| `exchange_jwt_attestation`, `exchange_cloud_attestation` | action, public entry | customer, federation assertion or AWS/Azure evidence, workload TAAP ID | short-lived workload credential | [callers.md](callers.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

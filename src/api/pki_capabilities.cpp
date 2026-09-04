@@ -296,6 +296,79 @@ void register_pki_capabilities(Registry& registry) {
                 {{"credential", credential->value}, {"expires_at", credential->expires_at}});
         }});
     registry.add(Capability{
+        .name = "exchange_jwt_attestation",
+        .title = "Exchange OIDC or JWT attestation",
+        .description = "Exchange a registered OIDC or JWT federation assertion.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"organization_id", {{"type", "string"}}},
+                           {"token", {{"type", "string"}}},
+                           {"workload_taap_id", {{"type", "string"}}}}},
+                         {"required",
+                          json::array(
+                              {"customer_id", "organization_id", "token", "workload_taap_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"credential", {{"type", "string"}}},
+                            {"expires_at", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.callers) {
+                return no_callers();
+            }
+            auto credential =
+                context.callers->exchange_jwt(input.at("organization_id").get<std::string>(),
+                                              input.at("token").get<std::string>(),
+                                              input.at("workload_taap_id").get<std::string>());
+            if (!credential) {
+                return from_caller_error(credential.error());
+            }
+            context.audit_customer_id = input.at("customer_id").get<std::string>();
+            context.audit_kind = "authentication";
+            context.audit_object = "workload/" + credential->workload_taap_id;
+            return ApiResult::success(
+                {{"credential", credential->value}, {"expires_at", credential->expires_at}});
+        }});
+    registry.add(Capability{
+        .name = "exchange_cloud_attestation",
+        .title = "Exchange cloud instance attestation",
+        .description = "Exchange AWS or Azure instance identity evidence.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"provider", {{"type", "string"}}},
+                           {"document", {{"type", "string"}}},
+                           {"workload_taap_id", {{"type", "string"}}}}},
+                         {"required",
+                          json::array({"customer_id", "provider", "document", "workload_taap_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"credential", {{"type", "string"}}},
+                            {"expires_at", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.callers) {
+                return no_callers();
+            }
+            auto credential =
+                context.callers->exchange_cloud(input.at("provider").get<std::string>(),
+                                                input.at("document").get<std::string>(),
+                                                input.at("workload_taap_id").get<std::string>());
+            if (!credential) {
+                return from_caller_error(credential.error());
+            }
+            context.audit_customer_id = input.at("customer_id").get<std::string>();
+            context.audit_kind = "authentication";
+            context.audit_object = "workload/" + credential->workload_taap_id;
+            return ApiResult::success(
+                {{"credential", credential->value}, {"expires_at", credential->expires_at}});
+        }});
+    registry.add(Capability{
         .name = "begin_root_recovery",
         .title = "Begin root recovery rehearsal",
         .description = "Create Shamir recovery shares for a configured customer quorum.",

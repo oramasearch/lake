@@ -16,6 +16,10 @@ verification, AWS instance identity, and Azure instance identity. A verified res
 on its own: JWT claims must each be allowed by the organization issuer policy before Lake mints a
 credential. This keeps trust-graph policy distinct from transport-specific verification.
 
+`ServerOptions` receives those configured dependencies and supplies one caller-attestation service
+to the registry. `exchange_kubernetes_attestation`, `exchange_jwt_attestation`, and
+`exchange_cloud_attestation` are public-entry capabilities; successful exchanges are audit events.
+
 ## How to verify
 
 The caller suite exchanges a Kubernetes token against a TokenReview double, rejects an

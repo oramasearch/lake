@@ -68,6 +68,7 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/callers.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/pki.hpp"
 #include "lake/control/store.hpp"
@@ -1981,6 +1982,7 @@ struct ApiServer::Impl {
     mutable LiquidCustomerStores sync_store;
     Registry registry;
     mutable control::pki::Service pki;
+    std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
     OutboundHttpClient outbound_http;
     struct CachedJwks {
@@ -1997,7 +1999,12 @@ struct ApiServer::Impl {
     std::mutex work_mutex;
     std::condition_variable work_cv;
 
-    explicit Impl(ServerOptions opts) : options(std::move(opts)), sync_store(options.store_root) {
+    explicit Impl(ServerOptions opts)
+        : options(std::move(opts)), sync_store(options.store_root),
+          callers(std::make_unique<control::callers::Service>(options.token_reviewer,
+                                                              options.jwt_verifier,
+                                                              options.cloud_identity_verifier,
+                                                              options.federation_issuer_policy)) {
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
         metrics.set_gauge("lake_build_info",
@@ -2124,6 +2131,7 @@ struct ApiServer::Impl {
         ctx.store = options.store.get();
         ctx.search = options.search.get();
         ctx.pki = &pki;
+        ctx.callers = callers.get();
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
