@@ -55,6 +55,8 @@ identity-core issue keeps `pool_id` on its tables and in its capability inputs f
   wrapped by the instance KEK (or provided as `LAKE_IDENTITY_SEED`), and its public document is
   exposed at `GET /v1/identity`. Until #18 lands, identity core has a fail-closed `LakeIdentity`
   stub and the `lake_identity` storage contract; it cannot produce an unsigned binding.
+  The temporary TAAP document decoder in lake is replaced with liquid's public identity-document
+  codec when liquid #162 lands; lake then verifies only through libliquid.
 - TOTP seeds, OAuth client secrets, and recovery codes are encrypted with AES-256-GCM under a
   purpose-specific data key. `keystore(purpose, wrapped_key, version)` holds those keys wrapped
   by the instance KEK; #24/#25 generalise the table and its lifecycle.
