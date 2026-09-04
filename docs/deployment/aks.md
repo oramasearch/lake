@@ -47,9 +47,9 @@ Lake with a schema guard older than `repository_refs`.
 Lake opens one libliquid store for each customer at
 `LAKE_STORE_ROOT/<customer id>/store`. The operator supplies `LAKE_STORE_ROOT` as a writable
 PersistentVolume mount; Lake neither creates nor selects it. The required operator work is issue
-#132 and the companion schema and guard update is pull request #134. liquid #160's sync contract
-and client API are pinned; push and pull endpoints await libliquid's public repository/store
-binding and codec required for lake's customer-store server.
+#132 and the companion schema and guard update is pull request #134. The source tree pins liquid
+#160 and #165 and implements push and pull over the customer store. Production requires a lake
+image containing those endpoints and the operator volume work before they are enabled there.
 
 ## Runbook
 

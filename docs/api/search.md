@@ -66,8 +66,10 @@ registry rejects an unauthenticated request before the query executes. Search th
 #40's query-time filtering and anonymous-public-read decision.
 
 Every REST, MCP, and server-rendered-page search call passes through `Registry::call`, which writes
-one signed `audit_events` record for the query outcome. Publication will be recorded by the push
-capability when its lifecycle hook publishes a change.
+one signed `audit_events` record for the query outcome. Sync publication and search open the same
+repository identity through `repository_options.store` over
+`LAKE_STORE_ROOT/<customer-id>/store`. Push records its route and per-change authorization outcomes;
+index publication remains a separate search lifecycle hook.
 
 ## Verify
 

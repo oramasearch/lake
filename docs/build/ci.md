@@ -16,10 +16,11 @@ ctest --test-dir build --output-on-failure
 ```
 
 `lake-postgres-tests` reads `LAKE_TEST_DB_URI` and uses unique fixture keys to round-trip every
-registered data capability through the production Postgres store; the audit integration test in
-`lake-tests` reads the same variable and skips without it. The rest of the test binary
-uses `InMemoryStore`, including policy inheritance, delegation, registry metadata and renderer
-coverage.
+registered data capability through the production Postgres store; the audit and repository-sync
+integration tests in `lake-tests` read the same variable and skip without it. The sync integration
+starts lake and uses libliquid's real client against the production control store. The rest of the
+test binary uses `InMemoryStore`, including policy inheritance, delegation, registry metadata and
+renderer coverage.
 
 For the same proof locally:
 

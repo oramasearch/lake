@@ -32,8 +32,11 @@ effective access; anonymous readers receive only public repositories. Change dif
 records remain explicitly deferred until liquid #166 exposes their public APIs. These repository
 data pages are not part of the production state above.
 Lake links libliquid as a library-only submodule and opens one customer store at
-`LAKE_STORE_ROOT/<customer id>/store`; liquid #160's contract is pinned, while push and pull await
-the public repository/store binding and protocol codec required by lake's server. Identity core
+`LAKE_STORE_ROOT/<customer id>/store`; liquid #160 and #165's client, server, and protocol contract
+are pinned. The source tree serves repository push, pull, missing-object negotiation, chunk upload,
+and ranged reads through the registry, with per-change policy and signed audit. These routes are not
+part of the production state above until a containing image and operator volume support are
+deployed. Identity core
 adds migrations `0007_identity_core` and `0008_mfa_recovery`, verified TAAP documents, password
 plus TOTP with one-use recovery codes, persisted WebAuthn, OAuth, row-resolved sessions, scoped
 tokens, device revocation, lake-signed passkey-to-TAAP bindings, and the hosted identity pages.

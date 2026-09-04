@@ -436,6 +436,14 @@ json repository_schema() {
               {"created_at", {{"type", "string"}}},
               {"updated_at", {{"type", "string"}}}}}};
 }
+json sync_ref_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"repository_id", {{"type", "string"}}},
+              {"name", {{"type", "string"}}},
+              {"head", {{"type", "string"}}},
+              {"updated_at", {{"type", "string"}}}}}};
+}
 
 std::string timestamp_after(std::chrono::seconds offset) {
     const std::time_t value = std::time(nullptr) + offset.count();
@@ -576,6 +584,84 @@ audit::IdentityOptions identity_options(const ApiContext& context) {
         .configured_seed = context.identity_seed,
         .instance_kek = context.instance_kek,
     };
+}
+
+ApiResult from_sync_error(ApiContext& context, SyncStoreError error) {
+    const std::string code = error.code;
+    const std::string message = error.message;
+    context.sync_error = std::move(error);
+    return ApiResult::failure(code, message);
+}
+
+SyncChangeAuthorizer sync_change_authorizer(ApiContext& context, const std::string& repository_id) {
+    return [&context, repository_id](const std::string& change_id) -> SyncStoreResult<void> {
+        auto object = context.store->find_policy_object("repository", repository_id);
+        if (!object) {
+            return std::unexpected(SyncStoreError{
+                object.error().code, object.error().message, "repository authorization"});
+        }
+        auto decision = control::authorize(*context.store,
+                                           context.acting_identity,
+                                           object->id,
+                                           "write",
+                                           context.authorization_cache);
+        const bool allowed = decision && decision->allowed;
+        const std::string outcome = !decision ? "failure" : (allowed ? "success" : "denied");
+        const std::string error_code =
+            !decision ? decision.error().code : (allowed ? "" : "unauthorized");
+        const audit::EventDraft event{
+            .kind = "repository_sync",
+            .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
+            .object = "repository/" + repository_id,
+            .action = "push_change",
+            .outcome = outcome,
+            .request_id = context.request_id,
+            .method = context.authentication_method,
+            .device = context.device,
+            .details = {{"change", change_id}, {"error_code", error_code}},
+        };
+        auto recorded = audit::record(*context.store, event, identity_options(context));
+        if (!recorded) {
+            return std::unexpected(SyncStoreError{
+                recorded.error().code, recorded.error().message, "repository sync audit"});
+        }
+        if (!decision) {
+            return std::unexpected(SyncStoreError{
+                decision.error().code, decision.error().message, "repository authorization"});
+        }
+        if (!decision->allowed) {
+            return std::unexpected(SyncStoreError{
+                "unauthorized", "principal is not allowed to write repository", change_id});
+        }
+        return {};
+    };
+}
+
+std::expected<control::Repository, ApiResult> live_sync_repository(const json& input,
+                                                                   ApiContext& context) {
+    if (!context.store) {
+        return std::unexpected(no_store());
+    }
+    if (!context.sync_store) {
+        return std::unexpected(
+            ApiResult::failure("store_unavailable", "LAKE_STORE_ROOT is not configured"));
+    }
+    auto repository = context.store->get_repository(input.at("repository_id"));
+    if (!repository) {
+        return std::unexpected(from_store_error(repository.error()));
+    }
+    if (!repository->deleted_at.empty()) {
+        return std::unexpected(ApiResult::failure("conflict", "repository is tombstoned"));
+    }
+    return *repository;
+}
+
+ApiResult require_sync_wire(ApiContext& context) {
+    if (context.sync_wire_request) {
+        return ApiResult::success(nullptr);
+    }
+    return ApiResult::failure("invalid_input",
+                              "this capability requires the repository sync wire route");
 }
 
 template <class T> ApiResult list_result(control::Result<std::vector<T>> rows) {
@@ -1494,6 +1580,16 @@ void register_repository_capabilities(Registry& registry) {
                                 return one_result(
                                     ctx.store->delete_repository(in.at("id"), deletion));
                             }});
+    const json sync_repository_input = {
+        {"type", "object"},
+        {"properties", {{"repository_id", {{"type", "string"}}}}},
+        {"required", json::array({"repository_id"})},
+        {"additionalProperties", false},
+    };
+    const json sync_output = {
+        {"type", "object"},
+        {"properties", {{"bytes", {{"type", "integer"}}}}},
+    };
     registry.add(Capability{
         .name = "repository_refs",
         .title = "List repository refs",
@@ -1705,6 +1801,201 @@ void register_repository_capabilities(Registry& registry) {
             return ApiResult::success({{"repository_id", repository->id},
                                        {"result_id", in.at("result_id")},
                                        {"status", "waiting for liquid #166"}});
+        }});
+    registry.add(Capability{
+        .name = "refs",
+        .title = "Repository refs",
+        .description = "List the liquid refs currently stored for one live repository.",
+        .input_schema = sync_repository_input,
+        .output_schema = list_schema(sync_ref_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "repository_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            auto repository = live_sync_repository(input, context);
+            if (!repository) {
+                return repository.error();
+            }
+            auto references = context.sync_store->refs(repository->customer_id, repository->id);
+            if (!references) {
+                return from_sync_error(context, references.error());
+            }
+            json items = json::array();
+            for (const auto& [name, head] : *references) {
+                auto stored = context.store->set_repository_ref(repository->id, name, head);
+                if (!stored) {
+                    return from_store_error(stored.error());
+                }
+                items.push_back(control::to_json(*stored));
+            }
+            return ApiResult::success({{"items", std::move(items)}});
+        }});
+    registry.add(Capability{
+        .name = "find_missing",
+        .title = "Find missing repository objects",
+        .description = "Answer liquid's binary missing-object negotiation for one repository.",
+        .input_schema = sync_repository_input,
+        .output_schema = sync_output,
+        .kind = CapabilityKind::Action,
+        .transport = CapabilityTransport::LiquidSync,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "repository_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            if (auto wire = require_sync_wire(context); !wire.ok) {
+                return wire;
+            }
+            auto repository = live_sync_repository(input, context);
+            if (!repository) {
+                return repository.error();
+            }
+            auto response = context.sync_store->find_missing(
+                repository->customer_id, repository->id, context.sync_request);
+            if (!response) {
+                return from_sync_error(context, response.error());
+            }
+            context.sync_response = std::move(*response);
+            return ApiResult::success({{"bytes", context.sync_response.size()}});
+        }});
+    registry.add(Capability{
+        .name = "push",
+        .title = "Push repository metadata",
+        .description = "Verify and atomically import a liquid metadata stream.",
+        .input_schema = sync_repository_input,
+        .output_schema = sync_output,
+        .kind = CapabilityKind::Action,
+        .transport = CapabilityTransport::LiquidSync,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = entity_object("repository", "repository_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            if (auto wire = require_sync_wire(context); !wire.ok) {
+                return wire;
+            }
+            auto repository = live_sync_repository(input, context);
+            if (!repository) {
+                return repository.error();
+            }
+            auto response =
+                context.sync_store->push(repository->customer_id,
+                                         repository->id,
+                                         context.sync_request,
+                                         sync_change_authorizer(context, repository->id));
+            if (!response) {
+                return from_sync_error(context, response.error());
+            }
+            auto references = context.sync_store->refs(repository->customer_id, repository->id);
+            if (!references) {
+                return from_sync_error(context, references.error());
+            }
+            for (const auto& [name, head] : *references) {
+                auto stored = context.store->set_repository_ref(repository->id, name, head);
+                if (!stored) {
+                    return from_store_error(stored.error());
+                }
+            }
+            context.sync_response = std::move(*response);
+            return ApiResult::success({{"bytes", context.sync_response.size()}});
+        }});
+    registry.add(
+        Capability{.name = "pull",
+                   .title = "Pull repository metadata",
+                   .description = "Export a liquid metadata stream after the client's cursor.",
+                   .input_schema = sync_repository_input,
+                   .output_schema = sync_output,
+                   .kind = CapabilityKind::Action,
+                   .transport = CapabilityTransport::LiquidSync,
+                   .object = "repository",
+                   .action = "read",
+                   .resolve_object = entity_object("repository", "repository_id"),
+                   .handler = [](const json& input, ApiContext& context) {
+                       if (auto wire = require_sync_wire(context); !wire.ok) {
+                           return wire;
+                       }
+                       auto repository = live_sync_repository(input, context);
+                       if (!repository) {
+                           return repository.error();
+                       }
+                       auto response = context.sync_store->pull(
+                           repository->customer_id, repository->id, context.sync_request);
+                       if (!response) {
+                           return from_sync_error(context, response.error());
+                       }
+                       context.sync_response = std::move(*response);
+                       return ApiResult::success({{"bytes", context.sync_response.size()}});
+                   }});
+    registry.add(Capability{.name = "upload_chunks",
+                            .title = "Upload repository chunks",
+                            .description =
+                                "Verify and store liquid pack-entry frames in the customer store.",
+                            .input_schema = sync_repository_input,
+                            .output_schema = sync_output,
+                            .kind = CapabilityKind::Action,
+                            .transport = CapabilityTransport::LiquidSync,
+                            .object = "repository",
+                            .action = "write",
+                            .resolve_object = entity_object("repository", "repository_id"),
+                            .handler = [](const json& input, ApiContext& context) {
+                                if (auto wire = require_sync_wire(context); !wire.ok) {
+                                    return wire;
+                                }
+                                auto repository = live_sync_repository(input, context);
+                                if (!repository) {
+                                    return repository.error();
+                                }
+                                auto stored = context.sync_store->upload_chunks(
+                                    repository->customer_id, repository->id, context.sync_request);
+                                if (!stored) {
+                                    return from_sync_error(context, stored.error());
+                                }
+                                return ApiResult::success({{"bytes", context.sync_request.size()}});
+                            }});
+    registry.add(Capability{
+        .name = "read_chunk",
+        .title = "Read a repository chunk range",
+        .description = "Read verified logical bytes from one customer-store object.",
+        .input_schema =
+            {
+                {"type", "object"},
+                {"properties",
+                 {{"repository_id", {{"type", "string"}}},
+                  {"digest", {{"type", "string"}}},
+                  {"offset", {{"type", "integer"}}},
+                  {"length", {{"type", "integer"}}}}},
+                {"required", json::array({"repository_id", "digest", "offset", "length"})},
+                {"additionalProperties", false},
+            },
+        .output_schema = sync_output,
+        .kind = CapabilityKind::Read,
+        .transport = CapabilityTransport::LiquidSync,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "repository_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            if (auto wire = require_sync_wire(context); !wire.ok) {
+                return wire;
+            }
+            const std::int64_t offset = input.at("offset");
+            const std::int64_t length = input.at("length");
+            constexpr std::int64_t maximum_range = 64 * 1024 * 1024;
+            if (offset < 0 || length < 0 || length > maximum_range) {
+                return ApiResult::failure("invalid_input", "invalid chunk range");
+            }
+            auto repository = live_sync_repository(input, context);
+            if (!repository) {
+                return repository.error();
+            }
+            auto response = context.sync_store->read_chunk(repository->customer_id,
+                                                           repository->id,
+                                                           input.at("digest"),
+                                                           static_cast<std::uint64_t>(offset),
+                                                           static_cast<std::uint64_t>(length));
+            if (!response) {
+                return from_sync_error(context, response.error());
+            }
+            context.sync_response = std::move(*response);
+            return ApiResult::success({{"bytes", context.sync_response.size()}});
         }});
 }
 

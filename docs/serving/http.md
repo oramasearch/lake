@@ -26,15 +26,18 @@ out) and are the unit-tested surface.
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated identity management pages |
 | `POST /identity/*` | form adapters that call the corresponding registry capability; see [`../ui/identity.md`](../ui/identity.md) |
 | `GET /v1/<capability>`, `POST /v1/<capability>` | the registry rendered as REST |
+| `POST /v1/repositories/<repository-id>/sync/{find-missing,push,pull,chunks}` | liquid sync operations with bounded streaming request and response bodies; see [`../api/sync.md`](../api/sync.md) |
+| `GET /v1/repositories/<repository-id>/sync/chunks/<digest>` | ranged liquid chunk reads with `offset` and `length` query parameters |
 | `GET /v1/oauth/<provider>/callback` | the provider-facing OAuth callback |
-| `GET /v1/openapi.json`, `POST /mcp` | the same registry rendered as OpenAPI and MCP |
+| `GET /v1/openapi.json` | the registry rendered as OpenAPI |
+| `POST /mcp` | JSON registry capabilities rendered as MCP tools |
 | anything else | `404 {"error":"not_found"}` |
 
 **Rules that keep it correct.**
 
-- Every response goes through `send_text`, which stamps headers Zetta's way: `erase(etag)`,
+- Every text response goes through `send_text`, which stamps headers Zetta's way: `erase(etag)`,
   `erase(content_length)`, `set_payload_size(body)`. Beast2 frames from the declared size; never
-  set those by hand.
+  set those by hand. Binary sync responses use the corresponding bounded byte writer.
 - Routes are registered in order: `router.use(cors())`, the `router.add(...)` list, then a
   **trailing `router.use` 404 handler**. The router falls through (`route_next`) past the last
   route and nothing answers otherwise: without the trailing handler an unmatched request
