@@ -97,6 +97,7 @@ add_library(lake-core STATIC
   src/api/rest.cpp
   src/api/mcp.cpp
   src/api/capabilities.cpp
+  src/audit/audit.cpp
   src/control/handles.cpp
   src/control/policy.cpp
   src/search/index.cpp
