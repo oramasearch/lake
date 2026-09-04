@@ -183,11 +183,11 @@ code runs inside lake as the library-only `liquid::liquid` target, and its pack 
 manifest, and collector state remain libliquid-owned. The chunk index is liquid's own, held per
 customer store. Zetta remains lake’s serving-model reference, not this repository-data backend.
 
-**Push and pull (#12)** uses liquid #160's published `docs/library/sync.md` and public sync API.
-Lake has the customer-store adapter and the library-only liquid dependency, but does not register
-`refs`, `find_missing`, `push`, or `pull` until libliquid publicly binds repository metadata to the
-required customer store and exposes the documented codec at the server boundary. That preserves
-the contract without inventing framing or creating a repository-local store.
+**Push and pull (#12) is implemented** with liquid #160 and #165's published
+`docs/library/sync.md`, public client, and `sync_server`. Lake registers `refs`, `find_missing`,
+`push`, `pull`, chunk upload, and ranged chunk read through the capability registry. The adapter
+opens every repository with `repository_options.store` against its customer store, delegates the
+binary protocol to `sync_server`, authorizes each pushed change, and records all outcomes.
 
 **Repository lifecycle (#13)** stays in the control plane: create, rename, transfer between
 customers, delete (tombstone first, content collected by the customer store's collector after
@@ -200,9 +200,9 @@ Indexed by blob once (content-addressed: a blob is indexed the first time any re
 it), with oramacore-cpp's BM25F and positional trigram index as the engines, a hot index on branch
 tips and cold snapshots for releases and tags, publication atomic per change (a query sees a
 change entirely or not at all), and the policy engine filtering candidates at query time. The
-shared framing will be published in liquid `docs/library/sync.md` and mirrored here as
-`docs/api/sync.md`; liquid #160 supplies the library export/import and CLI client. Until that
-library pin advances, lake does not implement or test a guessed server framing. Symbols
+shared framing is published in liquid `docs/library/sync.md` and mirrored here as
+`docs/api/sync.md`; liquid #160 and #165 supply the library client, server, and codecs. Lake uses
+that public contract and tests a client round trip without duplicating the protocol. Symbols
 from the compiler (liquid's build graph knows every translation unit) arrive when Phase 4's
 incremental engine lands. Search-index storage is specified by the search work; repository content
 and its liquid-owned metadata remain on the customer store volume.

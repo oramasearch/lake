@@ -41,6 +41,9 @@ std::optional<std::string> mcp_dispatch(const Registry& registry, const nlohmann
     if (method == "tools/list") {
         nlohmann::json tools = nlohmann::json::array();
         for (const auto& capability : registry.list()) {
+            if (capability->transport != CapabilityTransport::Json) {
+                continue;
+            }
             nlohmann::json tool = {{"name", capability->name},
                                    {"title", capability->title},
                                    {"description", capability->description},

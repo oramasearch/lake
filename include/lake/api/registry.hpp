@@ -1,13 +1,17 @@
 #pragma once
+#include <cstddef>
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
 
 namespace lake::control {
@@ -18,11 +22,9 @@ class Service;
 }
 
 // The capability registry — lake's control surface in Zetta's shape: one
-// registry, rendered as REST (/v1/<name>), OpenAPI (/v1/openapi.json) and MCP
-// tools (POST /mcp), zero drift.
+// registry rendered as HTTP and OpenAPI. JSON capabilities are also MCP tools;
+// binary liquid sync capabilities use repository-scoped streaming routes.
 namespace lake::api {
-
-class SyncStore;
 
 struct ApiError {
     std::string code;    // invalid_input | unauthorized | not_found | conflict |
@@ -43,6 +45,8 @@ struct ApiResult {
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
+enum class CapabilityTransport { Json, LiquidSync };
+
 struct ApiContext {
     control::Store* store = nullptr; // null = no control-plane store configured
     std::string node_name;
@@ -54,6 +58,10 @@ struct ApiContext {
     std::string identity_seed;
     std::string instance_kek;
     SyncStore* sync_store = nullptr;
+    bool sync_wire_request = false;
+    std::span<const std::byte> sync_request;
+    std::vector<std::byte> sync_response;
+    std::optional<SyncStoreError> sync_error;
     search::Service* search = nullptr;
     bool authorized = false;
     bool operator_credential = false;
@@ -81,6 +89,7 @@ struct Capability {
                                   // additionalProperties false
     nlohmann::json output_schema; // the success value's shape
     CapabilityKind kind = CapabilityKind::Read;
+    CapabilityTransport transport = CapabilityTransport::Json;
     bool requires_auth = true;
     std::string object;
     std::string action;

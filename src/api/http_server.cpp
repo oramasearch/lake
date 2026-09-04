@@ -1,38 +1,47 @@
 // lake — the HTTP adapter. Beast2 (HTTP/1) on Capy + Corosio, the same stack
 // Zetta serves with (zetta/src/core/api/http_server.cpp). This is the ONE
 // translation unit that knows about beast2 / boost::http / Boost.JSON. It
-// serves the hello page, the registry's REST rendering
-// (/v1/<capability>), the OpenAPI document and MCP (POST /mcp); every
-// capability call goes through Registry::call, so REST and MCP authorize and
-// validate identically.
+// serves the hello page, the registry's JSON and binary HTTP renderings, the
+// OpenAPI document and MCP (POST /mcp). Every capability call goes through
+// Registry::call so authorization, validation and audit remain centralized.
 
 #include "lake/api/server.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <expected>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <print>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <boost/beast2/http_server.hpp>
 #include <boost/capy/buffers.hpp>
+#include <boost/capy/buffers/buffer_copy.hpp>
+#include <boost/capy/buffers/vector_dynamic_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/io/push_to.hpp>
+#include <boost/capy/read.hpp>
 #include <boost/capy/timeout.hpp>
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/openssl_stream.hpp>
@@ -69,9 +78,14 @@
 #include <liquid/repository.hpp>
 #include <liquid/runtime.hpp>
 #include <liquid/store.hpp>
+#include <liquid/sync.hpp>
 
 namespace lake::api {
 namespace {
+
+constexpr auto sync_content_type = "application/vnd.liquid.sync-v1";
+constexpr auto sync_error_content_type = "application/vnd.liquid.error-v1";
+constexpr auto maximum_sync_body_size = std::size_t{64} * 1024 * 1024;
 
 // Beast2 computes the framing from the payload size we declare; anything a
 // handler set by hand would race it. Same rule as Zetta.
@@ -95,6 +109,132 @@ boost::http::route_task send_text(boost::http::route_params& route,
     if (send_error)
         co_return http::route_error(send_error);
     co_return http::route_done;
+}
+
+boost::http::route_task send_bytes(boost::http::route_params& route,
+                                   boost::http::status status,
+                                   std::string_view content_type,
+                                   std::span<const std::byte> body) {
+    namespace http = boost::http;
+    route.status(status);
+    route.res.set(http::field::content_type, content_type);
+    route.res.set(http::field::cache_control, "no-store");
+    route.res.erase(http::field::etag);
+    route.res.erase(http::field::content_length);
+    route.res.set_payload_size(body.size());
+    std::size_t offset = 0;
+    for (;;) {
+        auto buffers = std::array<boost::capy::mutable_buffer, 16>{};
+        const auto output = route.res_body.prepare(buffers);
+        const auto remaining = body.subspan(offset);
+        const auto copied = boost::capy::buffer_copy(
+            output, boost::capy::const_buffer(remaining.data(), remaining.size()));
+        offset += copied;
+        if (offset == body.size()) {
+            auto [send_error] = co_await route.res_body.commit_eof(copied);
+            if (send_error) {
+                co_return http::route_error(send_error);
+            }
+            co_return http::route_done;
+        }
+        auto [send_error] = co_await route.res_body.commit(copied);
+        if (send_error) {
+            co_return http::route_error(send_error);
+        }
+    }
+}
+
+boost::capy::task<std::expected<std::vector<unsigned char>, std::error_code>>
+read_sync_body(boost::http::route_params& route) {
+    auto body = std::vector<unsigned char>{};
+    auto [read_error, size] = co_await boost::capy::read(
+        route.req_body, boost::capy::dynamic_buffer(body, maximum_sync_body_size));
+    static_cast<void>(size);
+    if (read_error) {
+        co_return std::unexpected(read_error);
+    }
+    co_return body;
+}
+
+std::span<const std::byte> as_bytes(const std::vector<unsigned char>& value) {
+    return {reinterpret_cast<const std::byte*>(value.data()), value.size()};
+}
+
+liquid::errc liquid_error_code(std::string_view code) {
+    if (code == "invalid_argument" || code == "invalid_input") {
+        return liquid::errc::invalid_argument;
+    }
+    if (code == "corrupt") {
+        return liquid::errc::corrupt;
+    }
+    if (code == "unauthorized") {
+        return liquid::errc::unauthorized;
+    }
+    if (code == "not_found") {
+        return liquid::errc::not_found;
+    }
+    if (code == "already_exists") {
+        return liquid::errc::already_exists;
+    }
+    if (code == "conflict") {
+        return liquid::errc::conflict;
+    }
+    if (code == "locked") {
+        return liquid::errc::locked;
+    }
+    if (code == "busy") {
+        return liquid::errc::busy;
+    }
+    if (code == "unavailable" || code == "store_unavailable") {
+        return liquid::errc::unavailable;
+    }
+    if (code == "io") {
+        return liquid::errc::io;
+    }
+    return liquid::errc::internal;
+}
+
+boost::http::status sync_status(const liquid::error& error) {
+    switch (error.code) {
+    case liquid::errc::invalid_argument:
+    case liquid::errc::corrupt:
+        return boost::http::status::bad_request;
+    case liquid::errc::unauthorized:
+        return boost::http::status::unauthorized;
+    case liquid::errc::not_found:
+        return boost::http::status::not_found;
+    case liquid::errc::already_exists:
+    case liquid::errc::conflict:
+        return boost::http::status::conflict;
+    case liquid::errc::locked:
+        return boost::http::status::locked;
+    case liquid::errc::busy:
+        return boost::http::status::too_many_requests;
+    case liquid::errc::unavailable:
+        return boost::http::status::service_unavailable;
+    default:
+        return boost::http::status::internal_server_error;
+    }
+}
+
+boost::http::route_task send_sync_error(boost::http::route_params& route,
+                                        const liquid::error& error) {
+    auto body = liquid::sync_server::encode_error(error);
+    if (!body) {
+        co_return co_await send_bytes(
+            route, boost::http::status::internal_server_error, sync_error_content_type, {});
+    }
+    co_return co_await send_bytes(route, sync_status(error), sync_error_content_type, *body);
+}
+
+liquid::error sync_error_of(const ApiResult& result, const ApiContext& context) {
+    if (context.sync_error) {
+        return liquid::error{liquid_error_code(context.sync_error->code),
+                             context.sync_error->message,
+                             context.sync_error->context};
+    }
+    return liquid::error{
+        liquid_error_code(result.error.code), result.error.message, result.error.path};
 }
 
 // The bearer presented on a request, or empty ("Bearer <token>" only).
@@ -226,6 +366,24 @@ std::string query_value(const boost::http::route_params& route, std::string_view
             return std::string(parameter.value);
     }
     return {};
+}
+
+std::string route_value(const boost::http::route_params& route, std::string_view name) {
+    for (const auto& [key, value] : route.params) {
+        if (key == name) {
+            return value;
+        }
+    }
+    return {};
+}
+
+std::optional<std::uint64_t> decimal_value(std::string_view value) {
+    std::uint64_t output = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), output);
+    if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
+        return std::nullopt;
+    }
+    return output;
 }
 
 std::string browser_session_cookie(const boost::http::route_params& route,
@@ -581,6 +739,114 @@ public:
         return *contents;
     }
 
+    SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
+    refs(const std::string& customer_id, const std::string& repository_id) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        auto references = liquid::runtime::block_on((*state)->subject->refs());
+        if (!references) {
+            return std::unexpected(error_of(references.error()));
+        }
+        std::vector<std::pair<std::string, std::string>> output;
+        output.reserve(references->size());
+        for (const auto& reference : *references) {
+            output.emplace_back(reference.name, liquid::to_string(reference.id.value));
+        }
+        return output;
+    }
+
+    SyncStoreResult<std::vector<std::byte>>
+    find_missing(const std::string& customer_id,
+                 const std::string& repository_id,
+                 std::span<const std::byte> request) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        return from_liquid(liquid::runtime::block_on(server.handle_find_missing(request)));
+    }
+
+    SyncStoreResult<std::vector<std::byte>> push(const std::string& customer_id,
+                                                 const std::string& repository_id,
+                                                 std::span<const std::byte> request,
+                                                 SyncChangeAuthorizer authorize) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        liquid::sync_server_options options;
+        options.authorize = [authorize = std::move(authorize)](
+                                const liquid::sync_item& item) -> liquid::runtime::task<void> {
+            const std::string change_id = liquid::to_string(item.reference.value);
+            auto result = authorize(change_id);
+            if (!result) {
+                co_return std::unexpected(liquid_error(result.error()));
+            }
+            co_return liquid::result<void>{};
+        };
+        auto server =
+            liquid::sync_server{*(*state)->subject, *(*state)->objects, std::move(options)};
+        return from_liquid(liquid::runtime::block_on(server.handle_push(request)));
+    }
+
+    SyncStoreResult<std::vector<std::byte>> pull(const std::string& customer_id,
+                                                 const std::string& repository_id,
+                                                 std::span<const std::byte> request) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        return from_liquid(liquid::runtime::block_on(server.handle_pull(request)));
+    }
+
+    SyncStoreResult<void> upload_chunks(const std::string& customer_id,
+                                        const std::string& repository_id,
+                                        std::span<const std::byte> request) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        return from_liquid(liquid::runtime::block_on(server.handle_chunks(request)));
+    }
+
+    SyncStoreResult<std::vector<std::byte>> read_chunk(const std::string& customer_id,
+                                                       const std::string& repository_id,
+                                                       const std::string& digest_text,
+                                                       std::uint64_t offset,
+                                                       std::uint64_t length) override {
+        std::lock_guard lock(mutex_);
+        if (length > std::numeric_limits<std::size_t>::max()) {
+            return std::unexpected(SyncStoreError{
+                "invalid_argument", "chunk range length is too large", "sync server"});
+        }
+        const auto digest = liquid::parse_digest(digest_text);
+        if (!digest) {
+            return std::unexpected(error_of(digest.error()));
+        }
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
+        auto output = std::vector<std::byte>(static_cast<std::size_t>(length));
+        auto read = liquid::runtime::block_on(server.handle_chunks(*digest, offset, output));
+        if (!read) {
+            return std::unexpected(error_of(read.error()));
+        }
+        output.resize(static_cast<std::size_t>(*read));
+        return output;
+    }
+
     SyncStoreResult<std::vector<RepositoryContentRef>>
     repository_refs(const std::string& customer_id, const std::string& repository_id) override {
         std::lock_guard lock(mutex_);
@@ -588,7 +854,7 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        const auto refs = liquid::runtime::block_on((*repository)->refs());
+        const auto refs = liquid::runtime::block_on((*repository)->subject->refs());
         if (!refs) {
             return std::unexpected(error_of(refs.error()));
         }
@@ -609,12 +875,12 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        auto tree = tree_at_ref(**repository, ref);
+        auto tree = tree_at_ref(*(*repository)->subject, ref);
         if (!tree) {
             return std::unexpected(tree.error());
         }
         std::vector<RepositoryTreeEntry> output;
-        const auto walked = walk_tree(**repository, *tree, "", output);
+        const auto walked = walk_tree(*(*repository)->subject, *tree, "", output);
         if (!walked) {
             return std::unexpected(walked.error());
         }
@@ -630,15 +896,15 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        auto tree = tree_at_ref(**repository, ref);
+        auto tree = tree_at_ref(*(*repository)->subject, ref);
         if (!tree) {
             return std::unexpected(tree.error());
         }
-        auto entry = find_file(**repository, *tree, path);
+        auto entry = find_file(*(*repository)->subject, *tree, path);
         if (!entry) {
             return std::unexpected(entry.error());
         }
-        const auto bytes = liquid::runtime::block_on((*repository)->blob(entry->ref));
+        const auto bytes = liquid::runtime::block_on((*repository)->subject->blob(entry->ref));
         if (!bytes) {
             return std::unexpected(error_of(bytes.error()));
         }
@@ -655,7 +921,7 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        const auto changes = liquid::runtime::block_on((*repository)->log());
+        const auto changes = liquid::runtime::block_on((*repository)->subject->log());
         if (!changes) {
             return std::unexpected(error_of(changes.error()));
         }
@@ -684,7 +950,7 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        const auto conflicts = liquid::runtime::block_on((*repository)->conflicts());
+        const auto conflicts = liquid::runtime::block_on((*repository)->subject->conflicts());
         if (!conflicts) {
             return std::unexpected(error_of(conflicts.error()));
         }
@@ -702,9 +968,29 @@ public:
     }
 
 private:
+    struct RepositoryState {
+        std::unique_ptr<liquid::repository> subject;
+        liquid::store* objects{};
+    };
+
     static SyncStoreError error_of(const liquid::error& error) {
         const std::string code(liquid::to_string(error.code));
-        return SyncStoreError{code == "unavailable" ? "store_unavailable" : code, error.message};
+        return SyncStoreError{code, error.message, error.context};
+    }
+
+    static liquid::error liquid_error(const SyncStoreError& error) {
+        return liquid::error{liquid_error_code(error.code), error.message, error.context};
+    }
+
+    template <class T> static SyncStoreResult<T> from_liquid(liquid::result<T> result) {
+        if (!result) {
+            return std::unexpected(error_of(result.error()));
+        }
+        if constexpr (std::is_void_v<T>) {
+            return {};
+        } else {
+            return std::move(*result);
+        }
     }
 
     SyncStoreResult<liquid::store*> open_customer(const std::string& customer_id) {
@@ -729,24 +1015,6 @@ private:
     static bool path_component_is_safe(const std::string& value) {
         return !value.empty() && value != "." && value != ".." &&
                value.find_first_of("/\\\\") == std::string::npos;
-    }
-
-    SyncStoreResult<std::unique_ptr<liquid::repository>>
-    open_repository(const std::string& customer_id, const std::string& repository_id) {
-        if (root_.empty()) {
-            return std::unexpected(
-                SyncStoreError{"store_unavailable", "LAKE_STORE_ROOT is not configured"});
-        }
-        if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
-            return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
-        }
-        const std::filesystem::path path =
-            std::filesystem::path(root_) / customer_id / "repositories" / repository_id;
-        auto opened = liquid::runtime::block_on(liquid::repository::open(path));
-        if (!opened) {
-            return std::unexpected(error_of(opened.error()));
-        }
-        return std::make_unique<liquid::repository>(std::move(*opened));
     }
 
     static SyncStoreResult<liquid::tree> tree_at_ref(liquid::repository& repository,
@@ -842,9 +1110,63 @@ private:
         return output;
     }
 
+    SyncStoreResult<RepositoryState*> open_repository(const std::string& customer_id,
+                                                      const std::string& repository_id) {
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
+        }
+        const std::string key = customer_id + "/" + repository_id;
+        const auto existing = repositories_.find(key);
+        if (existing != repositories_.end()) {
+            return existing->second.get();
+        }
+        auto objects = open_customer(customer_id);
+        if (!objects) {
+            return std::unexpected(objects.error());
+        }
+        const std::filesystem::path repositories =
+            std::filesystem::path(root_) / customer_id / "repositories";
+        std::error_code filesystem_error;
+        std::filesystem::create_directories(repositories, filesystem_error);
+        if (filesystem_error) {
+            return std::unexpected(SyncStoreError{
+                "io", "could not create repository directory: " + filesystem_error.message(), key});
+        }
+        const std::filesystem::path path = repositories / repository_id;
+        liquid::repository_options options;
+        options.store = *objects;
+        const bool has_marker = std::filesystem::exists(path, filesystem_error);
+        if (filesystem_error) {
+            return std::unexpected(SyncStoreError{"io",
+                                                  "could not inspect repository directory: " +
+                                                      filesystem_error.message(),
+                                                  key});
+        }
+        liquid::result<liquid::repository> opened =
+            has_marker ? liquid::runtime::block_on(liquid::repository::open(path, options))
+                       : liquid::runtime::block_on(liquid::repository::create(path, options));
+        if (!opened && !has_marker && opened.error().code == liquid::errc::already_exists) {
+            opened = liquid::runtime::block_on(liquid::repository::open(path, options));
+        }
+        if (!opened) {
+            return std::unexpected(error_of(opened.error()));
+        }
+        std::filesystem::create_directories(path, filesystem_error);
+        if (filesystem_error) {
+            return std::unexpected(SyncStoreError{
+                "io", "could not create repository marker: " + filesystem_error.message(), key});
+        }
+        auto state = std::make_unique<RepositoryState>();
+        state->subject = std::make_unique<liquid::repository>(std::move(*opened));
+        state->objects = *objects;
+        auto inserted = repositories_.emplace(key, std::move(state));
+        return inserted.first->second.get();
+    }
+
     std::string root_;
     std::mutex mutex_;
     std::map<std::string, std::unique_ptr<liquid::store>> stores_;
+    std::map<std::string, std::unique_ptr<RepositoryState>> repositories_;
 };
 
 struct OutboundRequest {
@@ -2858,6 +3180,54 @@ struct ApiServer::Impl {
         co_return co_await send_scim(route, result, success_status);
     }
 
+    boost::http::route_task serve_sync_post(boost::http::route_params& route,
+                                            std::string capability_name) {
+        ApiContext context = context_for(route);
+        const nlohmann::json input = {
+            {"repository_id", route_value(route, "repository_id")},
+        };
+        auto body = co_await read_sync_body(route);
+        if (!body) {
+            const ApiResult result = registry.call(capability_name, input, context);
+            if (!result.ok && result.error.code != "invalid_input") {
+                co_return co_await send_sync_error(route, sync_error_of(result, context));
+            }
+            co_return co_await send_sync_error(route,
+                                               liquid::error{
+                                                   liquid::errc::invalid_argument,
+                                                   "could not read repository sync request",
+                                                   body.error().message(),
+                                               });
+        }
+        context.sync_wire_request = true;
+        context.sync_request = as_bytes(*body);
+        const ApiResult result = registry.call(capability_name, input, context);
+        if (!result.ok) {
+            co_return co_await send_sync_error(route, sync_error_of(result, context));
+        }
+        co_return co_await send_bytes(
+            route, boost::http::status::ok, sync_content_type, context.sync_response);
+    }
+
+    boost::http::route_task serve_sync_range(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        context.sync_wire_request = true;
+        nlohmann::json input = {
+            {"repository_id", route_value(route, "repository_id")},
+            {"digest", route_value(route, "digest")},
+        };
+        const auto offset = decimal_value(query_value(route, "offset"));
+        const auto length = decimal_value(query_value(route, "length"));
+        input["offset"] = offset ? nlohmann::json(*offset) : nlohmann::json("invalid");
+        input["length"] = length ? nlohmann::json(*length) : nlohmann::json("invalid");
+        const ApiResult result = registry.call("read_chunk", input, context);
+        if (!result.ok) {
+            co_return co_await send_sync_error(route, sync_error_of(result, context));
+        }
+        co_return co_await send_bytes(
+            route, boost::http::status::ok, sync_content_type, context.sync_response);
+    }
+
     // One REST rendering of a capability: GET reads (input in the query string,
     // coerced by the input schema), POST actions (input as the JSON body). Auth,
     // validation, the call and the envelope are Registry::call + rest_*, exactly
@@ -3293,7 +3663,28 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/v1/openapi.json", impl.serve_openapi(route));
                });
+    const auto add_sync_post = [&router, &impl](std::string path, std::string capability_name) {
+        router.add(http::method::post,
+                   path,
+                   [&impl, path, capability_name](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, path, impl.serve_sync_post(route, capability_name));
+                   });
+    };
+    add_sync_post("/v1/repositories/:repository_id/sync/find-missing", "find_missing");
+    add_sync_post("/v1/repositories/:repository_id/sync/push", "push");
+    add_sync_post("/v1/repositories/:repository_id/sync/pull", "pull");
+    add_sync_post("/v1/repositories/:repository_id/sync/chunks", "upload_chunks");
+    router.add(http::method::get,
+               "/v1/repositories/:repository_id/sync/chunks/:digest",
+               [&impl](http::route_params& route) -> http::route_task {
+                   const std::string path = "/v1/repositories/:repository_id/sync/chunks/:digest";
+                   return impl.observe_request(route, path, impl.serve_sync_range(route));
+               });
     for (const auto& capability : impl.registry.list()) {
+        if (capability->transport != CapabilityTransport::Json) {
+            continue;
+        }
         const auto method =
             rest_method(*capability) == "GET" ? http::method::get : http::method::post;
         const std::string path = rest_path(*capability);
@@ -3309,11 +3700,13 @@ bool ApiServer::start() {
         return impl.observe_request(route, "unmatched", impl.serve_not_found(route));
     });
 
+    auto parser_options = http::parser_config{true};
+    parser_options.body_limit = maximum_sync_body_size;
     impl.server = std::make_unique<beast2::http_server>(
         impl.io_context,
         static_cast<std::size_t>(impl.options.worker_coroutines),
         std::move(router),
-        http::make_parser_config(http::parser_config(true)),
+        http::make_parser_config(parser_options),
         http::make_serializer_config(http::serializer_config()));
 
     corosio::ipv4_address address(impl.options.listen_address);

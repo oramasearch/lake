@@ -8,15 +8,17 @@ serves. Methods:
 | `initialize` | `{protocolVersion, capabilities: {tools: {}}, serverInfo: {name: "lake", version}}` |
 | `notifications/initialized` | accepted, `202`, no body |
 | `ping` | `{}` |
-| `tools/list` | every registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` |
+| `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` |
 | `tools/call` | `params: {name, arguments}` → `Registry::call` with the request's bearer; result `{content: [{type: text, text}], structuredContent: <envelope>, isError}` |
 
 Unknown methods answer `-32601`; a body that is not JSON answers `400` with `-32700`; a request
 without `"jsonrpc": "2.0"` answers `-32600`.
 
 Authorization is the REST bearer ([`auth.md`](auth.md)) on the same HTTP request; `tools/list`
-needs none, `tools/call` on anything but `server_info` does. An agent therefore uses lake with
-exactly the capabilities, validation and errors a human client gets.
+needs none, `tools/call` on anything but `server_info` does. JSON operations have the same
+capabilities, validation and errors as a REST client. Streaming liquid-sync registry entries are
+omitted because MCP tool arguments cannot carry their binary request and response streams; they
+remain documented in OpenAPI and [`sync.md`](sync.md).
 
 ```sh
 curl -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lake.oramadev.net/mcp

@@ -3,7 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <functional>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lake::api {
@@ -11,9 +14,11 @@ namespace lake::api {
 struct SyncStoreError {
     std::string code;
     std::string message;
+    std::string context;
 };
 
 template <class T> using SyncStoreResult = std::expected<T, SyncStoreError>;
+using SyncChangeAuthorizer = std::function<SyncStoreResult<void>(const std::string& change_id)>;
 
 struct RepositoryContentRef {
     std::string name;
@@ -76,6 +81,28 @@ public:
     repository_log(const std::string& customer_id, const std::string& repository_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id, const std::string& repository_id) = 0;
+
+    virtual SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
+    refs(const std::string& customer_id, const std::string& repository_id) = 0;
+    virtual SyncStoreResult<std::vector<std::byte>>
+    find_missing(const std::string& customer_id,
+                 const std::string& repository_id,
+                 std::span<const std::byte> request) = 0;
+    virtual SyncStoreResult<std::vector<std::byte>> push(const std::string& customer_id,
+                                                         const std::string& repository_id,
+                                                         std::span<const std::byte> request,
+                                                         SyncChangeAuthorizer authorize) = 0;
+    virtual SyncStoreResult<std::vector<std::byte>> pull(const std::string& customer_id,
+                                                         const std::string& repository_id,
+                                                         std::span<const std::byte> request) = 0;
+    virtual SyncStoreResult<void> upload_chunks(const std::string& customer_id,
+                                                const std::string& repository_id,
+                                                std::span<const std::byte> request) = 0;
+    virtual SyncStoreResult<std::vector<std::byte>> read_chunk(const std::string& customer_id,
+                                                               const std::string& repository_id,
+                                                               const std::string& digest,
+                                                               std::uint64_t offset,
+                                                               std::uint64_t length) = 0;
 };
 
 } // namespace lake::api

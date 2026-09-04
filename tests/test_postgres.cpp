@@ -54,7 +54,15 @@ std::vector<std::byte> search_bytes(const std::string& value) {
 }
 
 std::string create_search_change(const std::filesystem::path& path, const std::string& content) {
-    auto opened = liquid::runtime::block_on(liquid::repository::create(path));
+    auto customer_store =
+        liquid::runtime::block_on(liquid::store::open(path.parent_path().parent_path() / "store"));
+    EXPECT_TRUE(customer_store) << customer_store.error().message;
+    if (!customer_store) {
+        return {};
+    }
+    liquid::repository_options options;
+    options.store = &*customer_store;
+    auto opened = liquid::runtime::block_on(liquid::repository::create(path, options));
     EXPECT_TRUE(opened) << opened.error().message;
     if (!opened) {
         return {};

@@ -4,7 +4,12 @@
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -93,6 +98,41 @@ struct RepositoryFixtureStore final : SyncStore {
     repository_conflicts(const std::string&, const std::string&) override {
         return std::vector<RepositoryConflict>{{"readme.md", {"blob-1", "blob-2"}}};
     }
+
+    SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
+    refs(const std::string&, const std::string&) override {
+        return std::vector<std::pair<std::string, std::string>>{{"main", "change-1"}};
+    }
+
+    SyncStoreResult<std::vector<std::byte>>
+    find_missing(const std::string&, const std::string&, std::span<const std::byte>) override {
+        return std::vector<std::byte>{};
+    }
+
+    SyncStoreResult<std::vector<std::byte>> push(const std::string&,
+                                                 const std::string&,
+                                                 std::span<const std::byte>,
+                                                 SyncChangeAuthorizer) override {
+        return std::vector<std::byte>{};
+    }
+
+    SyncStoreResult<std::vector<std::byte>>
+    pull(const std::string&, const std::string&, std::span<const std::byte>) override {
+        return std::vector<std::byte>{};
+    }
+
+    SyncStoreResult<void>
+    upload_chunks(const std::string&, const std::string&, std::span<const std::byte>) override {
+        return {};
+    }
+
+    SyncStoreResult<std::vector<std::byte>> read_chunk(const std::string&,
+                                                       const std::string&,
+                                                       const std::string&,
+                                                       std::uint64_t,
+                                                       std::uint64_t) override {
+        return std::vector<std::byte>{};
+    }
 };
 
 class TemporaryRepositoryRoot {
@@ -108,7 +148,28 @@ public:
         std::filesystem::remove_all(path_, error);
     }
 
-    const std::filesystem::path& path() const {
+    [[nodiscard]] const std::filesystem::path& path() const {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+class TemporarySyncRoot {
+public:
+    TemporarySyncRoot() {
+        static std::atomic<unsigned long> next{0};
+        path_ = std::filesystem::temp_directory_path() / ("lake-sync-" + std::to_string(++next));
+        std::filesystem::create_directories(path_);
+    }
+
+    ~TemporarySyncRoot() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const {
         return path_;
     }
 
@@ -124,6 +185,181 @@ std::vector<std::byte> bytes(const std::string& value) {
     }
     return output;
 }
+
+std::vector<std::byte> sync_bytes(std::string_view value) {
+    std::vector<std::byte> output;
+    output.reserve(value.size());
+    for (const char character : value) {
+        output.push_back(static_cast<std::byte>(character));
+    }
+    return output;
+}
+
+std::vector<std::string> tree_fingerprint(const liquid::tree& tree) {
+    std::vector<std::string> output;
+    output.reserve(tree.entries.size());
+    for (const auto& entry : tree.entries) {
+        output.push_back(entry.name + ":" + liquid::to_string(entry.ref));
+    }
+    std::ranges::sort(output);
+    return output;
+}
+
+bool send_socket_bytes(int socket_fd, std::string_view bytes) {
+    std::size_t sent = 0;
+    while (sent < bytes.size()) {
+        const ssize_t count = ::send(socket_fd, bytes.data() + sent, bytes.size() - sent, 0);
+        if (count <= 0) {
+            return false;
+        }
+        sent += static_cast<std::size_t>(count);
+    }
+    return true;
+}
+
+std::size_t content_length_of(std::string_view header) {
+    constexpr std::string_view name = "Content-Length:";
+    const std::size_t start = header.find(name);
+    if (start == std::string_view::npos) {
+        return 0;
+    }
+    const std::size_t value_start = start + name.size();
+    const std::size_t value_end = header.find("\r\n", value_start);
+    return static_cast<std::size_t>(
+        std::stoull(std::string(header.substr(value_start, value_end - value_start))));
+}
+
+std::string read_http_request(int socket_fd) {
+    std::string request;
+    char buffer[4096];
+    std::size_t expected = 0;
+    for (;;) {
+        const ssize_t count = ::recv(socket_fd, buffer, sizeof(buffer), 0);
+        if (count <= 0) {
+            return request;
+        }
+        request.append(buffer, static_cast<std::size_t>(count));
+        const std::size_t header_end = request.find("\r\n\r\n");
+        if (header_end != std::string::npos && expected == 0) {
+            expected = header_end + 4 + content_length_of(request.substr(0, header_end + 4));
+        }
+        if (expected != 0 && request.size() >= expected) {
+            return request;
+        }
+    }
+}
+
+class RecordingProxy {
+public:
+    explicit RecordingProxy(unsigned short upstream_port) : upstream_port_(upstream_port) {
+        listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = 0;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (listener_ < 0 ||
+            ::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+            ::listen(listener_, 16) != 0) {
+            return;
+        }
+        socklen_t size = sizeof(address);
+        if (::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size) != 0) {
+            return;
+        }
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] { run(); });
+    }
+
+    ~RecordingProxy() {
+        stop();
+    }
+
+    [[nodiscard]] unsigned short port() const {
+        return port_;
+    }
+
+    void stop() {
+        if (stopped_.exchange(true)) {
+            return;
+        }
+        const int wake = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port_);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (wake >= 0) {
+            static_cast<void>(
+                ::connect(wake, reinterpret_cast<sockaddr*>(&address), sizeof(address)));
+            ::close(wake);
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        if (listener_ >= 0) {
+            ::close(listener_);
+            listener_ = -1;
+        }
+    }
+
+    [[nodiscard]] std::vector<std::byte> push_body() const {
+        std::lock_guard lock(mutex_);
+        return push_body_;
+    }
+
+private:
+    void run() {
+        while (!stopped_.load()) {
+            const int client = ::accept(listener_, nullptr, nullptr);
+            if (client < 0) {
+                continue;
+            }
+            if (stopped_.load()) {
+                ::close(client);
+                break;
+            }
+            const std::string request = read_http_request(client);
+            const std::size_t header_end = request.find("\r\n\r\n");
+            if (header_end != std::string::npos &&
+                request.substr(0, header_end).find("/sync/push ") != std::string::npos) {
+                const auto* first =
+                    reinterpret_cast<const std::byte*>(request.data() + header_end + 4);
+                std::lock_guard lock(mutex_);
+                push_body_.assign(first, first + request.size() - header_end - 4);
+            }
+            const int upstream = ::socket(AF_INET, SOCK_STREAM, 0);
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_port = htons(upstream_port_);
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            if (upstream >= 0 &&
+                ::connect(upstream, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0 &&
+                send_socket_bytes(upstream, request)) {
+                std::string response;
+                char buffer[4096];
+                for (;;) {
+                    const ssize_t count = ::recv(upstream, buffer, sizeof(buffer), 0);
+                    if (count <= 0) {
+                        break;
+                    }
+                    response.append(buffer, static_cast<std::size_t>(count));
+                }
+                static_cast<void>(send_socket_bytes(client, response));
+            }
+            if (upstream >= 0) {
+                ::close(upstream);
+            }
+            ::close(client);
+        }
+    }
+
+    unsigned short upstream_port_{};
+    int listener_{-1};
+    unsigned short port_{};
+    std::atomic<bool> stopped_{false};
+    std::thread thread_;
+    mutable std::mutex mutex_;
+    std::vector<std::byte> push_body_;
+};
 
 std::string
 http_get(unsigned short port, std::string_view path, std::string_view authorization = {}) {
@@ -815,12 +1051,45 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     const json doc = openapi_document(s.registry, "0.0.1");
     EXPECT_EQ(doc["openapi"], "3.1.0");
     for (const auto& capability : s.registry.list()) {
+        if (capability->transport == CapabilityTransport::LiquidSync) {
+            continue;
+        }
         const std::string method = rest_method(*capability) == "GET" ? "get" : "post";
         ASSERT_TRUE(doc["paths"].contains(rest_path(*capability))) << capability->name;
         EXPECT_TRUE(doc["paths"][rest_path(*capability)].contains(method)) << capability->name;
     }
+    EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/push"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/pull"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/find-missing"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/chunks"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/chunks/{digest}"));
     EXPECT_TRUE(doc["paths"].contains("/mcp"));
     EXPECT_TRUE(doc["paths"]["/v1/server_info"]["get"]["security"].empty());
+}
+
+TEST(SyncRegistry, DeclaresTransportPolicyAndRecordsDenial) {
+    Surface surface;
+    const auto push = surface.registry.find("push");
+    const auto pull = surface.registry.find("pull");
+    const auto refs = surface.registry.find("refs");
+    ASSERT_NE(push, nullptr);
+    ASSERT_NE(pull, nullptr);
+    ASSERT_NE(refs, nullptr);
+    EXPECT_EQ(push->transport, CapabilityTransport::LiquidSync);
+    EXPECT_EQ(push->action, "write");
+    EXPECT_EQ(pull->transport, CapabilityTransport::LiquidSync);
+    EXPECT_EQ(pull->action, "read");
+    EXPECT_EQ(refs->transport, CapabilityTransport::Json);
+
+    surface.ctx.authorized = false;
+    const ApiResult denied = surface.call("push", {{"repository_id", "missing"}});
+    EXPECT_FALSE(denied.ok);
+    EXPECT_EQ(denied.error.code, "unauthorized");
+    const auto events = surface.store.list_audit_events({.limit = 100});
+    ASSERT_TRUE(events) << events.error().message;
+    ASSERT_FALSE(events->empty());
+    EXPECT_EQ(events->back().draft.action, "push");
+    EXPECT_EQ(events->back().draft.outcome, "denied");
 }
 
 TEST(Mcp, InitializeListAndCall) {
@@ -834,7 +1103,10 @@ TEST(Mcp, InitializeListAndCall) {
 
     const auto tools = json::parse(*mcp_dispatch(
         s.registry, {{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}}, s.ctx, "0.0.1"));
-    EXPECT_EQ(tools["result"]["tools"].size(), s.registry.list().size());
+    const auto json_capabilities = std::ranges::count_if(s.registry.list(), [](const auto& entry) {
+        return entry->transport == CapabilityTransport::Json;
+    });
+    EXPECT_EQ(tools["result"]["tools"].size(), json_capabilities);
 
     const json call = {
         {"jsonrpc", "2.0"},
@@ -985,7 +1257,13 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
 
     const std::filesystem::path repository_path =
         root.path() / customer->id / "repositories" / public_repository->id;
-    auto opened = liquid::runtime::block_on(liquid::repository::create(repository_path));
+    auto customer_store =
+        liquid::runtime::block_on(liquid::store::open(root.path() / customer->id / "store"));
+    ASSERT_TRUE(customer_store) << customer_store.error().message;
+    liquid::repository_options repository_options;
+    repository_options.store = &*customer_store;
+    auto opened =
+        liquid::runtime::block_on(liquid::repository::create(repository_path, repository_options));
     ASSERT_TRUE(opened) << opened.error().message;
     auto repository = std::move(*opened);
     ASSERT_TRUE(liquid::runtime::block_on(repository.write("readme.md", bytes("public content"))));
@@ -1078,6 +1356,283 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
         surface.call("rename_repository", {{"id", repository_id}, {"name", "denied"}}).error.code,
         "unauthorized");
 }
+
+TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = control->create_user(
+        {"taap:1:ed25519:sync-owner", "sync-owner@example.test", "Sync Owner"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = control->create_customer({"individual", user->id, "", "sync-owner"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository =
+        control->create_repository({customer->id, "project", "sync fixture", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto bad_repository =
+        control->create_repository({customer->id, "bad-signature", "", "private"});
+    ASSERT_TRUE(bad_repository) << bad_repository.error().message;
+
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "source"));
+    ASSERT_TRUE(source) << source.error().message;
+    const std::string first_contents(128 * 1024, 'a');
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("first.txt", sync_bytes(first_contents))));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("first")));
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "sync-test";
+    options.admin_token = "sync-admin";
+    options.instance_kek = "sync-test-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string direct_url =
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id;
+    RecordingProxy proxy(server.port());
+    ASSERT_NE(proxy.port(), 0);
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(proxy.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint endpoint(url,
+                                   liquid::sync_endpoint_options{.bearer_token = "sync-admin"});
+    const auto first_push = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(first_push) << first_push.error().message;
+    EXPECT_GT(first_push->sent.bytes, 0U);
+
+    ASSERT_TRUE(
+        liquid::runtime::block_on(source->write("second.txt", sync_bytes("second version"))));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("second")));
+    const auto second_push = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(second_push) << second_push.error().message;
+    EXPECT_GT(second_push->sent.bytes, 0U);
+    EXPECT_LT(second_push->sent.bytes, first_push->sent.bytes);
+    const auto unchanged_push = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(unchanged_push) << unchanged_push.error().message;
+    EXPECT_EQ(unchanged_push->sent.bytes, 0U);
+    proxy.stop();
+
+    auto corrupt_push = proxy.push_body();
+    ASSERT_FALSE(corrupt_push.empty());
+    auto page = std::vector<liquid::sync_item>(256);
+    const auto exported =
+        liquid::runtime::block_on(source->export_drips(liquid::journal_cursor{}, page));
+    ASSERT_TRUE(exported) << exported.error().message;
+    const auto signed_drip = std::ranges::find_if(
+        page.begin(), page.begin() + exported->count, [](const liquid::sync_item& item) {
+            return item.kind == liquid::sync_item_kind::drip && !item.signature.empty();
+        });
+    ASSERT_NE(signed_drip, page.begin() + exported->count);
+    const auto signature = std::search(corrupt_push.begin(),
+                                       corrupt_push.end(),
+                                       signed_drip->signature.begin(),
+                                       signed_drip->signature.end());
+    ASSERT_NE(signature, corrupt_push.end());
+    *signature ^= std::byte{1};
+    const std::string corrupt_body(reinterpret_cast<const char*>(corrupt_push.data()),
+                                   corrupt_push.size());
+    const std::string rejected =
+        http_request(server.port(),
+                     "POST",
+                     "/v1/repositories/" + bad_repository->id + "/sync/push",
+                     corrupt_body,
+                     "application/vnd.liquid.sync-v1",
+                     {},
+                     "Bearer sync-admin");
+    EXPECT_NE(rejected.find(" 400 "), std::string::npos) << rejected;
+
+    auto destination =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "destination"));
+    ASSERT_TRUE(destination) << destination.error().message;
+    liquid::sync_endpoint pull_endpoint(
+        direct_url, liquid::sync_endpoint_options{.bearer_token = "sync-admin"});
+    const auto pulled = liquid::runtime::block_on(pull_endpoint.pull(*destination));
+    ASSERT_TRUE(pulled) << pulled.error().message;
+    const auto source_tree = liquid::runtime::block_on(source->root());
+    const auto destination_tree = liquid::runtime::block_on(destination->root());
+    ASSERT_TRUE(source_tree) << source_tree.error().message;
+    ASSERT_TRUE(destination_tree) << destination_tree.error().message;
+    EXPECT_EQ(tree_fingerprint(*source_tree), tree_fingerprint(*destination_tree));
+    const auto source_first = liquid::runtime::block_on(source->read("first.txt"));
+    const auto destination_first = liquid::runtime::block_on(destination->read("first.txt"));
+    ASSERT_TRUE(source_first) << source_first.error().message;
+    ASSERT_TRUE(destination_first) << destination_first.error().message;
+    EXPECT_EQ(*destination_first, *source_first);
+    const auto source_second = liquid::runtime::block_on(source->read("second.txt"));
+    const auto destination_second = liquid::runtime::block_on(destination->read("second.txt"));
+    ASSERT_TRUE(source_second) << source_second.error().message;
+    ASSERT_TRUE(destination_second) << destination_second.error().message;
+    EXPECT_EQ(*destination_second, *source_second);
+    auto rejected_destination = liquid::runtime::block_on(
+        liquid::repository::create(temporary.path() / "rejected-destination"));
+    ASSERT_TRUE(rejected_destination) << rejected_destination.error().message;
+    const std::string rejected_url = "http://127.0.0.1:" + std::to_string(server.port()) +
+                                     "/v1/repositories/" + bad_repository->id;
+    liquid::sync_endpoint rejected_endpoint(
+        rejected_url, liquid::sync_endpoint_options{.bearer_token = "sync-admin"});
+    const auto rejected_pull =
+        liquid::runtime::block_on(rejected_endpoint.pull(*rejected_destination));
+    ASSERT_TRUE(rejected_pull) << rejected_pull.error().message;
+    const auto rejected_tree = liquid::runtime::block_on(rejected_destination->root());
+    ASSERT_TRUE(rejected_tree) << rejected_tree.error().message;
+    EXPECT_TRUE(rejected_tree->entries.empty());
+    EXPECT_FALSE(liquid::runtime::block_on(rejected_destination->head()));
+    server.stop();
+
+    EXPECT_TRUE(std::filesystem::exists(temporary.path() / "lake" / customer->id / "store"));
+    EXPECT_TRUE(std::filesystem::exists(temporary.path() / "lake" / customer->id / "store" /
+                                        "repositories"));
+    EXPECT_FALSE(std::filesystem::exists(temporary.path() / "lake" / customer->id / "repositories" /
+                                         repository->id / ".liquid-store"));
+    const auto references = control->list_repository_refs(repository->id);
+    ASSERT_TRUE(references) << references.error().message;
+    EXPECT_FALSE(references->empty());
+    const auto events = control->list_audit_events({.limit = 1000});
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
+        return event.draft.action == "push_change" && event.draft.outcome == "success";
+    }));
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
+        return event.draft.action == "push" && event.draft.outcome == "failure";
+    }));
+}
+
+TEST(SyncHttp, PushWithoutWriteAccessIsRejectedAndAudited) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto owner = control->create_user(
+        {"taap:1:ed25519:sync-owner-denial", "owner-denial@example.test", "Owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto customer =
+        control->create_customer({"individual", owner->id, "", "sync-denial-owner"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository =
+        control->create_repository({customer->id, "private-project", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto reader = control->sign_up_password(
+        {"lake", "reader@example.test", "correct horse battery staple", "Reader", "test", "{}"});
+    ASSERT_TRUE(reader) << reader.error().message;
+    const auto principal = control->context_for(reader->secret);
+    ASSERT_TRUE(principal) << principal.error().message;
+    const auto object = control->find_policy_object("repository", repository->id);
+    ASSERT_TRUE(object) << object.error().message;
+    const auto grant = control->create_grant({principal->taap_id,
+                                              object->id,
+                                              "read",
+                                              "attestation:sync-reader",
+                                              owner->taap_id,
+                                              "sync-denial"});
+    ASSERT_TRUE(grant) << grant.error().message;
+
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "denied-source"));
+    ASSERT_TRUE(source) << source.error().message;
+    ASSERT_TRUE(
+        liquid::runtime::block_on(source->write("private.txt", sync_bytes("not authorized"))));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("denied")));
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "sync-denial";
+    options.instance_kek = "sync-denial-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint endpoint(url,
+                                   liquid::sync_endpoint_options{.bearer_token = reader->secret});
+    const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
+    EXPECT_FALSE(pushed);
+    ASSERT_FALSE(pushed.has_value());
+    EXPECT_EQ(pushed.error().code, liquid::errc::unauthorized);
+    server.stop();
+
+    const auto references = control->list_repository_refs(repository->id);
+    ASSERT_TRUE(references) << references.error().message;
+    EXPECT_TRUE(references->empty());
+    const auto events = control->list_audit_events({.limit = 1000});
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
+        return event.draft.outcome == "denied" &&
+               (event.draft.action == "upload_chunks" || event.draft.action == "push");
+    }));
+}
+
+TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
+    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TemporarySyncRoot temporary;
+    std::shared_ptr<lake::control::Store> control =
+        lake::control::make_postgres_store(database_uri);
+    const auto ready = control->ping();
+    ASSERT_TRUE(ready) << ready.error().message;
+    const std::string suffix = lake::control::new_uuid_v4();
+    const auto user = control->create_user({"taap:1:ed25519:postgres-sync-" + suffix,
+                                            "postgres-sync-" + suffix + "@example.test",
+                                            "Postgres Sync"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer =
+        control->create_customer({"individual", user->id, "", "postgres-sync-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = control->create_repository({customer->id, "project", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "postgres-source"));
+    ASSERT_TRUE(source) << source.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(
+        source->write("postgres.txt", sync_bytes("postgres-backed sync"))));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("postgres")));
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "postgres-sync";
+    options.admin_token = "postgres-sync-admin";
+    options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint endpoint(
+        url, liquid::sync_endpoint_options{.bearer_token = "postgres-sync-admin"});
+    const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(pushed) << pushed.error().message;
+
+    auto destination = liquid::runtime::block_on(
+        liquid::repository::create(temporary.path() / "postgres-destination"));
+    ASSERT_TRUE(destination) << destination.error().message;
+    const auto pulled = liquid::runtime::block_on(endpoint.pull(*destination));
+    ASSERT_TRUE(pulled) << pulled.error().message;
+    server.stop();
+
+    const auto source_tree = liquid::runtime::block_on(source->root());
+    const auto destination_tree = liquid::runtime::block_on(destination->root());
+    ASSERT_TRUE(source_tree) << source_tree.error().message;
+    ASSERT_TRUE(destination_tree) << destination_tree.error().message;
+    EXPECT_EQ(tree_fingerprint(*source_tree), tree_fingerprint(*destination_tree));
+    const auto contents = liquid::runtime::block_on(destination->read("postgres.txt"));
+    ASSERT_TRUE(contents) << contents.error().message;
+    EXPECT_EQ(*contents, sync_bytes("postgres-backed sync"));
+
+    const auto references = control->list_repository_refs(repository->id);
+    ASSERT_TRUE(references) << references.error().message;
+    EXPECT_FALSE(references->empty());
+    const auto events = control->list_audit_events({.limit = 1000});
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
+        return event.draft.action == "push" && event.draft.outcome == "success";
+    }));
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
+        return event.draft.action == "pull" && event.draft.outcome == "success";
+    }));
+}
+
 TEST(Identity, PasswordSessionsTokensAndRevocation) {
     Surface s;
     const ApiResult sign_up = s.call("sign_up_password",

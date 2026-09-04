@@ -1,12 +1,16 @@
 # The `/v1` API and MCP
 
-**Shape.** lake exposes every capability three ways, the way Zetta does: REST under `/v1`, an
+**Shape.** lake exposes JSON capabilities three ways, the way Zetta does: REST under `/v1`, an
 OpenAPI 3.1 document at `GET /v1/openapi.json`, and MCP at `POST /mcp`. One capability registry
 (`include/lake/api/registry.hpp`) is the single source all three read: a capability is a name,
 a kind (`read` → `GET /v1/<name>`, input in the query string; `action` → `POST /v1/<name>`,
 input as the JSON body), an input schema, an output schema, an authorization object and action,
 an object resolver, and a handler. REST and MCP go through the same `Registry::call`, so they
 authorize, validate and fail identically.
+
+Binary liquid-sync capabilities use the same registry for validation, policy, execution, and
+audit, while the one HTTP adapter streams their bodies on repository-scoped routes. OpenAPI renders
+those routes and media types. MCP omits them because its tool arguments are JSON.
 
 **Envelope.** Every response is `{ ok, value | error{code, message, path}, duration_ms }`.
 Status by error code: `invalid_input` 400, `unauthorized` / `mfa_required` 403, `not_found` /
@@ -47,7 +51,8 @@ repository and its content; all other repository visibility levels remain protec
 | `get_artifact` | read | repository id, result id | result identity and liquid #166 deferred-data status | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
-| `refs`, `find_missing`, `push`, `pull` | read/action, reserved | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
+| `refs` | read | `repository_id` | `{items: [repository ref]}` | [sync.md](sync.md) |
+| `find_missing`, `push`, `pull`, `upload_chunks`, `read_chunk` | binary read/action | repository id plus liquid sync body, digest, or range | binary liquid response | [sync.md](sync.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
 | `list_memberships`, `create_membership` | read/action | scope, principal, role, TAAP evidence | membership(s) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
@@ -85,9 +90,9 @@ repository and its content; all other repository visibility levels remain protec
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
 
-The sync row documents the reserved capability names and their published wire contract. It is not
-registered until libliquid exposes the server-facing repository/store binding and codec described
-in [`sync.md`](sync.md).
+The binary sync operations use `/v1/repositories/<repository-id>/sync/*` rather than the generic
+`/v1/<capability>` mapping. Their OpenAPI operations are generated from registry entries, and the
+complete wire contract is mirrored in [`sync.md`](sync.md).
 
 OAuth providers return the browser to `GET /v1/oauth/<provider>/callback`. This callback is the
 documented provider-facing route outside the registry; it consumes one-use state and issues the
@@ -107,8 +112,9 @@ and audit recording remain inside the registry path.
    the object id. `Registry::call` rejects protected capabilities missing this metadata.
    A candidate-returning capability may instead declare its batched authorization and invoke
    `authorize_batch` before it returns any candidate.
-4. Register it in `src/api/capabilities.cpp`. It appears on REST, in OpenAPI and as an MCP tool
-   automatically; `test_api.cpp`'s OpenAPI test proves it.
+4. Register it in `src/api/capabilities.cpp`. JSON capabilities appear on REST, in OpenAPI and as
+   MCP tools automatically. Binary capabilities declare their transport so OpenAPI can render the
+   repository route and MCP can omit a body it cannot represent; `test_api.cpp` proves both cases.
 5. Tests against `InMemoryStore` and the Postgres fixture; a page under `docs/api/` in the same
    change.
 
