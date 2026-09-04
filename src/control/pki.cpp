@@ -637,6 +637,39 @@ Result<std::vector<std::byte>> recover_secret(const std::vector<ShamirShare>& sh
     return secret;
 }
 
+Result<RecoveryCeremony>
+recovery_ceremony_for(const Authority& authority, int threshold, int share_count) {
+    std::vector<std::byte> root;
+    root.reserve(authority.root_private_key_pem.size());
+    for (const char character : authority.root_private_key_pem) {
+        root.push_back(static_cast<std::byte>(character));
+    }
+    auto shares = split_secret(root, threshold, share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
+    }
+    return RecoveryCeremony{new_uuid_v4(), threshold, std::move(*shares)};
+}
+
+Result<void> verify_recovered_root(const Authority& authority,
+                                   const RecoveryCeremony& ceremony,
+                                   const std::vector<ShamirShare>& shares) {
+    auto recovered = recover_secret(shares, ceremony.threshold);
+    if (!recovered) {
+        return std::unexpected(recovered.error());
+    }
+    std::string root;
+    root.reserve(recovered->size());
+    for (const std::byte byte : *recovered) {
+        root.push_back(static_cast<char>(byte));
+    }
+    if (root != authority.root_private_key_pem) {
+        return std::unexpected(
+            Error{"unauthorized", "recovery shares do not restore the customer root"});
+    }
+    return {};
+}
+
 Result<AuthorityPublic> Service::create_authority(std::string_view customer_id) {
     std::lock_guard lock(mutex_);
     if (authorities_.contains(std::string(customer_id))) {
@@ -741,16 +774,19 @@ Service::begin_recovery(std::string_view customer_id, int threshold, int share_c
     if (authority == authorities_.end()) {
         return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
     }
-    std::vector<std::byte> root;
-    root.reserve(authority->second.root_private_key_pem.size());
-    for (const char character : authority->second.root_private_key_pem) {
-        root.push_back(static_cast<std::byte>(character));
+    return recovery_ceremony_for(authority->second, threshold, share_count);
+}
+
+Result<RecoveryCeremony> Service::begin_recovery(::lake::control::Store& store,
+                                                 std::string_view customer_id,
+                                                 std::string_view instance_kek,
+                                                 int threshold,
+                                                 int share_count) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
     }
-    auto shares = split_secret(root, threshold, share_count);
-    if (!shares) {
-        return std::unexpected(shares.error());
-    }
-    return RecoveryCeremony{std::string(customer_id), threshold, std::move(*shares)};
+    return recovery_ceremony_for(*authority, threshold, share_count);
 }
 
 Result<void> Service::recover_root(std::string_view customer_id,
@@ -758,23 +794,22 @@ Result<void> Service::recover_root(std::string_view customer_id,
                                    const std::vector<ShamirShare>& shares) {
     std::lock_guard lock(mutex_);
     const auto authority = authorities_.find(std::string(customer_id));
-    if (authority == authorities_.end() || ceremony.id != customer_id) {
+    if (authority == authorities_.end()) {
         return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
     }
-    auto recovered = recover_secret(shares, ceremony.threshold);
-    if (!recovered) {
-        return std::unexpected(recovered.error());
+    return verify_recovered_root(authority->second, ceremony, shares);
+}
+
+Result<void> Service::recover_root(::lake::control::Store& store,
+                                   std::string_view customer_id,
+                                   std::string_view instance_kek,
+                                   const RecoveryCeremony& ceremony,
+                                   const std::vector<ShamirShare>& shares) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
     }
-    std::string root;
-    root.reserve(recovered->size());
-    for (const std::byte byte : *recovered) {
-        root.push_back(static_cast<char>(byte));
-    }
-    if (root != authority->second.root_private_key_pem) {
-        return std::unexpected(
-            Error{"unauthorized", "recovery shares do not restore the customer root"});
-    }
-    return {};
+    return verify_recovered_root(*authority, ceremony, shares);
 }
 
 } // namespace lake::control::pki

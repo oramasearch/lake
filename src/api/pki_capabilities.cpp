@@ -4,6 +4,9 @@
 #include "lake/control/pki.hpp"
 #include "lake/control/store.hpp"
 
+#include <charconv>
+#include <format>
+
 namespace lake::api {
 namespace {
 
@@ -52,6 +55,51 @@ json svid_schema() {
              {{"certificate_pem", {{"type", "string"}}},
               {"private_key_pem", {{"type", "string"}}},
               {"chain_pem", {{"type", "string"}}}}}};
+}
+
+std::string hex_of(const std::vector<std::byte>& bytes) {
+    std::string output;
+    output.reserve(bytes.size() * 2);
+    for (const std::byte value : bytes) {
+        output += std::format("{:02x}", std::to_integer<unsigned char>(value));
+    }
+    return output;
+}
+
+std::expected<std::vector<std::byte>, ApiError> bytes_of_hex(const std::string& input) {
+    if (input.empty() || input.size() % 2 != 0) {
+        return std::unexpected(ApiError{"invalid_input", "share value must be hexadecimal", ""});
+    }
+    std::vector<std::byte> output;
+    output.reserve(input.size() / 2);
+    for (std::size_t index = 0; index < input.size(); index += 2) {
+        unsigned value = 0;
+        const auto [end, error] =
+            std::from_chars(input.data() + index, input.data() + index + 2, value, 16);
+        if (error != std::errc{} || end != input.data() + index + 2) {
+            return std::unexpected(
+                ApiError{"invalid_input", "share value must be hexadecimal", "/shares"});
+        }
+        output.push_back(static_cast<std::byte>(value));
+    }
+    return output;
+}
+
+std::expected<std::vector<control::pki::ShamirShare>, ApiError> shares_of(const json& input) {
+    std::vector<control::pki::ShamirShare> shares;
+    for (const json& value : input) {
+        if (!value.is_object() || !value.contains("index") || !value.contains("value") ||
+            !value.at("index").is_number_integer() || !value.at("value").is_string()) {
+            return std::unexpected(
+                ApiError{"invalid_input", "each recovery share needs index and value", "/shares"});
+        }
+        auto bytes = bytes_of_hex(value.at("value").get<std::string>());
+        if (!bytes) {
+            return std::unexpected(bytes.error());
+        }
+        shares.push_back({value.at("index").get<int>(), std::move(*bytes)});
+    }
+    return shares;
 }
 
 } // namespace
@@ -202,6 +250,92 @@ void register_pki_capabilities(Registry& registry) {
             context.audit_object = "workload/" + credential->workload_taap_id;
             return ApiResult::success(
                 {{"credential", credential->value}, {"expires_at", credential->expires_at}});
+        }});
+    registry.add(Capability{
+        .name = "begin_root_recovery",
+        .title = "Begin root recovery rehearsal",
+        .description = "Create Shamir recovery shares for a configured customer quorum.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"threshold", {{"type", "integer"}}},
+                           {"share_count", {{"type", "integer"}}}}},
+                         {"required", json::array({"customer_id", "threshold", "share_count"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"ceremony_id", {{"type", "string"}}},
+                            {"threshold", {{"type", "integer"}}},
+                            {"shares", {{"type", "array"}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki || !context.store) {
+                return no_pki();
+            }
+            auto ceremony = context.pki->begin_recovery(*context.store,
+                                                        input.at("customer_id").get<std::string>(),
+                                                        context.instance_kek,
+                                                        input.at("threshold").get<int>(),
+                                                        input.at("share_count").get<int>());
+            if (!ceremony) {
+                return from_pki_error(ceremony.error());
+            }
+            json shares = json::array();
+            for (const control::pki::ShamirShare& share : ceremony->shares) {
+                shares.push_back({{"index", share.index}, {"value", hex_of(share.value)}});
+            }
+            context.audit_customer_id = input.at("customer_id").get<std::string>();
+            context.audit_kind = "recovery";
+            context.audit_object = "root-recovery/" + ceremony->id;
+            return ApiResult::success({{"ceremony_id", ceremony->id},
+                                       {"threshold", ceremony->threshold},
+                                       {"shares", std::move(shares)}});
+        }});
+    registry.add(Capability{
+        .name = "complete_root_recovery",
+        .title = "Complete root recovery rehearsal",
+        .description = "Verify a Shamir quorum restores the customer root.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"ceremony_id", {{"type", "string"}}},
+                           {"threshold", {{"type", "integer"}}},
+                           {"shares", {{"type", "array"}}}}},
+                         {"required",
+                          json::array({"customer_id", "ceremony_id", "threshold", "shares"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"recovered", {{"type", "boolean"}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki || !context.store) {
+                return no_pki();
+            }
+            auto shares = shares_of(input.at("shares"));
+            if (!shares) {
+                return ApiResult::failure(
+                    shares.error().code, shares.error().message, shares.error().path);
+            }
+            control::pki::RecoveryCeremony ceremony{
+                input.at("ceremony_id").get<std::string>(), input.at("threshold").get<int>(), {}};
+            auto recovered = context.pki->recover_root(*context.store,
+                                                       input.at("customer_id").get<std::string>(),
+                                                       context.instance_kek,
+                                                       ceremony,
+                                                       *shares);
+            if (!recovered) {
+                return from_pki_error(recovered.error());
+            }
+            context.audit_customer_id = input.at("customer_id").get<std::string>();
+            context.audit_kind = "recovery";
+            context.audit_object = "root-recovery/" + ceremony.id;
+            return ApiResult::success({{"recovered", true}});
         }});
 }
 

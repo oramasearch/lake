@@ -372,6 +372,17 @@ public:
         return call("set_audit_retention_days",
                     [&] { return store_->set_audit_retention_days(customer_id, days); });
     }
+    control::Result<control::PkiAuthorityRecord>
+    create_pki_authority(const control::NewPkiAuthorityRecord& value,
+                         const std::string& instance_kek) override {
+        return call("create_pki_authority",
+                    [&] { return store_->create_pki_authority(value, instance_kek); });
+    }
+    control::Result<control::PkiAuthorityMaterial>
+    get_pki_authority(const std::string& customer_id, const std::string& instance_kek) override {
+        return call("get_pki_authority",
+                    [&] { return store_->get_pki_authority(customer_id, instance_kek); });
+    }
     control::Result<control::SecretMount>
     create_secret_mount(const control::NewSecretMount& value,
                         const std::string& instance_kek) override {

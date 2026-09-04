@@ -2,10 +2,10 @@
 
 ## What
 
-Each customer CA root has a configured Shamir threshold and share count. A recovery ceremony is
-an explicit, time-bounded capability. It accepts the configured quorum, validates each submitted
-share against its stored digest, restores the root only in process, and writes a signed audit event
-for every attempt. One share fewer than the threshold fails.
+`begin_root_recovery` creates Shamir shares for a caller-selected quorum and returns them only in
+that response. `complete_root_recovery` accepts the quorum, validates that it restores the
+customer root, and writes a signed audit event. One share fewer than the threshold fails. Shares
+are not retained by Lake.
 
 ## Degraded operation
 
@@ -22,5 +22,5 @@ attempt fails, and verifies the corresponding audit events.
 
 ## How to change
 
-Changing a threshold creates a new ceremony; it does not alter an active ceremony. Keep shares
-out of durable storage and logs. Rehearsals use the same capability path as an emergency recovery.
+Keep shares out of durable storage and logs. Rehearsals use the same capability path as an
+emergency recovery.

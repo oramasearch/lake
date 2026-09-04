@@ -8,9 +8,8 @@ and device certificates. The certificate profiles are credentials for a TAAP wor
 they do not create a second identity system.
 
 `create_pki_authority`, `issue_x509_svid`, and `issue_jwt_svid` are registry capabilities. They
-authorize against the customer object and record a `certificate` audit event on success, refusal,
-or failure. The X.509 response contains a newly generated workload private key; Lake does not
-persist that leaf key.
+authorize against the customer object and record a `certificate` audit event. The X.509 response
+contains a newly generated workload private key; Lake does not persist that leaf key.
 
 The API server owns the PKI service for its process and supplies it to every registry call. The
 service creates and loads customer authority records through the control-plane store; callers must

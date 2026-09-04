@@ -78,6 +78,25 @@ TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.kind, "certificate");
     EXPECT_EQ(event->draft.action, "issue_x509_svid");
+
+    context.request_id.clear();
+    const auto ceremony =
+        registry.call("begin_root_recovery",
+                      {{"customer_id", customer->id}, {"threshold", 2}, {"share_count", 3}},
+                      context);
+    ASSERT_TRUE(ceremony.ok) << ceremony.error.message;
+    const auto recovery = registry.call(
+        "complete_root_recovery",
+        {{"customer_id", customer->id},
+         {"ceremony_id", ceremony.value.at("ceremony_id")},
+         {"threshold", 2},
+         {"shares", {ceremony.value.at("shares").at(0), ceremony.value.at("shares").at(1)}}},
+        context);
+    ASSERT_TRUE(recovery.ok) << recovery.error.message;
+    const auto recovery_event = store.latest_audit_event();
+    ASSERT_TRUE(recovery_event) << recovery_event.error().message;
+    EXPECT_EQ(recovery_event->draft.kind, "recovery");
+    EXPECT_EQ(recovery_event->draft.action, "complete_root_recovery");
 }
 
 TEST(Pki, PersistsAuthorityKeysThroughTheCustomerKeystore) {

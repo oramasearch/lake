@@ -97,7 +97,17 @@ public:
                                    int lifetime_seconds = 900);
     Result<RecoveryCeremony>
     begin_recovery(std::string_view customer_id, int threshold, int share_count);
+    Result<RecoveryCeremony> begin_recovery(Store& store,
+                                            std::string_view customer_id,
+                                            std::string_view instance_kek,
+                                            int threshold,
+                                            int share_count);
     Result<void> recover_root(std::string_view customer_id,
+                              const RecoveryCeremony& ceremony,
+                              const std::vector<ShamirShare>& shares);
+    Result<void> recover_root(Store& store,
+                              std::string_view customer_id,
+                              std::string_view instance_kek,
                               const RecoveryCeremony& ceremony,
                               const std::vector<ShamirShare>& shares);
 
