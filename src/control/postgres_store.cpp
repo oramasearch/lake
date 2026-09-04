@@ -8,6 +8,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,33 @@ std::optional<std::string> nullable(const std::string &s) {
   if (s.empty())
     return std::nullopt;
   return s;
+}
+
+std::string hex_bytes(const unsigned char *bytes, std::size_t count) {
+  std::string result;
+  result.reserve(count * 2);
+  for (std::size_t index = 0; index < count; ++index) {
+    result += std::format("{:02x}", static_cast<unsigned>(bytes[index]));
+  }
+  return result;
+}
+
+std::optional<std::vector<unsigned char>> decode_hex(std::string_view value) {
+  if (value.size() % 2 != 0) {
+    return std::nullopt;
+  }
+  std::vector<unsigned char> result;
+  result.reserve(value.size() / 2);
+  for (std::size_t index = 0; index < value.size(); index += 2) {
+    unsigned parsed = 0;
+    const auto [end, error] = std::from_chars(
+        value.data() + index, value.data() + index + 2, parsed, 16);
+    if (error != std::errc{} || end != value.data() + index + 2) {
+      return std::nullopt;
+    }
+    result.push_back(static_cast<unsigned char>(parsed));
+  }
+  return result;
 }
 
 constexpr const char *user_columns =

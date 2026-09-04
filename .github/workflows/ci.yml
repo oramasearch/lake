@@ -25,6 +25,7 @@ jobs:
           --health-retries 5
     env:
       DEBIAN_FRONTEND: noninteractive
+      LAKE_INSTANCE_KEK: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
       LAKE_TEST_DB_URI: postgresql://postgres:postgres@127.0.0.1:5432/lake_test
     services:
       postgres:

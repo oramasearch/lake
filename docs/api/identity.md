@@ -14,6 +14,11 @@ A user with an enrolled TOTP factor receives `mfa_required` from password sign-i
 `verify_totp`. Tokens are named sessions with explicit capability-name scopes; a static token
 requires a non-empty reason.
 
+TOTP seeds are never stored in credential JSON as plaintext. OpenSSL AES-256-GCM seals each value
+with a purpose-specific random data key; `keystore` stores that key wrapped under the required
+32-byte hexadecimal `LAKE_INSTANCE_KEK`. OAuth client secrets and recovery codes use the same
+envelope format.
+
 ## Why
 
 The random bearer secret is not the authority. Every request resolves its session and device row;
