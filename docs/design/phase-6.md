@@ -10,7 +10,10 @@
 
 lake today is the control surface: one capability registry rendered as REST `/v1`, OpenAPI and
 MCP; users, organizations, customers and repositories in Postgres; server-rendered pages behind
-the admin sign-in; telemetry; CI. Everything below is added to that shape and keeps its rules
+the admin sign-in; telemetry; CI. Organization administration and the authorization object graph
+described below are implemented by lake issues #16 and #19 in migration
+`0004_organizations_policy`; TAAP credential resolution remains identity-core work. Everything
+else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
 
@@ -56,6 +59,14 @@ resolution walks up the graph once and caches per request; it never consults a s
 
 Query-time filtering for search and lists calls the same function per candidate object with a
 batched walk, so a result set never shows an object the caller could not open (#40).
+
+**Implemented status (#16, #19).** `teams`, `memberships`, `invitations`, `objects`, and `grants`
+are control-plane tables. Membership and grant rows retain the TAAP attestation digest and the
+granting administrator identity. `Registry::call` invokes `authorize` before protected handlers;
+the server-rendered pages call those same capabilities. `authorize_batch` shares cached ancestor
+and grant loads across candidates, and `effective_access` exposes direct and inherited access.
+The current operator-admin principal is handled as a break-glass principal by the same function;
+identity-core credential resolution will supply user and workload TAAP principals.
 
 ## Audit (decision §13)
 
