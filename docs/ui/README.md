@@ -13,6 +13,7 @@ Home, Customers, Organizations, Repositories, Search, Audit, API
 | Operator sign in | `GET /login`, `POST /session` (form field `token`), `POST /logout` | the operator-token form; a match sets the session cookie and redirects to Repositories |
 | Customers | `GET /customers` | every tenant: handle (links to its repositories), type, identity id, created |
 | Organizations | `GET /organizations` | every organization, with links to its teams and members |
+| Enterprise SSO | `GET /sso?organization_id=<uuid>[&provider_id=<uuid>]` | SAML/OIDC provider configuration, federation issuer claims, and one provider's SCIM provisioning log |
 | Teams | `GET /teams?organization_id=<uuid>` | the organization's teams and member links |
 | Members | `GET /members?organization_id=<uuid>[&team_id=<uuid>]` | direct memberships, their role, principal and attestation evidence |
 | Invitations | `GET /invitations?organization_id=<uuid>[&team_id=<uuid>]` | invitee, role, expiry and status |

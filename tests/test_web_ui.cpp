@@ -51,6 +51,33 @@ TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
     EXPECT_EQ(access.find("<script"), std::string::npos);
 }
 
+TEST(WebUi, SsoPageEscapesProviderAndProvisioningValues) {
+    const lake::control::SsoProvider provider{"p1",
+                                              "o1",
+                                              "lake",
+                                              "<provider>",
+                                              "oidc",
+                                              "https://id.example",
+                                              "",
+                                              "",
+                                              "client",
+                                              {},
+                                              true,
+                                              true,
+                                              "tested",
+                                              "created",
+                                              "updated"};
+    const lake::control::FederationIssuer issuer{
+        "i1", "o1", "https://id.example", "email", "created"};
+    const lake::control::ProvisioningLog log{
+        "l1", "p1", "user", "deactivate", "<external>", "success", {}, "created"};
+    const std::string page = lake::api::web_ui_sso("o1", {provider}, {issuer}, {log});
+    EXPECT_NE(page.find("/v1/register_sso_provider"), std::string::npos);
+    EXPECT_NE(page.find("&lt;provider&gt;"), std::string::npos);
+    EXPECT_NE(page.find("&lt;external&gt;"), std::string::npos);
+    EXPECT_EQ(page.find("<script"), std::string::npos);
+}
+
 TEST(WebUi, SearchEscapesHitsAndOffersTheQueryForm) {
     const lake::search::Hit hit{"customer", "repository", "<path>", "change", "<snippet>", 1.0};
     const std::string page = lake::api::web_ui_search("needle", {hit});

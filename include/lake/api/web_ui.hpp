@@ -33,6 +33,10 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner);
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations);
+std::string web_ui_sso(std::string_view organization_id,
+                       const std::vector<control::SsoProvider>& providers,
+                       const std::vector<control::FederationIssuer>& issuers,
+                       const std::vector<control::ProvisioningLog>& logs);
 std::string web_ui_teams(std::string_view organization_id, const std::vector<control::Team>& teams);
 std::string web_ui_memberships(std::string_view organization_id,
                                std::string_view team_id,

@@ -285,6 +285,43 @@ control::Organization organization_from_json(const nlohmann::json& value) {
             json_string(value, "updated_at")};
 }
 
+control::SsoProvider sso_provider_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "organization_id"),
+            json_string(value, "pool_id"),
+            json_string(value, "name"),
+            json_string(value, "protocol"),
+            json_string(value, "issuer"),
+            json_string(value, "metadata"),
+            json_string(value, "signing_certificate"),
+            json_string(value, "client_id"),
+            value.value("attribute_mapping", nlohmann::json::object()),
+            value.value("jit_provisioning", false),
+            value.value("enabled", false),
+            json_string(value, "tested_at"),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
+control::FederationIssuer federation_issuer_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "organization_id"),
+            json_string(value, "issuer"),
+            json_string(value, "claim"),
+            json_string(value, "created_at")};
+}
+
+control::ProvisioningLog provisioning_log_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "provider_id"),
+            json_string(value, "resource"),
+            json_string(value, "operation"),
+            json_string(value, "external_id"),
+            json_string(value, "outcome"),
+            value.value("details", nlohmann::json::object()),
+            json_string(value, "created_at")};
+}
+
 control::Customer customer_from_json(const nlohmann::json& value) {
     return {json_string(value, "id"),
             json_string(value, "customer_type"),
@@ -872,6 +909,7 @@ struct ApiServer::Impl {
             "/logout",
             "/customers",
             "/organizations",
+            "/sso",
             "/teams",
             "/members",
             "/invitations",
@@ -1159,6 +1197,55 @@ struct ApiServer::Impl {
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_organizations(organizations),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_sso_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        if (!ctx.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string organization_id = query_value(route, "organization_id");
+        if (organization_id.empty()) {
+            return redirect(route, "/organizations");
+        }
+        const ApiResult provider_rows = registry.call(
+            "list_sso_providers", {{"organization_id", organization_id}, {"limit", 100}}, ctx);
+        if (!provider_rows.ok) {
+            return serve_page_error(route, provider_rows);
+        }
+        const ApiResult issuer_rows = registry.call(
+            "list_federation_issuers", {{"organization_id", organization_id}, {"limit", 500}}, ctx);
+        if (!issuer_rows.ok) {
+            return serve_page_error(route, issuer_rows);
+        }
+        std::vector<control::SsoProvider> providers;
+        for (const nlohmann::json& value : provider_rows.value.at("items")) {
+            providers.push_back(sso_provider_from_json(value));
+        }
+        std::vector<control::FederationIssuer> issuers;
+        for (const nlohmann::json& value : issuer_rows.value.at("items")) {
+            issuers.push_back(federation_issuer_from_json(value));
+        }
+        std::vector<control::ProvisioningLog> logs;
+        std::string provider_id = query_value(route, "provider_id");
+        if (provider_id.empty() && !providers.empty()) {
+            provider_id = providers.front().id;
+        }
+        if (!provider_id.empty()) {
+            const ApiResult log_rows = registry.call(
+                "list_sso_provisioning_logs", {{"provider_id", provider_id}, {"limit", 100}}, ctx);
+            if (!log_rows.ok) {
+                return serve_page_error(route, log_rows);
+            }
+            for (const nlohmann::json& value : log_rows.value.at("items")) {
+                logs.push_back(provisioning_log_from_json(value));
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_sso(organization_id, providers, issuers, logs),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -2182,6 +2269,9 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/organizations", impl.serve_organizations_page(route));
                });
+    router.add(http::method::get, "/sso", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/sso", impl.serve_sso_page(route));
+    });
     router.add(http::method::get, "/teams", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/teams", impl.serve_teams_page(route));
     });

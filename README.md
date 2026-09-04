@@ -6,7 +6,8 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings and OAuth identity;
+> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth identity, and
+> organization SAML/OIDC provider, federation-policy and SCIM provisioning controls;
 > row-resolved sessions, devices and
 > scoped tokens; tenants, repositories, organization administration and policy over the Postgres
 > control plane), the pages to explore them, the OpenAPI
@@ -60,6 +61,7 @@ ctest --test-dir build
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
+| `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 
@@ -107,7 +109,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, the authorization object graph, the lake identity and the signed audit stream. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, SSO federation, the authorization object graph, the lake identity and the signed audit stream. The operator copies it once per wave through its own operator pull request. |
 
 ## What this is
 

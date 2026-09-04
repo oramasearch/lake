@@ -34,6 +34,10 @@ adds migrations `0007_identity_core` and `0008_mfa_recovery`, verified TAAP docu
 plus TOTP with one-use recovery codes, persisted WebAuthn, OAuth, row-resolved sessions, scoped
 tokens, device revocation, lake-signed passkey-to-TAAP bindings, and the hosted identity pages.
 Identity documents are verified through libliquid's public canonical-CBOR codec.
+SSO federation adds `0009_sso_federation`, organization SAML/OIDC provider configuration,
+federation issuer-claim policy, SCIM user/group mappings, deactivation session revocation,
+provisioning logs, and the `/sso` page. The operator copies the schema once per wave in its own
+operator pull request.
 Hot branch-tip search persists blob-deduplicated BM25F and positional-trigram segments at
 `LAKE_STORE_ROOT/<customer>/index/`, atomically publishes each change through its manifest,
 filters candidates with batched policy authorization, and records the signed query outcome
