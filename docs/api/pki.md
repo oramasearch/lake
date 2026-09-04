@@ -12,6 +12,10 @@ out of ordinary issuance and the online intermediate signs leaf credentials. X.5
 default to one hour; JWT SVIDs default to fifteen minutes. A caller requesting a longer lifetime
 must supply a justification, which is retained in the signed audit event.
 
+The cryptographic authority builder creates a P-256 root and intermediate, verifies each X.509
+SVID through that chain, and signs compact ES256 JWT SVIDs. Persistence and API dispatch bind
+that material to the customer key store and registry in the following implementation steps.
+
 ## How to verify
 
 The PKI integration suite creates a customer authority, verifies an SVID against its root and
