@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/api/forge.hpp"
 
 #include <algorithm>
 #include <expected>
@@ -9,6 +10,7 @@
 #include <openssl/hmac.h>
 
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::api {
@@ -453,6 +455,143 @@ void add_list(Registry& registry, std::string name, std::string title, std::stri
 
 } // namespace
 
+namespace {
+
+std::string branch_policy_key(const std::string& repository_id, const std::string& ref) {
+    return repository_id + ":" + ref;
+}
+
+bool branch_matches(std::string_view pattern, std::string_view ref) {
+    if (pattern == ref) {
+        return true;
+    }
+    if (!pattern.ends_with('*')) {
+        return false;
+    }
+    return ref.starts_with(pattern.substr(0, pattern.size() - 1));
+}
+
+bool allowed_pusher(const json& rule, const std::string& identity) {
+    if (!rule.contains("allowed_pushers") || !rule["allowed_pushers"].is_array() ||
+        rule["allowed_pushers"].empty()) {
+        return true;
+    }
+    return std::ranges::any_of(rule["allowed_pushers"], [&identity](const json& pusher) {
+        return pusher.is_string() && pusher.get<std::string>() == identity;
+    });
+}
+
+bool approved_review(const std::vector<control::ForgeRecord>& records,
+                     const std::string& change_id) {
+    return std::ranges::any_of(records, [&change_id](const control::ForgeRecord& review) {
+        return review.value.value("change_id", "") == change_id &&
+               review.value.value("state", "") == "approved";
+    });
+}
+
+bool verified_release(const std::vector<control::ForgeRecord>& records,
+                      const std::string& change_id) {
+    return std::ranges::any_of(records, [&change_id](const control::ForgeRecord& release) {
+        return release.value.value("change_id", "") == change_id &&
+               release.value.contains("artifacts") && release.value["artifacts"].is_array() &&
+               !release.value["artifacts"].empty();
+    });
+}
+
+ApiResult set_branch_protection(const json& input, ApiContext& context) {
+    const std::string repository_id = input.at("repository_id").get<std::string>();
+    const std::string ref = input.at("ref").get<std::string>();
+    const auto repository = context.store->find_policy_object("repository", repository_id);
+    if (!repository) {
+        return from_store_error(repository.error());
+    }
+    const std::string key = branch_policy_key(repository_id, ref);
+    auto policy = context.store->find_policy_object("path", key);
+    if (!policy && policy.error().code == "not_found") {
+        policy = context.store->create_policy_object(control::NewPolicyObject{
+            "path", key, repository->id, context.acting_identity, context.request_id, true});
+    }
+    if (!policy) {
+        return from_store_error(policy.error());
+    }
+    json value = input;
+    value.erase("repository_id");
+    value["policy_object_id"] = policy->id;
+    const auto rules = context.store->list_forge_records(repository_id, "branch_protection", 1000);
+    if (!rules) {
+        return from_store_error(rules.error());
+    }
+    for (const control::ForgeRecord& rule : *rules) {
+        if (rule.value.value("ref", "") != ref) {
+            continue;
+        }
+        return update_record(rule, value, context);
+    }
+    return create_record(
+        "branch_protection", {{"repository_id", repository_id}, {"value", value}}, context);
+}
+
+} // namespace
+
+SyncStoreResult<void> evaluate_branch_protection(control::Store& store,
+                                                 const std::string& acting_identity,
+                                                 control::AuthorizationCache& authorization_cache,
+                                                 const std::string& repository_id,
+                                                 const BranchRefUpdate& update) {
+    const auto rules = store.list_forge_records(repository_id, "branch_protection", 1000);
+    if (!rules) {
+        return std::unexpected(
+            SyncStoreError{rules.error().code, rules.error().message, update.name});
+    }
+    const auto reviews = store.list_forge_records(repository_id, "review", 1000);
+    if (!reviews) {
+        return std::unexpected(
+            SyncStoreError{reviews.error().code, reviews.error().message, update.name});
+    }
+    const auto releases = store.list_forge_records(repository_id, "release", 1000);
+    if (!releases) {
+        return std::unexpected(
+            SyncStoreError{releases.error().code, releases.error().message, update.name});
+    }
+    for (const control::ForgeRecord& rule : *rules) {
+        if (!branch_matches(rule.value.value("ref", ""), update.name)) {
+            continue;
+        }
+        if (rule.value.value("fast_forward_only", false) && !update.fast_forward) {
+            return std::unexpected(SyncStoreError{
+                "conflict", "branch protection rejects a non-fast-forward update", update.name});
+        }
+        if (!allowed_pusher(rule.value, acting_identity)) {
+            return std::unexpected(SyncStoreError{
+                "unauthorized", "branch protection rejects this pusher", update.name});
+        }
+        const std::string policy_object_id = rule.value.value("policy_object_id", "");
+        if (acting_identity != "admin" && !policy_object_id.empty()) {
+            const auto decision = control::authorize(
+                store, acting_identity, policy_object_id, "write", authorization_cache);
+            if (!decision) {
+                return std::unexpected(
+                    SyncStoreError{decision.error().code, decision.error().message, update.name});
+            }
+            if (!decision->allowed) {
+                return std::unexpected(SyncStoreError{
+                    "unauthorized", "policy does not allow a push to this ref", update.name});
+            }
+        }
+        if (rule.value.value("required_review", false) &&
+            !approved_review(*reviews, update.new_head)) {
+            return std::unexpected(SyncStoreError{
+                "conflict", "branch protection requires an approved review", update.name});
+        }
+        if (rule.value.value("required_verification", false) &&
+            !verified_release(*releases, update.new_head)) {
+            return std::unexpected(SyncStoreError{
+                "conflict", "branch protection requires verified build evidence", update.name});
+        }
+    }
+    return {};
+}
+
 void register_forge_capabilities(Registry& registry) {
     registry.add(Capability{.name = "create_issue",
                             .title = "Create issue",
@@ -643,15 +782,23 @@ void register_forge_capabilities(Registry& registry) {
                    .handler = retry_webhook_delivery});
     add_list(registry, "list_webhook_deliveries", "List webhook deliveries", "webhook_delivery");
 
-    add_create(registry,
-               "set_branch_protection",
-               "Set branch protection",
-               "branch_protection",
-               {{"ref", {{"type", "string"}}},
-                {"required_review", {{"type", "boolean"}}},
-                {"required_verification", {{"type", "boolean"}}},
-                {"allowed_pushers", {{"type", "array"}}}},
-               json::array({"ref"}));
+    registry.add(Capability{
+        .name = "set_branch_protection",
+        .title = "Set branch protection",
+        .description = "Set the review, verification, fast-forward, and pusher policy for a ref.",
+        .input_schema = repository_input({{"ref", {{"type", "string"}}},
+                                          {"required_review", {{"type", "boolean"}}},
+                                          {"required_verification", {{"type", "boolean"}}},
+                                          {"fast_forward_only", {{"type", "boolean"}}},
+                                          {"allowed_pushers", {{"type", "array"}}}},
+                                         json::array({"ref"})),
+        .output_schema = record_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "admin",
+        .resolve_object = repository_object,
+        .handler = set_branch_protection,
+    });
     add_list(registry, "list_branch_protections", "List branch protections", "branch_protection");
 }
 

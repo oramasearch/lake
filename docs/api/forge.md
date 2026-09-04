@@ -59,6 +59,22 @@ The sender is an injected service at the API boundary so the registry and its te
 network I/O. The HTTP service supplies that sender in deployment. If a sender is unavailable, the
 attempt is retained as a failed delivery and can be retried when delivery is configured.
 
+## Branch protection
+
+`set_branch_protection` creates or updates one policy rule for an exact ref or a trailing-`*`
+prefix. A rule may require an approved review for the proposed change, verified release evidence,
+fast-forward-only updates, and a non-empty allow-list of TAAP identities. The rule also owns a
+repository-child `path` policy object. A non-operator pusher must be permitted to `write` that
+object through `authorize`; inherited repository grants therefore remain effective and ref-specific
+grants can narrow access.
+
+`evaluate_branch_protection` accepts a `BranchRefUpdate` containing the ref name, prior and
+proposed heads, and the computed fast-forward result. It is ready for liquid #177's reference
+authorizer and refuses the proposed update on the first failed rule. The liquid revision currently
+vendored by lake supplies only bare change IDs to the push authorizer and does not expose reference
+items or the refs they move. Lake cannot call this evaluator from the existing callback without
+guessing a ref, so ref-specific enforcement is intentionally pending liquid #177.
+
 ## Verify
 
 ```sh

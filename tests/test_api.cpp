@@ -21,6 +21,7 @@
 #include <liquid/liquid.hpp>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/api/forge.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
@@ -1424,6 +1425,46 @@ TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
     EXPECT_TRUE(retried.value["value"]["delivered"]);
     EXPECT_EQ(retried.value["value"]["attempt"], 2);
     EXPECT_EQ(calls, 2);
+}
+
+TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "protected"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository_id},
+                           {"ref", "refs/heads/main"},
+                           {"required_review", true},
+                           {"allowed_pushers", json::array({"admin"})}})
+                    .ok);
+
+    const BranchRefUpdate update{
+        .name = "refs/heads/main", .new_head = "change-1", .fast_forward = true};
+    const auto rejected = evaluate_branch_protection(
+        surface.store, "admin", surface.ctx.authorization_cache, repository_id, update);
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().code, "conflict");
+
+    const ApiResult review = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    ASSERT_TRUE(surface
+                    .call("update_review",
+                          {{"repository_id", repository_id},
+                           {"review_id", review.value["id"]},
+                           {"state", "approved"}})
+                    .ok);
+    EXPECT_TRUE(evaluate_branch_protection(
+        surface.store, "admin", surface.ctx.authorization_cache, repository_id, update));
 }
 
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
