@@ -2817,6 +2817,21 @@ public:
         });
     }
 
+    Result<SsoProvider> authenticate_scim(const std::string& id,
+                                          const std::string& bearer_token) override {
+        return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + sso_provider_columns +
+                                                         ", scim_token_hash FROM sso_providers "
+                                                         "WHERE id = $1::uuid AND enabled",
+                                                     id);
+            if (rows.empty() ||
+                !identity_crypto::verify_secret(rows[0][15].as<std::string>(), bearer_token)) {
+                return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+            }
+            return sso_provider_of(rows[0]);
+        });
+    }
+
     Result<SsoProvider> test_sso_provider(const std::string& id) override {
         return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
             const pqxx::result rows = tx.exec_params(

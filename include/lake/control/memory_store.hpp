@@ -111,6 +111,8 @@ public:
                                                         int limit) override;
     Result<SsoProvider> get_sso_provider(const std::string& id) override;
     Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) override;
+    Result<SsoProvider> authenticate_scim(const std::string& id,
+                                          const std::string& bearer_token) override;
     Result<SsoProvider> test_sso_provider(const std::string& id) override;
     Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) override;
     Result<std::vector<FederationIssuer>>

@@ -1230,6 +1230,23 @@ Result<OAuthProvider> InMemoryStore::get_sso_oidc_provider(const std::string& id
                          {"openid", "email", "profile"}};
 }
 
+Result<SsoProvider> InMemoryStore::authenticate_scim(const std::string& id,
+                                                     const std::string& bearer_token) {
+    std::lock_guard lock(mutex_);
+    const auto provider =
+        std::find_if(sso_providers_.begin(), sso_providers_.end(), [&](const SsoProvider& item) {
+            return item.id == id && item.enabled;
+        });
+    const auto token =
+        std::find_if(sso_scim_tokens_.begin(), sso_scim_tokens_.end(), [&](const auto& item) {
+            return item.first == id && identity_crypto::verify_secret(item.second, bearer_token);
+        });
+    if (provider == sso_providers_.end() || token == sso_scim_tokens_.end()) {
+        return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+    }
+    return *provider;
+}
+
 Result<SsoProvider> InMemoryStore::test_sso_provider(const std::string& id) {
     std::lock_guard lock(mutex_);
     const auto provider = std::find_if(sso_providers_.begin(),

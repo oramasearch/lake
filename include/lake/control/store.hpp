@@ -399,6 +399,8 @@ public:
     virtual Result<SsoProvider> get_sso_provider(const std::string& id) = 0;
     // Internal callback lookup. This is never rendered through an API response.
     virtual Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) = 0;
+    virtual Result<SsoProvider> authenticate_scim(const std::string& id,
+                                                  const std::string& bearer_token) = 0;
     virtual Result<SsoProvider> test_sso_provider(const std::string& id) = 0;
     virtual Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) = 0;
     virtual Result<std::vector<FederationIssuer>>
