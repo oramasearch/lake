@@ -106,6 +106,19 @@ public:
     Result<std::vector<Device>> list_devices(const std::string& user_id) override;
     Result<void> revoke_device(const std::string& user_id, const std::string& device_id) override;
     Result<Principal> context_for(const std::string& secret) override;
+    Result<SsoProvider> register_sso_provider(const NewSsoProvider&) override;
+    Result<std::vector<SsoProvider>> list_sso_providers(const std::string& organization_id,
+                                                        int limit) override;
+    Result<SsoProvider> get_sso_provider(const std::string& id) override;
+    Result<SsoProvider> test_sso_provider(const std::string& id) override;
+    Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) override;
+    Result<std::vector<FederationIssuer>>
+    list_federation_issuers(const std::string& organization_id, int limit) override;
+    Result<IssuedSession> sign_in_sso(const SsoIdentity&) override;
+    Result<ScimUser> upsert_scim_user(const NewScimUser&) override;
+    Result<ScimGroup> upsert_scim_group(const NewScimGroup&) override;
+    Result<std::vector<ProvisioningLog>> list_sso_provisioning_logs(const std::string& provider_id,
+                                                                    int limit) override;
 
 private:
     std::mutex mutex_;
@@ -153,6 +166,25 @@ private:
     std::vector<Device> devices_;
     std::vector<Session> sessions_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;
+    std::vector<SsoProvider> sso_providers_;
+    std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
+    std::vector<FederationIssuer> federation_issuers_;
+    struct SsoCredential {
+        std::string provider_id;
+        std::string subject;
+        std::string user_id;
+    };
+    std::vector<SsoCredential> sso_credentials_;
+    std::vector<ScimUser> scim_users_;
+    std::vector<ScimGroup> scim_groups_;
+    struct ScimGroupMember {
+        std::string provider_id;
+        std::string group_external_id;
+        std::string user_external_id;
+        std::string membership_id;
+    };
+    std::vector<ScimGroupMember> scim_group_members_;
+    std::vector<ProvisioningLog> provisioning_logs_;
 };
 
 std::string new_uuid_v4();

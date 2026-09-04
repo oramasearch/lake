@@ -441,6 +441,48 @@ public:
     control::Result<control::Principal> context_for(const std::string& secret) override {
         return call("context_for", [&] { return store_->context_for(secret); });
     }
+    control::Result<control::SsoProvider>
+    register_sso_provider(const control::NewSsoProvider& value) override {
+        return call("register_sso_provider", [&] { return store_->register_sso_provider(value); });
+    }
+    control::Result<std::vector<control::SsoProvider>>
+    list_sso_providers(const std::string& organization_id, int limit) override {
+        return call("list_sso_providers",
+                    [&] { return store_->list_sso_providers(organization_id, limit); });
+    }
+    control::Result<control::SsoProvider> get_sso_provider(const std::string& id) override {
+        return call("get_sso_provider", [&] { return store_->get_sso_provider(id); });
+    }
+    control::Result<control::SsoProvider> test_sso_provider(const std::string& id) override {
+        return call("test_sso_provider", [&] { return store_->test_sso_provider(id); });
+    }
+    control::Result<control::FederationIssuer>
+    create_federation_issuer(const control::NewFederationIssuer& value) override {
+        return call("create_federation_issuer",
+                    [&] { return store_->create_federation_issuer(value); });
+    }
+    control::Result<std::vector<control::FederationIssuer>>
+    list_federation_issuers(const std::string& organization_id, int limit) override {
+        return call("list_federation_issuers",
+                    [&] { return store_->list_federation_issuers(organization_id, limit); });
+    }
+    control::Result<control::IssuedSession>
+    sign_in_sso(const control::SsoIdentity& value) override {
+        return call("sign_in_sso", [&] { return store_->sign_in_sso(value); });
+    }
+    control::Result<control::ScimUser>
+    upsert_scim_user(const control::NewScimUser& value) override {
+        return call("upsert_scim_user", [&] { return store_->upsert_scim_user(value); });
+    }
+    control::Result<control::ScimGroup>
+    upsert_scim_group(const control::NewScimGroup& value) override {
+        return call("upsert_scim_group", [&] { return store_->upsert_scim_group(value); });
+    }
+    control::Result<std::vector<control::ProvisioningLog>>
+    list_sso_provisioning_logs(const std::string& provider_id, int limit) override {
+        return call("list_sso_provisioning_logs",
+                    [&] { return store_->list_sso_provisioning_logs(provider_id, limit); });
+    }
 
 private:
     std::shared_ptr<control::Store> store_;

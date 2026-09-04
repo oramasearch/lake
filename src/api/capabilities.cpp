@@ -130,6 +130,21 @@ std::expected<std::string, ApiError> invitation_object(const json& input, ApiCon
     return object->id;
 }
 
+std::expected<std::string, ApiError> sso_provider_object(const json& input, ApiContext& context) {
+    const auto provider = context.store->get_sso_provider(input.at("provider_id"));
+    if (!provider) {
+        return std::unexpected(
+            ApiError{provider.error().code, provider.error().message, "/provider_id"});
+    }
+    const auto object =
+        context.store->find_policy_object("organization", provider->organization_id);
+    if (!object) {
+        return std::unexpected(
+            ApiError{object.error().code, object.error().message, "/provider_id"});
+    }
+    return object->id;
+}
+
 json id_input() {
     return {{"type", "object"},
             {"properties", {{"id", {{"type", "string"}, {"description", "uuid"}}}}},
@@ -1073,6 +1088,257 @@ void register_identity_capabilities(Registry& registry) {
         }});
 }
 
+void register_sso_capabilities(Registry& registry) {
+    const json provider_input = {
+        {"type", "object"},
+        {"properties",
+         {{"organization_id", {{"type", "string"}}},
+          {"pool_id", {{"type", "string"}}},
+          {"name", {{"type", "string"}}},
+          {"protocol", {{"type", "string"}}},
+          {"issuer", {{"type", "string"}}},
+          {"metadata", {{"type", "string"}}},
+          {"signing_certificate", {{"type", "string"}}},
+          {"client_id", {{"type", "string"}}},
+          {"client_secret", {{"type", "string"}}},
+          {"scim_token", {{"type", "string"}}},
+          {"attribute_mapping", {{"type", "object"}}},
+          {"jit_provisioning", {{"type", "boolean"}}}}},
+        {"required", json::array({"organization_id", "name", "protocol", "issuer", "scim_token"})},
+        {"additionalProperties", false},
+    };
+    registry.add(Capability{
+        .name = "register_sso_provider",
+        .title = "Register SSO provider",
+        .description = "Register or update an organization SAML or OpenID Connect provider.",
+        .input_schema = provider_input,
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            return one_result(context.store->register_sso_provider(
+                {input.value("organization_id", ""),
+                 input.value("pool_id", "lake"),
+                 input.value("name", ""),
+                 input.value("protocol", ""),
+                 input.value("issuer", ""),
+                 input.value("metadata", ""),
+                 input.value("signing_certificate", ""),
+                 input.value("client_id", ""),
+                 input.value("client_secret", ""),
+                 input.value("scim_token", ""),
+                 input.value("attribute_mapping", json::object()),
+                 input.value("jit_provisioning", false)}));
+        }});
+    registry.add(Capability{
+        .name = "list_sso_providers",
+        .title = "List SSO providers",
+        .description = "List an organization's SSO provider configurations without secrets.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"limit", {{"type", "integer"}}}}},
+                         {"required", json::array({"organization_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store ? list_result(context.store->list_sso_providers(
+                                       input.value("organization_id", ""), limit_of(input)))
+                                 : no_store();
+        }});
+    registry.add(Capability{
+        .name = "test_sso_provider",
+        .title = "Test SSO provider",
+        .description = "Validate that a provider has the configuration required by its protocol.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"provider_id", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = sso_provider_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store
+                       ? one_result(context.store->test_sso_provider(input.at("provider_id")))
+                       : no_store();
+        }});
+    registry.add(Capability{
+        .name = "create_federation_issuer",
+        .title = "Allow federation issuer claim",
+        .description = "Allow an issuer to assert one named claim for an organization.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"issuer", {{"type", "string"}}},
+                           {"claim", {{"type", "string"}}}}},
+                         {"required", json::array({"organization_id", "issuer", "claim"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store
+                       ? one_result(context.store->create_federation_issuer(
+                             {input.at("organization_id"), input.at("issuer"), input.at("claim")}))
+                       : no_store();
+        }});
+    registry.add(Capability{
+        .name = "list_federation_issuers",
+        .title = "List federation issuer policy",
+        .description = "List the issuer and claim pairs accepted by an organization.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"limit", {{"type", "integer"}}}}},
+                         {"required", json::array({"organization_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store ? list_result(context.store->list_federation_issuers(
+                                       input.value("organization_id", ""), limit_of(input)))
+                                 : no_store();
+        }});
+    registry.add(Capability{
+        .name = "sign_in_sso",
+        .title = "Sign in with SSO assertion",
+        .description = "Issue a session after provider verification and federation issuer policy.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"issuer", {{"type", "string"}}},
+                           {"subject", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"claims", {{"type", "object"}}}}},
+                         {"required", json::array({"provider_id", "issuer", "subject", "claims"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store ? issued_result(context.store->sign_in_sso(
+                                       {input.value("provider_id", ""),
+                                        input.value("issuer", ""),
+                                        input.value("subject", ""),
+                                        input.value("email", ""),
+                                        input.value("display_name", ""),
+                                        input.value("taap_id", ""),
+                                        input.value("device_name", "browser"),
+                                        input.value("claims", json::object())}))
+                                 : no_store();
+        }});
+    registry.add(Capability{
+        .name = "upsert_scim_user",
+        .title = "Provision SCIM user",
+        .description =
+            "Create, update, or deactivate a SCIM user and revoke sessions on deactivation.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"external_id", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"active", {{"type", "boolean"}}},
+                           {"attributes", {{"type", "object"}}}}},
+                         {"required",
+                          json::array({"provider_id", "external_id", "taap_id", "active"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = sso_provider_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store ? one_result(context.store->upsert_scim_user(
+                                       {input.value("provider_id", ""),
+                                        input.value("external_id", ""),
+                                        input.value("email", ""),
+                                        input.value("display_name", ""),
+                                        input.value("taap_id", ""),
+                                        input.value("active", true),
+                                        input.value("attributes", json::object())}))
+                                 : no_store();
+        }});
+    registry.add(Capability{
+        .name = "upsert_scim_group",
+        .title = "Provision SCIM group",
+        .description = "Create or update a SCIM group and map its users to a lake team.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"external_id", {{"type", "string"}}},
+                           {"team_name", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"member_external_ids", {{"type", "array"}}},
+                           {"attributes", {{"type", "object"}}}}},
+                         {"required",
+                          json::array({"provider_id",
+                                       "external_id",
+                                       "team_name",
+                                       "display_name",
+                                       "member_external_ids"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = sso_provider_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store
+                       ? one_result(context.store->upsert_scim_group(
+                             {input.value("provider_id", ""),
+                              input.value("external_id", ""),
+                              input.value("team_name", ""),
+                              input.value("display_name", ""),
+                              input.value("member_external_ids", std::vector<std::string>{}),
+                              input.value("attributes", json::object())}))
+                       : no_store();
+        }});
+    registry.add(Capability{.name = "list_sso_provisioning_logs",
+                            .title = "List SSO provisioning logs",
+                            .description = "List SCIM provisioning outcomes for an SSO provider.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties",
+                                              {{"provider_id", {{"type", "string"}}},
+                                               {"limit", {{"type", "integer"}}}}},
+                                             {"required", json::array({"provider_id"})},
+                                             {"additionalProperties", false}},
+                            .output_schema = {{"type", "object"}},
+                            .kind = CapabilityKind::Read,
+                            .object = "organization",
+                            .action = "admin",
+                            .resolve_object = sso_provider_object,
+                            .handler = [](const json& input, ApiContext& context) {
+                                return context.store
+                                           ? list_result(context.store->list_sso_provisioning_logs(
+                                                 input.value("provider_id", ""), limit_of(input)))
+                                           : no_store();
+                            }});
+}
+
 void register_repository_capabilities(Registry& registry) {
     // ---- repositories ----
     registry.add(Capability{.name = "list_repositories",
@@ -1766,6 +2032,7 @@ void register_audit_capabilities(Registry& registry) {
 void register_core_capabilities(Registry& registry, std::string_view version) {
     register_server_info(registry, version);
     register_identity_capabilities(registry);
+    register_sso_capabilities(registry);
     register_repository_capabilities(registry);
     register_organization_capabilities(registry);
     register_policy_capabilities(registry);
