@@ -22,8 +22,8 @@ Identity-core status on this branch: verified TAAP documents, password plus TOTP
 recovery codes and fresh-verification disablement, persisted
 WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
 hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use those capabilities.
-The signed audit substrate from #18 is integrated. A distinct signed passkey-binding attestation
-is deferred, and application user pools remain owned by #51.
+The signed audit substrate from #18 is integrated, and every passkey registration stores a
+lake-signed TAAP binding beside the credential. Application user pools remain owned by #51.
 
 ## Identity: one substrate, three principals
 
@@ -59,11 +59,12 @@ identity-core issue keeps `pool_id` on its tables and in its capability inputs f
   documents and rotation chains and verifies their signatures. A WebAuthn credential is the
   browser device key; lake stores its credential-id and public-key binding to the user's TAAP
   identity after an attestation-less registration, records the registration in the signed audit
-  stream, then issues a session only after a successful assertion. A distinct signed binding
-  attestation remains deferred. lake #18 supplies lake's instance identity: it is generated on
-  first start, its seed is wrapped by the instance KEK (or provided as `LAKE_IDENTITY_SEED`), and
-  its public document is exposed at `GET /v1/identity`. Identity capabilities and the OAuth
-  callback write through its signed audit stream.
+  stream, and stores a `passkey_binding/1` TAAP attestation signed by lake's current instance
+  identity. The binding remains verifiable through identity history after rotation. lake issues a
+  session only after a successful assertion. lake #18 supplies lake's instance identity: it is
+  generated on first start, its seed is wrapped by the instance KEK (or provided as
+  `LAKE_IDENTITY_SEED`), and its public document is exposed at `GET /v1/identity`. Identity
+  capabilities and the OAuth callback write through its signed audit stream.
   lake verifies identity documents through libliquid's public canonical-CBOR codec.
 - TOTP seeds and OAuth client secrets are encrypted with AES-256-GCM under a
   purpose-specific data key. `keystore(purpose, wrapped_key, version)` holds those keys wrapped

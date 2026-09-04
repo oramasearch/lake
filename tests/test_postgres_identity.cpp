@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -13,6 +14,7 @@
 
 #include <openssl/evp.h>
 
+#include "lake/audit/audit.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "webauthn_test_support.hpp"
 
@@ -153,12 +155,15 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     ASSERT_TRUE(registration) << registration.error().message;
     const auto attestation = authenticator.registration(
         registration->challenge, registration->rp_id, registration->origin);
-    const auto passkey = store->register_passkey({context->user_id,
-                                                  "lake",
-                                                  registration->challenge,
-                                                  attestation.client_data_json,
-                                                  attestation.authenticator_data,
-                                                  "integration passkey"});
+    const auto passkey = store->register_passkey(
+        {context->user_id,
+         "lake",
+         registration->challenge,
+         attestation.client_data_json,
+         attestation.authenticator_data,
+         "integration passkey",
+         lake::audit::IdentityOptions{.instance_kek = "00112233445566778899aabbccddeeff"
+                                                      "00112233445566778899aabbccddeeff"}});
     ASSERT_TRUE(passkey) << passkey.error().message;
     EXPECT_FALSE(store->register_passkey({context->user_id,
                                           "lake",
@@ -166,6 +171,17 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
                                           attestation.client_data_json,
                                           attestation.authenticator_data,
                                           "integration passkey"}));
+    const auto devices = store->list_devices(context->user_id);
+    ASSERT_TRUE(devices) << devices.error().message;
+    const auto passkey_device = std::ranges::find_if(
+        *devices, [](const auto& device) { return !device.passkey_credential_id.empty(); });
+    ASSERT_NE(passkey_device, devices->end());
+    EXPECT_EQ(passkey_device->passkey_credential_id, attestation.credential_id);
+    EXPECT_TRUE(lake::audit::verify_passkey_binding(*store,
+                                                    passkey_device->passkey_binding_attestation,
+                                                    context->taap_id,
+                                                    attestation.credential_id,
+                                                    "lake"));
 
     const auto assertion =
         store->begin_passkey_sign_in("lake", "lake.example", "https://lake.example");

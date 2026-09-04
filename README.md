@@ -6,7 +6,7 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (password, TOTP with one-use recovery codes, passkey and OAuth identity;
+> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings and OAuth identity;
 > row-resolved sessions, devices and
 > scoped tokens; tenants, repositories, organization administration and policy over the Postgres
 > control plane), the pages to explore them, the OpenAPI

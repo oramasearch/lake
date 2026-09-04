@@ -977,7 +977,9 @@ Device device_of(const pqxx::row& r) {
                   r[2].as<std::string>(),
                   r[3].as<std::string>(),
                   r[4].as<std::string>(),
-                  r[5].as<std::string>()};
+                  r[5].as<std::string>(),
+                  r[6].as<std::string>(),
+                  nlohmann::json::parse(r[7].as<std::string>())};
 }
 
 Session session_of(const pqxx::row& r) {
@@ -996,8 +998,10 @@ Session session_of(const pqxx::row& r) {
 }
 
 constexpr const char* device_columns =
-    "id::text, user_id::text, name, coalesce(revoked_at::text,''), "
-    "created_at::text, updated_at::text";
+    "devices.id::text, devices.user_id::text, devices.name, "
+    "coalesce(devices.revoked_at::text,''), devices.created_at::text, "
+    "devices.updated_at::text, coalesce(passkeys.subject,''), "
+    "coalesce(passkeys.public_data->'binding_attestation','null'::jsonb)::text";
 constexpr const char* session_columns =
     "id::text, coalesce(user_id::text,''), coalesce(device_id::text,''), "
     "pool_id, kind, name, reason, coalesce(expires_at::text,''), "
@@ -2237,19 +2241,35 @@ public:
         if (!verified) {
             return std::unexpected(StoreError{"unauthorized", verified.error()});
         }
+        const Result<User> user = get_user(in.user_id);
+        if (!user || user->taap_id.empty()) {
+            return std::unexpected(StoreError{"not_found", "user TAAP identity not found"});
+        }
+        const auto binding = audit::sign_passkey_binding(
+            *this, user->taap_id, verified->credential_id, in.pool_id, in.identity_options);
+        if (!binding) {
+            return std::unexpected(StoreError{binding.error().code, binding.error().message});
+        }
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result device = tx.exec_params(
+                "INSERT INTO devices (user_id, name) VALUES ($1::uuid, $2) RETURNING id::text",
+                in.user_id,
+                in.name.empty() ? "passkey" : in.name);
             tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, "
                            "subject, public_data) "
                            "VALUES ($1::uuid, $2, 'passkey', $3, "
                            "jsonb_build_object('public_key', $4::text, 'name', "
                            "$5::text, "
-                           "'sign_count', $6::integer))",
+                           "'sign_count', $6::integer, 'device_id', $7::text, "
+                           "'binding_attestation', $8::jsonb))",
                            in.user_id,
                            in.pool_id,
                            verified->credential_id,
                            verified->public_key_pem,
                            in.name,
-                           verified->sign_count);
+                           verified->sign_count,
+                           device[0][0].as<std::string>(),
+                           binding->dump());
             return {};
         });
     }
@@ -2544,10 +2564,13 @@ public:
     }
     Result<std::vector<Device>> list_devices(const std::string& user_id) override {
         return with_tx<std::vector<Device>>([&](pqxx::work& tx) -> Result<std::vector<Device>> {
-            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + device_columns +
-                                                         " FROM devices WHERE user_id = $1::uuid "
-                                                         "ORDER BY created_at DESC",
-                                                     user_id);
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + device_columns +
+                    " FROM devices LEFT JOIN credentials AS passkeys ON "
+                    "passkeys.user_id = devices.user_id AND passkeys.kind = 'passkey' AND "
+                    "passkeys.public_data->>'device_id' = devices.id::text "
+                    "WHERE devices.user_id = $1::uuid ORDER BY devices.created_at DESC",
+                user_id);
             std::vector<Device> devices;
             for (const pqxx::row& row : rows) {
                 devices.push_back(device_of(row));
@@ -2565,6 +2588,11 @@ public:
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "device is not active"});
             }
+            tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
+                           "AND kind = 'passkey' AND public_data->>'device_id' = $2 "
+                           "AND revoked_at IS NULL",
+                           user_id,
+                           device_id);
             return {};
         });
     }

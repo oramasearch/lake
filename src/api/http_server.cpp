@@ -1366,12 +1366,12 @@ struct ApiServer::Impl {
         std::vector<control::Session> sessions;
         std::vector<control::Device> devices;
         std::string error;
-        if (auto rows = options.store->list_sessions(context.acting_identity, context.pool_id)) {
+        if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
             sessions = std::move(*rows);
         } else {
             error = rows.error().message;
         }
-        if (auto rows = options.store->list_devices(context.acting_identity)) {
+        if (auto rows = options.store->list_devices(context.acting_user_id)) {
             devices = std::move(*rows);
         } else if (error.empty()) {
             error = rows.error().message;
@@ -1393,7 +1393,7 @@ struct ApiServer::Impl {
         }
         std::vector<control::Session> sessions;
         std::string error;
-        if (auto rows = options.store->list_sessions(context.acting_identity, context.pool_id)) {
+        if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
             sessions = std::move(*rows);
         } else {
             error = rows.error().message;
@@ -1615,8 +1615,7 @@ struct ApiServer::Impl {
                           context);
         std::vector<control::Session> sessions;
         if (context.authorized && !context.operator_credential) {
-            if (auto rows =
-                    options.store->list_sessions(context.acting_identity, context.pool_id)) {
+            if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
                 sessions = std::move(*rows);
             }
         }

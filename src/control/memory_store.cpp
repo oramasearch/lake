@@ -456,6 +456,8 @@ nlohmann::json to_json(const Device& d) {
     return {{"id", d.id},
             {"user_id", d.user_id},
             {"name", d.name},
+            {"passkey_credential_id", nullable(d.passkey_credential_id)},
+            {"passkey_binding_attestation", d.passkey_binding_attestation},
             {"revoked_at", nullable(d.revoked_at)},
             {"created_at", d.created_at},
             {"updated_at", d.updated_at}};
@@ -701,43 +703,72 @@ Result<WebAuthnChallenge> InMemoryStore::begin_passkey_registration(const std::s
 }
 
 Result<void> InMemoryStore::register_passkey(const PasskeyRegistration& input) {
-    std::lock_guard lock(mutex_);
-    WebAuthnChallengeRecord* challenge = nullptr;
-    for (WebAuthnChallengeRecord& candidate : webauthn_challenges_) {
-        if (candidate.challenge.challenge == input.challenge &&
-            candidate.challenge.ceremony == "registration" &&
-            candidate.challenge.user_id == input.user_id &&
-            candidate.challenge.pool_id == input.pool_id && !candidate.used &&
-            candidate.expires_at > std::chrono::steady_clock::now()) {
-            candidate.used = true;
-            challenge = &candidate;
-            break;
+    identity_crypto::VerifiedPasskeyRegistration verified;
+    std::string subject_taap_id;
+    {
+        std::lock_guard lock(mutex_);
+        WebAuthnChallengeRecord* challenge = nullptr;
+        for (WebAuthnChallengeRecord& candidate : webauthn_challenges_) {
+            if (candidate.challenge.challenge == input.challenge &&
+                candidate.challenge.ceremony == "registration" &&
+                candidate.challenge.user_id == input.user_id &&
+                candidate.challenge.pool_id == input.pool_id && !candidate.used &&
+                candidate.expires_at > std::chrono::steady_clock::now()) {
+                candidate.used = true;
+                challenge = &candidate;
+                break;
+            }
         }
+        if (challenge == nullptr) {
+            return std::unexpected(
+                StoreError{"unauthorized", "WebAuthn challenge is invalid or expired"});
+        }
+        const auto registration =
+            identity_crypto::verify_passkey_registration(input.client_data_json,
+                                                         input.attestation_object,
+                                                         input.challenge,
+                                                         challenge->challenge.rp_id,
+                                                         challenge->challenge.origin);
+        if (!registration) {
+            return std::unexpected(StoreError{"unauthorized", registration.error()});
+        }
+        verified = *registration;
+        for (const auto& credential : passkeys_) {
+            if (credential.pool_id == input.pool_id &&
+                credential.credential_id == verified.credential_id) {
+                return std::unexpected(StoreError{"conflict", "passkey already registered"});
+            }
+        }
+        const auto user = std::find_if(users_.begin(), users_.end(), [&](const User& candidate) {
+            return candidate.id == input.user_id;
+        });
+        if (user == users_.end() || user->taap_id.empty()) {
+            return std::unexpected(StoreError{"not_found", "user TAAP identity not found"});
+        }
+        subject_taap_id = user->taap_id;
     }
-    if (challenge == nullptr) {
-        return std::unexpected(
-            StoreError{"unauthorized", "WebAuthn challenge is invalid or expired"});
+    const auto binding = audit::sign_passkey_binding(
+        *this, subject_taap_id, verified.credential_id, input.pool_id, input.identity_options);
+    if (!binding) {
+        return std::unexpected(StoreError{binding.error().code, binding.error().message});
     }
-    const auto verified = identity_crypto::verify_passkey_registration(input.client_data_json,
-                                                                       input.attestation_object,
-                                                                       input.challenge,
-                                                                       challenge->challenge.rp_id,
-                                                                       challenge->challenge.origin);
-    if (!verified) {
-        return std::unexpected(StoreError{"unauthorized", verified.error()});
-    }
+    std::lock_guard lock(mutex_);
     for (const auto& credential : passkeys_) {
         if (credential.pool_id == input.pool_id &&
-            credential.credential_id == verified->credential_id) {
+            credential.credential_id == verified.credential_id) {
             return std::unexpected(StoreError{"conflict", "passkey already registered"});
         }
     }
+    Device& device = add_device(devices_, input.user_id, input.name);
     passkeys_.push_back(PasskeyCredential{input.user_id,
                                           input.pool_id,
-                                          verified->credential_id,
-                                          verified->public_key_pem,
+                                          verified.credential_id,
+                                          verified.public_key_pem,
                                           input.name,
-                                          verified->sign_count});
+                                          device.id,
+                                          "",
+                                          *binding,
+                                          verified.sign_count});
     return {};
 }
 
@@ -778,7 +809,7 @@ Result<IssuedSession> InMemoryStore::sign_in_passkey(const PasskeyAssertion& inp
     }
     for (PasskeyCredential& credential : passkeys_) {
         if (credential.pool_id != input.pool_id ||
-            credential.credential_id != input.credential_id) {
+            credential.credential_id != input.credential_id || !credential.revoked_at.empty()) {
             continue;
         }
         const auto sign_count =
@@ -961,20 +992,37 @@ Result<void> InMemoryStore::revoke_session(const std::string& user_id,
 Result<std::vector<Device>> InMemoryStore::list_devices(const std::string& user_id) {
     std::lock_guard lock(mutex_);
     std::vector<Device> result;
-    for (auto it = devices_.rbegin(); it != devices_.rend(); ++it)
-        if (it->user_id == user_id)
+    for (auto it = devices_.rbegin(); it != devices_.rend(); ++it) {
+        if (it->user_id == user_id) {
             result.push_back(*it);
+            const auto passkey =
+                std::find_if(passkeys_.begin(), passkeys_.end(), [&](const auto& credential) {
+                    return credential.device_id == it->id;
+                });
+            if (passkey != passkeys_.end()) {
+                result.back().passkey_credential_id = passkey->credential_id;
+                result.back().passkey_binding_attestation = passkey->binding_attestation;
+            }
+        }
+    }
     return result;
 }
 
 Result<void> InMemoryStore::revoke_device(const std::string& user_id,
                                           const std::string& device_id) {
     std::lock_guard lock(mutex_);
-    for (auto& device : devices_)
+    for (auto& device : devices_) {
         if (device.id == device_id && device.user_id == user_id) {
             device.revoked_at = now_iso8601();
+            device.updated_at = device.revoked_at;
+            for (PasskeyCredential& passkey : passkeys_) {
+                if (passkey.device_id == device_id && passkey.revoked_at.empty()) {
+                    passkey.revoked_at = device.revoked_at;
+                }
+            }
             return {};
         }
+    }
     return std::unexpected(StoreError{"not_found", "device not found"});
 }
 

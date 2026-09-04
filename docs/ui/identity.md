@@ -22,6 +22,10 @@ inside the response page. MFA enrollment likewise shows the authenticator URI an
 once, with every value HTML-escaped. Re-enrollment replaces the current seed and recovery codes;
 disablement requires a fresh TOTP or unused recovery code.
 
+The sessions page resolves session and device rows by the authenticated user ID. Passkey devices
+carry the credential ID and lake-signed TAAP binding on the `list_devices` API response; revoking
+one invalidates both its sessions and its linked passkey credential.
+
 ## Browser sessions
 
 Successful password, TOTP, OAuth, and passkey sign-in sets
@@ -50,8 +54,8 @@ ctest --test-dir build --output-on-failure -R 'WebUi|IdentityHttp|WebAuthn'
 The renderer tests cover MFA enrollment, challenge and disable forms, one-use value escaping,
 absence of scripts, and the one-script passkey exception.
 `IdentityHttp.PagesIssueAndResolveHttpOnlySessions` submits the sign-up form, checks the
-cookie attributes, loads the authenticated sessions page, and checks that a REST sign-up response
-also sets an HttpOnly cookie.
+cookie attributes, loads the authenticated session row on the sessions page, and checks that a
+REST sign-up response also sets an HttpOnly cookie.
 
 ## How to change
 

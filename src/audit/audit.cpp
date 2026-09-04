@@ -15,7 +15,8 @@
 namespace lake::audit {
 namespace {
 
-constexpr std::string_view signature_domain = "TAAP/1 audit_event/1";
+constexpr std::string_view audit_signature_domain = "TAAP/1 audit_event/1";
+constexpr std::string_view attestation_signature_domain = "TAAP/1 attestation";
 
 struct PkeyDeleter {
   void operator()(EVP_PKEY *key) const { EVP_PKEY_free(key); }
@@ -415,12 +416,20 @@ Result<Identity> identity_from_seed(const std::vector<std::uint8_t> &seed,
 }
 
 Result<std::vector<std::uint8_t>> signed_bytes(const Event &event) {
-  std::vector<std::uint8_t> output(signature_domain.begin(),
-                                   signature_domain.end());
-  output.push_back(0);
-  const auto encoded = cbor(payload(event));
-  output.insert(output.end(), encoded.begin(), encoded.end());
-  return output;
+    std::vector<std::uint8_t> output(audit_signature_domain.begin(), audit_signature_domain.end());
+    output.push_back(0);
+    const auto encoded = cbor(payload(event));
+    output.insert(output.end(), encoded.begin(), encoded.end());
+    return output;
+}
+
+std::vector<std::uint8_t> attestation_signed_bytes(const nlohmann::json& body) {
+    std::vector<std::uint8_t> output(attestation_signature_domain.begin(),
+                                     attestation_signature_domain.end());
+    output.push_back(0);
+    const auto encoded = cbor(body);
+    output.insert(output.end(), encoded.begin(), encoded.end());
+    return output;
 }
 
 Result<Event> signed_event(const EventDraft &draft, const Identity &identity,
@@ -573,6 +582,105 @@ Result<Identity> identity(control::Store &store,
         Error{current.error().code, current.error().message});
   }
   return *current;
+}
+
+Result<nlohmann::json> sign_passkey_binding(control::Store& store,
+                                            const std::string& subject_taap_id,
+                                            const std::string& credential_id,
+                                            const std::string& pool_id,
+                                            const IdentityOptions& options) {
+    if (subject_taap_id.empty() || credential_id.empty() || pool_id.empty()) {
+        return std::unexpected(Error{"invalid_input", "passkey binding fields are required"});
+    }
+    const IdentityOptions effective_options = options_for_store(store, options);
+    const auto current = identity(store, effective_options);
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    const auto seed = seed_for(*current, effective_options);
+    if (!seed) {
+        return std::unexpected(seed.error());
+    }
+    const auto key = pkey_from_seed(*seed);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    const std::string issued_at = timestamp();
+    nlohmann::json attestation = {
+        {"artifact_type", "attestation"},
+        {"protocol_version", "TAAP/1"},
+        {"attestation_identifier", control::new_uuid_v4()},
+        {"authority_identifier", current->taap_id},
+        {"authority_display_name", "lake"},
+        {"subject_identifier", subject_taap_id},
+        {"attestation_profile", "passkey_binding/1"},
+        {"asserted_attributes", {{"credential_id", credential_id}, {"pool_id", pool_id}}},
+        {"evidence_references", nlohmann::json::array()},
+        {"issued_at", issued_at},
+        {"valid_from", issued_at},
+        {"expires_at", nullptr},
+        {"status_policy",
+         {{"status_check_recommended", true},
+          {"status_authority_identifier", current->taap_id},
+          {"maximum_status_age_seconds", 300}}},
+    };
+    const auto signature = sign(key->get(), attestation_signed_bytes(attestation));
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    attestation["signatures"] =
+        nlohmann::json::array({{{"signature_algorithm", "ed25519"},
+                                {"signing_key_identifier", current->taap_id},
+                                {"signing_key_label", "lake-instance"},
+                                {"signature_purpose", "attestation"},
+                                {"signed_at", issued_at},
+                                {"signature_bytes_base64", *signature}}});
+    return attestation;
+}
+
+Result<void> verify_passkey_binding(control::Store& store,
+                                    const nlohmann::json& attestation,
+                                    const std::string& subject_taap_id,
+                                    const std::string& credential_id,
+                                    const std::string& pool_id) {
+    const auto text = [&](const nlohmann::json& object, std::string_view name) -> std::string {
+        const std::string key(name);
+        if (!object.is_object() || !object.contains(key) || !object.at(key).is_string()) {
+            return {};
+        }
+        return object.at(key).get<std::string>();
+    };
+    if (text(attestation, "artifact_type") != "attestation" ||
+        text(attestation, "protocol_version") != "TAAP/1" ||
+        text(attestation, "attestation_profile") != "passkey_binding/1" ||
+        text(attestation, "subject_identifier") != subject_taap_id ||
+        !attestation.contains("asserted_attributes") ||
+        text(attestation.at("asserted_attributes"), "credential_id") != credential_id ||
+        text(attestation.at("asserted_attributes"), "pool_id") != pool_id ||
+        !attestation.contains("signatures") || !attestation.at("signatures").is_array() ||
+        attestation.at("signatures").size() != 1) {
+        return std::unexpected(Error{"invalid_input", "passkey binding fields do not match"});
+    }
+    const nlohmann::json& signature = attestation.at("signatures").front();
+    const std::string authority = text(attestation, "authority_identifier");
+    if (authority.empty() || text(signature, "signature_algorithm") != "ed25519" ||
+        text(signature, "signing_key_identifier") != authority ||
+        text(signature, "signature_purpose") != "attestation") {
+        return std::unexpected(Error{"invalid_input", "passkey binding signature is malformed"});
+    }
+    const auto signing_identity = store.lake_identity_by_taap_id(authority);
+    if (!signing_identity) {
+        return std::unexpected(
+            Error{signing_identity.error().code, signing_identity.error().message});
+    }
+    const auto public_key = base64_decode(signing_identity->public_key);
+    if (!public_key) {
+        return std::unexpected(public_key.error());
+    }
+    nlohmann::json body = attestation;
+    body.erase("signatures");
+    return verify_signature(
+        *public_key, attestation_signed_bytes(body), text(signature, "signature_bytes_base64"));
 }
 
 Result<Event> record(control::Store &store, const EventDraft &draft,

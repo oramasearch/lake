@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string_view>
 
@@ -7,6 +8,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "webauthn_test_support.hpp"
@@ -91,6 +93,30 @@ TEST(WebAuthn, PersistedRegistrationAssertionAndSignCount) {
     const auto registered = register_response(registry, context, begun.value, authenticator);
     ASSERT_TRUE(registered.ok) << registered.error.message;
 
+    const auto devices = registry.call("list_devices", json::object(), context);
+    ASSERT_TRUE(devices.ok) << devices.error.message;
+    const auto passkey_device = std::ranges::find_if(devices.value["items"], [](const json& item) {
+        return !item["passkey_credential_id"].is_null();
+    });
+    ASSERT_NE(passkey_device, devices.value["items"].end());
+    const std::string credential_id = (*passkey_device)["passkey_credential_id"];
+    const json binding = (*passkey_device)["passkey_binding_attestation"];
+    const auto signing_identity = lake::audit::identity(store, {});
+    ASSERT_TRUE(signing_identity) << signing_identity.error().message;
+    EXPECT_EQ(binding["authority_identifier"], signing_identity->taap_id);
+    ASSERT_TRUE(lake::audit::verify_passkey_binding(
+        store, binding, principal->taap_id, credential_id, "lake"));
+    json tampered = binding;
+    tampered["asserted_attributes"]["credential_id"] = "another-credential";
+    EXPECT_FALSE(lake::audit::verify_passkey_binding(
+        store, tampered, principal->taap_id, "another-credential", "lake"));
+    const auto rotated = lake::audit::rotate_identity(store, {});
+    ASSERT_TRUE(rotated) << rotated.error().message;
+    EXPECT_NE(rotated->taap_id, signing_identity->taap_id);
+    EXPECT_TRUE(lake::audit::verify_passkey_binding(
+        store, binding, principal->taap_id, credential_id, "lake"));
+    const std::string passkey_device_id = (*passkey_device)["id"];
+
     context.authorized = false;
     auto assertion = registry.call("begin_passkey_sign_in", json::object(), context);
     ASSERT_TRUE(assertion.ok) << assertion.error.message;
@@ -109,6 +135,17 @@ TEST(WebAuthn, PersistedRegistrationAssertionAndSignCount) {
     ASSERT_TRUE(assertion.ok) << assertion.error.message;
     const auto advanced = sign_in_response(registry, context, assertion.value, authenticator, 2);
     ASSERT_TRUE(advanced.ok) << advanced.error.message;
+
+    context.authorized = true;
+    const auto revoked = registry.call("revoke_device", {{"id", passkey_device_id}}, context);
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    context.authorized = false;
+    assertion = registry.call("begin_passkey_sign_in", json::object(), context);
+    ASSERT_TRUE(assertion.ok) << assertion.error.message;
+    const auto after_revoke =
+        sign_in_response(registry, context, assertion.value, authenticator, 3);
+    EXPECT_FALSE(after_revoke.ok);
+    EXPECT_EQ(after_revoke.error.code, "unauthorized");
 }
 
 TEST(WebAuthn, RejectsMalformedClientDataWithoutThrowing) {

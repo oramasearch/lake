@@ -273,6 +273,7 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
         http_request(server.port(), "GET", "/sessions", "", "text/plain", cookie);
     EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
     EXPECT_NE(sessions.find("Sessions and devices"), std::string::npos);
+    EXPECT_NE(sessions.find("browser"), std::string::npos);
 
     const std::string mfa_enrollment = http_request(server.port(),
                                                     "POST",

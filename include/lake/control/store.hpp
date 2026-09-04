@@ -107,6 +107,8 @@ struct NewGrant {
 // duplicating identity tables.
 struct Device {
     std::string id, user_id, name, revoked_at, created_at, updated_at;
+    std::string passkey_credential_id;
+    nlohmann::json passkey_binding_attestation;
 };
 struct Session {
     std::string id, user_id, device_id, pool_id, kind, name, reason, expires_at, revoked_at,
@@ -142,6 +144,7 @@ struct WebAuthnChallenge {
 };
 struct PasskeyRegistration {
     std::string user_id, pool_id, challenge, client_data_json, attestation_object, name;
+    audit::IdentityOptions identity_options;
 };
 struct PasskeyAssertion {
     std::string pool_id, challenge, credential_id, client_data_json, authenticator_data, signature,

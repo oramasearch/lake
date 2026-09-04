@@ -252,6 +252,8 @@ json device_schema() {
              {{"id", {{"type", "string"}}},
               {"user_id", {{"type", "string"}}},
               {"name", {{"type", "string"}}},
+              {"passkey_credential_id", {{"type", {"string", "null"}}}},
+              {"passkey_binding_attestation", {{"type", {"object", "null"}}}},
               {"revoked_at", {{"type", {"string", "null"}}}},
               {"created_at", {{"type", "string"}}}}}};
 }
@@ -742,8 +744,8 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "register_passkey",
         .title = "Register passkey",
-        .description = "Record an attestation-less WebAuthn credential binding "
-                       "for the authenticated user.",
+        .description = "Record an attestation-less WebAuthn credential and a lake-signed TAAP "
+                       "identity binding for the authenticated user.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
@@ -769,7 +771,8 @@ void register_identity_capabilities(Registry& registry) {
                                                            input.value("challenge", ""),
                                                            input.value("client_data_json", ""),
                                                            input.value("attestation_object", ""),
-                                                           input.value("name", "passkey")});
+                                                           input.value("name", "passkey"),
+                                                           identity_options(context)});
             return result ? ApiResult::success({{"registered", true}})
                           : from_store_error(result.error());
         }});
@@ -1003,7 +1006,8 @@ void register_identity_capabilities(Registry& registry) {
         }});
     registry.add(Capability{.name = "list_devices",
                             .title = "List devices",
-                            .description = "List the authenticated user's devices.",
+                            .description = "List the authenticated user's devices and signed "
+                                           "passkey bindings.",
                             .input_schema = {{"type", "object"},
                                              {"properties", json::object()},
                                              {"additionalProperties", false}},

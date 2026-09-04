@@ -48,6 +48,12 @@ Passkeys use a two-capability WebAuthn ceremony. `begin_passkey_registration` bi
 challenge to the authenticated user and pool, then `register_passkey` accepts only attestation
 format `none`, verifies `clientDataJSON` type, challenge and origin, verifies the RP ID hash and
 user-presence flag in authenticator data, and stores the ES256 public key and initial sign count.
+Registration also creates a named device and a TAAP/1 `passkey_binding/1` attestation signed by
+lake's current instance identity. The attestation binds the credential ID and pool to the user's
+TAAP identity. It is stored with the credential and returned by `list_devices` together with the
+credential ID. Verification resolves the signing identity from `lake_identity`, so bindings made
+before an instance-identity rotation remain verifiable. Revoking the linked device also revokes
+the passkey credential before the next assertion.
 `begin_passkey_sign_in` creates an assertion challenge without revealing whether a credential
 exists. `sign_in_passkey` verifies the same pool-specific origin and RP ID, the ES256 assertion
 over authenticator data plus the client-data hash, and advancement of a nonzero sign count before
@@ -90,8 +96,9 @@ The Postgres identity test repeats the MFA recovery and disable flow, reads back
 provider secret, and proves that persisted OAuth state returns its verifier once and only once.
 `WebAuthn.PersistedRegistrationAssertionAndSignCount` uses a software ES256 authenticator to
 produce `clientDataJSON`, authenticator data, a CBOR attestation object and signed assertions. It
-proves origin binding, first-attempt challenge consumption, session issue and sign-count replay
-rejection. The Postgres identity test repeats a successful registration and assertion against the
+proves origin binding, first-attempt challenge consumption, lake-signed TAAP binding verification
+before and after identity rotation, session issue and sign-count replay rejection. The Postgres
+identity test repeats a successful registration, binding verification and assertion against the
 persisted challenge and credential rows.
 
 ## How to change

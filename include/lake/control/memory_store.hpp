@@ -127,7 +127,8 @@ private:
         std::vector<std::string> recovery_hashes;
     };
     struct PasskeyCredential {
-        std::string user_id, pool_id, credential_id, public_key_pem, name;
+        std::string user_id, pool_id, credential_id, public_key_pem, name, device_id, revoked_at;
+        nlohmann::json binding_attestation;
         std::uint32_t sign_count = 0;
     };
     struct OAuthCredential {

@@ -85,9 +85,9 @@ attempt in the signed audit stream.
 | Table | Purpose |
 |---|---|
 | `identity_documents` | Verified TAAP/1 document and SHA-512/256 digest for each user. |
-| `credentials` | Pool-scoped password, TOTP, passkey, OAuth, or admin proof; secrets are hashed or encrypted. |
+| `credentials` | Pool-scoped password, TOTP, passkey, OAuth, or admin proof; secrets are hashed or encrypted. Passkey public data carries its device link and lake-signed TAAP binding. |
 | `sessions` | Browser, API-token, static, or admin bearer hash; scopes, expiry, revocation, and last use. |
-| `devices` | Named user device and revocation state. |
+| `devices` | Named user device and revocation state; `list_devices` joins passkey binding data from its credential. |
 | `keystore` | Purpose-specific data key wrapped by the instance KEK. |
 | `oauth_providers` | Pool-scoped provider configuration and encrypted client secret. |
 | `identity_oauth_flows` | Five-minute, one-use OAuth state, encrypted PKCE verifier, nonce, and initiating device. |
