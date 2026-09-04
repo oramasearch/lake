@@ -1,5 +1,6 @@
 #include "lake/api/registry.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 
@@ -9,21 +10,22 @@
 namespace lake::api {
 
 ApiResult ApiResult::success(nlohmann::json output) {
-    ApiResult result;
-    result.ok = true;
-    result.value = std::move(output);
-    return result;
+  ApiResult result;
+  result.ok = true;
+  result.value = std::move(output);
+  return result;
 }
 
-ApiResult ApiResult::failure(std::string code, std::string message, std::string path) {
-    ApiResult result;
-    result.ok = false;
-    result.error = ApiError{std::move(code), std::move(message), std::move(path)};
-    return result;
+ApiResult ApiResult::failure(std::string code, std::string message,
+                             std::string path) {
+  ApiResult result;
+  result.ok = false;
+  result.error = ApiError{std::move(code), std::move(message), std::move(path)};
+  return result;
 }
 
 std::string_view to_string(CapabilityKind kind) {
-    return kind == CapabilityKind::Read ? "read" : "action";
+  return kind == CapabilityKind::Read ? "read" : "action";
 }
 
 namespace {
@@ -71,7 +73,15 @@ ApiResult validate_input(const Capability &capability, const nlohmann::json &inp
                                       "/" + it.key());
         }
     }
-    return ApiResult::success(nullptr);
+    if (it.value().is_null())
+      continue;
+    const std::string type = properties[it.key()].value("type", "");
+    if (!type.empty() && !matches_type(it.value(), type)) {
+      return ApiResult::failure(
+          "invalid_input", it.key() + " must be a " + type, "/" + it.key());
+    }
+  }
+  return ApiResult::success(nullptr);
 }
 
 bool Registry::add(Capability capability) {

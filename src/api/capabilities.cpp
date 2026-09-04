@@ -6,6 +6,7 @@
 #include "lake/audit/audit.hpp"
 
 #include "lake/control/handles.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::api {

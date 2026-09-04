@@ -3,6 +3,12 @@
 // errors map to the store's error codes.
 #include "lake/control/postgres_store.hpp"
 
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <chrono>
+#include <cstdint>
+#include <format>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -13,6 +19,8 @@
 #include "lake/control/policy.hpp"
 
 namespace lake::control {
+
+namespace identity_crypto {
 namespace {
 
 std::optional<std::string> nullable(const std::string &s) {

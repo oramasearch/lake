@@ -45,6 +45,32 @@ per application audience with a JWKS endpoint, and lifecycle webhooks. Nothing i
 core is written twice; the application-facing surface is the follow-up epic (#51) and every
 identity-core issue keeps `pool_id` on its tables and in its capability inputs from the start.
 
+### Identity-core security decisions
+
+- A person's TAAP private key never reaches lake. The client holds it. lake stores identity
+  documents and rotation chains and verifies their signatures. A WebAuthn credential is the
+  browser device key; lake records lake's signed binding from credential id to the user's TAAP
+  identity after an attestation-less registration, then issues a session only after a successful
+  assertion. lake #18 owns lake's instance identity: it is generated on first start, its seed is
+  wrapped by the instance KEK (or provided as `LAKE_IDENTITY_SEED`), and its public document is
+  exposed at `GET /v1/identity`.
+- TOTP seeds, OAuth client secrets, and recovery codes are encrypted with AES-256-GCM under a
+  purpose-specific data key. `keystore(purpose, wrapped_key, version)` holds those keys wrapped
+  by the instance KEK; #24/#25 generalise the table and its lifecycle.
+- Passwords use OpenSSL 3.2+ `EVP_KDF` `ARGON2ID`; lake's current build uses OpenSSL 3.6.3 with
+  64 MiB memory, three iterations, and one lane. An older build must use the documented scrypt
+  fallback until its OpenSSL is upgraded.
+- OAuth providers are registered per pool with issuer, client id, encrypted client secret and
+  scopes. The authorization-code flow uses PKCE and callback
+  `https://<LAKE_PUBLIC_HOST>/v1/oauth/<provider>/callback`; Google id tokens are verified against
+  cached issuer JWKS, while GitHub uses its authenticated user endpoint. The first providers are
+  GitHub and Google.
+- `LAKE_PUBLIC_HOST` is required for WebAuthn RP ID and OAuth callback construction. Each pool
+  configures its allowed origins. Registration and assertion challenges live in
+  `identity_webauthn_challenges`, expire after five minutes, and are consumed once. The accepted
+  registration attestation format is `none`; assertions verify the stored public key and sign
+  counter.
+
 ## Authorisation: one policy engine, one object graph
 
 Repository, drive and platform permissions are three surfaces over one engine. The object graph
