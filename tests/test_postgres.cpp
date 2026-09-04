@@ -83,6 +83,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     context.authorized = true;
     context.acting_identity = "admin";
     context.request_id = "postgres-integration";
+    context.instance_kek = "postgres-test-instance-kek";
     auto call = [&](const std::string &name, json input = json::object()) {
         return registry.call(name, input, context);
     };

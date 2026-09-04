@@ -20,7 +20,11 @@ credential resolution in place of the single admin token (lake #4), repositories
 once liquid Phase 1 lands, incremental migrations (operator #126). The codebase also includes
 organization administration, one policy engine, migration `0004`, and pages for organizations,
 teams, members, invitations, grants and effective access; those are not yet deployed in the
-production state above.
+production state above. It also includes the signed, hash-linked audit stream (one event per
+capability call, sign-in and session event, recorded by `Registry::call` and the session routes),
+the lake TAAP identity with rotation, audit verification and export, the 400-day retention
+floor, migration `0005`, and the `/audit` page; `LAKE_INSTANCE_KEK` is required wherever a
+Postgres store runs.
 
 ## Where to read Zetta
 

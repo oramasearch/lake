@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/audit/audit.hpp"
+
 // The control-plane store: users and organizations (identity), customers (the
 // tenant that owns everything). One interface, two implementations — Postgres
 // (production, the schema in db/schema.sql) and in-memory (tests, local demos).
@@ -157,6 +159,17 @@ class Store {
     virtual Result<std::vector<Grant>>
     list_grants(const std::vector<std::string> &object_ids,
                 const std::optional<std::string> &principal_taap_id, int limit) = 0;
+
+    virtual audit::Result<audit::Identity> current_lake_identity() = 0;
+    virtual audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string &taap_id) = 0;
+    virtual audit::Result<void> create_lake_identity(const audit::Identity &identity) = 0;
+    virtual audit::Result<void> rotate_lake_identity(const audit::Identity &previous,
+                                                     const audit::Identity &replacement) = 0;
+
+    virtual Result<void> append_audit_event(const audit::Event &event) = 0;
+    virtual Result<audit::Event> latest_audit_event() = 0;
+    virtual Result<std::vector<audit::Event>> list_audit_events(const audit::Filter &filter) = 0;
+    virtual Result<void> set_audit_retention_days(const std::string &customer_id, int days) = 0;
 };
 
 } // namespace lake::control

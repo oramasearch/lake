@@ -44,7 +44,13 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role, TAAP evidence | grant(s) | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
-| `search` | read | `query`, `customer?`, `repository?`, `ref?`, `limit?` | `{items: [hit]}` | [search.md](search.md) |
+| `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
+| `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
+| `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?` | `{items: [audit event]}` | [audit.md](audit.md) |
+| `export_audit` | read | audit filters | `{jsonl}` | [audit.md](audit.md) |
+| `verify_audit` | read | — | `{verified: true}` | [audit.md](audit.md) |
+| `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days}` | [audit.md](audit.md) |
+| `search` | read | `query`, `customer?`, `repository?`, `ref?`, `limit?` | `{items: [ranked hit]}` | [search.md](search.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
@@ -56,8 +62,8 @@ from the registry.
 2. `snake_case` name, verb-first for actions, noun-first for reads; input schema with
    `properties`, `required`, `additionalProperties: false`; an output schema for the value.
 3. Name the authorization object and action and provide the resolver that maps validated input to
-   the object id. `Registry::call` rejects protected capabilities missing this metadata. A
-   candidate-returning capability may instead declare its batched authorization and invoke
+   the object id. `Registry::call` rejects protected capabilities missing this metadata.
+   A candidate-returning capability may instead declare its batched authorization and invoke
    `authorize_batch` before it returns any candidate.
 4. Register it in `src/api/capabilities.cpp`. It appears on REST, in OpenAPI and as an MCP tool
    automatically; `test_api.cpp`'s OpenAPI test proves it.

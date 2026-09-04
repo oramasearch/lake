@@ -65,9 +65,9 @@ Anonymous search, including search of public repositories, is intentionally unav
 registry rejects an unauthenticated request before the query executes. Search therefore satisfies
 #40's query-time filtering and anonymous-public-read decision.
 
-Search does not yet write `audit_events`: the table and control-store writer are owned by #18 and
-are absent from the current schema. When #18 lands, `search` calls must write its documented event
-shape for query execution and publication.
+Every REST, MCP, and server-rendered-page search call passes through `Registry::call`, which writes
+one signed `audit_events` record for the query outcome. Publication will be recorded by the push
+capability when its lifecycle hook publishes a change.
 
 ## Verify
 

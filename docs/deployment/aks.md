@@ -23,6 +23,24 @@ state and the runbook; the CR's field reference is the operator's `docs/crd-refe
 `lake.live` is not wired yet: it needs a Cloudflare zone token Secret for that zone in the
 `lake` namespace (bridge issue #5).
 
+## Audit identity deployment
+
+The audit stream signs every event with lake's own TAAP/1 Ed25519 identity. The deployment
+provides `LAKE_IDENTITY_SEED` as a base64 32-byte Secret value when an operator-managed identity
+is available. Lake uses that Secret directly and does not copy it into the control database. When
+it is absent, lake generates a seed at first start and stores it only as AES-256-GCM ciphertext in
+the control database. `LAKE_INSTANCE_KEK` is the customer-independent key-encryption key for that
+ciphertext and must be supplied as a separate Secret value; it never appears in an API response,
+audit event, pod argument, or log line.
+
+`rotate_identity` creates a generated successor identity, so retain `LAKE_INSTANCE_KEK` even when
+`LAKE_IDENTITY_SEED` supplies the current identity.
+
+The audit migration (`0005_audit`) is subject to the Phase 6 operator waiver: lake carries the
+source schema now, while the operator's vendored schema, guard table, and Secret projection land
+once per completed wave in a separate operator pull request. Until that PR is deployed, do not
+enable audit on an existing production Lake with a schema guard older than `audit_events`.
+
 ## Runbook
 
 **Roll a new lake image.** Release an immutable CI-built image (see
@@ -74,6 +92,13 @@ kubectl wait lake/<name> --for=jsonpath='{.status.schemaPhase}'=Applied --timeou
 `curl -H "Authorization: Bearer $T" https://<host>/v1/list_repositories`, and the sign-in form at
 `/login` with the same token opens `/repositories`. The manager logs filtered on
 `"controller": "lake"` show reconcile errors.
+
+After the audit migration and identity Secrets are present, verify the identity and chain:
+
+```sh
+curl https://<host>/v1/identity
+curl -H "Authorization: Bearer $T" https://<host>/v1/verify_audit
+```
 
 **Delete.** `kubectl delete lake <name>` removes everything it owns, including the CNPG cluster
 and **its data**; the namespace is not owned and stays.
