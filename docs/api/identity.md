@@ -54,15 +54,11 @@ consumed on their first completion attempt.
 so an assertion cannot cross pool or origin. Additional pool-origin configuration belongs to the
 user-pools work in #51.
 
-Password sign-up requires the client-held TAAP/1 document as `identity_document`. The document is
-JSON with a `payload` object (`id` and base64 Ed25519 `public_key`) and a base64 `signature` over
-the canonical JSON encoding of `payload`. lake verifies that self-signature, hashes the complete
-document with SHA-512/256, writes `identity_documents`, and binds the resulting `taap_id` to the
-new user. lake never receives a person's private key.
-
-The TAAP decoder and verifier are a temporary local copy of liquid's identity rules. It is limited
-to this boundary and will be replaced with liquid's public typed document codec when liquid #162
-lands; Zetta source is not used or copied.
+Password sign-up requires the client-held TAAP/1 document as a base64url-encoded canonical-CBOR
+`identity_document`. lake decodes and verifies its self-signature through libliquid's public
+`decode_identity_document`, `encode_identity_document`, and `verify_document` APIs, hashes the
+complete canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting
+`taap_id` to the new user. lake never receives a person's private key.
 
 ## Why
 

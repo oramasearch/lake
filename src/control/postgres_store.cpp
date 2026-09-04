@@ -29,6 +29,8 @@
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 
+#include <liquid/identity.hpp>
+
 #include "lake/control/identity_crypto.hpp"
 
 #include <pqxx/pqxx>
@@ -719,25 +721,36 @@ std::optional<std::vector<unsigned char>> decode_hex(std::string_view value) {
     return result;
 }
 
-std::optional<std::vector<unsigned char>> decode_base64(std::string_view value) {
-    if (value.empty() || value.size() % 4 != 0) {
+std::optional<std::vector<std::byte>> decode_base64url(std::string_view value) {
+    if (value.empty()) {
         return std::nullopt;
     }
-    std::vector<unsigned char> result((value.size() / 4) * 3);
-    const int count = EVP_DecodeBlock(result.data(),
-                                      reinterpret_cast<const unsigned char*>(value.data()),
-                                      static_cast<int>(value.size()));
+    std::string padded(value);
+    std::replace(padded.begin(), padded.end(), '-', '+');
+    std::replace(padded.begin(), padded.end(), '_', '/');
+    while (padded.size() % 4 != 0) {
+        padded.push_back('=');
+    }
+    std::vector<unsigned char> decoded((padded.size() / 4) * 3);
+    const int count = EVP_DecodeBlock(decoded.data(),
+                                      reinterpret_cast<const unsigned char*>(padded.data()),
+                                      static_cast<int>(padded.size()));
     if (count < 0) {
         return std::nullopt;
     }
     std::size_t padding = 0;
-    if (value.ends_with('=')) {
+    if (padded.ends_with('=')) {
         ++padding;
     }
-    if (value.size() > 1 && value[value.size() - 2] == '=') {
+    if (padded.size() > 1 && padded[padded.size() - 2] == '=') {
         ++padding;
     }
-    result.resize(static_cast<std::size_t>(count) - padding);
+    decoded.resize(static_cast<std::size_t>(count) - padding);
+    std::vector<std::byte> result;
+    result.reserve(decoded.size());
+    for (const unsigned char byte : decoded) {
+        result.push_back(static_cast<std::byte>(byte));
+    }
     return result;
 }
 
@@ -2019,7 +2032,7 @@ public:
                                in.display_name);
             const std::string user_id = user_rows[0][0].as<std::string>();
             tx.exec_params("INSERT INTO identity_documents (user_id, document, "
-                           "document_hash) VALUES ($1::uuid, $2::jsonb, $3)",
+                           "document_hash) VALUES ($1::uuid, to_jsonb($2::text), $3)",
                            user_id,
                            identity->document,
                            identity->hash);
@@ -2267,7 +2280,7 @@ public:
                                       in.display_name);
                 user_id = rows[0][0].as<std::string>();
                 tx.exec_params("INSERT INTO identity_documents (user_id, document, "
-                               "document_hash) VALUES ($1::uuid, $2::jsonb, $3)",
+                               "document_hash) VALUES ($1::uuid, to_jsonb($2::text), $3)",
                                user_id,
                                identity->document,
                                identity->hash);
@@ -2548,48 +2561,27 @@ private:
     }
 
     Result<VerifiedIdentityDocument> verify_identity_document(std::string_view serialized) const {
-        // Temporary TAAP decoder and verifier copied from liquid's identity rules.
-        // Replace this bridge with liquid's public document codec from liquid #162
-        // as soon as that API is available; do not extend it here.
-        try {
-            const nlohmann::json document = nlohmann::json::parse(serialized);
-            if (!document.contains("payload") || !document.contains("signature") ||
-                !document["payload"].is_object() || !document["signature"].is_string()) {
-                return std::unexpected(StoreError{
-                    "invalid_input", "TAAP identity document needs payload and signature"});
-            }
-            const nlohmann::json& payload = document["payload"];
-            const std::string identifier = payload.value("id", "");
-            const auto key = decode_base64(payload.value("public_key", ""));
-            const auto signature = decode_base64(document["signature"].get<std::string>());
-            if (!identifier.starts_with("taap:1:ed25519:") || !key || key->size() != 32 ||
-                !signature || signature->size() != 64) {
-                return std::unexpected(
-                    StoreError{"invalid_input", "TAAP identity document is malformed"});
-            }
-            EVP_PKEY* verification_key =
-                EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, key->data(), key->size());
-            EVP_MD_CTX* context = EVP_MD_CTX_new();
-            if (verification_key == nullptr || context == nullptr) {
-                EVP_PKEY_free(verification_key);
-                EVP_MD_CTX_free(context);
-                return std::unexpected(
-                    StoreError{"store_error", "could not allocate TAAP verification context"});
-            }
-            const std::string canonical_payload = payload.dump();
-            const int verified =
-                EVP_DigestVerifyInit(context, nullptr, nullptr, nullptr, verification_key) &&
-                EVP_DigestVerify(context,
-                                 signature->data(),
-                                 signature->size(),
-                                 reinterpret_cast<const unsigned char*>(canonical_payload.data()),
-                                 canonical_payload.size());
-            EVP_MD_CTX_free(context);
-            EVP_PKEY_free(verification_key);
-            if (verified != 1) {
-                return std::unexpected(
-                    StoreError{"invalid_input", "TAAP identity document signature is invalid"});
-            }
+        const auto encoded = decode_base64url(serialized);
+        if (!encoded) {
+            return std::unexpected(
+                StoreError{"invalid_input", "TAAP identity document must be base64url CBOR"});
+        }
+        const auto document = liquid::decode_identity_document(*encoded);
+        if (!document) {
+            return std::unexpected(
+                StoreError{"invalid_input", "TAAP identity document is invalid canonical CBOR"});
+        }
+        const auto verified = liquid::verify_document(*document);
+        if (!verified || !*verified) {
+            return std::unexpected(
+                StoreError{"invalid_input", "TAAP identity document signature is invalid"});
+        }
+        const auto canonical = liquid::encode_identity_document(*document);
+        if (!canonical || *canonical != *encoded) {
+            return std::unexpected(
+                StoreError{"invalid_input", "TAAP identity document is not canonical"});
+        }
+        {
             EVP_MD* algorithm = EVP_MD_fetch(nullptr, "SHA512-256", nullptr);
             EVP_MD_CTX* digest_context = EVP_MD_CTX_new();
             std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
@@ -2597,7 +2589,7 @@ private:
             const int hashed =
                 algorithm != nullptr && digest_context != nullptr &&
                 EVP_DigestInit_ex(digest_context, algorithm, nullptr) &&
-                EVP_DigestUpdate(digest_context, serialized.data(), serialized.size()) &&
+                EVP_DigestUpdate(digest_context, canonical->data(), canonical->size()) &&
                 EVP_DigestFinal_ex(digest_context, digest.data(), &digest_size);
             EVP_MD_CTX_free(digest_context);
             EVP_MD_free(algorithm);
@@ -2605,11 +2597,9 @@ private:
                 return std::unexpected(
                     StoreError{"store_error", "could not hash TAAP identity document"});
             }
-            return VerifiedIdentityDocument{
-                identifier, std::string(serialized), hex_bytes(digest.data(), digest_size)};
-        } catch (const nlohmann::json::exception&) {
-            return std::unexpected(
-                StoreError{"invalid_input", "TAAP identity document is not JSON"});
+            return VerifiedIdentityDocument{document->subject.taap_id,
+                                            std::string(serialized),
+                                            hex_bytes(digest.data(), digest_size)};
         }
     }
 

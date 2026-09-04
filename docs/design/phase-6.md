@@ -22,8 +22,7 @@ Identity-core status on this branch: verified TAAP documents, password plus TOTP
 WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
 hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use those capabilities.
 The signed audit substrate from #18 is integrated. A distinct signed passkey-binding attestation
-is deferred, the temporary TAAP decoder remains tracked by liquid #162, and application user pools
-remain owned by #51.
+is deferred, and application user pools remain owned by #51.
 
 ## Identity: one substrate, three principals
 
@@ -64,8 +63,7 @@ identity-core issue keeps `pool_id` on its tables and in its capability inputs f
   first start, its seed is wrapped by the instance KEK (or provided as `LAKE_IDENTITY_SEED`), and
   its public document is exposed at `GET /v1/identity`. Identity capabilities and the OAuth
   callback write through its signed audit stream.
-  The temporary TAAP document decoder in lake is replaced with liquid's public identity-document
-  codec when liquid #162 lands; lake then verifies only through libliquid.
+  lake verifies identity documents through libliquid's public canonical-CBOR codec.
 - TOTP seeds and OAuth client secrets are encrypted with AES-256-GCM under a
   purpose-specific data key. `keystore(purpose, wrapped_key, version)` holds those keys wrapped
   by the instance KEK; #24/#25 generalise the table and its lifecycle.

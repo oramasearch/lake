@@ -32,7 +32,7 @@ Lake links libliquid as a library-only submodule and opens one customer store at
 the public repository/store binding and protocol codec required by lake's server. Identity core
 adds migration `0007_identity_core`, verified TAAP documents, password plus TOTP, persisted
 WebAuthn, OAuth, row-resolved sessions, scoped tokens, device revocation, and the hosted identity
-pages. The temporary TAAP document codec is tracked by liquid #162.
+pages. Identity documents are verified through libliquid's public canonical-CBOR codec.
 
 ## Where to read Zetta
 
