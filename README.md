@@ -43,7 +43,8 @@ liquid is the tool. lake is where it collects.
 > registry records every operation, including mount-grant denials, and the secrets pages expose
 > metadata without rendering protected values or key material.
 > Customer PKI adds private root and online-intermediate authorities, SPIFFE X.509 and JWT SVIDs,
-> client and device certificates, and a customer-scoped RFC 8555 ACME HTTP-01 order flow. ACME
+> client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555
+> ACME HTTP-01 order flow. ACME
 > requests use one-use nonces and ES256 account JWS, and finalization signs the submitted CSR key.
 
 ## Build and run

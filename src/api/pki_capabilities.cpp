@@ -252,6 +252,67 @@ void register_pki_capabilities(Registry& registry) {
                                            {"chain_pem", certificate->chain_pem}});
             }});
     }
+    for (const auto& [name, title, host] :
+         std::array<std::tuple<std::string, std::string, bool>, 2>{
+             {{"issue_ssh_user_certificate", "Issue SSH user certificate", false},
+              {"issue_ssh_host_certificate", "Issue SSH host certificate", true}}}) {
+        registry.add(Capability{
+            .name = name,
+            .title = title,
+            .description = "Issue a short-lived OpenSSH certificate for an Ed25519 public key.",
+            .input_schema =
+                {{"type", "object"},
+                 {"properties",
+                  {{"customer_id", {{"type", "string"}}},
+                   {"public_key", {{"type", "string"}}},
+                   {"key_id", {{"type", "string"}}},
+                   {"principals",
+                    {{"type", "array"}, {"items", {{"type", "string"}}}, {"minItems", 1}}},
+                   {"lifetime_seconds", {{"type", "integer"}}}}},
+                 {"required", json::array({"customer_id", "public_key", "key_id", "principals"})},
+                 {"additionalProperties", false}},
+            .output_schema = {{"type", "object"},
+                              {"properties",
+                               {{"certificate", {{"type", "string"}}},
+                                {"ca_public_key", {{"type", "string"}}},
+                                {"serial", {{"type", "integer"}}}}}},
+            .kind = CapabilityKind::Action,
+            .object = "customer",
+            .action = "admin",
+            .resolve_object = customer_object,
+            .handler = [host](const json& input, ApiContext& context) {
+                if (!context.pki || !context.store) {
+                    return no_pki();
+                }
+                std::vector<std::string> principals;
+                for (const json& principal : input.at("principals")) {
+                    if (!principal.is_string()) {
+                        return ApiResult::failure(
+                            "invalid_input", "SSH principals must be strings", "/principals");
+                    }
+                    principals.push_back(principal.get<std::string>());
+                }
+                auto certificate =
+                    context.pki->issue_ssh_certificate(*context.store,
+                                                       input.at("customer_id").get<std::string>(),
+                                                       input.at("public_key").get<std::string>(),
+                                                       input.at("key_id").get<std::string>(),
+                                                       principals,
+                                                       host,
+                                                       context.instance_kek,
+                                                       input.value("lifetime_seconds", 3600));
+                if (!certificate) {
+                    return from_pki_error(certificate.error());
+                }
+                context.audit_customer_id = input.at("customer_id").get<std::string>();
+                context.audit_kind = "certificate";
+                context.audit_object = std::string(host ? "ssh-host/" : "ssh-user/") +
+                                       input.at("key_id").get<std::string>();
+                return ApiResult::success({{"certificate", certificate->certificate},
+                                           {"ca_public_key", certificate->ca_public_key},
+                                           {"serial", certificate->serial}});
+            }});
+    }
     registry.add(
         Capability{.name = "acme_new_account",
                    .title = "Create ACME account",

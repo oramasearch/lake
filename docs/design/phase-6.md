@@ -246,9 +246,9 @@ versioned static-secret lifecycle, named key rotation, encrypt/decrypt/rewrap, E
 HMAC-SHA-256, stored child-key derivation and customer-KEK rotation. The API, authorization,
 signed audit fields and pages are documented in [`../api/secrets.md`](../api/secrets.md) and
 [`../api/encryption.md`](../api/encryption.md). PKI authority custody, SPIFFE X.509 and JWT SVIDs,
-client and device profiles, and the customer-scoped RFC 8555 ACME HTTP-01 flow are implemented on
-the #26 branch. SSH certificates, durable caller records, federation integration, and durable
-recovery ceremonies remain in #26–#28.
+client and device profiles, OpenSSH user and host certificates, and the customer-scoped RFC 8555
+ACME HTTP-01 flow are implemented on the #26 branch. Durable caller records, federation
+integration, and durable recovery ceremonies remain in #26–#28.
 
 ## The forge, the drive, models, metering, migration
 

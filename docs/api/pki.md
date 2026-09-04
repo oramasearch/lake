@@ -14,6 +14,12 @@ contains a newly generated workload private key; Lake does not persist that leaf
 `issue_client_certificate` and `issue_device_certificate` issue the same short-lived chain for a
 named client or device subject.
 
+`issue_ssh_user_certificate` and `issue_ssh_host_certificate` accept an Ed25519 OpenSSH public
+key, a key ID, one or more principals, and an optional lifetime. Lake returns a native OpenSSH
+certificate plus the customer CA public key. The online P-256 intermediate signs both profiles;
+the root stays offline, the caller's private key never enters Lake, and lifetimes cannot exceed
+one hour.
+
 ## ACME
 
 Each customer has an RFC 8555 directory at `GET /acme/<customer-id>/directory`. It advertises
@@ -48,11 +54,11 @@ that material to the customer key store and registry.
 ## How to verify
 
 The PKI integration suite creates a customer authority, verifies an SVID against its root and
-intermediate chain, and runs a minimal ES256 ACME client against a live lake server. The client
+intermediate chain, and parses issued user and host certificates with `ssh-keygen -L`. It also
+runs a minimal ES256 ACME client against a live lake server. The client
 gets a nonce, creates an account and order, reads Lake's HTTP-01 response, answers the challenge,
-submits a signed CSR, polls the order, and downloads the certificate chain. The SSH profile test
-presents its certificate to a test server. The suite also confirms issuance and renewal create
-audit events.
+submits a signed CSR, polls the order, and downloads the certificate chain. The suite also
+confirms issuance and renewal create audit events.
 
 ## How to change
 

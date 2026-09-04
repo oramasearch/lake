@@ -11,6 +11,7 @@
 
 #include <openssl/bio.h>
 #include <openssl/bn.h>
+#include <openssl/core_names.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -136,6 +137,78 @@ Result<std::vector<unsigned char>> base64url_decode(std::string value) {
     }
     decoded.resize(static_cast<std::size_t>(written) - padding);
     return decoded;
+}
+
+Result<std::string> base64_encode(const std::vector<unsigned char>& value) {
+    if (value.empty()) {
+        return std::string{};
+    }
+    std::string encoded(4 * ((value.size() + 2) / 3), '\0');
+    const int written = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()),
+                                        value.data(),
+                                        static_cast<int>(value.size()));
+    if (written < 0) {
+        return std::unexpected(crypto_error("could not encode OpenSSH value"));
+    }
+    encoded.resize(static_cast<std::size_t>(written));
+    return encoded;
+}
+
+void append_u32(std::vector<unsigned char>& output, std::uint32_t value) {
+    output.push_back(static_cast<unsigned char>(value >> 24));
+    output.push_back(static_cast<unsigned char>(value >> 16));
+    output.push_back(static_cast<unsigned char>(value >> 8));
+    output.push_back(static_cast<unsigned char>(value));
+}
+
+void append_u64(std::vector<unsigned char>& output, std::uint64_t value) {
+    append_u32(output, static_cast<std::uint32_t>(value >> 32));
+    append_u32(output, static_cast<std::uint32_t>(value));
+}
+
+void append_ssh_string(std::vector<unsigned char>& output,
+                       const unsigned char* value,
+                       std::size_t size) {
+    append_u32(output, static_cast<std::uint32_t>(size));
+    output.insert(output.end(), value, value + size);
+}
+
+void append_ssh_string(std::vector<unsigned char>& output, std::string_view value) {
+    append_ssh_string(output, reinterpret_cast<const unsigned char*>(value.data()), value.size());
+}
+
+void append_ssh_string(std::vector<unsigned char>& output,
+                       const std::vector<unsigned char>& value) {
+    append_ssh_string(output, value.data(), value.size());
+}
+
+Result<std::string_view> read_ssh_string(std::string_view& input) {
+    if (input.size() < 4) {
+        return std::unexpected(Error{"invalid_input", "OpenSSH public key is truncated"});
+    }
+    const auto* bytes = reinterpret_cast<const unsigned char*>(input.data());
+    const std::uint32_t size = (static_cast<std::uint32_t>(bytes[0]) << 24) |
+                               (static_cast<std::uint32_t>(bytes[1]) << 16) |
+                               (static_cast<std::uint32_t>(bytes[2]) << 8) |
+                               static_cast<std::uint32_t>(bytes[3]);
+    input.remove_prefix(4);
+    if (size > input.size()) {
+        return std::unexpected(Error{"invalid_input", "OpenSSH public key is truncated"});
+    }
+    const std::string_view value = input.substr(0, size);
+    input.remove_prefix(size);
+    return value;
+}
+
+std::vector<unsigned char> ssh_mpint(const BIGNUM* value) {
+    std::vector<unsigned char> output(static_cast<std::size_t>(BN_num_bytes(value)));
+    if (!output.empty()) {
+        BN_bn2bin(value, output.data());
+    }
+    if (!output.empty() && (output.front() & 0x80) != 0) {
+        output.insert(output.begin(), 0);
+    }
+    return output;
 }
 
 Result<Pkey> new_p256_key() {
@@ -747,6 +820,128 @@ Result<void> verify_jwt_svid(const Authority& authority, const JwtSvid& svid) {
     return {};
 }
 
+Result<SshCertificate> issue_ssh_certificate(const Authority& authority,
+                                             std::string_view public_key,
+                                             std::string_view key_id,
+                                             const std::vector<std::string>& principals,
+                                             bool host,
+                                             int lifetime_seconds) {
+    if (key_id.empty() || principals.empty() || lifetime_seconds <= 0 || lifetime_seconds > 3600) {
+        return std::unexpected(Error{
+            "invalid_input", "SSH key id, principals, and a lifetime up to one hour are required"});
+    }
+    if (std::ranges::any_of(principals, [](const std::string& value) { return value.empty(); })) {
+        return std::unexpected(Error{"invalid_input", "SSH principals must not be empty"});
+    }
+    const std::size_t algorithm_end = public_key.find(' ');
+    const std::size_t encoded_end =
+        public_key.find(' ', algorithm_end == std::string_view::npos ? 0 : algorithm_end + 1);
+    if (algorithm_end == std::string_view::npos ||
+        public_key.substr(0, algorithm_end) != "ssh-ed25519") {
+        return std::unexpected(
+            Error{"invalid_input", "SSH certificate subjects must use an Ed25519 public key"});
+    }
+    const std::string encoded_key(public_key.substr(algorithm_end + 1,
+                                                    encoded_end == std::string_view::npos
+                                                        ? std::string_view::npos
+                                                        : encoded_end - algorithm_end - 1));
+    auto decoded_key = base64url_decode(encoded_key);
+    if (!decoded_key) {
+        return std::unexpected(decoded_key.error());
+    }
+    std::string_view key_blob(reinterpret_cast<const char*>(decoded_key->data()),
+                              decoded_key->size());
+    auto key_algorithm = read_ssh_string(key_blob);
+    auto key_value = read_ssh_string(key_blob);
+    if (!key_algorithm || !key_value || *key_algorithm != "ssh-ed25519" ||
+        key_value->size() != 32 || !key_blob.empty()) {
+        return std::unexpected(Error{"invalid_input", "Ed25519 public key is malformed"});
+    }
+
+    auto signing_key = private_key_from_pem(authority.intermediate_private_key_pem);
+    if (!signing_key) {
+        return std::unexpected(signing_key.error());
+    }
+    std::array<unsigned char, 65> ca_point{};
+    std::size_t ca_point_size = ca_point.size();
+    if (EVP_PKEY_get_octet_string_param(signing_key->get(),
+                                        OSSL_PKEY_PARAM_PUB_KEY,
+                                        ca_point.data(),
+                                        ca_point.size(),
+                                        &ca_point_size) != 1 ||
+        ca_point_size != ca_point.size()) {
+        return std::unexpected(crypto_error("could not encode SSH CA public key"));
+    }
+    constexpr std::string_view ca_algorithm = "ecdsa-sha2-nistp256";
+    std::vector<unsigned char> ca_blob;
+    append_ssh_string(ca_blob, ca_algorithm);
+    append_ssh_string(ca_blob, "nistp256");
+    append_ssh_string(ca_blob, ca_point.data(), ca_point.size());
+
+    constexpr std::string_view certificate_algorithm = "ssh-ed25519-cert-v01@openssh.com";
+    std::array<unsigned char, 32> nonce{};
+    std::uint64_t serial = 0;
+    if (RAND_bytes(nonce.data(), nonce.size()) != 1 ||
+        RAND_bytes(reinterpret_cast<unsigned char*>(&serial), sizeof(serial)) != 1) {
+        return std::unexpected(crypto_error("could not create SSH certificate identifiers"));
+    }
+    std::vector<unsigned char> principal_blob;
+    for (const std::string& principal : principals) {
+        append_ssh_string(principal_blob, principal);
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    std::vector<unsigned char> certificate_blob;
+    append_ssh_string(certificate_blob, certificate_algorithm);
+    append_ssh_string(certificate_blob, nonce.data(), nonce.size());
+    append_ssh_string(certificate_blob,
+                      reinterpret_cast<const unsigned char*>(key_value->data()),
+                      key_value->size());
+    append_u64(certificate_blob, serial);
+    append_u32(certificate_blob, host ? 2 : 1);
+    append_ssh_string(certificate_blob, key_id);
+    append_ssh_string(certificate_blob, principal_blob);
+    append_u64(certificate_blob, static_cast<std::uint64_t>(now - 60));
+    append_u64(certificate_blob, static_cast<std::uint64_t>(now + lifetime_seconds));
+    append_ssh_string(certificate_blob, "");
+    append_ssh_string(certificate_blob, "");
+    append_ssh_string(certificate_blob, "");
+    append_ssh_string(certificate_blob, ca_blob);
+
+    auto raw_signature =
+        sign_jws(signing_key->get(),
+                 std::string_view(reinterpret_cast<const char*>(certificate_blob.data()),
+                                  certificate_blob.size()));
+    if (!raw_signature) {
+        return std::unexpected(raw_signature.error());
+    }
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> r(BN_bin2bn(raw_signature->data(), 32, nullptr),
+                                                  BN_free);
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> s(
+        BN_bin2bn(raw_signature->data() + 32, 32, nullptr), BN_free);
+    if (!r || !s) {
+        return std::unexpected(crypto_error("could not encode SSH certificate signature"));
+    }
+    std::vector<unsigned char> ecdsa_signature;
+    append_ssh_string(ecdsa_signature, ssh_mpint(r.get()));
+    append_ssh_string(ecdsa_signature, ssh_mpint(s.get()));
+    std::vector<unsigned char> signature_blob;
+    append_ssh_string(signature_blob, ca_algorithm);
+    append_ssh_string(signature_blob, ecdsa_signature);
+    append_ssh_string(certificate_blob, signature_blob);
+
+    auto encoded_certificate = base64_encode(certificate_blob);
+    auto encoded_ca = base64_encode(ca_blob);
+    if (!encoded_certificate || !encoded_ca) {
+        return std::unexpected(crypto_error("could not encode SSH certificate"));
+    }
+    return SshCertificate{std::string(certificate_algorithm) + " " + *encoded_certificate + " " +
+                              std::string(key_id),
+                          std::string(ca_algorithm) + " " + *encoded_ca + " lake-ssh-ca",
+                          serial};
+}
+
 Result<std::vector<ShamirShare>>
 split_secret(const std::vector<std::byte>& secret, int threshold, int share_count) {
     if (secret.empty() || threshold < 2 || share_count < threshold || share_count > 255) {
@@ -954,6 +1149,22 @@ Result<JwtSvid> Service::issue_jwt_svid(::lake::control::Store& store,
         return std::unexpected(authority.error());
     }
     return pki::issue_jwt_svid(*authority, spiffe_id, audience, lifetime_seconds);
+}
+
+Result<SshCertificate> Service::issue_ssh_certificate(::lake::control::Store& store,
+                                                      std::string_view customer_id,
+                                                      std::string_view public_key,
+                                                      std::string_view key_id,
+                                                      const std::vector<std::string>& principals,
+                                                      bool host,
+                                                      std::string_view instance_kek,
+                                                      int lifetime_seconds) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    return pki::issue_ssh_certificate(
+        *authority, public_key, key_id, principals, host, lifetime_seconds);
 }
 
 Result<RecoveryCeremony>

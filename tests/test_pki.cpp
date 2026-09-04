@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <string>
@@ -460,6 +463,81 @@ TEST(Pki, PersistsAuthorityKeysThroughTheCustomerKeystore) {
     ASSERT_TRUE(store.rotate_customer_kek(customer->id, instance_kek));
     EXPECT_TRUE(after_restart.issue_jwt_svid(
         store, customer->id, "spiffe://lake.test/persisted", "lake", instance_kek));
+}
+
+TEST(Pki, IssuesOpenSshUserAndHostCertificates) {
+    char directory_template[] = "/tmp/lake-ssh-XXXXXX";
+    const char* directory_value = mkdtemp(directory_template);
+    ASSERT_NE(directory_value, nullptr);
+    const std::filesystem::path directory(directory_value);
+    const std::filesystem::path key_path = directory / "subject";
+    const std::string generate_command = "ssh-keygen -q -t ed25519 -N '' -f " + key_path.string();
+    ASSERT_EQ(std::system(generate_command.c_str()), 0);
+    std::ifstream public_key_file(key_path.string() + ".pub");
+    std::string public_key;
+    ASSERT_TRUE(std::getline(public_key_file, public_key));
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::control::InMemoryStore store;
+    lake::control::pki::Service pki;
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.pki = &pki;
+    context.authorized = true;
+    context.acting_identity = "admin";
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const auto organization =
+        store.create_organization({"taap:1:ed25519:ssh", "SSH certificates", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto customer =
+        store.create_customer({"organization", "", organization->id, "ssh-certificates"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    ASSERT_TRUE(registry.call("create_pki_authority", {{"customer_id", customer->id}}, context).ok);
+
+    context.request_id.clear();
+    const auto user = registry.call("issue_ssh_user_certificate",
+                                    {{"customer_id", customer->id},
+                                     {"public_key", public_key},
+                                     {"key_id", "operator"},
+                                     {"principals", {"lake-admin"}}},
+                                    context);
+    ASSERT_TRUE(user.ok) << user.error.message;
+    context.request_id.clear();
+    const auto host = registry.call("issue_ssh_host_certificate",
+                                    {{"customer_id", customer->id},
+                                     {"public_key", public_key},
+                                     {"key_id", "lake-node"},
+                                     {"principals", {"lake.internal"}}},
+                                    context);
+    ASSERT_TRUE(host.ok) << host.error.message;
+
+    const std::filesystem::path user_certificate_path = directory / "user-cert.pub";
+    const std::filesystem::path host_certificate_path = directory / "host-cert.pub";
+    const std::filesystem::path user_output_path = directory / "user.txt";
+    const std::filesystem::path host_output_path = directory / "host.txt";
+    std::ofstream(user_certificate_path) << user.value.at("certificate").get<std::string>() << '\n';
+    std::ofstream(host_certificate_path) << host.value.at("certificate").get<std::string>() << '\n';
+    const std::string inspect_user =
+        "ssh-keygen -L -f " + user_certificate_path.string() + " > " + user_output_path.string();
+    const std::string inspect_host =
+        "ssh-keygen -L -f " + host_certificate_path.string() + " > " + host_output_path.string();
+    ASSERT_EQ(std::system(inspect_user.c_str()), 0);
+    ASSERT_EQ(std::system(inspect_host.c_str()), 0);
+    std::ifstream user_output_file(user_output_path);
+    std::ifstream host_output_file(host_output_path);
+    const std::string user_output((std::istreambuf_iterator<char>(user_output_file)),
+                                  std::istreambuf_iterator<char>());
+    const std::string host_output((std::istreambuf_iterator<char>(host_output_file)),
+                                  std::istreambuf_iterator<char>());
+    EXPECT_NE(user_output.find("user certificate"), std::string::npos);
+    EXPECT_NE(user_output.find("lake-admin"), std::string::npos);
+    EXPECT_NE(host_output.find("host certificate"), std::string::npos);
+    EXPECT_NE(host_output.find("lake.internal"), std::string::npos);
+    const auto event = store.latest_audit_event();
+    ASSERT_TRUE(event) << event.error().message;
+    EXPECT_EQ(event->draft.action, "issue_ssh_host_certificate");
+    std::filesystem::remove_all(directory);
 }
 
 TEST(Pki, AcmeClientCompletesHttp01OrderAndDownloadsCertificate) {

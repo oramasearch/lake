@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <map>
 #include <mutex>
@@ -40,6 +41,12 @@ struct JwtSvid {
     std::string token;
     std::string issuer;
     std::string subject;
+};
+
+struct SshCertificate {
+    std::string certificate;
+    std::string ca_public_key;
+    std::uint64_t serial = 0;
 };
 
 struct ShamirShare {
@@ -101,6 +108,12 @@ Result<JwtSvid> issue_jwt_svid(const Authority& authority,
                                std::string_view audience,
                                int lifetime_seconds = 900);
 Result<void> verify_jwt_svid(const Authority& authority, const JwtSvid& svid);
+Result<SshCertificate> issue_ssh_certificate(const Authority& authority,
+                                             std::string_view public_key,
+                                             std::string_view key_id,
+                                             const std::vector<std::string>& principals,
+                                             bool host,
+                                             int lifetime_seconds = 3600);
 
 Result<std::vector<ShamirShare>>
 split_secret(const std::vector<std::byte>& secret, int threshold, int share_count);
@@ -135,6 +148,14 @@ public:
                                    std::string_view audience,
                                    std::string_view instance_kek,
                                    int lifetime_seconds = 900);
+    Result<SshCertificate> issue_ssh_certificate(Store& store,
+                                                 std::string_view customer_id,
+                                                 std::string_view public_key,
+                                                 std::string_view key_id,
+                                                 const std::vector<std::string>& principals,
+                                                 bool host,
+                                                 std::string_view instance_kek,
+                                                 int lifetime_seconds = 3600);
     Result<RecoveryCeremony>
     begin_recovery(std::string_view customer_id, int threshold, int share_count);
     Result<RecoveryCeremony> begin_recovery(Store& store,
