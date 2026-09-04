@@ -25,8 +25,19 @@ state and the runbook; the CR's field reference is the operator's `docs/crd-refe
 
 ## Runbook
 
-**Roll a new lake image.** Build natively on amd64 (see [`../build/container-image.md`](../build/container-image.md)),
-push an immutable tag, then change `spec.image` on the Lake and apply; the Deployment rolls.
+**Roll a new lake image.** Release an immutable CI-built image (see
+[`../build/container-image.md`](../build/container-image.md)) by creating and pushing a
+Docker-compatible Git tag:
+
+```sh
+git tag <tag>
+git push origin <tag>
+```
+
+Wait for the GitHub Actions `image` workflow to publish `oramasearch/lake:<tag>`, then change
+`spec.image` on the Lake and apply; the Deployment rolls. Never deploy `latest` or an image pushed
+from a workstation. The workflow credentials and the manual retry path are documented in
+[`../build/ci.md`](../build/ci.md).
 
 **Roll the operator.** From the operator repo on the branch to deploy:
 
