@@ -56,6 +56,14 @@ struct RecoveryCeremony {
     std::vector<ShamirShare> shares;
 };
 
+struct AcmeOrder {
+    std::string id;
+    std::string customer_id;
+    std::string identifier;
+    std::string status;
+    std::string certificate_pem;
+};
+
 Result<Authority> create_authority(std::string_view customer_id);
 Result<X509Svid> issue_x509_svid(const Authority& authority,
                                  std::string_view spiffe_id,
@@ -118,12 +126,20 @@ public:
                               std::string_view instance_kek,
                               const RecoveryCeremony& ceremony,
                               const std::vector<ShamirShare>& shares);
+    Result<AcmeOrder> create_acme_order(Store& store,
+                                        std::string_view customer_id,
+                                        std::string_view identifier,
+                                        std::string_view instance_kek);
+    Result<AcmeOrder> authorize_acme_order(std::string_view order_id);
+    Result<AcmeOrder>
+    finalize_acme_order(Store& store, std::string_view order_id, std::string_view instance_kek);
 
 private:
     Result<Authority>
     load_authority(Store& store, std::string_view customer_id, std::string_view instance_kek);
     std::mutex mutex_;
     std::map<std::string, Authority> authorities_;
+    std::map<std::string, AcmeOrder> acme_orders_;
 };
 
 } // namespace lake::control::pki

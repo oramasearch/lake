@@ -855,4 +855,50 @@ Result<void> Service::recover_root(::lake::control::Store& store,
     return verify_recovered_root(*authority, ceremony, shares);
 }
 
+Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
+                                             std::string_view customer_id,
+                                             std::string_view identifier,
+                                             std::string_view instance_kek) {
+    if (identifier.empty() || identifier.find('.') == std::string_view::npos) {
+        return std::unexpected(Error{"invalid_input", "an ACME DNS identifier is required"});
+    }
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    std::lock_guard lock(mutex_);
+    AcmeOrder order{
+        new_uuid_v4(), std::string(customer_id), std::string(identifier), "pending", {}};
+    acme_orders_.emplace(order.id, order);
+    return order;
+}
+
+Result<AcmeOrder> Service::authorize_acme_order(std::string_view order_id) {
+    std::lock_guard lock(mutex_);
+    const auto order = acme_orders_.find(std::string(order_id));
+    if (order == acme_orders_.end()) {
+        return std::unexpected(Error{"not_found", "ACME order does not exist"});
+    }
+    order->second.status = "ready";
+    return order->second;
+}
+
+Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
+                                               std::string_view order_id,
+                                               std::string_view instance_kek) {
+    std::lock_guard lock(mutex_);
+    const auto order = acme_orders_.find(std::string(order_id));
+    if (order == acme_orders_.end() || order->second.status != "ready") {
+        return std::unexpected(Error{"invalid_input", "ACME order is not ready to finalize"});
+    }
+    auto certificate = issue_x509_certificate(
+        store, order->second.customer_id, order->second.identifier, instance_kek);
+    if (!certificate) {
+        return std::unexpected(certificate.error());
+    }
+    order->second.status = "valid";
+    order->second.certificate_pem = certificate->certificate_pem + certificate->chain_pem;
+    return order->second;
+}
+
 } // namespace lake::control::pki
