@@ -6,6 +6,7 @@ the same change (bridge `CLAUDE.md`, *Documentation is part of every change*). `
 
 | Topic | Files |
 |---|---|
+| [`design/`](design/) | [`phase-6.md`](design/phase-6.md) — the Phase 6 design: identity on TAAP with user pools, one policy engine over one object graph, the audit stream, repositories on Zetta with liquid's push and pull, search, secrets and PKI, the waves |
 | [`serving/`](serving/) | [`http.md`](serving/http.md) — the HTTP server: Beast2 on Capy/Corosio, routes, the trailing-404 rule, header stamping, log noise; [`telemetry.md`](serving/telemetry.md) — Prometheus metrics, health and readiness, request logs |
 | [`control-plane/`](control-plane/) | [`postgres.md`](control-plane/postgres.md) — the Postgres the operator provisions per Lake; [`schema.md`](control-plane/schema.md) — tables, the tenant model, how the schema is applied and changed |
 | [`deployment/`](deployment/) | [`aks.md`](deployment/aks.md) — `Lake/prod` on AKS: what exists, how it was built, how to roll, how to verify, what is not production-grade yet |
