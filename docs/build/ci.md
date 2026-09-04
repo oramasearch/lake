@@ -37,6 +37,19 @@ dependencies; lake's adapter and libliquid's sync client share that one Boost.HT
 includes the hash of `CMakeLists.txt`; a missing cache is valid and CMake downloads the dependencies
 again.
 
+Postgres-backed identity coverage uses `LAKE_TEST_DB_URI`. To run it locally, start the documented
+test database and apply the schema before the test command:
+
+```sh
+docker run --rm -d --name lake-test-postgres -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=lake_test -p 5432:5432 postgres:16
+until docker exec lake-test-postgres pg_isready -U postgres -d lake_test; do sleep 1; done
+docker exec -i lake-test-postgres psql -U postgres -d lake_test < db/schema.sql
+LAKE_TEST_DB_URI=postgresql://postgres:postgres@127.0.0.1:5432/lake_test \
+  ctest --test-dir build --output-on-failure -R PostgresIdentity
+docker stop lake-test-postgres
+```
+
 ## Tagged image workflow
 
 [`image.yml`](../../.github/workflows/image.yml) runs when any Git tag is pushed. It builds only
