@@ -28,7 +28,8 @@ Postgres store runs. Repository lifecycle adds migration `0006_repository_lifecy
 rename, transfer, visibility and tombstone capabilities, and lifecycle state on the repository
 page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
 Lake links libliquid as a library-only submodule and opens one customer store at
-`LAKE_STORE_ROOT/<customer id>/store`; push and pull wait for liquid #160's published contract.
+`LAKE_STORE_ROOT/<customer id>/store`; liquid #160's contract is pinned, while push and pull await
+the public repository/store binding and protocol codec required by lake's server.
 
 ## Where to read Zetta
 

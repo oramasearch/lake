@@ -38,14 +38,11 @@ option(LAKE_BUILD_TESTS "Build the test suite" ON)
 include(FetchContent)
 
 # -----------------------------------------------------------------------------
-# Vendored modules — libliquid is library-only and provides Capy and Corosio
-# to its consumers. http + beast2 remain lake's Zetta-shaped serving stack.
-# Order matters: liquid → OpenSSL → Boost core libs → http → beast2.
+# Vendored modules — libliquid is library-only and provides Capy, Corosio and
+# HTTP to its consumers. Beast2 remains lake's Zetta-shaped serving stack.
+# Order matters: OpenSSL → Boost core libs → liquid → beast2. liquid owns the
+# one HTTP target shared by its sync client and lake's server.
 # -----------------------------------------------------------------------------
-set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
-set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
-
 if(APPLE)
   list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/openssl@3)
 endif()
@@ -61,9 +58,9 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(boost_core_libs)
-set(BOOST_HTTP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(BOOST_HTTP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/http EXCLUDE_FROM_ALL)
+set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
 set(BOOST_BEAST2_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_BEAST2_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/beast2 EXCLUDE_FROM_ALL)
