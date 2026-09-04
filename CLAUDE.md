@@ -27,6 +27,10 @@ floor, migration `0005`, and the `/audit` page; `LAKE_INSTANCE_KEK` is required 
 Postgres store runs. Repository lifecycle adds migration `0006_repository_lifecycle`, repository
 rename, transfer, visibility and tombstone capabilities, and lifecycle state on the repository
 page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
+The codebase now also renders repository refs, trees, files, change logs, conflict values, and
+effective access; anonymous readers receive only public repositories. Change diffs and artifact
+records remain explicitly deferred until liquid #166 exposes their public APIs. These repository
+data pages are not part of the production state above.
 Lake links libliquid as a library-only submodule and opens one customer store at
 `LAKE_STORE_ROOT/<customer id>/store`; liquid #160's contract is pinned, while push and pull await
 the public repository/store binding and protocol codec required by lake's server. Identity core

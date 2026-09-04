@@ -16,6 +16,8 @@ envelope as `structuredContent` (and as text), with `isError` set.
 
 **Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
 the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
+Repository reads are the deliberate public-read exception: anonymous calls return only a public
+repository and its content; all other repository visibility levels remain protected.
 
 ## Operational routes
 
@@ -39,6 +41,9 @@ the lake `identity`, and the identity sign-up/sign-in entry capabilities documen
 | `create_customer` | action | `customer_type`, `user_id?`, `organization_id?`, `name?` | customer | [customers.md](customers.md) |
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
+| `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
+| `list_changes`, `get_change`, `list_conflicts` | read | repository id plus change id where required | change metadata or conflict values | [repositories.md](repositories.md) |
+| `get_artifact` | read | repository id, result id | result identity and liquid #166 deferred-data status | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
 | `refs`, `find_missing`, `push`, `pull` | read/action, reserved | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
@@ -48,6 +53,7 @@ the lake `identity`, and the identity sign-up/sign-in entry capabilities documen
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role, TAAP evidence | grant(s) | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
+| `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access]}` | [policy.md](policy.md) |
 | `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
 | `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
 | `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?` | `{items: [audit event]}` | [audit.md](audit.md) |

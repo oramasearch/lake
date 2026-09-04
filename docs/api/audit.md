@@ -72,3 +72,7 @@ The CI workflow provisions this database automatically.
 Add a new event kind without changing the meaning of an existing field. A canonical payload
 change requires a new event version, matching verifier support, and an update to the Phase 6
 event contract. New callers must use `audit::record` rather than writing `audit_events` directly.
+
+The audit implementation is compiled once into `lake-core`. Control-store implementations depend
+on that library for the provider-neutral audit API; they do not include its implementation source.
+This keeps the static-library link graph valid on ELF linkers as well as macOS.

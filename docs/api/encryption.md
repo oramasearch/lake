@@ -7,8 +7,9 @@ decrypt and verify.
 
 ## Capabilities
 
-All mount operations require `read` or `write` on the mount policy object. Customer KEK rotation
-requires `admin` on the customer.
+All mount operations require `read` or `write` on the mount policy object. `list_encryption_keys`
+authorizes its requested mount through `authorize_batch` before it returns any metadata. Customer
+KEK rotation requires `admin` on the customer.
 
 | Capability | Input | Result |
 |---|---|---|

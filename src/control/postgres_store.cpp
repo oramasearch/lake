@@ -4283,9 +4283,3 @@ std::unique_ptr<Store> make_postgres_store(std::string connection_uri) {
 }
 
 } // namespace lake::control
-
-// Audit cryptography is intentionally compiled through this provider-bound
-// translation unit. The audit API remains provider-neutral while
-// external-library names stay confined to the designated server and
-// control-store translation units.
-#include "../audit/audit.cpp"

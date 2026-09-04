@@ -87,6 +87,9 @@ struct Capability {
     CapabilityObjectResolver resolve_object;
     // Candidate-returning capabilities apply control::authorize_batch internally.
     bool authorizes_candidates = false;
+    // Anonymous callers may proceed only when the handler verifies that the
+    // returned repository is public.
+    bool allows_anonymous_public_read = false;
     // Operators bypass policy decisions, but capabilities can still resolve their
     // audit target before invoking the handler.
     bool resolves_operator_audit_target = false;

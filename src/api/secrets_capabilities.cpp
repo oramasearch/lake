@@ -426,10 +426,28 @@ void register_encryption_key_capabilities(Registry& registry) {
         .object = "secret_mount",
         .action = "read",
         .resolve_object = mount_object("encryption"),
+        .authorizes_candidates = true,
         .resolves_operator_audit_target = true,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.store) {
                 return no_store();
+            }
+            const auto object = mount_object("encryption")(input, context);
+            if (!object) {
+                return ApiResult::failure(
+                    object.error().code, object.error().message, object.error().path);
+            }
+            const auto decisions = control::authorize_batch(*context.store,
+                                                            context.acting_identity,
+                                                            {*object},
+                                                            "read",
+                                                            context.authorization_cache);
+            if (!decisions) {
+                return from_store_error(decisions.error());
+            }
+            if (!decisions->at(*object).allowed) {
+                return ApiResult::failure("unauthorized",
+                                          "principal is not allowed to read secret_mount");
             }
             auto rows = context.store->list_encryption_keys(input.at("mount_id"), limit_of(input));
             if (!rows) {

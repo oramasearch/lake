@@ -108,7 +108,8 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         return ApiResult::failure("unknown_capability", "no capability named " + name);
     ApiResult result;
     bool proceed = true;
-    if (capability->requires_auth && !context.authorized) {
+    if (capability->requires_auth && !context.authorized &&
+        !capability->allows_anonymous_public_read) {
         result = ApiResult::failure("unauthorized",
                                     "a valid session or operator credential is required");
         proceed = false;
@@ -121,7 +122,8 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         result =
             ApiResult::failure("unauthorized", "credential does not grant " + capability->name);
         proceed = false;
-    } else if (capability->requires_auth && !capability->authorizes_candidates) {
+    } else if (capability->requires_auth && context.authorized &&
+               !capability->authorizes_candidates) {
         if (capability->object.empty() || capability->action.empty() ||
             !capability->resolve_object) {
             result = ApiResult::failure("store_error",

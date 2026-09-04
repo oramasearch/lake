@@ -193,11 +193,26 @@ authorize_batch(Store& store,
         return decisions;
     }
 
-    if (auto loaded = load_paths(store, object_ids, cache); !loaded) {
+    const std::string self_object = "principal/" + principal_taap_id;
+    std::vector<std::string> policy_objects;
+    policy_objects.reserve(object_ids.size());
+    for (const auto& object_id : object_ids) {
+        if (object_id == self_object && role_allows("admin", action)) {
+            decisions.emplace(object_id,
+                              AuthorizationDecision{true, object_id, object_id, "admin", false});
+            continue;
+        }
+        policy_objects.push_back(object_id);
+    }
+    if (policy_objects.empty()) {
+        return decisions;
+    }
+
+    if (auto loaded = load_paths(store, policy_objects, cache); !loaded) {
         return std::unexpected(loaded.error());
     }
     std::set<std::string> path_object_ids;
-    for (const auto& object_id : object_ids) {
+    for (const auto& object_id : policy_objects) {
         for (const auto& entry : cache.paths[object_id]) {
             path_object_ids.insert(entry.object.id);
         }
@@ -207,7 +222,7 @@ authorize_batch(Store& store,
         return std::unexpected(loaded.error());
     }
     const auto& grants = cache.grants[principal_taap_id];
-    for (const auto& object_id : object_ids) {
+    for (const auto& object_id : policy_objects) {
         decisions.emplace(object_id, decide(object_id, action, cache.paths[object_id], grants));
     }
     return decisions;

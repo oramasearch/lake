@@ -189,8 +189,12 @@ TEST_F(SecretsCapabilities, RotationRewrapSigningHmacDerivationAndKekRotation) {
 }
 
 TEST_F(SecretsCapabilities, MissingMountGrantIsDeniedAndAudited) {
+    ASSERT_TRUE(call("create_encryption_key", {{"mount_id", mount_id}, {"name", "orders"}}).ok);
     context.operator_credential = false;
     context.acting_identity = "taap:1:ed25519:ungranted";
+    const ApiResult denied_list = call("list_encryption_keys", {{"mount_id", mount_id}});
+    EXPECT_FALSE(denied_list.ok);
+    EXPECT_EQ(denied_list.error.code, "unauthorized");
     const ApiResult denied = call("read_secret", {{"mount_id", mount_id}, {"name", "database"}});
     EXPECT_FALSE(denied.ok);
     EXPECT_EQ(denied.error.code, "unauthorized");
