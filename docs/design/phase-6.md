@@ -19,9 +19,9 @@ the API cannot).
 
 Identity-core status on this branch: verified TAAP documents, password plus TOTP, persisted
 WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
-hosted identity pages are not yet included. The instance-signed passkey binding remains owned by
-#18, the temporary TAAP decoder remains tracked by liquid #162, and application user pools remain
-owned by #51.
+hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use those capabilities.
+The instance-signed passkey binding remains owned by #18, the temporary TAAP decoder remains
+tracked by liquid #162, and application user pools remain owned by #51.
 
 ## Identity: one substrate, three principals
 

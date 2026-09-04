@@ -9,6 +9,9 @@ Password, passkey, and OAuth sign-in issue random browser-session secrets. User 
 named sessions with explicit capability scopes. Both bearer values and the HttpOnly
 `lake_session` cookie go through `context_for` on every request, so session or device revocation
 takes effect on the next request. See [identity.md](identity.md).
+Successful browser-session REST capabilities also set that secret as an `HttpOnly`, `SameSite=Lax`
+cookie (`Secure` behind HTTPS). This lets the passkey page use the REST capability without exposing
+the session secret to its inline script.
 
 - Every capability except the documented identity entry points and `server_info` requires a
   resolved credential, on REST and on MCP `tools/call` alike (`Registry::call` enforces

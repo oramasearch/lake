@@ -22,6 +22,12 @@ out) and are the unit-tested surface.
 | `GET /style.css` | the stylesheet, `public, max-age=86400` |
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | operational probes and metrics; see [`telemetry.md`](telemetry.md) |
 | `GET /v1/server_info` | `{"name":"lake","node":…,"version":…,"api":"v1"}` |
+| `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public identity entry pages |
+| `GET /sessions`, `/passkeys`, `/tokens` | authenticated identity management pages |
+| `POST /identity/*` | form adapters that call the corresponding registry capability; see [`../ui/identity.md`](../ui/identity.md) |
+| `GET /v1/<capability>`, `POST /v1/<capability>` | the registry rendered as REST |
+| `GET /v1/oauth/<provider>/callback` | the provider-facing OAuth callback |
+| `GET /v1/openapi.json`, `POST /mcp` | the same registry rendered as OpenAPI and MCP |
 | anything else | `404 {"error":"not_found"}` |
 
 **Rules that keep it correct.**

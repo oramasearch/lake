@@ -8,7 +8,8 @@ navigation is on every page: Home, Customers, Organizations, Repositories, API
 | Page | Route | Shows |
 |---|---|---|
 | Home | `GET /` | the node, version, links |
-| Sign in | `GET /login`, `POST /session` (form field `token`), `POST /logout` | the admin-token form; a match sets the session cookie and redirects to Repositories |
+| User identity | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`, `/sessions`, `/passkeys`, `/tokens` | password, TOTP, OAuth, passkeys, sessions/devices, and scoped tokens; see [identity.md](identity.md) |
+| Operator sign in | `GET /login`, `POST /session` (form field `token`), `POST /logout` | the operator-token form; a match sets the session cookie and redirects to Repositories |
 | Customers | `GET /customers` | every tenant: handle (links to its repositories), type, identity id, created |
 | Organizations | `GET /organizations` | every organization, with links to its teams and members |
 | Teams | `GET /teams?organization_id=<uuid>` | the organization's teams and member links |
@@ -19,12 +20,13 @@ navigation is on every page: Home, Customers, Organizations, Repositories, API
 | Repositories | `GET /repositories[?customer_id=<uuid>]` | every repository newest first as `<owner>/<name>`, owner, visibility, description, created |
 | Repository | `GET /repository?id=<uuid>` | one repository: owner, visibility, timestamps, lifecycle state, and the API call that returns it |
 
-**Session.** `POST /session` compares the form token with the admin token in constant time; on
+**Session.** `POST /session` compares the form token with the operator token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the
 request arrived over HTTPS, read from `X-Forwarded-Proto`) and redirects. Every page that reads
 the store requires it and redirects to `/login` otherwise; `POST /logout` clears it. The cookie
 value is the same secret the API takes as a bearer, resolved by the same code (`context_for`), so
-the UI never has a second auth path. A wrong token answers `401` with the form and a message.
+the UI never has a second auth path. User sign-in forms call registry capabilities and set the
+same cookie. A wrong operator token answers `401` with the form and a message.
 
 **Data.** Data pages call the same registry capabilities as REST and MCP, with the session's
 principal and one per-request authorization cache. Lists are capped by their capability limits

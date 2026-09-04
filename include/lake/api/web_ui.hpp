@@ -7,16 +7,20 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 
-// Pure renderers: data in, HTML out. No HTTP type, no I/O. Pages are server-rendered,
-// self-contained (one stylesheet at /style.css, no script) and unit-tested here.
+// Pure renderers: data in, HTML out. No HTTP type, no I/O. Pages are
+// server-rendered, self-contained (one stylesheet at /style.css, no script) and
+// unit-tested here.
 namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
 std::string web_ui_stylesheet();
 
-// The page frame: title, the navigation (Home, Customers, Repositories, API; Sign in/out), the
-// page content. signed_in switches the session link.
-std::string web_ui_shell(std::string_view title, std::string_view meta, std::string_view content,
+// The page frame: title, the navigation (Home, Customers, Repositories, API;
+// Sign in/out), the page content. signed_in switches the session link.
+std::string web_ui_shell(std::string_view title, std::string_view meta,
+                         std::string_view content, bool signed_in = false);
+
+std::string web_ui_hello(std::string_view node_name, std::string_view version,
                          bool signed_in = false);
 
 std::string web_ui_hello(std::string_view node_name, std::string_view version,

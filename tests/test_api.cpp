@@ -88,6 +88,61 @@ std::string http_get(unsigned short port, std::string_view path,
   return response;
 }
 
+std::string http_request(unsigned short port, std::string_view method,
+                         std::string_view path, std::string_view body,
+                         std::string_view content_type,
+                         std::string_view cookie = {}) {
+  const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (socket_fd < 0)
+    return {};
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(port);
+  if (::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1 ||
+      ::connect(socket_fd, reinterpret_cast<sockaddr *>(&address),
+                sizeof(address)) != 0) {
+    ::close(socket_fd);
+    return {};
+  }
+  std::string request = std::string(method) + " " + std::string(path) +
+                        " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
+  request += "Content-Type: " + std::string(content_type) + "\r\n";
+  request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+  if (!cookie.empty())
+    request += "Cookie: " + std::string(cookie) + "\r\n";
+  request += "\r\n" + std::string(body);
+  std::size_t sent = 0;
+  while (sent < request.size()) {
+    const ssize_t count =
+        ::send(socket_fd, request.data() + sent, request.size() - sent, 0);
+    if (count <= 0) {
+      ::close(socket_fd);
+      return {};
+    }
+    sent += static_cast<std::size_t>(count);
+  }
+  std::string response;
+  char buffer[4096];
+  for (;;) {
+    const ssize_t count = ::recv(socket_fd, buffer, sizeof(buffer), 0);
+    if (count <= 0)
+      break;
+    response.append(buffer, static_cast<std::size_t>(count));
+  }
+  ::close(socket_fd);
+  return response;
+}
+
+std::string response_header(std::string_view response, std::string_view name) {
+  const std::string prefix = "\r\n" + std::string(name) + ": ";
+  const std::size_t start = response.find(prefix);
+  if (start == std::string_view::npos)
+    return {};
+  const std::size_t value_start = start + prefix.size();
+  const std::size_t end = response.find("\r\n", value_start);
+  return std::string(response.substr(value_start, end - value_start));
+}
+
 } // namespace
 
 TEST(Registry, ServerInfoNeedsNoAuth) {
@@ -186,6 +241,55 @@ TEST(TelemetryHttp, MetricsRequireExistingAuthAndUsePrometheusContentType) {
   EXPECT_NE(served.find("lake_up 1\n"), std::string::npos);
   EXPECT_NE(served.find("lake_http_requests_total{method=\"GET\",route=\"/"
                         "metrics\",status=\"403\"} 1\n"),
+            std::string::npos);
+  server.stop();
+}
+
+TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
+  ServerOptions options;
+  options.port = 0;
+  options.public_host = "lake.example";
+  options.admin_token = "operator-page-token";
+  options.store = std::make_shared<lake::control::InMemoryStore>();
+  ApiServer server(options);
+  ASSERT_TRUE(server.start()) << server.reason();
+
+  const std::string page = http_get(server.port(), "/sign-up");
+  EXPECT_NE(page.find(" 200 "), std::string::npos);
+  EXPECT_NE(page.find("action=\"/identity/sign-up\""), std::string::npos);
+
+  const std::string operator_page =
+      http_get(server.port(), "/sign-in", "Bearer operator-page-token");
+  EXPECT_NE(operator_page.find(" 302 "), std::string::npos);
+  EXPECT_EQ(response_header(operator_page, "Location"), "/repositories");
+  const std::string operator_sessions =
+      http_get(server.port(), "/sessions", "Bearer operator-page-token");
+  EXPECT_NE(operator_sessions.find(" 302 "), std::string::npos);
+  EXPECT_EQ(response_header(operator_sessions, "Location"), "/repositories");
+
+  const std::string created = http_request(
+      server.port(), "POST", "/identity/sign-up",
+      "email=page%40example.test&display_name=Page+User&password=correct+horse+"
+      "battery+staple&device_name=browser&identity_document=%7B%7D",
+      "application/x-www-form-urlencoded");
+  EXPECT_NE(created.find(" 302 "), std::string::npos) << created;
+  EXPECT_EQ(response_header(created, "Location"), "/sessions");
+  const std::string set_cookie = response_header(created, "Set-Cookie");
+  EXPECT_NE(set_cookie.find("HttpOnly"), std::string::npos);
+  const std::size_t cookie_end = set_cookie.find(';');
+  const std::string cookie = set_cookie.substr(0, cookie_end);
+
+  const std::string sessions =
+      http_request(server.port(), "GET", "/sessions", "", "text/plain", cookie);
+  EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
+  EXPECT_NE(sessions.find("Sessions and devices"), std::string::npos);
+
+  const std::string rest_signup = http_request(
+      server.port(), "POST", "/v1/sign_up_password",
+      R"({"email":"rest-page@example.test","password":"correct horse battery staple","display_name":"REST Page","device_name":"browser","identity_document":"{}"})",
+      "application/json");
+  EXPECT_NE(rest_signup.find(" 200 "), std::string::npos) << rest_signup;
+  EXPECT_NE(response_header(rest_signup, "Set-Cookie").find("HttpOnly"),
             std::string::npos);
   server.stop();
 }

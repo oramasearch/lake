@@ -136,6 +136,18 @@ struct StringBodySink {
   boost::capy::immediate<boost::capy::io_result<>> write_eof() { return {{}}; }
 };
 
+boost::capy::io_task<std::string>
+read_string_body(boost::http::route_params &route) {
+  StringBodySink sink;
+  auto [read_error, bytes_read] =
+      co_await boost::capy::push_to(route.req_body, sink);
+  static_cast<void>(bytes_read);
+  if (read_error) {
+    co_return {read_error, {}};
+  }
+  co_return {{}, std::move(sink.data)};
+}
+
 std::string cookie_value(const boost::http::route_params &route,
                          std::string_view name) {
   if (route.req.count(boost::http::field::cookie) == 0)
@@ -207,6 +219,37 @@ std::string form_field(std::string_view body, std::string_view name) {
 bool request_is_https(const boost::http::route_params &route) {
   return route.req.count("x-forwarded-proto") != 0 &&
          std::string_view(route.req.at("x-forwarded-proto")) == "https";
+}
+
+std::string browser_session_cookie(const boost::http::route_params &route,
+                                   std::string_view secret) {
+  std::string cookie = "lake_session=" + std::string(secret) +
+                       "; HttpOnly; SameSite=Lax; Path=/";
+  if (request_is_https(route)) {
+    cookie += "; Secure";
+  }
+  return cookie;
+}
+
+std::vector<std::string> comma_separated(std::string_view value) {
+  std::vector<std::string> result;
+  std::size_t position = 0;
+  while (position <= value.size()) {
+    const std::size_t comma = value.find(',', position);
+    std::string item(value.substr(position, comma == std::string_view::npos
+                                                ? std::string_view::npos
+                                                : comma - position));
+    const std::size_t first = item.find_first_not_of(" \t\r\n");
+    const std::size_t last = item.find_last_not_of(" \t\r\n");
+    if (first != std::string::npos) {
+      result.push_back(item.substr(first, last - first + 1));
+    }
+    if (comma == std::string_view::npos) {
+      break;
+    }
+    position = comma + 1;
+  }
+  return result;
 }
 
 std::string query_value(const boost::http::route_params &route,
@@ -1047,6 +1090,7 @@ struct ApiServer::Impl {
     namespace http = boost::http;
     nlohmann::json input = nlohmann::json::object();
     std::string body;
+    std::string set_cookie;
     http::status status = http::status::ok;
 
     if (route.req.method() == http::method::get) {
@@ -1076,10 +1120,22 @@ struct ApiServer::Impl {
       const ApiResult result = registry.call(capability->name, input, ctx);
       status = http::int_to_status(static_cast<unsigned>(rest_status(result)));
       body = rest_envelope(result).dump();
+      const bool browser_sign_in = capability->name == "sign_up_password" ||
+                                   capability->name == "sign_in_password" ||
+                                   capability->name == "verify_totp" ||
+                                   capability->name == "sign_in_passkey";
+      if (result.ok && browser_sign_in && result.value.contains("secret") &&
+          result.value["secret"].is_string()) {
+        set_cookie = browser_session_cookie(
+            route, result.value["secret"].get<std::string>());
+      }
     }
     route.status(status);
     route.res.set(http::field::content_type, "application/json; charset=utf-8");
     route.res.set(http::field::cache_control, "no-store");
+    if (!set_cookie.empty()) {
+      route.res.set(http::field::set_cookie, set_cookie);
+    }
     stamp_response_headers(route, body);
     auto [send_error] = co_await route.send(body);
     if (send_error)
@@ -1210,6 +1266,86 @@ bool ApiServer::start() {
              [&impl](http::route_params &route) -> http::route_task {
                return impl.observe_request(route, "/logout",
                                            impl.serve_logout(route));
+             });
+  router.add(http::method::get, "/sign-up",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/sign-up",
+                                           impl.serve_sign_up(route));
+             });
+  router.add(http::method::get, "/sign-in",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/sign-in",
+                                           impl.serve_sign_in(route));
+             });
+  router.add(http::method::get, "/mfa",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/mfa",
+                                           impl.serve_mfa(route));
+             });
+  router.add(http::method::get, "/passkeys",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/passkeys",
+                                           impl.serve_passkeys(route));
+             });
+  router.add(http::method::get, "/passkey-sign-in",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/passkey-sign-in",
+                                           impl.serve_passkey_sign_in(route));
+             });
+  router.add(http::method::get, "/sessions",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/sessions",
+                                           impl.serve_sessions(route));
+             });
+  router.add(http::method::get, "/tokens",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/tokens",
+                                           impl.serve_tokens(route));
+             });
+  router.add(http::method::post, "/identity/sign-up",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/identity/sign-up",
+                                           impl.serve_identity_sign_up(route));
+             });
+  router.add(http::method::post, "/identity/sign-in",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/identity/sign-in",
+                                           impl.serve_identity_sign_in(route));
+             });
+  router.add(http::method::post, "/identity/mfa/verify",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(
+                   route, "/identity/mfa/verify",
+                   impl.serve_identity_mfa_verify(route));
+             });
+  router.add(http::method::post, "/identity/mfa/enroll",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(
+                   route, "/identity/mfa/enroll",
+                   impl.serve_identity_mfa_enroll(route));
+             });
+  router.add(http::method::post, "/identity/oauth",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/identity/oauth",
+                                           impl.serve_identity_oauth(route));
+             });
+  router.add(http::method::post, "/identity/session/revoke",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(
+                   route, "/identity/session/revoke",
+                   impl.serve_identity_session_revoke(route));
+             });
+  router.add(http::method::post, "/identity/device/revoke",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(
+                   route, "/identity/device/revoke",
+                   impl.serve_identity_device_revoke(route));
+             });
+  router.add(http::method::post, "/identity/token/create",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(
+                   route, "/identity/token/create",
+                   impl.serve_identity_token_create(route));
              });
   router.add(http::method::get, "/customers",
              [&impl](http::route_params &route) -> http::route_task {
