@@ -210,4 +210,106 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     EXPECT_FALSE(store->context_for(sign_up->secret));
 }
 
+TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    setenv(
+        "LAKE_INSTANCE_KEK", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1);
+    std::unique_ptr<lake::control::Store> store = lake::control::make_postgres_store(uri);
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto organization = store->create_organization(
+        {"taap:1:ed25519:sso-org-" + suffix, "SSO integration organization", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const std::string scim_token = "lake-stub-scim-token-" + suffix;
+
+    const auto provider = store->register_sso_provider({organization->id,
+                                                        "lake",
+                                                        "stub-sso-" + suffix,
+                                                        "oidc",
+                                                        "https://oidc.stub.example/" + suffix,
+                                                        "",
+                                                        "",
+                                                        "lake-stub-client",
+                                                        "lake-stub-secret",
+                                                        scim_token,
+                                                        {{"email", "mail"}},
+                                                        false});
+    ASSERT_TRUE(provider) << provider.error().message;
+    const auto authenticated = store->authenticate_scim(scim_token);
+    ASSERT_TRUE(authenticated) << authenticated.error().message;
+    EXPECT_EQ(authenticated->id, provider->id);
+    EXPECT_FALSE(store->authenticate_scim("wrong-scim-token"));
+    ASSERT_TRUE(store->test_sso_provider(provider->id));
+    ASSERT_TRUE(store->create_federation_issuer({organization->id, provider->issuer, "email"}));
+
+    const auto created = store->upsert_scim_user({provider->id,
+                                                  "stub-user-" + suffix,
+                                                  "sso-user-" + suffix + "@example.test",
+                                                  "SSO user",
+                                                  "taap:1:ed25519:sso-user-" + suffix,
+                                                  true,
+                                                  {{"department", "engineering"}}});
+    ASSERT_TRUE(created) << created.error().message;
+    const auto updated = store->upsert_scim_user({provider->id,
+                                                  "stub-user-" + suffix,
+                                                  "sso-user-" + suffix + "@example.test",
+                                                  "Updated SSO user",
+                                                  "taap:1:ed25519:sso-user-" + suffix,
+                                                  true,
+                                                  {{"department", "identity"}}});
+    ASSERT_TRUE(updated) << updated.error().message;
+    EXPECT_EQ(updated->user_id, created->user_id);
+    const auto users = store->list_scim_users(provider->id, 100);
+    ASSERT_TRUE(users) << users.error().message;
+    ASSERT_EQ(users->size(), 1);
+    EXPECT_EQ(users->at(0).external_id, created->external_id);
+    const auto read_user = store->get_scim_user(provider->id, created->user_id);
+    ASSERT_TRUE(read_user) << read_user.error().message;
+    EXPECT_EQ(read_user->external_id, created->external_id);
+
+    const auto group = store->upsert_scim_group({provider->id,
+                                                 "stub-group-" + suffix,
+                                                 "stub-sso-team-" + suffix,
+                                                 "SSO team",
+                                                 {"stub-user-" + suffix},
+                                                 {}});
+    ASSERT_TRUE(group) << group.error().message;
+    const auto groups = store->list_scim_groups(provider->id, 100);
+    ASSERT_TRUE(groups) << groups.error().message;
+    ASSERT_EQ(groups->size(), 1);
+    const auto read_group = store->get_scim_group(provider->id, group->team_id);
+    ASSERT_TRUE(read_group) << read_group.error().message;
+    EXPECT_EQ(read_group->external_id, group->external_id);
+    const auto issued = store->sign_in_sso({provider->id,
+                                            provider->issuer,
+                                            "stub-user-" + suffix,
+                                            "sso-user-" + suffix + "@example.test",
+                                            "Updated SSO user",
+                                            "",
+                                            "integration browser",
+                                            {{"email", "sso-user-" + suffix + "@example.test"}}});
+    ASSERT_TRUE(issued) << issued.error().message;
+    EXPECT_TRUE(store->context_for(issued->secret));
+
+    const auto deactivated = store->upsert_scim_user({provider->id,
+                                                      "stub-user-" + suffix,
+                                                      "sso-user-" + suffix + "@example.test",
+                                                      "Updated SSO user",
+                                                      "taap:1:ed25519:sso-user-" + suffix,
+                                                      false,
+                                                      {}});
+    ASSERT_TRUE(deactivated) << deactivated.error().message;
+    EXPECT_FALSE(store->context_for(issued->secret));
+    ASSERT_TRUE(store->delete_scim_user(provider->id, created->user_id));
+    ASSERT_TRUE(store->delete_scim_group(provider->id, group->team_id));
+    EXPECT_FALSE(store->get_scim_group(provider->id, group->team_id));
+    const auto logs = store->list_sso_provisioning_logs(provider->id, 100);
+    ASSERT_TRUE(logs) << logs.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*logs, [](const lake::control::ProvisioningLog& log) {
+        return log.resource == "user" && log.operation == "deactivate";
+    }));
+}
+
 } // namespace

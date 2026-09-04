@@ -24,7 +24,13 @@ Wait for the workflow to succeed before updating `Lake.spec.image`; the deployme
 
 ## Local verification
 
-For local image inspection, build natively on amd64:
+Identity and API changes must first prove that the production Linux image compiles:
+
+```sh
+docker build --platform linux/amd64 .
+```
+
+For local image inspection, build and load a named image:
 
 ```sh
 docker buildx build --platform linux/amd64 -t oramasearch/lake:<local-tag> --load .
@@ -32,8 +38,8 @@ docker run --rm -p 4900:4900 oramasearch/lake:<local-tag> version
 ```
 
 Do not deploy or push a workstation-built image. A CI-built immutable tag is the deployment
-artifact. The local emulated `linux/amd64` build is not required on Apple Silicon; CI or the AKS
-amd64 builder produces the image.
+artifact. On Apple Silicon the local `linux/amd64` build uses emulation; CI and the AKS builder
+produce the release image natively.
 
 ## Change the image recipe
 

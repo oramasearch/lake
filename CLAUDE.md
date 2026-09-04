@@ -41,6 +41,10 @@ adds migrations `0007_identity_core` and `0008_mfa_recovery`, verified TAAP docu
 plus TOTP with one-use recovery codes, persisted WebAuthn, OAuth, row-resolved sessions, scoped
 tokens, device revocation, lake-signed passkey-to-TAAP bindings, and the hosted identity pages.
 Identity documents are verified through libliquid's public canonical-CBOR codec.
+SSO federation adds `0010_sso_federation`, organization SAML/OIDC provider configuration,
+federation issuer-claim policy, SCIM user/group mappings, deactivation session revocation,
+provisioning logs, the `/sso` page, and provider-bearer SCIM 2.0 `/scim/v2/Users` and `/Groups`
+resources. The operator copies the schema once per wave in its own operator pull request.
 Hot branch-tip search persists blob-deduplicated BM25F and positional-trigram segments at
 `LAKE_STORE_ROOT/<customer>/index/`, atomically publishes each change through its manifest,
 filters candidates with batched policy authorization, and records the signed query outcome
@@ -113,7 +117,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `secrets_guard` today, versioned by content hash).
+  `sso_federation_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

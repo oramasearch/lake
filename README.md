@@ -6,9 +6,11 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings and OAuth identity;
-> row-resolved sessions, devices and scoped tokens; tenants, repositories, organization administration and policy over the
-> Postgres control plane), public repository reading through libliquid, the pages to explore them, the OpenAPI
+> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth
+> identity, organization SAML/OIDC providers, federation policy and SCIM 2.0 user/group
+> provisioning; row-resolved sessions, devices and scoped tokens; tenants, repositories,
+> organization administration and policy over the Postgres control plane), public repository
+> reading through libliquid, the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
 > Prometheus metrics and JSON request logs. Protected operations accept the operator bearer or a
 > row-resolved user credential; probes and documented identity entry points are unauthenticated.
@@ -66,6 +68,8 @@ ctest --test-dir build
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
+| `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
+| `/scim/v2/Users`, `/scim/v2/Groups` and `/:id` | provider-bearer SCIM 2.0 filtered list, get, create, PATCH and delete resources |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 
@@ -112,7 +116,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 

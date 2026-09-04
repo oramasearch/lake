@@ -425,6 +425,37 @@ std::string error_body(std::string_view code, std::string_view message) {
         .dump();
 }
 
+boost::http::status scim_status(const ApiResult& result) {
+    if (result.ok) {
+        return boost::http::status::ok;
+    }
+    if (result.error.code == "unauthorized") {
+        return boost::http::status::unauthorized;
+    }
+    return boost::http::int_to_status(static_cast<unsigned>(rest_status(result)));
+}
+
+std::string scim_error_body(const ApiResult& result) {
+    return nlohmann::json{
+        {"schemas", nlohmann::json::array({"urn:ietf:params:scim:api:messages:2.0:Error"})},
+        {"status", std::to_string(static_cast<unsigned>(scim_status(result)))},
+        {"detail", result.error.message}}
+        .dump();
+}
+
+int query_integer(const boost::http::route_params& route, std::string_view name, int fallback) {
+    const std::string value = query_value(route, name);
+    if (value.empty()) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(value.c_str(), &end, 10);
+    if (end == value.c_str() || *end != '\0' || parsed < 0 || parsed > 1000) {
+        return fallback;
+    }
+    return static_cast<int>(parsed);
+}
+
 std::string log_timestamp() {
     const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
     return std::format("{:%FT%T}Z", now);
@@ -444,6 +475,43 @@ control::Organization organization_from_json(const nlohmann::json& value) {
             json_string(value, "display_name"),
             json_string(value, "created_at"),
             json_string(value, "updated_at")};
+}
+
+control::SsoProvider sso_provider_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "organization_id"),
+            json_string(value, "pool_id"),
+            json_string(value, "name"),
+            json_string(value, "protocol"),
+            json_string(value, "issuer"),
+            json_string(value, "metadata"),
+            json_string(value, "signing_certificate"),
+            json_string(value, "client_id"),
+            value.value("attribute_mapping", nlohmann::json::object()),
+            value.value("jit_provisioning", false),
+            value.value("enabled", false),
+            json_string(value, "tested_at"),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
+control::FederationIssuer federation_issuer_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "organization_id"),
+            json_string(value, "issuer"),
+            json_string(value, "claim"),
+            json_string(value, "created_at")};
+}
+
+control::ProvisioningLog provisioning_log_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "provider_id"),
+            json_string(value, "resource"),
+            json_string(value, "operation"),
+            json_string(value, "external_id"),
+            json_string(value, "outcome"),
+            value.value("details", nlohmann::json::object()),
+            json_string(value, "created_at")};
 }
 
 control::Customer customer_from_json(const nlohmann::json& value) {
@@ -1502,6 +1570,7 @@ struct ApiServer::Impl {
             "/logout",
             "/customers",
             "/organizations",
+            "/sso",
             "/teams",
             "/members",
             "/invitations",
@@ -1539,6 +1608,8 @@ struct ApiServer::Impl {
             "/identity/session/revoke",
             "/identity/device/revoke",
             "/identity/token/create",
+            "/scim/v2/Users",
+            "/scim/v2/Groups",
             "/customers",
             "/repositories",
             "/repository",
@@ -1557,6 +1628,12 @@ struct ApiServer::Impl {
         }
         if (path.starts_with("/v1/oauth/") && path.ends_with("/callback")) {
             return "/v1/oauth/:provider/callback";
+        }
+        if (path.starts_with("/scim/v2/Users/")) {
+            return "/scim/v2/Users/:id";
+        }
+        if (path.starts_with("/scim/v2/Groups/")) {
+            return "/scim/v2/Groups/:id";
         }
         return "unmatched";
     }
@@ -1810,6 +1887,55 @@ struct ApiServer::Impl {
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_organizations(organizations),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_sso_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        if (!ctx.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string organization_id = query_value(route, "organization_id");
+        if (organization_id.empty()) {
+            return redirect(route, "/organizations");
+        }
+        const ApiResult provider_rows = registry.call(
+            "list_sso_providers", {{"organization_id", organization_id}, {"limit", 100}}, ctx);
+        if (!provider_rows.ok) {
+            return serve_page_error(route, provider_rows);
+        }
+        const ApiResult issuer_rows = registry.call(
+            "list_federation_issuers", {{"organization_id", organization_id}, {"limit", 500}}, ctx);
+        if (!issuer_rows.ok) {
+            return serve_page_error(route, issuer_rows);
+        }
+        std::vector<control::SsoProvider> providers;
+        for (const nlohmann::json& value : provider_rows.value.at("items")) {
+            providers.push_back(sso_provider_from_json(value));
+        }
+        std::vector<control::FederationIssuer> issuers;
+        for (const nlohmann::json& value : issuer_rows.value.at("items")) {
+            issuers.push_back(federation_issuer_from_json(value));
+        }
+        std::vector<control::ProvisioningLog> logs;
+        std::string provider_id = query_value(route, "provider_id");
+        if (provider_id.empty() && !providers.empty()) {
+            provider_id = providers.front().id;
+        }
+        if (!provider_id.empty()) {
+            const ApiResult log_rows = registry.call(
+                "list_sso_provisioning_logs", {{"provider_id", provider_id}, {"limit", 100}}, ctx);
+            if (!log_rows.ok) {
+                return serve_page_error(route, log_rows);
+            }
+            for (const nlohmann::json& value : log_rows.value.at("items")) {
+                logs.push_back(provisioning_log_from_json(value));
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_sso(organization_id, providers, issuers, logs),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -2353,7 +2479,12 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth state is invalid or expired");
         }
-        const auto provider = options.store->get_oauth_provider(flow->pool_id, provider_name);
+        const bool enterprise_provider = provider_name.starts_with("sso-");
+        const std::string provider_id =
+            enterprise_provider ? provider_name.substr(std::string("sso-").size()) : std::string();
+        const auto provider = enterprise_provider
+                                  ? options.store->get_sso_oidc_provider(provider_id)
+                                  : options.store->get_oauth_provider(flow->pool_id, provider_name);
         if (!provider) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth provider is not registered");
@@ -2434,7 +2565,19 @@ struct ApiServer::Impl {
             identity.email = claims->email;
             identity.display_name = claims->display_name;
         }
-        const auto issued = options.store->sign_in_oauth(identity);
+        control::Result<control::IssuedSession> issued =
+            enterprise_provider
+                ? options.store->sign_in_sso({provider_id,
+                                              provider->issuer,
+                                              identity.subject,
+                                              identity.email,
+                                              identity.display_name,
+                                              flow->identity_document,
+                                              flow->device_name,
+                                              identity.email.empty()
+                                                  ? nlohmann::json::object()
+                                                  : nlohmann::json{{"email", identity.email}}})
+                : options.store->sign_in_oauth(identity);
         if (!issued) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth identity could not sign in");
@@ -2446,15 +2589,16 @@ struct ApiServer::Impl {
             context.acting_user_id = principal->user_id;
             context.acting_identity = principal->taap_id;
         }
-        if (!record_direct_event(context,
-                                 audit::EventDraft{
-                                     .kind = "authentication",
-                                     .object = "oauth/" + provider_name,
-                                     .action = "sign_in",
-                                     .outcome = "success",
-                                     .method = "oauth",
-                                     .device = flow->device_name,
-                                 })) {
+        if (!record_direct_event(
+                context,
+                audit::EventDraft{
+                    .kind = "authentication",
+                    .object = (enterprise_provider ? "oidc/" : "oauth/") + provider_name,
+                    .action = "sign_in",
+                    .outcome = "success",
+                    .method = enterprise_provider ? "oidc" : "oauth",
+                    .device = flow->device_name,
+                })) {
             co_return co_await oauth_error(
                 route, http::status::service_unavailable, "OAuth audit recording failed");
         }
@@ -2935,6 +3079,107 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task send_scim(boost::http::route_params& route,
+                                      const ApiResult& result,
+                                      boost::http::status success_status) {
+        namespace http = boost::http;
+        const http::status status = result.ok ? success_status : scim_status(result);
+        const std::string body = status == http::status::no_content
+                                     ? std::string()
+                                     : (result.ok ? result.value.dump() : scim_error_body(result));
+        if (result.ok && success_status == http::status::created && result.value.contains("meta") &&
+            result.value["meta"].is_object()) {
+            const std::string location = result.value["meta"].value("location", "");
+            if (!location.empty()) {
+                route.res.set(http::field::location, location);
+            }
+        }
+        if (!result.ok && status == http::status::unauthorized) {
+            route.res.set(http::field::www_authenticate, "Bearer");
+        }
+        co_return co_await send_text(
+            route, status, body, "application/scim+json; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_scim_collection(boost::http::route_params& route,
+                                                  std::string_view resource_type) {
+        namespace http = boost::http;
+        const bool users = resource_type == "Users";
+        nlohmann::json input{{"bearer_token", bearer_of(route)}};
+        std::string capability;
+        http::status success_status = http::status::ok;
+        if (route.req.method() == http::method::get) {
+            capability = users ? "scim_list_users" : "scim_list_groups";
+            input["filter"] = form_decode(query_value(route, "filter"));
+            input["start_index"] = query_integer(route, "startIndex", 1);
+            input["count"] = query_integer(route, "count", 100);
+        } else {
+            capability = users ? "scim_upsert_user" : "scim_upsert_group";
+            success_status = http::status::created;
+            http::json_sink sink;
+            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            if (read_error || bytes_read == 0) {
+                co_return co_await send_scim(
+                    route,
+                    ApiResult::failure("invalid_input", "SCIM resource body is required"),
+                    success_status);
+            }
+            nlohmann::json resource = to_nlohmann(sink.release());
+            if (resource.is_discarded() || !resource.is_object()) {
+                co_return co_await send_scim(
+                    route,
+                    ApiResult::failure("invalid_input", "SCIM resource body is not valid JSON"),
+                    success_status);
+            }
+            input["resource"] = std::move(resource);
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call(capability, input, context);
+        co_return co_await send_scim(route, result, success_status);
+    }
+
+    boost::http::route_task serve_scim_resource(boost::http::route_params& route,
+                                                std::string_view resource_type) {
+        namespace http = boost::http;
+        const bool users = resource_type == "Users";
+        std::string resource_id;
+        for (const auto& [name, value] : route.params) {
+            if (name == "id") {
+                resource_id = value;
+            }
+        }
+        nlohmann::json input{{"bearer_token", bearer_of(route)}, {"resource_id", resource_id}};
+        std::string capability;
+        http::status success_status = http::status::ok;
+        if (route.req.method() == http::method::get) {
+            capability = users ? "scim_get_user" : "scim_get_group";
+        } else if (route.req.method() == http::method::delete_) {
+            capability = users ? "scim_delete_user" : "scim_delete_group";
+            success_status = http::status::no_content;
+        } else {
+            capability = users ? "scim_patch_user" : "scim_patch_group";
+            http::json_sink sink;
+            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            if (read_error || bytes_read == 0) {
+                co_return co_await send_scim(
+                    route,
+                    ApiResult::failure("invalid_input", "SCIM PATCH body is required"),
+                    success_status);
+            }
+            nlohmann::json patch = to_nlohmann(sink.release());
+            if (patch.is_discarded() || !patch.is_object()) {
+                co_return co_await send_scim(
+                    route,
+                    ApiResult::failure("invalid_input", "SCIM PATCH body is not valid JSON"),
+                    success_status);
+            }
+            input["patch"] = std::move(patch);
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call(capability, input, context);
+        co_return co_await send_scim(route, result, success_status);
+    }
+
     boost::http::route_task serve_sync_post(boost::http::route_params& route,
                                             std::string capability_name) {
         ApiContext context = context_for(route);
@@ -3163,6 +3408,9 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/organizations", impl.serve_organizations_page(route));
                });
+    router.add(http::method::get, "/sso", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/sso", impl.serve_sso_page(route));
+    });
     router.add(http::method::get, "/teams", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/teams", impl.serve_teams_page(route));
     });
@@ -3348,6 +3596,66 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/v1/oauth/:provider/callback", impl.serve_oauth_callback(route));
+               });
+    router.add(http::method::get,
+               "/scim/v2/Users",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Users", impl.serve_scim_collection(route, "Users"));
+               });
+    router.add(http::method::post,
+               "/scim/v2/Users",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Users", impl.serve_scim_collection(route, "Users"));
+               });
+    router.add(http::method::get,
+               "/scim/v2/Users/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Users/:id", impl.serve_scim_resource(route, "Users"));
+               });
+    router.add(http::method::patch,
+               "/scim/v2/Users/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Users/:id", impl.serve_scim_resource(route, "Users"));
+               });
+    router.add(http::method::delete_,
+               "/scim/v2/Users/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Users/:id", impl.serve_scim_resource(route, "Users"));
+               });
+    router.add(http::method::get,
+               "/scim/v2/Groups",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Groups", impl.serve_scim_collection(route, "Groups"));
+               });
+    router.add(http::method::post,
+               "/scim/v2/Groups",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Groups", impl.serve_scim_collection(route, "Groups"));
+               });
+    router.add(http::method::get,
+               "/scim/v2/Groups/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Groups/:id", impl.serve_scim_resource(route, "Groups"));
+               });
+    router.add(http::method::patch,
+               "/scim/v2/Groups/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Groups/:id", impl.serve_scim_resource(route, "Groups"));
+               });
+    router.add(http::method::delete_,
+               "/scim/v2/Groups/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/scim/v2/Groups/:id", impl.serve_scim_resource(route, "Groups"));
                });
     router.add(http::method::get,
                "/v1/openapi.json",

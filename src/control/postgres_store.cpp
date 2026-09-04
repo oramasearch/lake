@@ -1359,6 +1359,63 @@ Session session_of(const pqxx::row& r) {
                    nlohmann::json::parse(r[11].as<std::string>()).get<std::vector<std::string>>()};
 }
 
+SsoProvider sso_provider_of(const pqxx::row& row) {
+    return SsoProvider{row[0].as<std::string>(),
+                       row[1].as<std::string>(),
+                       row[2].as<std::string>(),
+                       row[3].as<std::string>(),
+                       row[4].as<std::string>(),
+                       row[5].as<std::string>(),
+                       row[6].as<std::string>(),
+                       row[7].as<std::string>(),
+                       row[8].as<std::string>(),
+                       nlohmann::json::parse(row[9].as<std::string>()),
+                       row[10].as<bool>(),
+                       row[11].as<bool>(),
+                       row[12].as<std::string>(),
+                       row[13].as<std::string>(),
+                       row[14].as<std::string>()};
+}
+
+FederationIssuer federation_issuer_of(const pqxx::row& row) {
+    return FederationIssuer{row[0].as<std::string>(),
+                            row[1].as<std::string>(),
+                            row[2].as<std::string>(),
+                            row[3].as<std::string>(),
+                            row[4].as<std::string>()};
+}
+
+ScimUser scim_user_of(const pqxx::row& row) {
+    return ScimUser{row[0].as<std::string>(),
+                    row[1].as<std::string>(),
+                    row[2].as<std::string>(),
+                    row[3].as<bool>(),
+                    nlohmann::json::parse(row[4].as<std::string>()),
+                    row[5].as<std::string>(),
+                    row[6].as<std::string>()};
+}
+
+ScimGroup scim_group_of(const pqxx::row& row) {
+    return ScimGroup{row[0].as<std::string>(),
+                     row[1].as<std::string>(),
+                     row[2].as<std::string>(),
+                     row[3].as<std::string>(),
+                     nlohmann::json::parse(row[4].as<std::string>()),
+                     row[5].as<std::string>(),
+                     row[6].as<std::string>()};
+}
+
+ProvisioningLog provisioning_log_of(const pqxx::row& row) {
+    return ProvisioningLog{row[0].as<std::string>(),
+                           row[1].as<std::string>(),
+                           row[2].as<std::string>(),
+                           row[3].as<std::string>(),
+                           row[4].as<std::string>(),
+                           row[5].as<std::string>(),
+                           nlohmann::json::parse(row[6].as<std::string>()),
+                           row[7].as<std::string>()};
+}
+
 constexpr const char* device_columns =
     "devices.id::text, devices.user_id::text, devices.name, "
     "coalesce(devices.revoked_at::text,''), devices.created_at::text, "
@@ -1376,6 +1433,46 @@ constexpr const char* qualified_session_columns =
     "coalesce(sessions.revoked_at::text,''), sessions.created_at::text, "
     "coalesce(sessions.last_used_at::text,''), "
     "array_to_json(sessions.scopes)::text";
+constexpr const char* sso_provider_columns =
+    "id::text, organization_id::text, pool_id, name, protocol, issuer, metadata, "
+    "signing_certificate, client_id, attribute_mapping::text, jit_provisioning, enabled, "
+    "coalesce(tested_at::text,''), created_at::text, updated_at::text";
+constexpr const char* federation_issuer_columns =
+    "id::text, organization_id::text, issuer, claim, created_at::text";
+constexpr const char* scim_user_columns =
+    "provider_id::text, external_id, user_id::text, active, attributes::text, created_at::text, "
+    "updated_at::text";
+constexpr const char* scim_group_columns =
+    "provider_id::text, external_id, team_id::text, display_name, attributes::text, "
+    "created_at::text, updated_at::text";
+constexpr const char* provisioning_log_columns =
+    "id::text, provider_id::text, resource, operation, external_id, outcome, details::text, "
+    "created_at::text";
+
+void remove_scim_user_access(pqxx::work& tx,
+                             const std::string& provider_id,
+                             const std::string& external_id,
+                             const std::string& user_id) {
+    tx.exec_params("UPDATE sessions SET revoked_at = now() WHERE user_id = $1::uuid "
+                   "AND revoked_at IS NULL",
+                   user_id);
+    tx.exec_params(
+        "DELETE FROM grants USING scim_group_members, memberships, objects WHERE "
+        "scim_group_members.membership_id = memberships.id AND objects.object_type = 'team' "
+        "AND objects.external_id = memberships.team_id::text AND grants.object_id = objects.id "
+        "AND grants.principal_taap_id = memberships.principal_taap_id "
+        "AND grants.attestation_digest = memberships.attestation_digest "
+        "AND scim_group_members.provider_id = $1::uuid "
+        "AND scim_group_members.user_external_id = $2",
+        provider_id,
+        external_id);
+    tx.exec_params("DELETE FROM memberships USING scim_group_members WHERE memberships.id = "
+                   "scim_group_members.membership_id AND scim_group_members.provider_id = $1::uuid "
+                   "AND scim_group_members.user_external_id = $2",
+                   provider_id,
+                   external_id);
+}
+
 constexpr const char* secret_mount_columns =
     "id::text, customer_id::text, organization_id::text, name, description, "
     "created_at::text, updated_at::text";
@@ -3012,6 +3109,649 @@ public:
             }
             return std::unexpected(StoreError{"not_found", "session is not active"});
         });
+    }
+
+    Result<SsoProvider> register_sso_provider(const NewSsoProvider& input) override {
+        if (input.organization_id.empty() || input.name.empty() || input.issuer.empty() ||
+            input.scim_token.empty() || (input.protocol != "saml" && input.protocol != "oidc")) {
+            return std::unexpected(
+                StoreError{"invalid_input", "provider configuration is incomplete"});
+        }
+        if ((input.protocol == "saml" &&
+             (input.metadata.empty() || input.signing_certificate.empty())) ||
+            (input.protocol == "oidc" &&
+             (input.client_id.empty() || input.client_secret.empty()))) {
+            return std::unexpected(
+                StoreError{"invalid_input", "provider protocol configuration is incomplete"});
+        }
+        return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
+            std::string encrypted_secret;
+            if (input.protocol == "oidc") {
+                const auto encrypted =
+                    encrypt_secret(tx,
+                                   "sso.oidc." + input.organization_id + "." + input.name,
+                                   input.client_secret);
+                if (!encrypted) {
+                    return std::unexpected(encrypted.error());
+                }
+                encrypted_secret = *encrypted;
+            }
+            const std::string token_hash = identity_crypto::hash_secret(input.scim_token);
+            if (token_hash.empty()) {
+                return std::unexpected(StoreError{"store_error", "could not hash SCIM token"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO sso_providers (organization_id, pool_id, name, protocol, "
+                            "issuer, ") +
+                    "metadata, signing_certificate, client_id, encrypted_client_secret, "
+                    "scim_token_hash, "
+                    "attribute_mapping, jit_provisioning) VALUES ($1::uuid, $2, $3, $4, $5, $6, "
+                    "$7, $8, "
+                    "decode(NULLIF($9, ''), 'hex'), $10, $11::jsonb, $12) ON CONFLICT "
+                    "(organization_id, name) "
+                    "DO UPDATE SET pool_id = EXCLUDED.pool_id, protocol = EXCLUDED.protocol, "
+                    "issuer = "
+                    "EXCLUDED.issuer, metadata = EXCLUDED.metadata, signing_certificate = "
+                    "EXCLUDED.signing_certificate, client_id = EXCLUDED.client_id, "
+                    "encrypted_client_secret = "
+                    "EXCLUDED.encrypted_client_secret, scim_token_hash = EXCLUDED.scim_token_hash, "
+                    "attribute_mapping = EXCLUDED.attribute_mapping, jit_provisioning = "
+                    "EXCLUDED.jit_provisioning, enabled = true RETURNING " +
+                    sso_provider_columns,
+                input.organization_id,
+                input.pool_id.empty() ? "lake" : input.pool_id,
+                input.name,
+                input.protocol,
+                input.issuer,
+                input.metadata,
+                input.signing_certificate,
+                input.client_id,
+                encrypted_secret,
+                token_hash,
+                input.attribute_mapping.dump(),
+                input.jit_provisioning);
+            return sso_provider_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<SsoProvider>> list_sso_providers(const std::string& organization_id,
+                                                        int limit) override {
+        return with_tx<std::vector<SsoProvider>>(
+            [&](pqxx::work& tx) -> Result<std::vector<SsoProvider>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + sso_provider_columns +
+                                       " FROM sso_providers WHERE organization_id = $1::uuid ORDER "
+                                       "BY created_at DESC LIMIT $2",
+                                   organization_id,
+                                   limit);
+                std::vector<SsoProvider> providers;
+                for (const auto& row : rows) {
+                    providers.push_back(sso_provider_of(row));
+                }
+                return providers;
+            });
+    }
+
+    Result<SsoProvider> get_sso_provider(const std::string& id) override {
+        return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + sso_provider_columns +
+                                                         " FROM sso_providers WHERE id = $1::uuid",
+                                                     id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "SSO provider does not exist"});
+            }
+            return sso_provider_of(rows[0]);
+        });
+    }
+
+    Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) override {
+        return with_tx<OAuthProvider>([&](pqxx::work& tx) -> Result<OAuthProvider> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT organization_id::text, name, pool_id, issuer, client_id, "
+                "encode(encrypted_client_secret, 'hex') FROM sso_providers WHERE id = $1::uuid "
+                "AND protocol = 'oidc' AND enabled",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "OIDC provider is unavailable"});
+            }
+            const Result<std::string> secret = decrypt_secret(
+                tx,
+                "sso.oidc." + rows[0][0].as<std::string>() + "." + rows[0][1].as<std::string>(),
+                rows[0][5].as<std::string>());
+            if (!secret) {
+                return std::unexpected(secret.error());
+            }
+            return OAuthProvider{rows[0][2].as<std::string>(),
+                                 "sso-" + id,
+                                 rows[0][3].as<std::string>(),
+                                 rows[0][4].as<std::string>(),
+                                 *secret,
+                                 {"openid", "email", "profile"}};
+        });
+    }
+
+    Result<SsoProvider> authenticate_scim(const std::string& bearer_token) override {
+        return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
+            const pqxx::result rows = tx.exec(std::string("SELECT ") + sso_provider_columns +
+                                              ", scim_token_hash FROM sso_providers "
+                                              "WHERE enabled ORDER BY created_at");
+            for (const pqxx::row& row : rows) {
+                if (identity_crypto::verify_secret(row[15].as<std::string>(), bearer_token)) {
+                    return sso_provider_of(row);
+                }
+            }
+            return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+        });
+    }
+
+    Result<SsoProvider> test_sso_provider(const std::string& id) override {
+        return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
+            const pqxx::result rows = tx.exec_params(
+                std::string(
+                    "UPDATE sso_providers SET tested_at = now() WHERE id = $1::uuid AND enabled "
+                    "AND ((protocol = 'saml' AND length(metadata) > 0 AND "
+                    "length(signing_certificate) > 0) "
+                    "OR (protocol = 'oidc' AND length(client_id) > 0 AND encrypted_client_secret "
+                    "IS NOT NULL)) "
+                    "RETURNING ") +
+                    sso_provider_columns,
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"invalid_input", "SSO provider is not testable"});
+            }
+            return sso_provider_of(rows[0]);
+        });
+    }
+
+    Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer& input) override {
+        if (input.organization_id.empty() || input.issuer.empty() || input.claim.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "organization, issuer, and claim are required"});
+        }
+        return with_tx<FederationIssuer>([&](pqxx::work& tx) -> Result<FederationIssuer> {
+            const pqxx::result rows = tx.exec_params(
+                std::string(
+                    "INSERT INTO federation_issuers (organization_id, issuer, claim) VALUES ") +
+                    "($1::uuid, $2, $3) RETURNING " + federation_issuer_columns,
+                input.organization_id,
+                input.issuer,
+                input.claim);
+            return federation_issuer_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<FederationIssuer>>
+    list_federation_issuers(const std::string& organization_id, int limit) override {
+        return with_tx<std::vector<FederationIssuer>>(
+            [&](pqxx::work& tx) -> Result<std::vector<FederationIssuer>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + federation_issuer_columns +
+                                       " FROM federation_issuers WHERE organization_id = $1::uuid "
+                                       "ORDER BY created_at DESC LIMIT $2",
+                                   organization_id,
+                                   limit);
+                std::vector<FederationIssuer> issuers;
+                for (const auto& row : rows) {
+                    issuers.push_back(federation_issuer_of(row));
+                }
+                return issuers;
+            });
+    }
+
+    Result<IssuedSession> sign_in_sso(const SsoIdentity& input) override {
+        if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
+            !input.claims.is_object()) {
+            return std::unexpected(StoreError{"invalid_input", "SSO assertion is incomplete"});
+        }
+        return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
+            const pqxx::result providers =
+                tx.exec_params(std::string("SELECT ") + sso_provider_columns +
+                                   " FROM sso_providers WHERE id = $1::uuid AND enabled",
+                               input.provider_id);
+            if (providers.empty()) {
+                return std::unexpected(StoreError{"unauthorized", "SSO provider is unavailable"});
+            }
+            const SsoProvider provider = sso_provider_of(providers[0]);
+            if (provider.issuer != input.issuer) {
+                return std::unexpected(StoreError{"unauthorized", "SSO issuer is not accepted"});
+            }
+            for (auto claim = input.claims.begin(); claim != input.claims.end(); ++claim) {
+                const pqxx::result permitted =
+                    tx.exec_params("SELECT 1 FROM federation_issuers WHERE organization_id = "
+                                   "$1::uuid AND issuer = $2 "
+                                   "AND claim = $3",
+                                   provider.organization_id,
+                                   input.issuer,
+                                   claim.key());
+                if (permitted.empty()) {
+                    return std::unexpected(StoreError{
+                        "unauthorized", "issuer is not allowed to assert " + claim.key()});
+                }
+            }
+            const pqxx::result mapped =
+                tx.exec_params("SELECT scim_users.user_id::text, scim_users.active FROM scim_users "
+                               "WHERE provider_id = "
+                               "$1::uuid AND external_id = $2 FOR UPDATE",
+                               input.provider_id,
+                               input.subject);
+            std::string user_id;
+            if (!mapped.empty()) {
+                if (!mapped[0][1].as<bool>()) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "provisioned user is inactive"});
+                }
+                user_id = mapped[0][0].as<std::string>();
+            } else {
+                if (!provider.jit_provisioning || input.taap_id.empty()) {
+                    return std::unexpected(
+                        StoreError{"unauthorized", "SSO user is not provisioned"});
+                }
+                const pqxx::result created =
+                    tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
+                                   "$2, $3) RETURNING id::text",
+                                   input.taap_id,
+                                   nullable(input.email),
+                                   input.display_name);
+                user_id = created[0][0].as<std::string>();
+                tx.exec_params(
+                    "INSERT INTO scim_users (provider_id, external_id, user_id, attributes) "
+                    "VALUES ($1::uuid, $2, $3::uuid, $4::jsonb)",
+                    input.provider_id,
+                    input.subject,
+                    user_id,
+                    input.claims.dump());
+            }
+            const pqxx::result user = tx.exec_params(
+                "SELECT taap_id FROM users WHERE id = $1::uuid AND taap_id IS NOT NULL", user_id);
+            if (user.empty()) {
+                return std::unexpected(StoreError{"unauthorized", "SSO user has no TAAP identity"});
+            }
+            tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject) VALUES "
+                           "($1::uuid, $2, $3, $4) ON CONFLICT (pool_id, kind, subject) DO NOTHING",
+                           user_id,
+                           provider.pool_id,
+                           provider.protocol,
+                           input.provider_id + ":" + input.subject);
+            return issue_session(tx,
+                                 user_id,
+                                 provider.pool_id,
+                                 input.device_name,
+                                 "browser",
+                                 "",
+                                 {"*"},
+                                 "",
+                                 60 * 60 * 24 * 30);
+        });
+    }
+
+    Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
+                                                  int limit) override {
+        return with_tx<std::vector<ScimUser>>([&](pqxx::work& tx) -> Result<std::vector<ScimUser>> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + scim_user_columns +
+                    " FROM scim_users WHERE provider_id = $1::uuid ORDER BY created_at LIMIT $2",
+                provider_id,
+                limit);
+            std::vector<ScimUser> users;
+            for (const pqxx::row& row : rows) {
+                users.push_back(scim_user_of(row));
+            }
+            return users;
+        });
+    }
+
+    Result<ScimUser> get_scim_user(const std::string& provider_id,
+                                   const std::string& resource_id) override {
+        return with_tx<ScimUser>([&](pqxx::work& tx) -> Result<ScimUser> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + scim_user_columns +
+                                   " FROM scim_users WHERE provider_id = $1::uuid "
+                                   "AND (user_id::text = $2 OR external_id = $2)",
+                               provider_id,
+                               resource_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM user does not exist"});
+            }
+            return scim_user_of(rows[0]);
+        });
+    }
+
+    Result<ScimUser> upsert_scim_user(const NewScimUser& input) override {
+        if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
+            return std::unexpected(StoreError{
+                "invalid_input", "provider, external id, and TAAP identity are required"});
+        }
+        return with_tx<ScimUser>([&](pqxx::work& tx) -> Result<ScimUser> {
+            const pqxx::result provider = tx.exec_params(
+                "SELECT 1 FROM sso_providers WHERE id = $1::uuid", input.provider_id);
+            if (provider.empty()) {
+                return std::unexpected(StoreError{"not_found", "SSO provider does not exist"});
+            }
+            const pqxx::result existing =
+                tx.exec_params("SELECT user_id::text FROM scim_users WHERE provider_id = $1::uuid "
+                               "AND external_id = $2 "
+                               "FOR UPDATE",
+                               input.provider_id,
+                               input.external_id);
+            std::string user_id;
+            std::string operation = "create";
+            if (existing.empty()) {
+                const pqxx::result created =
+                    tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES ($1, "
+                                   "$2, $3) RETURNING id::text",
+                                   input.taap_id,
+                                   nullable(input.email),
+                                   input.display_name);
+                user_id = created[0][0].as<std::string>();
+                tx.exec_params("INSERT INTO scim_users (provider_id, external_id, user_id, active, "
+                               "attributes) "
+                               "VALUES ($1::uuid, $2, $3::uuid, $4, $5::jsonb)",
+                               input.provider_id,
+                               input.external_id,
+                               user_id,
+                               input.active,
+                               input.attributes.dump());
+            } else {
+                user_id = existing[0][0].as<std::string>();
+                operation = input.active ? "update" : "deactivate";
+                tx.exec_params("UPDATE users SET email = $2, display_name = $3 WHERE id = $1::uuid",
+                               user_id,
+                               nullable(input.email),
+                               input.display_name);
+                tx.exec_params("UPDATE scim_users SET active = $3, attributes = $4::jsonb WHERE "
+                               "provider_id = $1::uuid AND external_id = $2",
+                               input.provider_id,
+                               input.external_id,
+                               input.active,
+                               input.attributes.dump());
+            }
+            if (!input.active) {
+                remove_scim_user_access(tx, input.provider_id, input.external_id, user_id);
+                operation = "deactivate";
+            }
+            tx.exec_params(
+                "INSERT INTO sso_provisioning_logs (provider_id, resource, operation, external_id, "
+                "outcome) VALUES ($1::uuid, 'user', $2, $3, 'success')",
+                input.provider_id,
+                operation,
+                input.external_id);
+            const pqxx::result row =
+                tx.exec_params(std::string("SELECT ") + scim_user_columns +
+                                   " FROM scim_users WHERE provider_id = $1::uuid "
+                                   "AND external_id = $2",
+                               input.provider_id,
+                               input.external_id);
+            return scim_user_of(row[0]);
+        });
+    }
+
+    Result<ScimUser> delete_scim_user(const std::string& provider_id,
+                                      const std::string& resource_id) override {
+        return with_tx<ScimUser>([&](pqxx::work& tx) -> Result<ScimUser> {
+            const pqxx::result existing =
+                tx.exec_params(std::string("SELECT ") + scim_user_columns +
+                                   " FROM scim_users WHERE provider_id = $1::uuid "
+                                   "AND (user_id::text = $2 OR external_id = $2) FOR UPDATE",
+                               provider_id,
+                               resource_id);
+            if (existing.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM user does not exist"});
+            }
+            const ScimUser user = scim_user_of(existing[0]);
+            tx.exec_params("UPDATE scim_users SET active = false WHERE provider_id = $1::uuid "
+                           "AND external_id = $2",
+                           provider_id,
+                           user.external_id);
+            remove_scim_user_access(tx, provider_id, user.external_id, user.user_id);
+            tx.exec_params(
+                "INSERT INTO sso_provisioning_logs (provider_id, resource, operation, "
+                "external_id, outcome) VALUES ($1::uuid, 'user', 'deactivate', $2, 'success')",
+                provider_id,
+                user.external_id);
+            const pqxx::result updated = tx.exec_params(
+                std::string("SELECT ") + scim_user_columns +
+                    " FROM scim_users WHERE provider_id = $1::uuid AND external_id = $2",
+                provider_id,
+                user.external_id);
+            return scim_user_of(updated[0]);
+        });
+    }
+
+    Result<std::vector<ScimGroup>> list_scim_groups(const std::string& provider_id,
+                                                    int limit) override {
+        return with_tx<std::vector<ScimGroup>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ScimGroup>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + scim_group_columns +
+                                       " FROM scim_groups WHERE provider_id = $1::uuid "
+                                       "ORDER BY created_at LIMIT $2",
+                                   provider_id,
+                                   limit);
+                std::vector<ScimGroup> groups;
+                for (const pqxx::row& row : rows) {
+                    groups.push_back(scim_group_of(row));
+                }
+                return groups;
+            });
+    }
+
+    Result<ScimGroup> get_scim_group(const std::string& provider_id,
+                                     const std::string& resource_id) override {
+        return with_tx<ScimGroup>([&](pqxx::work& tx) -> Result<ScimGroup> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + scim_group_columns +
+                                   " FROM scim_groups WHERE provider_id = $1::uuid "
+                                   "AND (team_id::text = $2 OR external_id = $2)",
+                               provider_id,
+                               resource_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM group does not exist"});
+            }
+            return scim_group_of(rows[0]);
+        });
+    }
+
+    Result<ScimGroup> upsert_scim_group(const NewScimGroup& input) override {
+        if (input.provider_id.empty() || input.external_id.empty() || input.team_name.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "provider, external id, and team name are required"});
+        }
+        return with_tx<ScimGroup>([&](pqxx::work& tx) -> Result<ScimGroup> {
+            const pqxx::result providers = tx.exec_params(
+                "SELECT organization_id::text, issuer FROM sso_providers WHERE id = $1::uuid",
+                input.provider_id);
+            if (providers.empty()) {
+                return std::unexpected(StoreError{"not_found", "SSO provider does not exist"});
+            }
+            const std::string organization_id = providers[0][0].as<std::string>();
+            const std::string issuer = providers[0][1].as<std::string>();
+            pqxx::result groups = tx.exec_params("SELECT team_id::text FROM scim_groups WHERE "
+                                                 "provider_id = $1::uuid AND external_id = $2 "
+                                                 "FOR UPDATE",
+                                                 input.provider_id,
+                                                 input.external_id);
+            const bool creating = groups.empty();
+            std::string team_id;
+            if (groups.empty()) {
+                const pqxx::result team =
+                    tx.exec_params("INSERT INTO teams (organization_id, name, display_name) VALUES "
+                                   "($1::uuid, $2, $3) "
+                                   "RETURNING id::text",
+                                   organization_id,
+                                   input.team_name,
+                                   input.display_name);
+                team_id = team[0][0].as<std::string>();
+                const pqxx::result parent =
+                    tx.exec_params("SELECT id::text FROM objects WHERE object_type = "
+                                   "'organization' AND external_id = $1",
+                                   organization_id);
+                if (parent.empty()) {
+                    return std::unexpected(
+                        StoreError{"store_error", "organization policy object is missing"});
+                }
+                tx.exec_params(
+                    "INSERT INTO objects (object_type, external_id, parent_id) VALUES ('team', $1, "
+                    "$2::uuid)",
+                    team_id,
+                    parent[0][0].as<std::string>());
+                tx.exec_params(
+                    "INSERT INTO scim_groups (provider_id, external_id, team_id, display_name, "
+                    "attributes) VALUES ($1::uuid, $2, $3::uuid, $4, $5::jsonb)",
+                    input.provider_id,
+                    input.external_id,
+                    team_id,
+                    input.display_name,
+                    input.attributes.dump());
+            } else {
+                team_id = groups[0][0].as<std::string>();
+                tx.exec_params(
+                    "UPDATE scim_groups SET display_name = $3, attributes = $4::jsonb WHERE "
+                    "provider_id = $1::uuid AND external_id = $2",
+                    input.provider_id,
+                    input.external_id,
+                    input.display_name,
+                    input.attributes.dump());
+            }
+            const pqxx::result team_object = tx.exec_params(
+                "SELECT id::text FROM objects WHERE object_type = 'team' AND external_id = $1",
+                team_id);
+            if (team_object.empty()) {
+                return std::unexpected(StoreError{"store_error", "team policy object is missing"});
+            }
+            const pqxx::result existing_members = tx.exec_params(
+                "SELECT scim_group_members.user_external_id, users.taap_id, "
+                "scim_group_members.membership_id::text FROM "
+                "scim_group_members JOIN scim_users ON scim_users.provider_id = "
+                "scim_group_members.provider_id AND scim_users.external_id = "
+                "scim_group_members.user_external_id JOIN users ON users.id = scim_users.user_id "
+                "WHERE scim_group_members.provider_id = $1::uuid AND "
+                "scim_group_members.group_external_id = $2",
+                input.provider_id,
+                input.external_id);
+            const std::string digest = "scim:" + input.provider_id + ":" + input.external_id;
+            for (const pqxx::row& member : existing_members) {
+                const std::string external_id = member[0].as<std::string>();
+                if (std::ranges::find(input.member_external_ids, external_id) !=
+                    input.member_external_ids.end()) {
+                    continue;
+                }
+                tx.exec_params("DELETE FROM grants WHERE object_id = $1::uuid AND "
+                               "principal_taap_id = $2 AND attestation_digest = $3",
+                               team_object[0][0].as<std::string>(),
+                               member[1].as<std::string>(),
+                               digest);
+                tx.exec_params("DELETE FROM memberships WHERE id = $1::uuid",
+                               member[2].as<std::string>());
+            }
+            for (const std::string& external_id : input.member_external_ids) {
+                const pqxx::result user = tx.exec_params(
+                    "SELECT scim_users.user_id::text, users.taap_id FROM scim_users JOIN users ON "
+                    "users.id = scim_users.user_id WHERE scim_users.provider_id = $1::uuid AND "
+                    "scim_users.external_id = $2 AND scim_users.active",
+                    input.provider_id,
+                    external_id);
+                if (user.empty() || user[0][1].is_null()) {
+                    return std::unexpected(
+                        StoreError{"invalid_input", "SCIM group member is not active"});
+                }
+                pqxx::result membership =
+                    tx.exec_params(std::string("INSERT INTO memberships (organization_id, team_id, "
+                                               "principal_type, principal_id, ") +
+                                       "principal_taap_id, role, attestation_digest, "
+                                       "granted_by_taap_id) VALUES ($1::uuid, "
+                                       "$2::uuid, 'user', $3, $4, 'member', $5, $6) ON CONFLICT DO "
+                                       "NOTHING RETURNING " +
+                                       membership_columns,
+                                   organization_id,
+                                   team_id,
+                                   user[0][0].as<std::string>(),
+                                   user[0][1].as<std::string>(),
+                                   digest,
+                                   issuer);
+                if (membership.empty()) {
+                    membership = tx.exec_params(std::string("SELECT ") + membership_columns +
+                                                    " FROM memberships WHERE "
+                                                    "organization_id = $1::uuid AND team_id = "
+                                                    "$2::uuid AND principal_type = 'user' "
+                                                    "AND principal_id = $3",
+                                                organization_id,
+                                                team_id,
+                                                user[0][0].as<std::string>());
+                }
+                tx.exec_params(
+                    "INSERT INTO grants (principal_taap_id, object_id, role, attestation_digest, "
+                    "granted_by_taap_id) VALUES ($1, $2::uuid, 'read', $3, $4) ON CONFLICT DO "
+                    "NOTHING",
+                    user[0][1].as<std::string>(),
+                    team_object[0][0].as<std::string>(),
+                    digest,
+                    issuer);
+                tx.exec_params(
+                    "INSERT INTO scim_group_members (provider_id, group_external_id, "
+                    "user_external_id, "
+                    "membership_id) VALUES ($1::uuid, $2, $3, $4::uuid) ON CONFLICT DO NOTHING",
+                    input.provider_id,
+                    input.external_id,
+                    external_id,
+                    membership[0][0].as<std::string>());
+            }
+            tx.exec_params(
+                "INSERT INTO sso_provisioning_logs (provider_id, resource, operation, external_id, "
+                "outcome) VALUES ($1::uuid, 'group', $3, $2, 'success')",
+                input.provider_id,
+                input.external_id,
+                creating ? "create" : "update");
+            const pqxx::result row =
+                tx.exec_params(std::string("SELECT ") + scim_group_columns +
+                                   " FROM scim_groups WHERE provider_id = $1::uuid "
+                                   "AND external_id = $2",
+                               input.provider_id,
+                               input.external_id);
+            return scim_group_of(row[0]);
+        });
+    }
+
+    Result<void> delete_scim_group(const std::string& provider_id,
+                                   const std::string& resource_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result existing = tx.exec_params(
+                "SELECT external_id, team_id::text FROM scim_groups WHERE provider_id = $1::uuid "
+                "AND (team_id::text = $2 OR external_id = $2) FOR UPDATE",
+                provider_id,
+                resource_id);
+            if (existing.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM group does not exist"});
+            }
+            const std::string external_id = existing[0][0].as<std::string>();
+            const std::string team_id = existing[0][1].as<std::string>();
+            tx.exec_params("DELETE FROM objects WHERE object_type = 'team' AND external_id = $1",
+                           team_id);
+            tx.exec_params("DELETE FROM teams WHERE id = $1::uuid", team_id);
+            tx.exec_params(
+                "INSERT INTO sso_provisioning_logs (provider_id, resource, operation, "
+                "external_id, outcome) VALUES ($1::uuid, 'group', 'deactivate', $2, 'success')",
+                provider_id,
+                external_id);
+            return {};
+        });
+    }
+
+    Result<std::vector<ProvisioningLog>> list_sso_provisioning_logs(const std::string& provider_id,
+                                                                    int limit) override {
+        return with_tx<std::vector<ProvisioningLog>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ProvisioningLog>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + provisioning_log_columns +
+                                       " FROM sso_provisioning_logs WHERE provider_id = $1::uuid "
+                                       "ORDER BY created_at DESC LIMIT $2",
+                                   provider_id,
+                                   limit);
+                std::vector<ProvisioningLog> logs;
+                for (const auto& row : rows) {
+                    logs.push_back(provisioning_log_of(row));
+                }
+                return logs;
+            });
     }
 
     Result<SecretMount> create_secret_mount(const NewSecretMount& input,

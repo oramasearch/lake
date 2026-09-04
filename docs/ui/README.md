@@ -3,7 +3,7 @@
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on the two passkey
 pages that call `navigator.credentials`, unit-tested as strings. The navigation is on every page:
-Home, Customers, Organizations, Repositories, Search, Secrets, Audit, API
+Home, Customers, Organizations, Repositories, Search, Secrets, Audit, SSO, API
 (`/v1/openapi.json`), and Sign in / Sign out.
 
 | Page | Route | Shows |
@@ -14,6 +14,7 @@ Home, Customers, Organizations, Repositories, Search, Secrets, Audit, API
 | Customers | `GET /customers` | every tenant: handle (links to its repositories), type, identity id, created |
 | Organizations | `GET /organizations` | every authorized organization, with links to teams, members, and effective access |
 | Teams | `GET /teams?organization_id=<uuid>` | the organization's authorized teams with member and effective-access links |
+| Enterprise SSO | `GET /sso?organization_id=<uuid>[&provider_id=<uuid>]` | SAML/OIDC provider configuration, federation issuer claims, and one provider's SCIM provisioning log |
 | Members | `GET /members?organization_id=<uuid>[&team_id=<uuid>]` | direct memberships, their role, principal and attestation evidence |
 | Invitations | `GET /invitations?organization_id=<uuid>[&team_id=<uuid>]` | invitee, role, expiry and status |
 | Grants | `GET /grants?object_id=<uuid>` | direct policy grants and their attestation evidence |

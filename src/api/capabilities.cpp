@@ -1,8 +1,13 @@
 #include "lake/api/capabilities.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <ctime>
+#include <expected>
 #include <ranges>
+#include <string>
+#include <string_view>
 
 #include "lake/audit/audit.hpp"
 
@@ -10,6 +15,7 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/saml.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 
@@ -376,6 +382,258 @@ std::expected<std::string, ApiError> invitation_object(const json& input, ApiCon
         return std::unexpected(ApiError{object.error().code, object.error().message, {}});
     }
     return object->id;
+}
+
+std::expected<std::string, ApiError> sso_provider_object(const json& input, ApiContext& context) {
+    const auto provider = context.store->get_sso_provider(input.at("provider_id"));
+    if (!provider) {
+        return std::unexpected(
+            ApiError{provider.error().code, provider.error().message, "/provider_id"});
+    }
+    const auto object =
+        context.store->find_policy_object("organization", provider->organization_id);
+    if (!object) {
+        return std::unexpected(
+            ApiError{object.error().code, object.error().message, "/provider_id"});
+    }
+    return object->id;
+}
+
+constexpr std::string_view scim_user_schema = "urn:ietf:params:scim:schemas:core:2.0:User";
+constexpr std::string_view scim_group_schema = "urn:ietf:params:scim:schemas:core:2.0:Group";
+constexpr std::string_view scim_taap_schema =
+    "urn:orama:params:scim:schemas:extension:taap:2.0:User";
+
+std::string lower_ascii(std::string value) {
+    std::ranges::transform(value, value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return value;
+}
+
+std::string scim_email(const json& resource) {
+    if (resource.contains("userName") && resource["userName"].is_string()) {
+        return resource["userName"].get<std::string>();
+    }
+    for (const json& email : resource.value("emails", json::array())) {
+        if (email.is_object() && email.contains("value") && email["value"].is_string()) {
+            return email["value"].get<std::string>();
+        }
+    }
+    return {};
+}
+
+std::string scim_taap_id(const json& resource) {
+    if (resource.contains("taapId") && resource["taapId"].is_string()) {
+        return resource["taapId"].get<std::string>();
+    }
+    const std::string extension(scim_taap_schema);
+    if (resource.contains(extension) && resource[extension].is_object()) {
+        return resource[extension].value("taapId", "");
+    }
+    return {};
+}
+
+std::string scim_team_name(std::string_view external_id) {
+    std::string result;
+    result.reserve(std::min<std::size_t>(external_id.size(), 256));
+    bool last_was_hyphen = false;
+    for (const unsigned char character : external_id) {
+        if (std::isalnum(character)) {
+            result.push_back(static_cast<char>(std::tolower(character)));
+            last_was_hyphen = false;
+        } else if (!result.empty() && !last_was_hyphen) {
+            result.push_back('-');
+            last_was_hyphen = true;
+        }
+        if (result.size() == 256) {
+            break;
+        }
+    }
+    while (!result.empty() && result.back() == '-') {
+        result.pop_back();
+    }
+    return result;
+}
+
+json scim_user_document(const control::ScimUser& user) {
+    json resource = user.attributes.is_object() ? user.attributes : json::object();
+    resource["schemas"] = json::array({scim_user_schema});
+    resource["id"] = user.user_id;
+    resource["externalId"] = user.external_id;
+    resource["active"] = user.active;
+    resource["meta"] = {{"resourceType", "User"},
+                        {"created", user.created_at},
+                        {"lastModified", user.updated_at},
+                        {"location", "/scim/v2/Users/" + user.user_id}};
+    return resource;
+}
+
+json scim_group_document(const control::ScimGroup& group) {
+    json resource = group.attributes.is_object() ? group.attributes : json::object();
+    resource["schemas"] = json::array({scim_group_schema});
+    resource["id"] = group.team_id;
+    resource["externalId"] = group.external_id;
+    resource["displayName"] = group.display_name;
+    resource["meta"] = {{"resourceType", "Group"},
+                        {"created", group.created_at},
+                        {"lastModified", group.updated_at},
+                        {"location", "/scim/v2/Groups/" + group.team_id}};
+    return resource;
+}
+
+std::expected<control::SsoProvider, ApiResult> scim_provider(const json& input,
+                                                             ApiContext& context) {
+    if (!context.store) {
+        return std::unexpected(no_store());
+    }
+    const auto provider = context.store->authenticate_scim(input.value("bearer_token", ""));
+    if (!provider) {
+        return std::unexpected(from_store_error(provider.error()));
+    }
+    context.acting_identity = "sso-provider/" + provider->id;
+    context.authentication_method = "scim";
+    return *provider;
+}
+
+std::expected<bool, std::string> scim_filter_matches(const json& resource,
+                                                     std::string_view filter) {
+    if (filter.empty()) {
+        return true;
+    }
+    const std::size_t separator = filter.find(" eq ");
+    if (separator == std::string_view::npos) {
+        return std::unexpected("SCIM filter must use the eq operator");
+    }
+    const std::string attribute(filter.substr(0, separator));
+    std::string value(filter.substr(separator + 4));
+    if (value.size() < 2 || value.front() != '"' || value.back() != '"') {
+        return std::unexpected("SCIM filter value must be quoted");
+    }
+    value = value.substr(1, value.size() - 2);
+    if (!resource.contains(attribute) || !resource[attribute].is_string()) {
+        return false;
+    }
+    return resource[attribute].get<std::string>() == value;
+}
+
+std::expected<json, std::string> apply_scim_patch(json resource, const json& request) {
+    if (!request.is_object() || !request.contains("Operations") ||
+        !request["Operations"].is_array()) {
+        return std::unexpected("SCIM PATCH requires an Operations array");
+    }
+    for (const json& operation : request["Operations"]) {
+        if (!operation.is_object()) {
+            return std::unexpected("SCIM PATCH operation must be an object");
+        }
+        const std::string action = lower_ascii(operation.value("op", ""));
+        const std::string path = operation.value("path", "");
+        const json value = operation.value("value", json());
+        if (action != "add" && action != "replace" && action != "remove") {
+            return std::unexpected("SCIM PATCH operation is not supported");
+        }
+        if (path.empty()) {
+            if (action == "remove" || !value.is_object()) {
+                return std::unexpected("SCIM PATCH without a path requires an object value");
+            }
+            for (auto field = value.begin(); field != value.end(); ++field) {
+                resource[field.key()] = field.value();
+            }
+            continue;
+        }
+        if (path.starts_with("members[value eq \"") && path.ends_with("\"]")) {
+            if (action != "remove") {
+                return std::unexpected("filtered member PATCH only supports remove");
+            }
+            const std::size_t start = std::string_view("members[value eq \"").size();
+            const std::string member_id = path.substr(start, path.size() - start - 2);
+            json members = json::array();
+            for (const json& member : resource.value("members", json::array())) {
+                if (!member.is_object() || member.value("value", "") != member_id) {
+                    members.push_back(member);
+                }
+            }
+            resource["members"] = std::move(members);
+            continue;
+        }
+        if (action == "remove") {
+            resource.erase(path);
+            continue;
+        }
+        if (action == "add" && path == "members" && resource.contains(path) &&
+            resource[path].is_array() && value.is_array()) {
+            for (const json& member : value) {
+                resource[path].push_back(member);
+            }
+            continue;
+        }
+        resource[path] = value;
+    }
+    return resource;
+}
+
+std::expected<control::NewScimUser, ApiResult> new_scim_user(const std::string& provider_id,
+                                                             json resource) {
+    const std::string external_id = resource.value("externalId", resource.value("userName", ""));
+    const std::string taap_id = scim_taap_id(resource);
+    if (external_id.empty() || taap_id.empty()) {
+        return std::unexpected(ApiResult::failure(
+            "invalid_input", "SCIM user requires externalId or userName and a TAAP identity"));
+    }
+    resource["externalId"] = external_id;
+    return control::NewScimUser{provider_id,
+                                external_id,
+                                scim_email(resource),
+                                resource.value("displayName", ""),
+                                taap_id,
+                                resource.value("active", true),
+                                std::move(resource)};
+}
+
+std::expected<control::NewScimGroup, ApiResult>
+new_scim_group(control::Store& store, const std::string& provider_id, json resource) {
+    const std::string external_id = resource.value("externalId", "");
+    const std::string display_name = resource.value("displayName", "");
+    const std::string team_name = scim_team_name(external_id);
+    if (external_id.empty() || display_name.empty() || !control::valid_handle(team_name)) {
+        return std::unexpected(ApiResult::failure(
+            "invalid_input", "SCIM group requires a usable externalId and displayName"));
+    }
+    std::vector<std::string> members;
+    for (const json& member : resource.value("members", json::array())) {
+        if (!member.is_object() || !member.contains("value") || !member["value"].is_string()) {
+            return std::unexpected(
+                ApiResult::failure("invalid_input", "SCIM group member requires a value"));
+        }
+        const auto user = store.get_scim_user(provider_id, member["value"]);
+        if (!user) {
+            return std::unexpected(from_store_error(user.error()));
+        }
+        members.push_back(user->external_id);
+    }
+    resource["externalId"] = external_id;
+    return control::NewScimGroup{
+        provider_id, external_id, team_name, display_name, std::move(members), std::move(resource)};
+}
+
+ApiResult scim_list_response(std::vector<json> resources, int start_index, int count) {
+    const int safe_start = std::max(1, start_index);
+    const int safe_count = std::clamp(count, 0, 1000);
+    const std::size_t offset = static_cast<std::size_t>(safe_start - 1);
+    json page = json::array();
+    if (offset < resources.size()) {
+        const std::size_t end =
+            std::min(resources.size(), offset + static_cast<std::size_t>(safe_count));
+        for (std::size_t index = offset; index < end; ++index) {
+            page.push_back(std::move(resources[index]));
+        }
+    }
+    return ApiResult::success(
+        {{"schemas", json::array({"urn:ietf:params:scim:api:messages:2.0:ListResponse"})},
+         {"totalResults", resources.size()},
+         {"startIndex", safe_start},
+         {"itemsPerPage", page.size()},
+         {"Resources", std::move(page)}});
 }
 
 json id_input() {
@@ -1313,6 +1571,55 @@ void register_identity_capabilities(Registry& registry) {
                 {{"authorization_url",
                   oauth_authorization_url(*provider, flow, context.public_host)}});
         }});
+    registry.add(Capability{
+        .name = "start_sso_oidc",
+        .title = "Start enterprise OIDC sign-in",
+        .description = "Create a one-use enterprise OIDC authorization-code flow with PKCE.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            if (context.public_host.empty()) {
+                return ApiResult::failure("store_unavailable",
+                                          "LAKE_PUBLIC_HOST is required for OIDC sign-in");
+            }
+            const std::string provider_id = input.at("provider_id");
+            const auto provider = context.store->get_sso_oidc_provider(provider_id);
+            if (!provider)
+                return from_store_error(provider.error());
+            if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
+                return ApiResult::failure("invalid_input",
+                                          "OIDC endpoints must use HTTPS outside loopback tests");
+            }
+            control::OAuthFlow flow{provider->pool_id,
+                                    provider->provider,
+                                    control::identity_crypto::random_secret(),
+                                    control::identity_crypto::random_secret(),
+                                    control::identity_crypto::random_secret(),
+                                    input.value("device_name", "browser"),
+                                    input.value("taap_id", "")};
+            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
+                return ApiResult::failure("store_error", "could not generate OIDC flow material");
+            }
+            const auto started = context.store->begin_oauth(flow);
+            if (!started)
+                return from_store_error(started.error());
+            return ApiResult::success(
+                {{"authorization_url",
+                  oauth_authorization_url(*provider, flow, context.public_host)}});
+        }});
     registry.add(Capability{.name = "create_token",
                             .title = "Create API token",
                             .description = "Issue a named, scoped API-token session. Static tokens "
@@ -1423,6 +1730,647 @@ void register_identity_capabilities(Registry& registry) {
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
         }});
+}
+
+void register_sso_capabilities(Registry& registry) {
+    const json provider_input = {
+        {"type", "object"},
+        {"properties",
+         {{"organization_id", {{"type", "string"}}},
+          {"pool_id", {{"type", "string"}}},
+          {"name", {{"type", "string"}}},
+          {"protocol", {{"type", "string"}}},
+          {"issuer", {{"type", "string"}}},
+          {"metadata", {{"type", "string"}}},
+          {"signing_certificate", {{"type", "string"}}},
+          {"client_id", {{"type", "string"}}},
+          {"client_secret", {{"type", "string"}}},
+          {"scim_token", {{"type", "string"}}},
+          {"attribute_mapping", {{"type", "object"}}},
+          {"jit_provisioning", {{"type", "boolean"}}}}},
+        {"required", json::array({"organization_id", "name", "protocol", "issuer", "scim_token"})},
+        {"additionalProperties", false},
+    };
+    registry.add(Capability{
+        .name = "register_sso_provider",
+        .title = "Register SSO provider",
+        .description = "Register or update an organization SAML or OpenID Connect provider.",
+        .input_schema = provider_input,
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            return one_result(context.store->register_sso_provider(
+                {input.value("organization_id", ""),
+                 input.value("pool_id", "lake"),
+                 input.value("name", ""),
+                 input.value("protocol", ""),
+                 input.value("issuer", ""),
+                 input.value("metadata", ""),
+                 input.value("signing_certificate", ""),
+                 input.value("client_id", ""),
+                 input.value("client_secret", ""),
+                 input.value("scim_token", ""),
+                 input.value("attribute_mapping", json::object()),
+                 input.value("jit_provisioning", false)}));
+        }});
+    registry.add(Capability{
+        .name = "list_sso_providers",
+        .title = "List SSO providers",
+        .description = "List an organization's SSO provider configurations without secrets.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"limit", {{"type", "integer"}}}}},
+                         {"required", json::array({"organization_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .authorizes_candidates = true,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto authorization = authorize_entity_scope(
+                context, "organization", input.at("organization_id"), "admin");
+            if (!authorization) {
+                return authorization_failure(authorization);
+            }
+            return list_result(
+                context.store->list_sso_providers(input.at("organization_id"), limit_of(input)));
+        }});
+    registry.add(Capability{
+        .name = "test_sso_provider",
+        .title = "Test SSO provider",
+        .description = "Validate that a provider has the configuration required by its protocol.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"provider_id", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = sso_provider_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store
+                       ? one_result(context.store->test_sso_provider(input.at("provider_id")))
+                       : no_store();
+        }});
+    registry.add(Capability{
+        .name = "create_federation_issuer",
+        .title = "Allow federation issuer claim",
+        .description = "Allow an issuer to assert one named claim for an organization.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"issuer", {{"type", "string"}}},
+                           {"claim", {{"type", "string"}}}}},
+                         {"required", json::array({"organization_id", "issuer", "claim"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store
+                       ? one_result(context.store->create_federation_issuer(
+                             {input.at("organization_id"), input.at("issuer"), input.at("claim")}))
+                       : no_store();
+        }});
+    registry.add(
+        Capability{.name = "list_federation_issuers",
+                   .title = "List federation issuer policy",
+                   .description = "List the issuer and claim pairs accepted by an organization.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"organization_id", {{"type", "string"}}},
+                                      {"limit", {{"type", "integer"}}}}},
+                                    {"required", json::array({"organization_id"})},
+                                    {"additionalProperties", false}},
+                   .output_schema = {{"type", "object"}},
+                   .kind = CapabilityKind::Read,
+                   .object = "organization",
+                   .action = "admin",
+                   .resolve_object = entity_object("organization", "organization_id"),
+                   .authorizes_candidates = true,
+                   .handler = [](const json& input, ApiContext& context) {
+                       const auto authorization = authorize_entity_scope(
+                           context, "organization", input.at("organization_id"), "admin");
+                       if (!authorization) {
+                           return authorization_failure(authorization);
+                       }
+                       return list_result(context.store->list_federation_issuers(
+                           input.at("organization_id"), limit_of(input)));
+                   }});
+    registry.add(Capability{
+        .name = "sign_in_sso",
+        .title = "Sign in with SSO assertion",
+        .description = "Issue a session after provider verification and federation issuer policy.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"issuer", {{"type", "string"}}},
+                           {"subject", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"claims", {{"type", "object"}}}}},
+                         {"required", json::array({"provider_id", "issuer", "subject", "claims"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store ? issued_result(context.store->sign_in_sso(
+                                       {input.value("provider_id", ""),
+                                        input.value("issuer", ""),
+                                        input.value("subject", ""),
+                                        input.value("email", ""),
+                                        input.value("display_name", ""),
+                                        input.value("taap_id", ""),
+                                        input.value("device_name", "browser"),
+                                        input.value("claims", json::object())}))
+                                 : no_store();
+        }});
+    registry.add(Capability{
+        .name = "sign_in_saml",
+        .title = "Sign in with signed SAML assertion",
+        .description = "Verify the configured SAML signing certificate before issuing a session.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"saml_response", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id", "saml_response"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            auto provider = context.store->get_sso_provider(input.at("provider_id"));
+            if (!provider) {
+                return from_store_error(provider.error());
+            }
+            if (provider->protocol != "saml") {
+                return ApiResult::failure("invalid_input", "provider is not a SAML provider");
+            }
+            auto assertion =
+                control::saml::verify_response(input.at("saml_response").get<std::string>(),
+                                               provider->signing_certificate,
+                                               provider->issuer);
+            if (!assertion) {
+                return ApiResult::failure("unauthorized", assertion.error());
+            }
+            return issued_result(context.store->sign_in_sso({provider->id,
+                                                             assertion->issuer,
+                                                             assertion->subject,
+                                                             assertion->email,
+                                                             assertion->display_name,
+                                                             input.value("taap_id", ""),
+                                                             input.value("device_name", "browser"),
+                                                             assertion->claims}));
+        }});
+    registry.add(Capability{
+        .name = "upsert_scim_user",
+        .title = "Provision SCIM user",
+        .description =
+            "Create, update, or deactivate a SCIM user and revoke sessions on deactivation.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"external_id", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"active", {{"type", "boolean"}}},
+                           {"attributes", {{"type", "object"}}}}},
+                         {"required",
+                          json::array({"provider_id", "external_id", "taap_id", "active"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = sso_provider_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store ? one_result(context.store->upsert_scim_user(
+                                       {input.value("provider_id", ""),
+                                        input.value("external_id", ""),
+                                        input.value("email", ""),
+                                        input.value("display_name", ""),
+                                        input.value("taap_id", ""),
+                                        input.value("active", true),
+                                        input.value("attributes", json::object())}))
+                                 : no_store();
+        }});
+    registry.add(Capability{
+        .name = "scim_upsert_user",
+        .title = "SCIM user resource",
+        .description = "Authenticate a provider bearer token and create a SCIM user resource.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"resource", {{"type", "object"}}}}},
+                         {"required", json::array({"bearer_token", "resource"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            auto user = new_scim_user(provider->id, input.at("resource"));
+            if (!user) {
+                return user.error();
+            }
+            const auto created = context.store->upsert_scim_user(*user);
+            return created ? ApiResult::success(scim_user_document(*created))
+                           : from_store_error(created.error());
+        }});
+    registry.add(Capability{
+        .name = "scim_list_users",
+        .title = "List SCIM users",
+        .description = "Authenticate a provider bearer token and filter its SCIM users.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"filter", {{"type", "string"}}},
+                           {"start_index", {{"type", "integer"}}},
+                           {"count", {{"type", "integer"}}}}},
+                         {"required", json::array({"bearer_token"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "read",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            const auto users = context.store->list_scim_users(provider->id, 1000);
+            if (!users) {
+                return from_store_error(users.error());
+            }
+            std::vector<json> resources;
+            for (const control::ScimUser& user : *users) {
+                json resource = scim_user_document(user);
+                const auto matches =
+                    scim_filter_matches(resource, input.value("filter", std::string()));
+                if (!matches) {
+                    return ApiResult::failure("invalid_input", matches.error());
+                }
+                if (*matches) {
+                    resources.push_back(std::move(resource));
+                }
+            }
+            return scim_list_response(
+                std::move(resources), input.value("start_index", 1), input.value("count", 100));
+        }});
+    registry.add(Capability{
+        .name = "scim_get_user",
+        .title = "Get SCIM user",
+        .description = "Authenticate a provider bearer token and read one SCIM user.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"resource_id", {{"type", "string"}}}}},
+                         {"required", json::array({"bearer_token", "resource_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "read",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            const auto user = context.store->get_scim_user(provider->id, input.at("resource_id"));
+            return user ? ApiResult::success(scim_user_document(*user))
+                        : from_store_error(user.error());
+        }});
+    registry.add(Capability{
+        .name = "scim_patch_user",
+        .title = "Patch SCIM user",
+        .description = "Apply SCIM PATCH operations and revoke sessions when active becomes false.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"resource_id", {{"type", "string"}}},
+                           {"patch", {{"type", "object"}}}}},
+                         {"required", json::array({"bearer_token", "resource_id", "patch"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            const auto existing =
+                context.store->get_scim_user(provider->id, input.at("resource_id"));
+            if (!existing) {
+                return from_store_error(existing.error());
+            }
+            auto patched = apply_scim_patch(scim_user_document(*existing), input.at("patch"));
+            if (!patched) {
+                return ApiResult::failure("invalid_input", patched.error());
+            }
+            (*patched)["externalId"] = existing->external_id;
+            auto user = new_scim_user(provider->id, std::move(*patched));
+            if (!user) {
+                return user.error();
+            }
+            const auto updated = context.store->upsert_scim_user(*user);
+            return updated ? ApiResult::success(scim_user_document(*updated))
+                           : from_store_error(updated.error());
+        }});
+    registry.add(Capability{
+        .name = "scim_delete_user",
+        .title = "Delete SCIM user",
+        .description = "Deactivate a SCIM user, remove team access, and revoke active sessions.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"resource_id", {{"type", "string"}}}}},
+                         {"required", json::array({"bearer_token", "resource_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            const auto user =
+                context.store->delete_scim_user(provider->id, input.at("resource_id"));
+            return user ? ApiResult::success({{"deleted", true}}) : from_store_error(user.error());
+        }});
+    registry.add(Capability{
+        .name = "upsert_scim_group",
+        .title = "Provision SCIM group",
+        .description = "Create or update a SCIM group and map its users to a lake team.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"external_id", {{"type", "string"}}},
+                           {"team_name", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"member_external_ids", {{"type", "array"}}},
+                           {"attributes", {{"type", "object"}}}}},
+                         {"required",
+                          json::array({"provider_id",
+                                       "external_id",
+                                       "team_name",
+                                       "display_name",
+                                       "member_external_ids"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = sso_provider_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store
+                       ? one_result(context.store->upsert_scim_group(
+                             {input.value("provider_id", ""),
+                              input.value("external_id", ""),
+                              input.value("team_name", ""),
+                              input.value("display_name", ""),
+                              input.value("member_external_ids", std::vector<std::string>{}),
+                              input.value("attributes", json::object())}))
+                       : no_store();
+        }});
+    registry.add(Capability{
+        .name = "scim_upsert_group",
+        .title = "SCIM group resource",
+        .description = "Authenticate a provider bearer token and create a SCIM group resource.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"resource", {{"type", "object"}}}}},
+                         {"required", json::array({"bearer_token", "resource"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            auto group = new_scim_group(*context.store, provider->id, input.at("resource"));
+            if (!group) {
+                return group.error();
+            }
+            const auto created = context.store->upsert_scim_group(*group);
+            return created ? ApiResult::success(scim_group_document(*created))
+                           : from_store_error(created.error());
+        }});
+    registry.add(Capability{
+        .name = "scim_list_groups",
+        .title = "List SCIM groups",
+        .description = "Authenticate a provider bearer token and filter its SCIM groups.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"filter", {{"type", "string"}}},
+                           {"start_index", {{"type", "integer"}}},
+                           {"count", {{"type", "integer"}}}}},
+                         {"required", json::array({"bearer_token"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "read",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            const auto groups = context.store->list_scim_groups(provider->id, 1000);
+            if (!groups) {
+                return from_store_error(groups.error());
+            }
+            std::vector<json> resources;
+            for (const control::ScimGroup& group : *groups) {
+                json resource = scim_group_document(group);
+                const auto matches =
+                    scim_filter_matches(resource, input.value("filter", std::string()));
+                if (!matches) {
+                    return ApiResult::failure("invalid_input", matches.error());
+                }
+                if (*matches) {
+                    resources.push_back(std::move(resource));
+                }
+            }
+            return scim_list_response(
+                std::move(resources), input.value("start_index", 1), input.value("count", 100));
+        }});
+    registry.add(Capability{
+        .name = "scim_get_group",
+        .title = "Get SCIM group",
+        .description = "Authenticate a provider bearer token and read one SCIM group.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"resource_id", {{"type", "string"}}}}},
+                         {"required", json::array({"bearer_token", "resource_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "read",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            const auto group = context.store->get_scim_group(provider->id, input.at("resource_id"));
+            return group ? ApiResult::success(scim_group_document(*group))
+                         : from_store_error(group.error());
+        }});
+    registry.add(Capability{
+        .name = "scim_patch_group",
+        .title = "Patch SCIM group",
+        .description = "Apply SCIM PATCH operations and replace the mapped team membership.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"bearer_token", {{"type", "string"}}},
+                           {"resource_id", {{"type", "string"}}},
+                           {"patch", {{"type", "object"}}}}},
+                         {"required", json::array({"bearer_token", "resource_id", "patch"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto provider = scim_provider(input, context);
+            if (!provider) {
+                return provider.error();
+            }
+            const auto existing =
+                context.store->get_scim_group(provider->id, input.at("resource_id"));
+            if (!existing) {
+                return from_store_error(existing.error());
+            }
+            auto patched = apply_scim_patch(scim_group_document(*existing), input.at("patch"));
+            if (!patched) {
+                return ApiResult::failure("invalid_input", patched.error());
+            }
+            (*patched)["externalId"] = existing->external_id;
+            auto group = new_scim_group(*context.store, provider->id, std::move(*patched));
+            if (!group) {
+                return group.error();
+            }
+            const auto updated = context.store->upsert_scim_group(*group);
+            return updated ? ApiResult::success(scim_group_document(*updated))
+                           : from_store_error(updated.error());
+        }});
+    registry.add(
+        Capability{.name = "scim_delete_group",
+                   .title = "Delete SCIM group",
+                   .description = "Delete a SCIM group and its source-managed team access.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"bearer_token", {{"type", "string"}}},
+                                      {"resource_id", {{"type", "string"}}}}},
+                                    {"required", json::array({"bearer_token", "resource_id"})},
+                                    {"additionalProperties", false}},
+                   .output_schema = {{"type", "object"}},
+                   .kind = CapabilityKind::Action,
+                   .requires_auth = false,
+                   .object = "authentication",
+                   .action = "write",
+                   .resolve_object = global_object,
+                   .handler = [](const json& input, ApiContext& context) {
+                       const auto provider = scim_provider(input, context);
+                       if (!provider) {
+                           return provider.error();
+                       }
+                       const auto deleted =
+                           context.store->delete_scim_group(provider->id, input.at("resource_id"));
+                       return deleted ? ApiResult::success({{"deleted", true}})
+                                      : from_store_error(deleted.error());
+                   }});
+    registry.add(Capability{.name = "list_sso_provisioning_logs",
+                            .title = "List SSO provisioning logs",
+                            .description = "List SCIM provisioning outcomes for an SSO provider.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties",
+                                              {{"provider_id", {{"type", "string"}}},
+                                               {"limit", {{"type", "integer"}}}}},
+                                             {"required", json::array({"provider_id"})},
+                                             {"additionalProperties", false}},
+                            .output_schema = {{"type", "object"}},
+                            .kind = CapabilityKind::Read,
+                            .object = "organization",
+                            .action = "admin",
+                            .resolve_object = sso_provider_object,
+                            .authorizes_candidates = true,
+                            .handler = [](const json& input, ApiContext& context) {
+                                if (!context.store) {
+                                    return no_store();
+                                }
+                                const auto provider =
+                                    context.store->get_sso_provider(input.at("provider_id"));
+                                if (!provider) {
+                                    return from_store_error(provider.error());
+                                }
+                                const auto authorization = authorize_entity_scope(
+                                    context, "organization", provider->organization_id, "admin");
+                                if (!authorization) {
+                                    return authorization_failure(authorization);
+                                }
+                                return list_result(context.store->list_sso_provisioning_logs(
+                                    provider->id, limit_of(input)));
+                            }});
 }
 
 void register_repository_capabilities(Registry& registry) {
@@ -2614,6 +3562,7 @@ void register_audit_capabilities(Registry& registry) {
 void register_core_capabilities(Registry& registry, std::string_view version) {
     register_server_info(registry, version);
     register_identity_capabilities(registry);
+    register_sso_capabilities(registry);
     register_repository_capabilities(registry);
     register_organization_capabilities(registry);
     register_policy_capabilities(registry);

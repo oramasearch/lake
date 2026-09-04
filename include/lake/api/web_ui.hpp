@@ -27,6 +27,10 @@ std::string web_ui_shell(std::string_view title,
 std::string
 web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in = false);
 std::string web_ui_login(std::string_view error);
+std::string web_ui_sso(std::string_view organization_id,
+                       const std::vector<control::SsoProvider>& providers,
+                       const std::vector<control::FederationIssuer>& issuers,
+                       const std::vector<control::ProvisioningLog>& logs);
 std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts);
 std::string web_ui_secrets(const control::SecretMount& mount,
                            std::string_view name,

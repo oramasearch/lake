@@ -62,7 +62,8 @@ std::string nav(bool signed_in) {
     std::string out = "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
                       "href=\"/organizations\">Organizations</a><a "
                       "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
-                      "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>";
+                      "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>"
+                      "<a href=\"/sso\">SSO</a>";
     if (signed_in) {
         out += "<a href=\"/sessions\">Sessions</a><a "
                "href=\"/passkeys\">Passkeys</a><a href=\"/tokens\">Tokens</a>";
@@ -421,12 +422,12 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
                    "<code>POST /v1/create_organization</code> creates one.</div>";
     } else {
         content += "<table><thead><tr><th>Organization</th><th>TAAP identity</th>"
-                   "<th>Administration</th><th>Created</th></tr></thead><tbody>";
+                   "<th>Administration</th><th>SSO</th><th>Created</th></tr></thead><tbody>";
         for (const auto& organization : organizations) {
             const std::string organization_query = "organization_id=" + organization.id;
             content += std::format(
                 "<tr><td>{}</td><td><code>{}</code></td><td>{} · {} · "
-                "{} · {}</td><td>{}</td></tr>",
+                "{} · {}</td><td>{}</td><td>{}</td></tr>",
                 web_ui_escape(organization.display_name.empty() ? organization.id
                                                                 : organization.display_name),
                 web_ui_escape(organization.taap_id.empty() ? "not assigned" : organization.taap_id),
@@ -434,6 +435,7 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
                 row_link("/members?" + organization_query, "members"),
                 row_link("/invitations?" + organization_query, "invitations"),
                 row_link("/organization/access?id=" + organization.id, "effective access"),
+                row_link("/sso?" + organization_query, "SSO"),
                 web_ui_escape(organization.created_at));
         }
         content += "</tbody></table>";
@@ -442,6 +444,69 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
                         std::format("{} organizations", organizations.size()),
                         content,
                         true);
+}
+
+std::string web_ui_sso(std::string_view organization_id,
+                       const std::vector<control::SsoProvider>& providers,
+                       const std::vector<control::FederationIssuer>& issuers,
+                       const std::vector<control::ProvisioningLog>& logs) {
+    std::string content = "<p class=\"eyebrow\">organization identity</p><h1>Enterprise SSO</h1>"
+                          "<p class=\"sub\">Provider configuration, federation policy, and SCIM "
+                          "provisioning evidence.</p>";
+    content += "<div class=\"panel\"><p>Configure providers with <code>POST "
+               "/v1/register_sso_provider</code>, then validate them with <code>POST "
+               "/v1/test_sso_provider</code>. Provider secrets and SCIM tokens are never shown "
+               "here.</p></div>";
+    content += "<h2>Providers</h2>";
+    if (providers.empty()) {
+        content += "<div class=\"panel empty\">No SSO providers are configured.</div>";
+    } else {
+        content += "<table><thead><tr><th>Name</th><th>Protocol</th><th>Issuer</th>"
+                   "<th>JIT</th><th>Tested</th></tr></thead><tbody>";
+        for (const control::SsoProvider& provider : providers) {
+            content += std::format(
+                "<tr><td><code>{}</code></td><td>{}</td><td><code>{}</code></td>"
+                "<td>{}</td><td>{}</td></tr>",
+                web_ui_escape(provider.name),
+                web_ui_escape(provider.protocol),
+                web_ui_escape(provider.issuer),
+                provider.jit_provisioning ? "enabled" : "disabled",
+                web_ui_escape(provider.tested_at.empty() ? "not tested" : provider.tested_at));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<h2>Allowed issuer claims</h2>";
+    if (issuers.empty()) {
+        content += "<div class=\"panel empty\">No issuer claims are allowed yet.</div>";
+    } else {
+        content += "<table><thead><tr><th>Issuer</th><th>Claim</th></tr></thead><tbody>";
+        for (const control::FederationIssuer& issuer : issuers) {
+            content += std::format("<tr><td><code>{}</code></td><td><code>{}</code></td></tr>",
+                                   web_ui_escape(issuer.issuer),
+                                   web_ui_escape(issuer.claim));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<h2>Provisioning log</h2>";
+    if (logs.empty()) {
+        content +=
+            "<div class=\"panel empty\">No SCIM provisioning events for this provider.</div>";
+    } else {
+        content += "<table><thead><tr><th>When</th><th>Resource</th><th>Operation</th>"
+                   "<th>External id</th><th>Outcome</th></tr></thead><tbody>";
+        for (const control::ProvisioningLog& log : logs) {
+            content += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td>"
+                                   "<td>{}</td></tr>",
+                                   web_ui_escape(log.created_at),
+                                   web_ui_escape(log.resource),
+                                   web_ui_escape(log.operation),
+                                   web_ui_escape(log.external_id),
+                                   web_ui_escape(log.outcome));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell(
+        "lake — enterprise SSO", "organization " + std::string(organization_id), content, true);
 }
 
 std::string web_ui_teams(std::string_view organization_id,

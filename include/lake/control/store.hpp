@@ -161,6 +161,104 @@ struct OAuthProvider {
 struct OAuthFlow {
     std::string pool_id, provider, state, code_verifier, nonce, device_name, identity_document;
 };
+struct SsoProvider {
+    std::string id;
+    std::string organization_id;
+    std::string pool_id;
+    std::string name;
+    std::string protocol;
+    std::string issuer;
+    std::string metadata;
+    std::string signing_certificate;
+    std::string client_id;
+    nlohmann::json attribute_mapping;
+    bool jit_provisioning = false;
+    bool enabled = true;
+    std::string tested_at;
+    std::string created_at;
+    std::string updated_at;
+};
+struct NewSsoProvider {
+    std::string organization_id;
+    std::string pool_id;
+    std::string name;
+    std::string protocol;
+    std::string issuer;
+    std::string metadata;
+    std::string signing_certificate;
+    std::string client_id;
+    std::string client_secret;
+    std::string scim_token;
+    nlohmann::json attribute_mapping;
+    bool jit_provisioning = false;
+};
+struct FederationIssuer {
+    std::string id;
+    std::string organization_id;
+    std::string issuer;
+    std::string claim;
+    std::string created_at;
+};
+struct NewFederationIssuer {
+    std::string organization_id;
+    std::string issuer;
+    std::string claim;
+};
+struct SsoIdentity {
+    std::string provider_id;
+    std::string issuer;
+    std::string subject;
+    std::string email;
+    std::string display_name;
+    std::string taap_id;
+    std::string device_name;
+    nlohmann::json claims;
+};
+struct ScimUser {
+    std::string provider_id;
+    std::string external_id;
+    std::string user_id;
+    bool active = true;
+    nlohmann::json attributes;
+    std::string created_at;
+    std::string updated_at;
+};
+struct NewScimUser {
+    std::string provider_id;
+    std::string external_id;
+    std::string email;
+    std::string display_name;
+    std::string taap_id;
+    bool active = true;
+    nlohmann::json attributes;
+};
+struct ScimGroup {
+    std::string provider_id;
+    std::string external_id;
+    std::string team_id;
+    std::string display_name;
+    nlohmann::json attributes;
+    std::string created_at;
+    std::string updated_at;
+};
+struct NewScimGroup {
+    std::string provider_id;
+    std::string external_id;
+    std::string team_name;
+    std::string display_name;
+    std::vector<std::string> member_external_ids;
+    nlohmann::json attributes;
+};
+struct ProvisioningLog {
+    std::string id;
+    std::string provider_id;
+    std::string resource;
+    std::string operation;
+    std::string external_id;
+    std::string outcome;
+    nlohmann::json details;
+    std::string created_at;
+};
 
 nlohmann::json to_json(const User&);
 nlohmann::json to_json(const Organization&);
@@ -176,6 +274,11 @@ std::string new_uuid_v4();
 std::string now_iso8601();
 nlohmann::json to_json(const Device&);
 nlohmann::json to_json(const Session&);
+nlohmann::json to_json(const SsoProvider&);
+nlohmann::json to_json(const FederationIssuer&);
+nlohmann::json to_json(const ScimUser&);
+nlohmann::json to_json(const ScimGroup&);
+nlohmann::json to_json(const ProvisioningLog&);
 
 class Store {
 public:
@@ -355,6 +458,35 @@ public:
     virtual Result<void> revoke_device(const std::string& user_id,
                                        const std::string& device_id) = 0;
     virtual Result<Principal> context_for(const std::string& secret) = 0;
+
+    virtual Result<SsoProvider> register_sso_provider(const NewSsoProvider&) = 0;
+    virtual Result<std::vector<SsoProvider>> list_sso_providers(const std::string& organization_id,
+                                                                int limit) = 0;
+    virtual Result<SsoProvider> get_sso_provider(const std::string& id) = 0;
+    // Internal callback lookup. This is never rendered through an API response.
+    virtual Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) = 0;
+    virtual Result<SsoProvider> authenticate_scim(const std::string& bearer_token) = 0;
+    virtual Result<SsoProvider> test_sso_provider(const std::string& id) = 0;
+    virtual Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) = 0;
+    virtual Result<std::vector<FederationIssuer>>
+    list_federation_issuers(const std::string& organization_id, int limit) = 0;
+    virtual Result<IssuedSession> sign_in_sso(const SsoIdentity&) = 0;
+    virtual Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
+                                                          int limit) = 0;
+    virtual Result<ScimUser> get_scim_user(const std::string& provider_id,
+                                           const std::string& resource_id) = 0;
+    virtual Result<ScimUser> upsert_scim_user(const NewScimUser&) = 0;
+    virtual Result<ScimUser> delete_scim_user(const std::string& provider_id,
+                                              const std::string& resource_id) = 0;
+    virtual Result<std::vector<ScimGroup>> list_scim_groups(const std::string& provider_id,
+                                                            int limit) = 0;
+    virtual Result<ScimGroup> get_scim_group(const std::string& provider_id,
+                                             const std::string& resource_id) = 0;
+    virtual Result<ScimGroup> upsert_scim_group(const NewScimGroup&) = 0;
+    virtual Result<void> delete_scim_group(const std::string& provider_id,
+                                           const std::string& resource_id) = 0;
+    virtual Result<std::vector<ProvisioningLog>>
+    list_sso_provisioning_logs(const std::string& provider_id, int limit) = 0;
 };
 
 } // namespace lake::control

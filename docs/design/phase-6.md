@@ -32,6 +32,13 @@ hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use tho
 The signed audit substrate from #18 is integrated, and every passkey registration stores a
 lake-signed TAAP binding beside the credential. Application user pools remain owned by #51.
 
+**SSO federation status (#15, #21).** Organization SAML and OIDC provider records, encrypted
+OIDC client secrets, hashed SCIM tokens, federation issuer-claim policy, JIT user mapping,
+SCIM user/group provisioning, session revocation on SCIM deactivation, and provisioning logs are
+implemented in `0010_sso_federation`. Provider configuration, testing, federation policy,
+provisioning, and SSO sign-in are registry capabilities and append signed audit events. Their
+contract is documented in [`../api/sso.md`](../api/sso.md).
+
 ## Identity: one substrate, three principals
 
 Every principal is a TAAP identity (liquid `docs/library/identity.md`: Ed25519 keys, SHA-512/256
