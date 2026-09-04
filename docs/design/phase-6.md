@@ -10,7 +10,10 @@
 
 lake today is the control surface: one capability registry rendered as REST `/v1`, OpenAPI and
 MCP; users, organizations, customers and repositories in Postgres; server-rendered pages behind
-the admin sign-in; telemetry; CI. Everything below is added to that shape and keeps its rules
+the admin sign-in; telemetry; CI. Organization administration and the authorization object graph
+described below are implemented by lake issues #16 and #19 in migration
+`0004_organizations_policy`; TAAP credential resolution remains identity-core work. Everything
+else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
 
@@ -57,16 +60,63 @@ resolution walks up the graph once and caches per request; it never consults a s
 Query-time filtering for search and lists calls the same function per candidate object with a
 batched walk, so a result set never shows an object the caller could not open (#40).
 
+**Implemented status (#16, #19).** `teams`, `memberships`, `invitations`, `objects`, and `grants`
+are control-plane tables. Membership and grant rows retain the TAAP attestation digest and the
+granting administrator identity. `Registry::call` invokes `authorize` before protected handlers;
+the server-rendered pages call those same capabilities. `authorize_batch` shares cached ancestor
+and grant loads across candidates, and `effective_access` exposes direct and inherited access.
+The current operator-admin principal is handled as a break-glass principal by the same function;
+identity-core credential resolution will supply user and workload TAAP principals.
+
 ## Audit (decision §13)
 
-One append-only `audit_events` stream: authentication (success and failure, method, device),
-session and token issuance and revocation, every authorisation decision that denied, every
-grant change, every secret and certificate issuance, access, renewal and revocation, and every
-administrative action. Each event carries the acting principal, the object, the outcome, the
-request id and a signature by lake's own identity over the canonical event, chained by digest so
-a gap is detectable. Exported as JSON lines and queryable through a capability and a page. SOC 2
-evidence (access reviews, change management) is a query over this stream plus the forge's
-change records; nothing is reconstructed after the fact.
+**Status: the audit event contract is published for #18.** The implementation creates the
+append-only `audit_events` stream and all wave-one branches write this shape through
+`audit::record`; a later wave may add event kinds but may not reinterpret an existing field.
+
+One append-only `audit_events` stream records authentication (success and failure, method,
+device), session and token issuance and revocation, every authorisation decision that denied,
+every grant change, every secret and certificate issuance, access, renewal and revocation, and
+every administrative action. The canonical signed payload is canonical CBOR with this versioned
+shape:
+
+| Field | Meaning |
+|---|---|
+| `version` | `audit_event/1`; a new canonical shape receives a new version. |
+| `id`, `occurred_at` | UUID event identifier and UTC RFC 3339 timestamp with microsecond precision. |
+| `customer_id` | Owning customer when an event is customer-scoped; null for lake-instance events. |
+| `kind` | Stable event name such as `capability`, `authentication`, `session`, `token`, `authorisation`, `grant`, `secret`, `certificate`, `administrative`, or `retention`. |
+| `principal` | The acting TAAP identity; `anonymous` is used before authentication identifies a principal. |
+| `object` | Stable object identifier, including its type, or `lake` for instance-wide actions. |
+| `action`, `outcome` | Attempted action and one of `success`, `failure`, `denied`, or `revoked`. |
+| `request_id` | Opaque request correlation identifier, generated before registry dispatch. |
+| `method`, `device` | Authentication method and device identifier when known; otherwise null. |
+| `details` | Canonical JSON-compatible facts needed to interpret the event; secrets, credentials and private key material never appear here. |
+| `previous_digest` | SHA-512/256 digest of the preceding stored event, or null for the first event. |
+| `signer` | lake's TAAP identity. |
+| `signature` | Base64 Ed25519 signature by `signer` over `TAAP/1 audit_event/1`, a zero byte, and the canonical CBOR payload. |
+| `digest` | SHA-512/256 digest of the complete stored event excluding `digest`; it is the next event's `previous_digest`. |
+
+`audit::record` appends exactly one signed event for each registry capability outcome, including
+authorization and validation failures. Identity, policy, secrets and certificate code calls the
+same function for events that do not originate in a registry call. The verifier recomputes each
+signature and digest and checks each predecessor link, so a deleted or reordered row is detected.
+
+The instance signing identity is a TAAP/1 Ed25519 identity. At first start lake uses
+`LAKE_IDENTITY_SEED` directly when configured, without copying that Secret into the control
+database; otherwise it creates an Ed25519 seed and persists it wrapped by the
+customer-independent `LAKE_INSTANCE_KEK` in `lake_identity`. `GET /v1/identity` publishes the
+identity document. `rotate_identity` creates and verifies the TAAP dual-signed rotation document,
+appends it to the identity chain, and records its audit event. Rotation creates a wrapped generated
+successor, so it requires `LAKE_INSTANCE_KEK` even when the current identity came from the
+operator Secret.
+
+The `audit` capability and its server-rendered page filter by principal, object, outcome and time.
+`export_audit` returns the matching rows as JSON lines for evidence handling and round-trip
+verification. Retention is configurable upward per customer with a non-negotiable 400-day floor;
+an attempted deletion below the floor is refused and recorded as a `retention` event. SOC 2
+evidence (access reviews, change management) is a query over this stream plus the forge's change
+records; nothing is reconstructed after the fact.
 
 ## The data plane: customer liquid stores
 
@@ -78,16 +128,10 @@ code runs inside lake as the library-only `liquid::liquid` target, and its pack 
 manifest, and collector state remain libliquid-owned. The chunk index is liquid's own, held per
 customer store. Zetta remains lake’s serving-model reference, not this repository-data backend.
 
-**Push and pull (#12)** is liquid's own protocol over HTTP/1.1, not REAPI: a client `POST`s a
-sync request naming the repository, its heads and the drips it has since a cursor; lake answers
-with the drips it lacks and the chunk digests it needs (`find_missing` over the customer store);
-chunks travel in the existing pack framing in both directions; the CRDT sync framing from
-liquid's `src/crdt` carries the per-directory documents; every drip and change is verified
-against the TAAP signature of its author before it is stored, and a push is authorised at the
-change (decision: checked at commit, not at open). The client side is liquid's
-`remote_blob_source` plus a `sync_endpoint` implemented over `oramasearch/http`; the server side
-is capabilities in the registry (`push`, `pull`, `find_missing`, `refs`) rendered as REST like
-everything else, with streaming bodies through the one adapter TU.
+**Push and pull (#12)** waits for liquid #160 to publish `docs/library/sync.md` and its public
+sync API. Lake has the customer-store adapter and the library-only liquid dependency, but does
+not register `refs`, `find_missing`, `push`, or `pull` until it can implement the published
+contract without inventing wire framing.
 
 **Repository lifecycle (#13)** stays in the control plane: create, rename, transfer between
 customers, delete (tombstone first, content collected by the customer store's collector after
@@ -100,9 +144,9 @@ Indexed by blob once (content-addressed: a blob is indexed the first time any re
 it), with oramacore-cpp's BM25F and positional trigram index as the engines, a hot index on branch
 tips and cold snapshots for releases and tags, publication atomic per change (a query sees a
 change entirely or not at all), and the policy engine filtering candidates at query time. The
-shared framing is published in liquid `docs/library/sync.md` and mirrored here as
+shared framing will be published in liquid `docs/library/sync.md` and mirrored here as
 `docs/api/sync.md`; liquid #160 supplies the library export/import and CLI client. Until that
-library pin advances, lake proves the server framing with an in-test client. Symbols
+library pin advances, lake does not implement or test a guessed server framing. Symbols
 from the compiler (liquid's build graph knows every translation unit) arrive when Phase 4's
 incremental engine lands. Search-index storage is specified by the search work; repository content
 and its liquid-owned metadata remain on the customer store volume.

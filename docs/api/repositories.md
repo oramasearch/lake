@@ -23,28 +23,27 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 | `transfer_repository` | action | `id`, `customer_id` | `400 invalid_input` (unknown destination), `404 not_found`, `409 conflict` (tombstoned or destination name taken) |
 | `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
-| `list_repository_audit_events` | read | `repository_id`, `limit?` | `403 unauthorized` |
+| `audit` | read | audit filters | [`audit.md`](audit.md), including the lifecycle capability calls |
 
-Every lifecycle mutation, including creation, is checked through
-`authorize(principal, repository, action)` before the state transition. Until lake #16/#19 is
-rebased, the temporary implementation authorizes only the existing `admin` principal. The migration writes both a repository lifecycle row and an
-append-only `audit_events` row in the same control-plane transaction; the repository page renders
-those audit entries.
+Every lifecycle capability carries the repository or customer authorization object and its
+`write` action. `Registry::call` invokes `authorize(principal, object, action)` before the
+handler and appends its signed outcome to `audit_events` through `audit::record`.
 
 ## Lifecycle
 
 Rename changes only the repository slug. Transfer moves the repository record to another customer
-after checking the destination's name namespace. The data store remains keyed by the originating
-customer until the policy engine’s transfer operation supplies the corresponding data migration;
-therefore transfer is a control-plane operation pending that rebase and does not move store bytes.
+after checking the destination's name namespace. Repository content synchronization is deferred
+until liquid #160 publishes its sync API and wire-format document; no push or pull endpoint is
+registered before that contract is available.
 
 Delete is a tombstone, not an immediate erase: `deleted_at` and `retention_until` are stored on the
 repository record. The collector may reclaim data after the documented 30-day retention period,
 but only when no remaining repository root leases it. A tombstoned repository cannot be renamed,
 transferred, or have visibility changed.
 
-The repository detail page at `/repository?id=<id>` presents current lifecycle state and audit
-entries. All mutations remain capabilities, so REST, OpenAPI, and MCP expose the same operations.
+The repository detail page at `/repository?id=<id>` presents current lifecycle state. The signed
+audit page at `/audit` exposes the same capability outcomes. All mutations remain capabilities,
+so REST, OpenAPI, and MCP expose the same operations.
 
 ```sh
 H='Authorization: Bearer <token>'
@@ -61,15 +60,15 @@ curl -H "$H" -H 'content-type: application/json' \
 ```
 
 The UI lists them at `/repositories` ([`../ui/README.md`](../ui/README.md)); the detail page
-displays the audit history and tombstone state. Repository contents use libliquid’s customer store
-and the sync protocol described in [`sync.md`](sync.md).
+displays the tombstone state. Repository content uses the libliquid customer store. Sync protocol
+documentation and its endpoints wait for liquid #160.
 
 ## Verify
 
-Run `ctest --test-dir build --output-on-failure`. The repository lifecycle test creates two
-customers, changes visibility, renames, transfers, tombstones, and verifies that every transition
-appears on the repository page and in its audit event list. For Postgres, apply `db/schema.sql`
-through the operator’s `PostgresSchema` before running the integration test.
+Run `ctest --test-dir build --output-on-failure`. The repository lifecycle tests create two
+customers, change visibility, rename, transfer, tombstone, verify policy denial, and verify the
+signed audit stream contains the deletion outcome. For Postgres, apply `db/schema.sql` through
+the operator’s `PostgresSchema` before running the integration test.
 
 ## Change
 

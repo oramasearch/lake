@@ -38,8 +38,8 @@ option(LAKE_BUILD_TESTS "Build the test suite" ON)
 include(FetchContent)
 
 # -----------------------------------------------------------------------------
-# Vendored modules — liquid is library-only and provides Capy and Corosio to its
-# consumers. http + beast2 remain lake's Zetta-shaped serving stack.
+# Vendored modules — libliquid is library-only and provides Capy and Corosio
+# to its consumers. http + beast2 remain lake's Zetta-shaped serving stack.
 # Order matters: liquid → OpenSSL → Boost core libs → http → beast2.
 # -----------------------------------------------------------------------------
 set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
@@ -50,7 +50,6 @@ if(APPLE)
   list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/openssl@3)
 endif()
 find_package(OpenSSL REQUIRED)
-
 # http/beast2 expect the Boost:: targets to already exist (they do not self-resolve
 # Boost as subdirectories), so the official boost-cmake release comes first.
 set(BOOST_INCLUDE_LIBRARIES json url assert config core describe endian mp11 static_assert system throw_exception type_traits variant2 winapi)
@@ -94,18 +93,19 @@ add_library(lake-core STATIC
   src/api/rest.cpp
   src/api/mcp.cpp
   src/api/capabilities.cpp
+  src/audit/audit.cpp
   src/control/handles.cpp
+  src/control/policy.cpp
   src/control/memory_store.cpp
-  src/policy/authorization.cpp
   src/telemetry/metrics.cpp
 )
 target_include_directories(lake-core PUBLIC include)
 target_compile_features(lake-core PUBLIC cxx_std_26)
-target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid)
+target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid OpenSSL::Crypto)
 
-# lake-control-postgres: the one library that names libpqxx.
+# lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
 add_library(lake-control-postgres STATIC src/control/postgres_store.cpp)
-target_link_libraries(lake-control-postgres PUBLIC lake-core PRIVATE pqxx)
+target_link_libraries(lake-control-postgres PUBLIC lake-core PRIVATE pqxx OpenSSL::Crypto)
 
 # lake-api: the Beast2 adapter — the ONE translation unit that knows beast2 / http / Boost.JSON.
 # No beast2 / http / Boost.JSON type reaches lake-core's surface — they link PRIVATE.
@@ -116,7 +116,7 @@ target_link_libraries(lake-api PUBLIC lake-core)
 target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boost::corosio Boost::corosio_openssl)
 
 add_executable(lake src/main.cpp)
-target_link_libraries(lake PRIVATE lake-api lake-control-postgres)
+target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
 
 if(LAKE_BUILD_TESTS)
   FetchContent_Declare(googletest

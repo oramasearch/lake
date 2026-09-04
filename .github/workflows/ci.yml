@@ -11,22 +11,22 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      LAKE_TEST_DB_URI: postgresql://postgres:postgres@127.0.0.1:5432/lake_test
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: lake
-          POSTGRES_PASSWORD: lake
-          POSTGRES_USER: lake
-        options: >-
-          --health-cmd "pg_isready -U lake -d lake"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          POSTGRES_DB: lake_test
+          POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
-    env:
-      DEBIAN_FRONTEND: noninteractive
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lake_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out source and submodules
         uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ca-certificates wget gnupg lsb-release software-properties-common \
             build-essential ninja-build git pkg-config libfuse3-dev fuse3 \
-            libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev
+            libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev postgresql-client
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 19
@@ -65,12 +65,8 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Apply control-plane schema
-        env:
-          PGPASSWORD: lake
-        run: psql -h 127.0.0.1 -U lake -d lake -f db/schema.sql
+      - name: Apply the control-plane schema
+        run: psql "$LAKE_TEST_DB_URI" --set ON_ERROR_STOP=1 --file db/schema.sql
 
       - name: Test
-        env:
-          LAKE_TEST_DATABASE_URI: postgresql://lake:lake@127.0.0.1:5432/lake
         run: ctest --test-dir build --output-on-failure

@@ -7,31 +7,33 @@ images. The Dockerfile remains the canonical Linux toolchain recipe; CI installs
 ## Build and test workflow
 
 [`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It checks out all
-submodules recursively, starts Postgres 16, applies `db/schema.sql`, configures Release with
-`LAKE_BUILD_TESTS=ON`, builds with clang-19, then runs:
+submodules recursively, starts a Postgres 16 service, configures Release with
+`LAKE_BUILD_TESTS=ON`, builds with clang-19, applies `db/schema.sql`, then runs:
 
 ```sh
 ctest --test-dir build --output-on-failure
 ```
 
-The Postgres lifecycle integration test reads `LAKE_TEST_DATABASE_URI`. Reproduce it locally with:
+`lake-postgres-tests` reads `LAKE_TEST_DB_URI` and uses unique fixture keys to round-trip every
+registered data capability through the production Postgres store; the audit integration test in
+`lake-tests` reads the same variable and skips without it. The rest of the test binary
+uses `InMemoryStore`, including policy inheritance, delegation, registry metadata and renderer
+coverage.
+
+For the same proof locally:
 
 ```sh
-docker run --name lake-test-postgres -d --rm -p 5432:5432 \
-  -e POSTGRES_DB=lake -e POSTGRES_USER=lake -e POSTGRES_PASSWORD=lake postgres:16
-until PGPASSWORD=lake psql -h 127.0.0.1 -U lake -d lake -c 'select 1' >/dev/null; do sleep 1; done
-PGPASSWORD=lake psql -h 127.0.0.1 -U lake -d lake -f db/schema.sql
-LAKE_TEST_DATABASE_URI=postgresql://lake:lake@127.0.0.1:5432/lake \
+docker run --name lake-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lake_test \
+  -p 55416:5432 -d postgres:16
+PGPASSWORD=postgres psql -h 127.0.0.1 -p 55416 -U postgres -d lake_test -f db/schema.sql
+LAKE_TEST_DB_URI='postgresql://postgres:postgres@127.0.0.1:55416/lake_test' \
   ctest --test-dir build --output-on-failure
-docker stop lake-test-postgres
+docker rm -f lake-postgres
 ```
 
-The Linux build toolchain installs `pkg-config` and `libfuse3-dev` because libliquid uses the
-`fuse3` package during CMake configuration.
-
-The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost,
-nlohmann/json and GoogleTest. Its key includes the hash of `CMakeLists.txt`; a missing cache is
-valid and CMake downloads the dependencies again.
+The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost and
+GoogleTest. libliquid supplies nlohmann/json and its own transitive dependencies. Its key includes
+the hash of `CMakeLists.txt`; a missing cache is valid and CMake downloads the dependencies again.
 
 ## Tagged image workflow
 

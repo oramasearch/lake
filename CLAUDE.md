@@ -8,16 +8,27 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-**The control surface serves, in production. Repository lifecycle and customer liquid stores await deployment.** `Lake/prod` on AKS (3 replicas, image
+**The control surface serves, in production.** `Lake/prod` on AKS (3 replicas, image
 `oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
 (`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
-the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages
-(`/customers`, `/repositories`, `/repository?id=`) behind the admin sign-in; liveness, readiness,
+the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages for customers
+and repositories behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
 `server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
-is `oramasearch/liquid/docs/features/`. Repository lifecycle and customer liquid stores are present;
-the sync protocol waits for liquid #160, TAAP identities replace the single admin token in lake #4,
-and incremental migrations remain operator #126.
+is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
+credential resolution in place of the single admin token (lake #4), repositories with content
+once liquid Phase 1 lands, incremental migrations (operator #126). The codebase also includes
+organization administration, one policy engine, migration `0004`, and pages for organizations,
+teams, members, invitations, grants and effective access; those are not yet deployed in the
+production state above. It also includes the signed, hash-linked audit stream (one event per
+capability call, sign-in and session event, recorded by `Registry::call` and the session routes),
+the lake TAAP identity with rotation, audit verification and export, the 400-day retention
+floor, migration `0005`, and the `/audit` page; `LAKE_INSTANCE_KEK` is required wherever a
+Postgres store runs. Repository lifecycle adds migration `0006_repository_lifecycle`, repository
+rename, transfer, visibility and tombstone capabilities, and lifecycle state on the repository
+page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
+Lake links libliquid as a library-only submodule and opens one customer store at
+`LAKE_STORE_ROOT/<customer id>/store`; push and pull wait for liquid #160's published contract.
 
 ## Where to read Zetta
 
@@ -51,8 +62,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
   placeholders until lake has a node to marshal onto.
 - Pages are **server-rendered, self-contained, no script**; renderers in `web_ui.cpp`
-  are pure functions and are the unit-tested surface. Pages read the `Store` directly and can
-  never do what the API cannot.
+  are pure functions and are the unit-tested surface. Data pages call capabilities through
+  `Registry::call` and can never do what the API cannot.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`
@@ -73,13 +84,12 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `Lake` (`spec.postgres`, on by default) and injects `LAKE_CONTROL_DB_URI` /
   `LAKE_CONTROL_DB_PASSWORD` into the pod (optional refs: the pod starts before the DB is
   bootstrapped, so treat an empty value as "not yet"), and `LAKE_ADMIN_TOKEN` from the
-  minted-once `lake-<name>-admin` Secret. **Repository data plane: libliquid stores on the
-  operator-provided `LAKE_STORE_ROOT` volume.** Each customer owns `<root>/<customer id>/store`;
-  operator #132 owns the mount and environment injection.
+  minted-once `lake-<name>-admin` Secret. **Data plane: Zetta.** Recorded in the
+  bridge `decisions.md` §6; "for now" is deliberate.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `repository_lifecycle_events` after migration `0006_repository_lifecycle`, versioned by content hash).
+  `repository_refs` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
@@ -100,12 +110,10 @@ that licence boundary.
 - **Port 4900** (decided; Zetta is 4800). The `Lake` CR's `spec.port` defaults to it.
 - **C++26**, CMake ≥ 3.28 + Ninja, Clang 17+ auto-selected as Zetta's `CMakeLists.txt`
   does, OpenSSL 3 and libpq from Homebrew. GoogleTest v1.17.0 via FetchContent (as Zetta), not Catch2.
-- **Boost.Capy** coroutines, **Corosio** networking, **Boost.HTTP** router, **Beast2**
-  HTTP/1 server — vendored under `modules/` at **Zetta's exact pins**, from the same
-  remotes Zetta uses: `capy` (cppalliance `develop`), `corosio` (`oramasearch/corosio`
-  `orama-main`), `http` (`oramasearch/http` `zetta-patches`), `beast2` (cppalliance),
-  `libpqxx` (jtv, 7.10.7 at `853bc0a4`, on libpq). nlohmann/json 3.11.3 via FetchContent.
-  Bump a pin only to a commit Zetta has moved to; never take `cppalliance` corosio or http.
+- **libliquid** as a library-only submodule supplies Capy, Corosio and nlohmann/json;
+  **Boost.HTTP** and **Beast2** provide the HTTP/1 server. `http`, `beast2` and `libpqxx`
+  remain vendored under `modules/`. Bump liquid only to its current `main`; never edit it
+  through lake's copy.
 - `std::expected` at every public boundary; no exceptions across public APIs.
 - Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended);
   runs on `oramasearch/k0s`, and on our AKS cluster for now.
