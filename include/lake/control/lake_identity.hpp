@@ -1,6 +1,7 @@
 #pragma once
 
 #include <expected>
+#include <memory>
 #include <string>
 
 namespace lake::control {
@@ -20,5 +21,10 @@ public:
   virtual std::expected<std::string, std::string>
   sign_passkey_binding(const std::string &binding) const = 0;
 };
+
+// This implementation boundary is intentionally available before audit issue #18
+// lands. The placeholder fails closed; callers cannot accidentally mint an
+// unsigned passkey binding.
+std::unique_ptr<LakeIdentity> make_lake_identity_stub();
 
 } // namespace lake::control

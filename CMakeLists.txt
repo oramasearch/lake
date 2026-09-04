@@ -84,6 +84,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 # lake-core: HTTP-free. Version, the pure web_ui renderers, the capability registry and its
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
+  src/control/lake_identity.cpp
   src/version.cpp
   src/api/web_ui.cpp
   src/api/registry.cpp

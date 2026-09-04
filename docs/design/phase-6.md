@@ -53,7 +53,8 @@ identity-core issue keeps `pool_id` on its tables and in its capability inputs f
   identity after an attestation-less registration, then issues a session only after a successful
   assertion. lake #18 owns lake's instance identity: it is generated on first start, its seed is
   wrapped by the instance KEK (or provided as `LAKE_IDENTITY_SEED`), and its public document is
-  exposed at `GET /v1/identity`.
+  exposed at `GET /v1/identity`. Until #18 lands, identity core has a fail-closed `LakeIdentity`
+  stub and the `lake_identity` storage contract; it cannot produce an unsigned binding.
 - TOTP seeds, OAuth client secrets, and recovery codes are encrypted with AES-256-GCM under a
   purpose-specific data key. `keystore(purpose, wrapped_key, version)` holds those keys wrapped
   by the instance KEK; #24/#25 generalise the table and its lifecycle.
