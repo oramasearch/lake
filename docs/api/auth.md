@@ -6,7 +6,9 @@
 
 - Every capability except `server_info` requires it, on REST and on MCP `tools/call` alike
   (`Registry::call` enforces `requires_auth`).
-- Without a token configured, lake logs `admin token: NOT SET` at start and every guarded
+- `GET /metrics` uses the same resolution code: either the bearer or the UI's `lake_session`
+  cookie. `GET /healthz` and `GET /readyz` are unauthenticated so Kubernetes can probe them.
+- Without a token configured, lake logs `"admin_token_set":"no"` in its JSON startup event and every guarded
   capability answers `403 unauthorized`. There is no anonymous write path.
 - `GET /`, `/style.css`, `/v1/openapi.json` and MCP `initialize` / `tools/list` need no token.
 

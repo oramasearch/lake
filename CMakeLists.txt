@@ -107,6 +107,7 @@ add_library(lake-core STATIC
   src/api/capabilities.cpp
   src/control/handles.cpp
   src/control/memory_store.cpp
+  src/telemetry/metrics.cpp
 )
 target_include_directories(lake-core PUBLIC include)
 target_compile_features(lake-core PUBLIC cxx_std_26)

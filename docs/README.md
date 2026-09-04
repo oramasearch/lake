@@ -6,7 +6,7 @@ the same change (bridge `CLAUDE.md`, *Documentation is part of every change*). `
 
 | Topic | Files |
 |---|---|
-| [`serving/`](serving/) | [`http.md`](serving/http.md) — the HTTP server: Beast2 on Capy/Corosio, routes, the trailing-404 rule, header stamping, log noise |
+| [`serving/`](serving/) | [`http.md`](serving/http.md) — the HTTP server: Beast2 on Capy/Corosio, routes, the trailing-404 rule, header stamping, log noise; [`telemetry.md`](serving/telemetry.md) — Prometheus metrics, health and readiness, request logs |
 | [`control-plane/`](control-plane/) | [`postgres.md`](control-plane/postgres.md) — the Postgres the operator provisions per Lake; [`schema.md`](control-plane/schema.md) — tables, the tenant model, how the schema is applied and changed |
 | [`deployment/`](deployment/) | [`aks.md`](deployment/aks.md) — `Lake/prod` on AKS: what exists, how it was built, how to roll, how to verify, what is not production-grade yet |
 | [`build/`](build/) | [`container-image.md`](build/container-image.md) — the Linux/amd64 image and the on-node builder |

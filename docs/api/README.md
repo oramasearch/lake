@@ -14,6 +14,12 @@ envelope as `structuredContent` (and as text), with `isError` set.
 
 **Auth.** Bearer token, see [`auth.md`](auth.md). Everything except `server_info` requires it.
 
+## Operational routes
+
+| Route | Contract |
+|---|---|
+| `GET /healthz`, `GET /readyz`, `GET /metrics` | Liveness and readiness are unauthenticated; metrics uses the same bearer or session cookie as capabilities. These are HTTP operational routes, not capabilities, so they are not rendered into OpenAPI or MCP. See [`../serving/telemetry.md`](../serving/telemetry.md). |
+
 ## Capabilities
 
 | Capability | Kind | Input | Value | Page |

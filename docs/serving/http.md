@@ -20,6 +20,7 @@ out) and are the unit-tested surface.
 |---|---|
 | `GET /` | the hello page (server-rendered, self-contained, no script) |
 | `GET /style.css` | the stylesheet, `public, max-age=86400` |
+| `GET /healthz`, `GET /readyz`, `GET /metrics` | operational probes and metrics; see [`telemetry.md`](telemetry.md) |
 | `GET /v1/server_info` | `{"name":"lake","node":…,"version":…,"api":"v1"}` |
 | anything else | `404 {"error":"not_found"}` |
 

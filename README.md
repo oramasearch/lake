@@ -7,7 +7,8 @@ liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
 > capabilities (users, organizations, customers, repositories over the Postgres control plane), the pages to explore them, the OpenAPI
-> document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), behind the admin bearer. The specification lives in
+> document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
+> Prometheus metrics and JSON request logs. The control surface and metrics are behind the admin bearer; probes are unauthenticated. The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
 > The image `oramasearch/lake` (private) runs under the `Lake` CR on `orama-operator`; see
@@ -31,6 +32,8 @@ ctest --test-dir build
 |---|---|
 | `GET /` | the hello page — server-rendered, self-contained, no script |
 | `GET /style.css` | the stylesheet (`public, max-age=86400`) |
+| `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
+| `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /customers`, `/repositories`, `/repository?id=` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: list / get / create for users, organizations, customers and repositories; bearer required |
@@ -73,6 +76,7 @@ by default, no args needed.
 | `src/api/http_server.cpp` | the **one** translation unit that knows Beast2, `boost::http` and Boost.JSON; serves the registry as REST, OpenAPI and MCP |
 | `include/lake/api/registry.hpp`, `rest.hpp`, `mcp.hpp`, `capabilities.hpp` | the capability registry and its three renderings (HTTP-free) |
 | `include/lake/control/`, `src/control/` | the control-plane store: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
+| `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |

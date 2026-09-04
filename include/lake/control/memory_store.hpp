@@ -11,6 +11,7 @@ namespace lake::control {
 class InMemoryStore final : public Store {
 public:
     std::string kind() const override { return "memory"; }
+    Result<void> ping() override;
     Result<User> create_user(const NewUser&) override;
     Result<std::vector<User>> list_users(int limit) override;
     Result<User> get_user(const std::string& id) override;
