@@ -68,6 +68,17 @@ cmake --build build
 ctest --test-dir build --output-on-failure -R 'Sso|Scim|Postgres'
 ```
 
+For the release proof, create a fresh database, apply the complete schema, and run the entire
+suite so the SSO migration is exercised with every other control-plane migration:
+
+```sh
+docker exec lake-test-pg-18 psql -U postgres -c 'CREATE DATABASE lake_sso_test'
+docker exec -i lake-test-pg-18 psql -U postgres -d lake_sso_test < db/schema.sql
+LAKE_TEST_DB_URI=postgresql://postgres:lake@127.0.0.1:55432/lake_sso_test \
+  LAKE_INSTANCE_KEK=<64-hex-key> \
+  ctest --test-dir build --output-on-failure
+```
+
 The in-memory SSO tests configure one SAML and one OIDC stub provider, cover both successful
 assertions, verify a refused unlisted issuer is audited, and exercise SCIM create, update, group
 membership replacement, and deactivation with immediate session rejection.
