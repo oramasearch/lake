@@ -38,6 +38,12 @@ negotiation walks their content-addressed graph and sends only objects the recei
 An optional `Authorization: Bearer <token>` header carries lake authentication. The CLI reads the
 token from `LIQUID_TOKEN`; credentials never appear in the URL or output.
 
+An offline publisher also sends `Liquid-Offline-Grant: <grant-uuid>`. The grant is context for
+publication reauthorization, never a replacement for the ordinary credential. Push verifies its
+current ownership, device binding, expiry, and revocation state, then checks current write policy
+per change. `Liquid-Reauthorization` returns a base64url JSON array of checked change IDs, allowed
+flags, and exact explanations on both success and refusal. See [`offline.md`](offline.md).
+
 ## Metadata stream
 
 Every metadata frame has a one-byte type, a four-byte unsigned big-endian payload length, and that

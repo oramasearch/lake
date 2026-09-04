@@ -1,5 +1,9 @@
 # Identity API
 
+Account restoration beyond MFA sign-in is specified in [`recovery.md`](recovery.md). Recovery
+restores sign-in credentials and sessions; it does not restore end-to-end encrypted repository
+keys. Offline device grants are specified separately in [`offline.md`](offline.md).
+
 ## What
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,

@@ -142,13 +142,30 @@ does not update `secrets_versions`.
 The credential-kind constraint also accepts `saml` and `oidc`; both remain proofs bound to the
 user's TAAP identity, rather than identities in their own right.
 
+## Offline authorization and recovery (migration `0011_offline_recovery`)
+
+| Table | Purpose |
+|---|---|
+| `offline_recovery_grants` | Lake-signed, user/device-bound cached-read grants with explicit scopes, expiry, and revocation. |
+| `offline_recovery_attempts` | Email or administrator recovery state, cooling/expiry timestamps, hashed one-use token, and completion. |
+| `offline_recovery_admin_approvals` | Distinct approving TAAP identities; the composite key prevents an administrator from approving twice. |
+| `offline_recovery_deliveries` | Operator mail outbox. Claiming sets `delivered_at` and clears the plaintext token. |
+| `offline_recovery_notifications` | Immutable recovery notices addressed to every device registered to the affected user. |
+| `offline_recovery_contacts` | One designated TAAP contact and opaque client-wrapped trust-domain key per repository. |
+| `offline_recovery_guard` | Guard table for migration `0011_offline_recovery`. |
+
+All new tables carry the area prefix. Account attempts and grants cascade with the user; key
+custody cascades with the repository. Lake stores only the recovery token hash on an attempt and
+never stores an unwrapped repository key. The API and security consequences are in
+[`../api/offline.md`](../api/offline.md) and [`../api/recovery.md`](../api/recovery.md).
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`sso_federation_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`offline_recovery_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -162,11 +179,9 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
 1. Edit `db/schema.sql` idempotently (`IF NOT EXISTS`, `CREATE OR REPLACE`, `DROP … IF EXISTS`
    before `CREATE TRIGGER`), append a new `INSERT INTO schema_migrations`.
 2. Copy to the operator's `assets/lake-schema.sql`; the version hash changes automatically. During
-   the Phase 6 waves this copy and the `GuardTable` update land once per wave in a separate operator
-   pull request, never a partial schema between waves. By the approved Phase 6 wave-level waiver,
-   the operator copies for `0009_secrets` and `0010_sso_federation` are deferred to the separate
-   operator migration pull request that collects this wave; lake keeps the source-of-truth schema
-   and newest guard ready for that update.
+   the Phase 6 waves this copy and the `GuardTable` update land in a separate operator pull request.
+   The operator change for this migration must carry the byte-identical schema and use
+   `offline_recovery_guard`.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
    lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a
@@ -179,5 +194,6 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery')" \
+  -c "SELECT to_regclass('offline_recovery_guard')"
 ```

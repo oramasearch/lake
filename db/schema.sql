@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `sso_federation_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `offline_recovery_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -673,3 +673,92 @@ CREATE TABLE IF NOT EXISTS sso_federation_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0010_sso_federation') ON CONFLICT DO NOTHING;
+
+-- Offline grants and account recovery (migration 0011): signed, bounded cached-read grants;
+-- one-use recovery paths; device notification; two-administrator organization recovery; and
+-- client-wrapped repository key custody. Prefix every table for parallel wave ownership.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS offline_recovery_grants (
+    id                uuid        PRIMARY KEY,
+    user_id           uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    principal_taap_id text        NOT NULL,
+    device_id         uuid        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    scopes            text[]      NOT NULL,
+    credential        jsonb       NOT NULL,
+    issued_at         timestamptz NOT NULL DEFAULT now(),
+    expires_at        timestamptz NOT NULL,
+    revoked_at        timestamptz,
+    CONSTRAINT offline_recovery_grants_scope_check CHECK (cardinality(scopes) > 0),
+    CONSTRAINT offline_recovery_grants_expiry_check CHECK (expires_at > issued_at)
+);
+CREATE INDEX IF NOT EXISTS offline_recovery_grants_user_id_idx
+    ON offline_recovery_grants (user_id, issued_at DESC);
+
+CREATE TABLE IF NOT EXISTS offline_recovery_attempts (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    organization_id uuid        REFERENCES organizations(id) ON DELETE CASCADE,
+    method          text        NOT NULL,
+    status          text        NOT NULL,
+    token_hash      text,
+    ready_at        timestamptz NOT NULL,
+    expires_at      timestamptz NOT NULL,
+    completed_at    timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT offline_recovery_attempts_method_check CHECK (method IN ('email', 'admin')),
+    CONSTRAINT offline_recovery_attempts_status_check
+        CHECK (status IN ('cooling', 'pending_approval', 'approved', 'completed')),
+    CONSTRAINT offline_recovery_attempts_expiry_check CHECK (expires_at > ready_at)
+);
+CREATE INDEX IF NOT EXISTS offline_recovery_attempts_user_id_idx
+    ON offline_recovery_attempts (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS offline_recovery_admin_approvals (
+    recovery_id      uuid        NOT NULL REFERENCES offline_recovery_attempts(id) ON DELETE CASCADE,
+    approver_taap_id text        NOT NULL,
+    approved_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (recovery_id, approver_taap_id)
+);
+
+CREATE TABLE IF NOT EXISTS offline_recovery_deliveries (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    recovery_id  uuid        NOT NULL REFERENCES offline_recovery_attempts(id) ON DELETE CASCADE,
+    email        text        NOT NULL,
+    token        text,
+    kind         text        NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    delivered_at timestamptz,
+    CONSTRAINT offline_recovery_deliveries_kind_check
+        CHECK (kind IN ('email_recovery_started', 'admin_recovery_approved'))
+);
+CREATE INDEX IF NOT EXISTS offline_recovery_deliveries_pending_idx
+    ON offline_recovery_deliveries (created_at) WHERE delivered_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS offline_recovery_notifications (
+    id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    recovery_id uuid        NOT NULL REFERENCES offline_recovery_attempts(id) ON DELETE CASCADE,
+    user_id     uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_id   uuid        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    kind        text        NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS offline_recovery_notifications_user_id_idx
+    ON offline_recovery_notifications (user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS offline_recovery_contacts (
+    repository_id   uuid        PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+    contact_taap_id text        NOT NULL,
+    wrapped_key     text        NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT offline_recovery_contacts_key_check CHECK (length(wrapped_key) > 0)
+);
+DROP TRIGGER IF EXISTS offline_recovery_contacts_set_updated_at ON offline_recovery_contacts;
+CREATE TRIGGER offline_recovery_contacts_set_updated_at BEFORE UPDATE ON offline_recovery_contacts
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS offline_recovery_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0011_offline_recovery') ON CONFLICT DO NOTHING;

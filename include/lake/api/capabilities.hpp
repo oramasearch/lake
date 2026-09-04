@@ -7,5 +7,6 @@ namespace lake::api {
 // organizations, customers — as list / get / create. Handlers are thin callers of the Store.
 void register_core_capabilities(Registry& registry, std::string_view version);
 void register_secret_capabilities(Registry& registry);
+void register_offline_recovery_capabilities(Registry& registry);
 
 } // namespace lake::api

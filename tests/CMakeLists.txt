@@ -7,8 +7,9 @@ add_executable(lake-tests test_web_ui.cpp
   test_webauthn.cpp
   test_search.cpp
   test_secrets.cpp
+  test_offline_recovery.cpp
   test_postgres_identity.cpp)
-target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres OpenSSL::Crypto GTest::gtest_main)
+target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)
 

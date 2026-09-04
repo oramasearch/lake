@@ -27,7 +27,7 @@ class Service;
 namespace lake::api {
 
 struct ApiError {
-    std::string code;    // invalid_input | unauthorized | not_found | conflict |
+    std::string code;    // invalid_input | unauthorized | not_found | conflict | unrecoverable |
                          // unknown_capability | store_unavailable | store_error
     std::string message; // the real reason, verbatim where one exists
     std::string path;    // JSON pointer when the input is at fault
@@ -55,6 +55,7 @@ struct ApiContext {
     std::string request_id;
     std::string authentication_method;
     std::string device;
+    std::string credential_device_id;
     std::string identity_seed;
     std::string instance_kek;
     SyncStore* sync_store = nullptr;
@@ -62,6 +63,8 @@ struct ApiContext {
     std::span<const std::byte> sync_request;
     std::vector<std::byte> sync_response;
     std::optional<SyncStoreError> sync_error;
+    std::string offline_grant_id;
+    nlohmann::json reauthorization_results = nlohmann::json::array();
     search::Service* search = nullptr;
     bool authorized = false;
     bool operator_credential = false;

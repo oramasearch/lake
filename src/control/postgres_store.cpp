@@ -1359,6 +1359,31 @@ Session session_of(const pqxx::row& r) {
                    nlohmann::json::parse(r[11].as<std::string>()).get<std::vector<std::string>>()};
 }
 
+OfflineGrant offline_grant_of(const pqxx::row& row) {
+    return OfflineGrant{
+        row[0].as<std::string>(),
+        row[1].as<std::string>(),
+        row[2].as<std::string>(),
+        row[3].as<std::string>(),
+        nlohmann::json::parse(row[4].as<std::string>()).get<std::vector<std::string>>(),
+        row[5].as<std::string>(),
+        row[6].as<std::string>(),
+        row[7].as<std::string>(),
+        nlohmann::json::parse(row[8].as<std::string>())};
+}
+
+RecoveryAttempt recovery_attempt_of(const pqxx::row& row) {
+    return RecoveryAttempt{row[0].as<std::string>(),
+                           row[1].as<std::string>(),
+                           row[2].as<std::string>(),
+                           row[3].as<std::string>(),
+                           row[4].as<std::string>(),
+                           row[5].as<std::string>(),
+                           row[6].as<std::string>(),
+                           row[7].as<std::string>(),
+                           row[8].as<int>()};
+}
+
 SsoProvider sso_provider_of(const pqxx::row& row) {
     return SsoProvider{row[0].as<std::string>(),
                        row[1].as<std::string>(),
@@ -1433,6 +1458,18 @@ constexpr const char* qualified_session_columns =
     "coalesce(sessions.revoked_at::text,''), sessions.created_at::text, "
     "coalesce(sessions.last_used_at::text,''), "
     "array_to_json(sessions.scopes)::text";
+constexpr const char* offline_grant_columns =
+    "id::text, user_id::text, principal_taap_id, device_id::text, "
+    "array_to_json(scopes)::text, issued_at::text, expires_at::text, "
+    "coalesce(revoked_at::text,''), credential::text";
+constexpr const char* recovery_attempt_columns =
+    "offline_recovery_attempts.id::text, offline_recovery_attempts.user_id::text, "
+    "coalesce(offline_recovery_attempts.organization_id::text,''), "
+    "offline_recovery_attempts.method, offline_recovery_attempts.status, "
+    "offline_recovery_attempts.ready_at::text, offline_recovery_attempts.expires_at::text, "
+    "coalesce(offline_recovery_attempts.completed_at::text,''), "
+    "(SELECT count(*)::integer FROM offline_recovery_admin_approvals "
+    "WHERE recovery_id = offline_recovery_attempts.id)";
 constexpr const char* sso_provider_columns =
     "id::text, organization_id::text, pool_id, name, protocol, issuer, metadata, "
     "signing_certificate, client_id, attribute_mapping::text, jit_provisioning, enabled, "
@@ -4433,7 +4470,434 @@ public:
         });
     }
 
+    Result<OfflineGrant> issue_offline_grant(const NewOfflineGrant& input) override {
+        if (input.id.empty() || input.user_id.empty() || input.principal_taap_id.empty() ||
+            input.device_id.empty() || input.scopes.empty() || input.duration_seconds <= 0 ||
+            input.duration_seconds > 604800 || !input.credential.is_object()) {
+            return std::unexpected(StoreError{"invalid_input", "offline grant is incomplete"});
+        }
+        return with_tx<OfflineGrant>([&](pqxx::work& tx) -> Result<OfflineGrant> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO offline_recovery_grants ") +
+                    "(id, user_id, principal_taap_id, device_id, scopes, credential, expires_at) "
+                    "SELECT $1::uuid, $2::uuid, $3, $4::uuid, "
+                    "ARRAY(SELECT jsonb_array_elements_text($5::jsonb)), $6::jsonb, "
+                    "now() + make_interval(secs => $7) FROM devices "
+                    "WHERE id = $4::uuid AND user_id = $2::uuid AND revoked_at IS NULL RETURNING " +
+                    offline_grant_columns,
+                input.id,
+                input.user_id,
+                input.principal_taap_id,
+                input.device_id,
+                nlohmann::json(input.scopes).dump(),
+                input.credential.dump(),
+                input.duration_seconds);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "active device not found"});
+            }
+            return offline_grant_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<OfflineGrant>> list_offline_grants(const std::string& user_id) override {
+        return with_tx<std::vector<OfflineGrant>>(
+            [&](pqxx::work& tx) -> Result<std::vector<OfflineGrant>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + offline_grant_columns +
+                                       " FROM offline_recovery_grants WHERE user_id = $1::uuid "
+                                       "ORDER BY issued_at DESC",
+                                   user_id);
+                std::vector<OfflineGrant> output;
+                for (const pqxx::row& row : rows) {
+                    output.push_back(offline_grant_of(row));
+                }
+                return output;
+            });
+    }
+
+    Result<OfflineGrant> get_offline_grant(const std::string& id) override {
+        return with_tx<OfflineGrant>([&](pqxx::work& tx) -> Result<OfflineGrant> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + offline_grant_columns +
+                                   " FROM offline_recovery_grants WHERE id = $1::uuid",
+                               id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "offline grant not found"});
+            }
+            return offline_grant_of(rows[0]);
+        });
+    }
+
+    Result<OfflineGrant> revoke_offline_grant(const std::string& user_id,
+                                              const std::string& id) override {
+        return with_tx<OfflineGrant>([&](pqxx::work& tx) -> Result<OfflineGrant> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE offline_recovery_grants SET revoked_at = ") +
+                    "coalesce(revoked_at, now()) WHERE id = $1::uuid AND user_id = $2::uuid "
+                    "RETURNING " +
+                    offline_grant_columns,
+                id,
+                user_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "offline grant not found"});
+            }
+            return offline_grant_of(rows[0]);
+        });
+    }
+
+    Result<IssuedSession> recover_with_code(const std::string& pool_id,
+                                            const std::string& email,
+                                            const std::string& code,
+                                            const std::string& device_name) override {
+        return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
+            const pqxx::result user_rows = tx.exec_params(
+                "SELECT user_id::text FROM credentials WHERE pool_id = $1 AND kind = 'password' "
+                "AND subject = lower($2) AND revoked_at IS NULL",
+                pool_id,
+                email);
+            if (user_rows.empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "invalid email or recovery code"});
+            }
+            const std::string user_id = user_rows[0][0].as<std::string>();
+            const pqxx::result recovery_rows = tx.exec_params(
+                "SELECT id::text, secret_hash FROM credentials WHERE user_id = $1::uuid "
+                "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL FOR UPDATE",
+                user_id,
+                pool_id);
+            const auto recovery = std::ranges::find_if(recovery_rows, [&](const pqxx::row& row) {
+                return identity_crypto::verify_secret(row[1].as<std::string>(), code);
+            });
+            if (recovery == recovery_rows.end()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "invalid email or recovery code"});
+            }
+            tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
+                           (*recovery)[0].as<std::string>());
+            return issue_session(
+                tx, user_id, pool_id, device_name, "browser", "", {"*"}, "", 86400);
+        });
+    }
+
+    Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
+                                                 const std::string& email,
+                                                 int cooling_seconds) override {
+        if (cooling_seconds < 3600) {
+            return std::unexpected(
+                StoreError{"invalid_input", "email recovery cooling period is too short"});
+        }
+        const std::string token = identity_crypto::random_secret();
+        const std::string token_hash = identity_crypto::hash_secret(token);
+        if (token.empty() || token_hash.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not create recovery token"});
+        }
+        return with_tx<RecoveryAttempt>([&](pqxx::work& tx) -> Result<RecoveryAttempt> {
+            const pqxx::result users = tx.exec_params(
+                "SELECT user_id::text FROM credentials WHERE pool_id = $1 AND kind = 'password' "
+                "AND subject = lower($2) AND revoked_at IS NULL",
+                pool_id,
+                email);
+            if (users.empty()) {
+                return std::unexpected(StoreError{"not_found", "account not found"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO offline_recovery_attempts ") +
+                    "(user_id, method, status, token_hash, ready_at, expires_at) "
+                    "VALUES ($1::uuid, 'email', 'cooling', $2, "
+                    "now() + make_interval(secs => $3), "
+                    "now() + make_interval(secs => $3) + interval '24 hours') RETURNING " +
+                    recovery_attempt_columns,
+                users[0][0].as<std::string>(),
+                token_hash,
+                cooling_seconds);
+            const RecoveryAttempt attempt = recovery_attempt_of(rows[0]);
+            tx.exec_params("INSERT INTO offline_recovery_deliveries "
+                           "(recovery_id, email, token, kind) "
+                           "VALUES ($1::uuid, $2, $3, 'email_recovery_started')",
+                           attempt.id,
+                           email,
+                           token);
+            notify_devices(tx, attempt, "email_recovery_started");
+            return attempt;
+        });
+    }
+
+    Result<RecoveryAttempt> begin_admin_recovery(const std::string& organization_id,
+                                                 const std::string& user_id,
+                                                 const std::string& requested_by) override {
+        return with_tx<RecoveryAttempt>([&](pqxx::work& tx) -> Result<RecoveryAttempt> {
+            if (!organization_admin(tx, organization_id, requested_by)) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "requester is not an organization admin"});
+            }
+            const pqxx::result target =
+                tx.exec_params("SELECT 1 FROM memberships WHERE organization_id = $1::uuid "
+                               "AND principal_type = 'user' AND principal_id = $2",
+                               organization_id,
+                               user_id);
+            if (target.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "target user is not in the organization"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO offline_recovery_attempts ") +
+                    "(user_id, organization_id, method, status, ready_at, expires_at) "
+                    "VALUES ($1::uuid, $2::uuid, 'admin', 'pending_approval', now(), "
+                    "now() + interval '24 hours') RETURNING " +
+                    recovery_attempt_columns,
+                user_id,
+                organization_id);
+            const RecoveryAttempt attempt = recovery_attempt_of(rows[0]);
+            tx.exec_params("INSERT INTO offline_recovery_admin_approvals "
+                           "(recovery_id, approver_taap_id) VALUES ($1::uuid, $2)",
+                           attempt.id,
+                           requested_by);
+            notify_devices(tx, attempt, "admin_recovery_requested");
+            RecoveryAttempt output = attempt;
+            output.approval_count = 1;
+            return output;
+        });
+    }
+
+    Result<RecoveryAttempt> get_recovery_attempt(const std::string& recovery_id) override {
+        return with_tx<RecoveryAttempt>([&](pqxx::work& tx) -> Result<RecoveryAttempt> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + recovery_attempt_columns +
+                                   " FROM offline_recovery_attempts WHERE id = $1::uuid",
+                               recovery_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "recovery attempt not found"});
+            }
+            return recovery_attempt_of(rows[0]);
+        });
+    }
+
+    Result<RecoveryAttempt> approve_admin_recovery(const std::string& recovery_id,
+                                                   const std::string& approved_by) override {
+        return with_tx<RecoveryAttempt>([&](pqxx::work& tx) -> Result<RecoveryAttempt> {
+            const pqxx::result attempts = tx.exec_params(
+                std::string("SELECT ") + recovery_attempt_columns +
+                    " FROM offline_recovery_attempts WHERE id = $1::uuid AND method = 'admin' "
+                    "FOR UPDATE",
+                recovery_id);
+            if (attempts.empty()) {
+                return std::unexpected(StoreError{"not_found", "admin recovery not found"});
+            }
+            RecoveryAttempt attempt = recovery_attempt_of(attempts[0]);
+            if (!organization_admin(tx, attempt.organization_id, approved_by)) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "approver is not an organization admin"});
+            }
+            const pqxx::result duplicate =
+                tx.exec_params("SELECT 1 FROM offline_recovery_admin_approvals "
+                               "WHERE recovery_id = $1::uuid AND approver_taap_id = $2",
+                               recovery_id,
+                               approved_by);
+            if (!duplicate.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "a different organization admin must approve recovery"});
+            }
+            const pqxx::result valid =
+                tx.exec_params("SELECT 1 FROM offline_recovery_attempts WHERE id = $1::uuid "
+                               "AND expires_at > now() AND status = 'pending_approval'",
+                               recovery_id);
+            if (valid.empty()) {
+                return std::unexpected(StoreError{"conflict", "admin recovery is not pending"});
+            }
+            tx.exec_params("INSERT INTO offline_recovery_admin_approvals "
+                           "(recovery_id, approver_taap_id) VALUES ($1::uuid, $2)",
+                           recovery_id,
+                           approved_by);
+            const std::string token = identity_crypto::random_secret();
+            const std::string token_hash = identity_crypto::hash_secret(token);
+            if (token.empty() || token_hash.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "could not create recovery token"});
+            }
+            const pqxx::result updated = tx.exec_params(
+                std::string("UPDATE offline_recovery_attempts SET status = 'approved', ") +
+                    "token_hash = $2 WHERE id = $1::uuid RETURNING " + recovery_attempt_columns,
+                recovery_id,
+                token_hash);
+            attempt = recovery_attempt_of(updated[0]);
+            const pqxx::result user =
+                tx.exec_params("SELECT email FROM users WHERE id = $1::uuid", attempt.user_id);
+            tx.exec_params("INSERT INTO offline_recovery_deliveries "
+                           "(recovery_id, email, token, kind) "
+                           "VALUES ($1::uuid, $2, $3, 'admin_recovery_approved')",
+                           recovery_id,
+                           user[0][0].as<std::string>(),
+                           token);
+            notify_devices(tx, attempt, "admin_recovery_approved");
+            return attempt;
+        });
+    }
+
+    Result<IssuedSession> complete_recovery(const std::string& recovery_id,
+                                            const std::string& token,
+                                            const std::string& device_name) override {
+        return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
+            const pqxx::result attempts = tx.exec_params(
+                "SELECT user_id::text, method, status, token_hash, ready_at <= now(), "
+                "expires_at > now() FROM offline_recovery_attempts WHERE id = $1::uuid FOR UPDATE",
+                recovery_id);
+            if (attempts.empty() || attempts[0][3].is_null() ||
+                !identity_crypto::verify_secret(attempts[0][3].as<std::string>(), token)) {
+                return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
+            }
+            if (!attempts[0][4].as<bool>()) {
+                return std::unexpected(
+                    StoreError{"conflict", "recovery cooling period has not ended"});
+            }
+            if (!attempts[0][5].as<bool>()) {
+                return std::unexpected(StoreError{"conflict", "recovery token has expired"});
+            }
+            const std::string method = attempts[0][1].as<std::string>();
+            const std::string status = attempts[0][2].as<std::string>();
+            if (status == "completed" || (method == "admin" && status != "approved")) {
+                return std::unexpected(StoreError{"conflict", "recovery is not completable"});
+            }
+            const std::string user_id = attempts[0][0].as<std::string>();
+            tx.exec_params("UPDATE sessions SET revoked_at = coalesce(revoked_at, now()) "
+                           "WHERE user_id = $1::uuid",
+                           user_id);
+            tx.exec_params("UPDATE offline_recovery_attempts SET status = 'completed', "
+                           "completed_at = now(), token_hash = NULL WHERE id = $1::uuid",
+                           recovery_id);
+            const pqxx::result pool = tx.exec_params(
+                "SELECT pool_id FROM credentials WHERE user_id = $1::uuid AND kind = 'password' "
+                "AND revoked_at IS NULL LIMIT 1",
+                user_id);
+            if (pool.empty()) {
+                return std::unexpected(StoreError{"not_found", "password credential not found"});
+            }
+            const RecoveryAttempt notification{
+                recovery_id, user_id, {}, method, "completed", {}, {}, {}, 0};
+            notify_devices(tx, notification, "account_recovery_completed");
+            return issue_session(tx,
+                                 user_id,
+                                 pool[0][0].as<std::string>(),
+                                 device_name,
+                                 "browser",
+                                 "",
+                                 {"*"},
+                                 "",
+                                 86400);
+        });
+    }
+
+    Result<std::vector<RecoveryDelivery>> claim_recovery_deliveries(int limit) override {
+        return with_tx<std::vector<RecoveryDelivery>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RecoveryDelivery>> {
+                const pqxx::result rows = tx.exec_params(
+                    "WITH selected AS (SELECT id, recovery_id, email, token, kind, created_at "
+                    "FROM offline_recovery_deliveries WHERE delivered_at IS NULL "
+                    "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) "
+                    "UPDATE offline_recovery_deliveries AS delivery SET delivered_at = now(), "
+                    "token = NULL FROM selected WHERE delivery.id = selected.id RETURNING "
+                    "delivery.id::text, selected.recovery_id::text, selected.email, "
+                    "selected.token, selected.kind, selected.created_at::text, "
+                    "delivery.delivered_at::text",
+                    limit);
+                std::vector<RecoveryDelivery> output;
+                for (const pqxx::row& row : rows) {
+                    output.push_back({row[0].as<std::string>(),
+                                      row[1].as<std::string>(),
+                                      row[2].as<std::string>(),
+                                      row[3].as<std::string>(),
+                                      row[4].as<std::string>(),
+                                      row[5].as<std::string>(),
+                                      row[6].as<std::string>()});
+                }
+                return output;
+            });
+    }
+
+    Result<std::vector<RecoveryNotification>>
+    list_recovery_notifications(const std::string& user_id) override {
+        return with_tx<std::vector<RecoveryNotification>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RecoveryNotification>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text, recovery_id::text, user_id::text, device_id::text, kind, "
+                    "created_at::text FROM offline_recovery_notifications "
+                    "WHERE user_id = $1::uuid ORDER BY created_at DESC",
+                    user_id);
+                std::vector<RecoveryNotification> output;
+                for (const pqxx::row& row : rows) {
+                    output.push_back({row[0].as<std::string>(),
+                                      row[1].as<std::string>(),
+                                      row[2].as<std::string>(),
+                                      row[3].as<std::string>(),
+                                      row[4].as<std::string>(),
+                                      row[5].as<std::string>()});
+                }
+                return output;
+            });
+    }
+
+    Result<RecoveryContact> configure_recovery_contact(const RecoveryContact& input) override {
+        if (input.repository_id.empty() || input.contact_taap_id.empty() ||
+            input.wrapped_key.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "recovery contact is incomplete"});
+        }
+        return with_tx<RecoveryContact>([&](pqxx::work& tx) -> Result<RecoveryContact> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO offline_recovery_contacts "
+                "(repository_id, contact_taap_id, wrapped_key) VALUES ($1::uuid, $2, $3) "
+                "ON CONFLICT (repository_id) DO UPDATE SET contact_taap_id = "
+                "EXCLUDED.contact_taap_id, "
+                "wrapped_key = EXCLUDED.wrapped_key RETURNING repository_id::text, "
+                "contact_taap_id, wrapped_key, created_at::text, updated_at::text",
+                input.repository_id,
+                input.contact_taap_id,
+                input.wrapped_key);
+            return RecoveryContact{rows[0][0].as<std::string>(),
+                                   rows[0][1].as<std::string>(),
+                                   rows[0][2].as<std::string>(),
+                                   rows[0][3].as<std::string>(),
+                                   rows[0][4].as<std::string>()};
+        });
+    }
+
+    Result<RecoveryContact> get_recovery_contact(const std::string& repository_id) override {
+        return with_tx<RecoveryContact>([&](pqxx::work& tx) -> Result<RecoveryContact> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT repository_id::text, contact_taap_id, wrapped_key, created_at::text, "
+                "updated_at::text FROM offline_recovery_contacts WHERE repository_id = $1::uuid",
+                repository_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "repository has no recovery contact"});
+            }
+            return RecoveryContact{rows[0][0].as<std::string>(),
+                                   rows[0][1].as<std::string>(),
+                                   rows[0][2].as<std::string>(),
+                                   rows[0][3].as<std::string>(),
+                                   rows[0][4].as<std::string>()};
+        });
+    }
+
 private:
+    bool organization_admin(pqxx::work& tx,
+                            const std::string& organization_id,
+                            const std::string& principal_taap_id) {
+        const pqxx::result rows =
+            tx.exec_params("SELECT 1 FROM memberships WHERE organization_id = $1::uuid "
+                           "AND principal_taap_id = $2 AND role IN ('owner', 'admin') LIMIT 1",
+                           organization_id,
+                           principal_taap_id);
+        return !rows.empty();
+    }
+
+    void notify_devices(pqxx::work& tx, const RecoveryAttempt& attempt, const std::string& kind) {
+        tx.exec_params("INSERT INTO offline_recovery_notifications "
+                       "(recovery_id, user_id, device_id, kind) "
+                       "SELECT $1::uuid, $2::uuid, id, $3 FROM devices WHERE user_id = $2::uuid",
+                       attempt.id,
+                       attempt.user_id,
+                       kind);
+    }
+
     Result<SecretMount> secret_mount_tx(pqxx::work& tx, const std::string& id) {
         const pqxx::result rows = tx.exec_params(std::string("SELECT ") + secret_mount_columns +
                                                      " FROM secrets_mounts WHERE id = $1::uuid",

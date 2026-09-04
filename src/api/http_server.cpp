@@ -2148,6 +2148,7 @@ struct ApiServer::Impl {
                 ctx.session_credential = true;
                 ctx.acting_user_id = principal->user_id;
                 ctx.acting_identity = principal->taap_id;
+                ctx.credential_device_id = principal->device_id;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;
             }
@@ -2162,6 +2163,9 @@ struct ApiServer::Impl {
             ctx.request_id = std::string(route.req.at("x-request-id"));
         } else {
             ctx.request_id = control::new_uuid_v4();
+        }
+        if (route.req.count("liquid-offline-grant") != 0) {
+            ctx.offline_grant_id = std::string(route.req.at("liquid-offline-grant"));
         }
         return ctx;
     }
@@ -3739,6 +3743,11 @@ struct ApiServer::Impl {
         context.sync_wire_request = true;
         context.sync_request = as_bytes(*body);
         const ApiResult result = registry.call(capability_name, input, context);
+        if (!context.reauthorization_results.empty()) {
+            const std::string encoded =
+                control::identity_crypto::base64url_encode(context.reauthorization_results.dump());
+            route.res.set("liquid-reauthorization", encoded);
+        }
         if (!result.ok) {
             co_return co_await send_sync_error(route, sync_error_of(result, context));
         }
@@ -3803,7 +3812,8 @@ struct ApiServer::Impl {
             body = rest_envelope(result).dump();
             const bool browser_sign_in =
                 capability->name == "sign_up_password" || capability->name == "sign_in_password" ||
-                capability->name == "verify_mfa" || capability->name == "sign_in_passkey";
+                capability->name == "verify_mfa" || capability->name == "sign_in_passkey" ||
+                capability->name == "recover_with_code" || capability->name == "complete_recovery";
             if (result.ok && browser_sign_in && result.value.contains("secret") &&
                 result.value["secret"].is_string()) {
                 set_cookie =

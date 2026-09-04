@@ -566,6 +566,82 @@ public:
     control::Result<control::Principal> context_for(const std::string& secret) override {
         return call("context_for", [&] { return store_->context_for(secret); });
     }
+    control::Result<control::OfflineGrant>
+    issue_offline_grant(const control::NewOfflineGrant& value) override {
+        return call("issue_offline_grant", [&] { return store_->issue_offline_grant(value); });
+    }
+    control::Result<std::vector<control::OfflineGrant>>
+    list_offline_grants(const std::string& user_id) override {
+        return call("list_offline_grants", [&] { return store_->list_offline_grants(user_id); });
+    }
+    control::Result<control::OfflineGrant> get_offline_grant(const std::string& id) override {
+        return call("get_offline_grant", [&] { return store_->get_offline_grant(id); });
+    }
+    control::Result<control::OfflineGrant> revoke_offline_grant(const std::string& user_id,
+                                                                const std::string& id) override {
+        return call("revoke_offline_grant",
+                    [&] { return store_->revoke_offline_grant(user_id, id); });
+    }
+    control::Result<control::IssuedSession>
+    recover_with_code(const std::string& pool_id,
+                      const std::string& email,
+                      const std::string& code,
+                      const std::string& device_name) override {
+        return call("recover_with_code",
+                    [&] { return store_->recover_with_code(pool_id, email, code, device_name); });
+    }
+    control::Result<control::RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
+                                                                   const std::string& email,
+                                                                   int cooling_seconds) override {
+        return call("begin_email_recovery",
+                    [&] { return store_->begin_email_recovery(pool_id, email, cooling_seconds); });
+    }
+    control::Result<control::RecoveryAttempt>
+    begin_admin_recovery(const std::string& organization_id,
+                         const std::string& user_id,
+                         const std::string& requested_by) override {
+        return call("begin_admin_recovery", [&] {
+            return store_->begin_admin_recovery(organization_id, user_id, requested_by);
+        });
+    }
+    control::Result<control::RecoveryAttempt>
+    get_recovery_attempt(const std::string& recovery_id) override {
+        return call("get_recovery_attempt",
+                    [&] { return store_->get_recovery_attempt(recovery_id); });
+    }
+    control::Result<control::RecoveryAttempt>
+    approve_admin_recovery(const std::string& recovery_id,
+                           const std::string& approved_by) override {
+        return call("approve_admin_recovery",
+                    [&] { return store_->approve_admin_recovery(recovery_id, approved_by); });
+    }
+    control::Result<control::IssuedSession>
+    complete_recovery(const std::string& recovery_id,
+                      const std::string& token,
+                      const std::string& device_name) override {
+        return call("complete_recovery",
+                    [&] { return store_->complete_recovery(recovery_id, token, device_name); });
+    }
+    control::Result<std::vector<control::RecoveryDelivery>>
+    claim_recovery_deliveries(int limit) override {
+        return call("claim_recovery_deliveries",
+                    [&] { return store_->claim_recovery_deliveries(limit); });
+    }
+    control::Result<std::vector<control::RecoveryNotification>>
+    list_recovery_notifications(const std::string& user_id) override {
+        return call("list_recovery_notifications",
+                    [&] { return store_->list_recovery_notifications(user_id); });
+    }
+    control::Result<control::RecoveryContact>
+    configure_recovery_contact(const control::RecoveryContact& contact) override {
+        return call("configure_recovery_contact",
+                    [&] { return store_->configure_recovery_contact(contact); });
+    }
+    control::Result<control::RecoveryContact>
+    get_recovery_contact(const std::string& repository_id) override {
+        return call("get_recovery_contact",
+                    [&] { return store_->get_recovery_contact(repository_id); });
+    }
     control::Result<control::SsoProvider>
     register_sso_provider(const control::NewSsoProvider& value) override {
         return call("register_sso_provider", [&] { return store_->register_sso_provider(value); });
