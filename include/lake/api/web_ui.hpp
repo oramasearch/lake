@@ -25,5 +25,6 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers);
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners);
 std::string web_ui_repository(const control::Repository& repository, const control::Customer* owner);
+std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter);
 
 }  // namespace lake::api

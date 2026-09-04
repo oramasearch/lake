@@ -37,6 +37,12 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
+| `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
+| `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
+| `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?` | `{items: [audit event]}` | [audit.md](audit.md) |
+| `export_audit` | read | audit filters | `{jsonl}` | [audit.md](audit.md) |
+| `verify_audit` | read | — | `{verified: true}` | [audit.md](audit.md) |
+| `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days}` | [audit.md](audit.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

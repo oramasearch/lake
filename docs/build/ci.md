@@ -7,12 +7,15 @@ images. The Dockerfile remains the canonical Linux toolchain recipe; CI installs
 ## Build and test workflow
 
 [`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It checks out all
-submodules recursively, configures Release with `LAKE_BUILD_TESTS=ON`, builds with clang-19, then
-runs:
+submodules recursively, starts a Postgres 16 service, configures Release with `LAKE_BUILD_TESTS=ON`,
+builds with clang-19, applies `db/schema.sql` in one transaction, then runs:
 
 ```sh
 ctest --test-dir build --output-on-failure
 ```
+
+The workflow exports its service URI as `LAKE_TEST_DATABASE`; this enables the audit store
+integration test in addition to the in-memory unit tests.
 
 The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost,
 nlohmann/json and GoogleTest. Its key includes the hash of `CMakeLists.txt`; a missing cache is

@@ -14,9 +14,11 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages
 (`/customers`, `/repositories`, `/repository?id=`) behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
-`server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
-is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
-identities in place of the single admin token (lake #4), repositories with content once liquid
+`server_info`; probes are unauthenticated. The source additionally has signed audit events, a lake
+TAAP identity, audit verification and export, and the `/audit` page; deployment awaits the Phase 6
+operator schema-and-Secret waiver follow-up. State and runbook: `docs/deployment/aks.md`; the
+specification is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125),
+TAAP identities in place of the single admin token (lake #4), repositories with content once liquid
 Phase 1 lands, incremental migrations (operator #126).
 
 ## Where to read Zetta

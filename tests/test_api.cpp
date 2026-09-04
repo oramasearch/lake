@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdlib>
+#include <sstream>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -12,8 +16,10 @@
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/server.hpp"
+#include "lake/audit/audit.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/postgres_store.hpp"
 #include "lake/telemetry/metrics.hpp"
 
 using nlohmann::json;
@@ -29,10 +35,14 @@ struct Surface {
         register_core_capabilities(registry, "0.0.1");
         ctx.store = &store;
         ctx.node_name = "test";
+        ctx.instance_kek = "test-instance-kek";
         ctx.authorized = true;
         ctx.acting_identity = "admin";
     }
-    ApiResult call(const std::string& name, json input = json::object()) { return registry.call(name, input, ctx); }
+    ApiResult call(const std::string& name, json input = json::object()) {
+        ctx.request_id.clear();
+        return registry.call(name, input, ctx);
+    }
 };
 
 std::string http_get(unsigned short port, std::string_view path, std::string_view authorization = {}) {
@@ -172,6 +182,167 @@ TEST(Registry, ValidatesInput) {
     EXPECT_EQ(s.call("no_such").error.code, "unknown_capability");
 }
 
+TEST(Audit, RegistryRecordsEachCapabilityOutcomeAndDetectsDeletedRows) {
+  Surface s;
+  for (const auto &capability : s.registry.list()) {
+    s.call(capability->name);
+  }
+  auto events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
+  ASSERT_TRUE(events);
+  ASSERT_EQ(events->size(), s.registry.list().size());
+  for (const auto &capability : s.registry.list()) {
+    const auto count = std::count_if(
+        events->begin(), events->end(), [&](const lake::audit::Event &event) {
+          return event.draft.action == capability->name;
+        });
+    EXPECT_EQ(count, 1) << capability->name;
+  }
+  EXPECT_TRUE(lake::audit::verify(s.store, *events));
+
+  std::vector<lake::audit::Event> deleted = *events;
+  deleted.erase(deleted.begin() + 1);
+  const auto verification = lake::audit::verify(s.store, deleted);
+  EXPECT_FALSE(verification);
+  EXPECT_EQ(verification.error().code, "invalid_chain");
+}
+
+TEST(Audit, DeniedAuthorizationAndJsonLinesExportAreRecorded) {
+  Surface s;
+  s.ctx.authorized = false;
+  const ApiResult denied = s.call("list_users");
+  EXPECT_FALSE(denied.ok);
+  EXPECT_EQ(denied.error.code, "unauthorized");
+
+  s.ctx.authorized = true;
+  const ApiResult exported = s.call("export_audit");
+  ASSERT_TRUE(exported.ok) << exported.error.message;
+  std::istringstream lines(exported.value["jsonl"].get<std::string>());
+  std::string line;
+  std::vector<json> decoded;
+  while (std::getline(lines, line)) {
+    if (!line.empty()) {
+      decoded.push_back(json::parse(line));
+    }
+  }
+  ASSERT_EQ(decoded.size(), 1u);
+  EXPECT_EQ(decoded[0]["outcome"], "denied");
+  EXPECT_EQ(decoded[0]["action"], "list_users");
+
+  auto events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
+  ASSERT_TRUE(events);
+  ASSERT_EQ(events->size(), 2u);
+  EXPECT_TRUE(lake::audit::verify(s.store, *events));
+}
+
+TEST(Audit, IdentityRotatesAndRetentionFloorIsEnforced) {
+  Surface s;
+  const ApiResult initial = s.call("identity");
+  ASSERT_TRUE(initial.ok) << initial.error.message;
+  const std::string initial_identity = initial.value["taap_id"];
+  const ApiResult rotated = s.call("rotate_identity");
+  ASSERT_TRUE(rotated.ok) << rotated.error.message;
+  EXPECT_NE(rotated.value["taap_id"], initial_identity);
+
+  lake::control::InMemoryStore externally_seeded_store;
+  const lake::audit::IdentityOptions externally_seeded_options{
+      .configured_seed = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      .instance_kek = "test-instance-kek",
+  };
+  auto externally_seeded =
+      lake::audit::identity(externally_seeded_store, externally_seeded_options);
+  ASSERT_TRUE(externally_seeded) << externally_seeded.error().message;
+  auto externally_rotated = lake::audit::rotate_identity(
+      externally_seeded_store, externally_seeded_options);
+  ASSERT_TRUE(externally_rotated) << externally_rotated.error().message;
+  lake::audit::EventDraft externally_seeded_event{
+      .kind = "administrative",
+      .principal = "admin",
+      .object = "lake",
+      .action = "verify_external_rotation",
+      .outcome = "success",
+      .request_id = lake::control::new_uuid_v4(),
+  };
+  auto recorded =
+      lake::audit::record(externally_seeded_store, externally_seeded_event,
+                          externally_seeded_options);
+  ASSERT_TRUE(recorded) << recorded.error().message;
+  auto externally_seeded_events = externally_seeded_store.list_audit_events(
+      lake::audit::Filter{.limit = 1000});
+  ASSERT_TRUE(externally_seeded_events);
+  EXPECT_TRUE(
+      lake::audit::verify(externally_seeded_store, *externally_seeded_events));
+
+  const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});
+  ASSERT_TRUE(user.ok) << user.error.message;
+  const ApiResult customer =
+      s.call("create_customer", {{"customer_type", "individual"},
+                                 {"user_id", user.value["id"]},
+                                 {"name", "ada"}});
+  ASSERT_TRUE(customer.ok) << customer.error.message;
+  const ApiResult accepted =
+      s.call("set_audit_retention",
+             {{"customer_id", customer.value["id"]}, {"days", 500}});
+  EXPECT_TRUE(accepted.ok);
+  const ApiResult lowered =
+      s.call("set_audit_retention",
+             {{"customer_id", customer.value["id"]}, {"days", 400}});
+  EXPECT_FALSE(lowered.ok);
+  EXPECT_EQ(lowered.error.code, "conflict");
+  const ApiResult refused =
+      s.call("set_audit_retention",
+             {{"customer_id", customer.value["id"]}, {"days", 399}});
+  EXPECT_FALSE(refused.ok);
+  EXPECT_EQ(refused.error.code, "invalid_input");
+
+  auto events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
+  ASSERT_TRUE(events);
+  const auto retention = std::find_if(
+      events->rbegin(), events->rend(), [](const lake::audit::Event &event) {
+        return event.draft.kind == "retention" &&
+               event.draft.outcome == "failure";
+      });
+  ASSERT_NE(retention, events->rend());
+  EXPECT_EQ(retention->draft.action, "set_audit_retention");
+  EXPECT_TRUE(lake::audit::verify(s.store, *events));
+}
+
+TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
+  const char *database_uri = std::getenv("LAKE_TEST_DATABASE");
+  if (database_uri == nullptr || *database_uri == '\0') {
+    GTEST_SKIP() << "LAKE_TEST_DATABASE is not configured";
+  }
+  auto store = lake::control::make_postgres_store(database_uri);
+  const auto ready = store->ping();
+  ASSERT_TRUE(ready) << ready.error().message;
+  const auto before =
+      store->list_audit_events(lake::audit::Filter{.limit = 1000000});
+  ASSERT_TRUE(before) << before.error().message;
+  Registry registry;
+  register_core_capabilities(registry, "0.0.1");
+  ApiContext context;
+  context.store = store.get();
+  context.node_name = "postgres-test";
+  context.instance_kek = "postgres-test-instance-kek";
+  context.authorized = true;
+  context.acting_identity = "admin";
+
+  for (const auto &capability : registry.list()) {
+    context.request_id.clear();
+    registry.call(capability->name, json::object(), context);
+  }
+  context.authorized = false;
+  context.request_id.clear();
+  const ApiResult result = registry.call("list_users", json::object(), context);
+  EXPECT_EQ(result.error.code, "unauthorized");
+
+  auto events = store->list_audit_events(lake::audit::Filter{.limit = 1000000});
+  ASSERT_TRUE(events) << events.error().message;
+  ASSERT_EQ(events->size(), before->size() + registry.list().size() + 1);
+  EXPECT_EQ(events->back().draft.outcome, "denied");
+  const auto verification = lake::audit::verify(*store, *events);
+  EXPECT_TRUE(verification) << verification.error().message;
+}
+
 TEST(Customers, IndividualLifecycleWithGeneratedHandle) {
     Surface s;
     const ApiResult user = s.call("create_user", {{"email", "Ada@Example.com"}, {"display_name", "Ada"}});
@@ -201,7 +372,6 @@ TEST(Customers, IndividualLifecycleWithGeneratedHandle) {
     EXPECT_EQ(got.value["name"], name);
     EXPECT_EQ(s.call("get_customer", {{"id", "missing"}}).error.code, "not_found");
 }
-
 TEST(Customers, OrganizationAndTheTenantRules) {
     Surface s;
     const ApiResult org = s.call("create_organization", {{"display_name", "Orama"}, {"taap_id", "taap:1:ed25519:abc"}});

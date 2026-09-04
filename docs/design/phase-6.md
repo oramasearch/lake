@@ -92,10 +92,13 @@ same function for events that do not originate in a registry call. The verifier 
 signature and digest and checks each predecessor link, so a deleted or reordered row is detected.
 
 The instance signing identity is a TAAP/1 Ed25519 identity. At first start lake uses
-`LAKE_IDENTITY_SEED` when configured; otherwise it creates an Ed25519 seed and persists it
-wrapped by the customer-independent instance KEK in `lake_identity`. `GET /v1/identity` publishes
-the identity document. `rotate_identity` creates and verifies the TAAP dual-signed rotation
-document, appends it to the identity chain, and records its audit event.
+`LAKE_IDENTITY_SEED` directly when configured, without copying that Secret into the control
+database; otherwise it creates an Ed25519 seed and persists it wrapped by the
+customer-independent `LAKE_INSTANCE_KEK` in `lake_identity`. `GET /v1/identity` publishes the
+identity document. `rotate_identity` creates and verifies the TAAP dual-signed rotation document,
+appends it to the identity chain, and records its audit event. Rotation creates a wrapped generated
+successor, so it requires `LAKE_INSTANCE_KEK` even when the current identity came from the
+operator Secret.
 
 The `audit` capability and its server-rendered page filter by principal, object, outcome and time.
 `export_audit` returns the matching rows as JSON lines for evidence handling and round-trip

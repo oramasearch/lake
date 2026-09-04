@@ -1,5 +1,6 @@
 #include "lake/api/capabilities.hpp"
 
+#include "lake/audit/audit.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/store.hpp"
 
@@ -52,11 +53,41 @@ json repository_schema() {
               {"description", {{"type", "string"}}}, {"visibility", {{"type", "string"}, {"enum", json::array({"private", "public"})}}},
               {"created_at", {{"type", "string"}}}, {"updated_at", {{"type", "string"}}}}}};
 }
+json audit_event_schema() {
+    return {{"type", "object"}};
+}
 json list_schema(json item) { return {{"type", "object"}, {"properties", {{"items", {{"type", "array"}, {"items", std::move(item)}}}}}}; }
 
 int limit_of(const json& input) {
     const int limit = input.value("limit", 100);
     return limit <= 0 ? 100 : (limit > 1000 ? 1000 : limit);
+}
+
+json audit_filter_input() {
+    return {{"type", "object"},
+            {"properties",
+             {{"principal", {{"type", "string"}}}, {"object", {{"type", "string"}}},
+              {"outcome", {{"type", "string"}}}, {"from", {{"type", "string"}}},
+              {"to", {{"type", "string"}}}, {"limit", {{"type", "integer"}}}}},
+            {"additionalProperties", false}};
+}
+
+audit::Filter audit_filter_of(const json& input) {
+    return audit::Filter{
+        .principal = input.value("principal", ""),
+        .object = input.value("object", ""),
+        .outcome = input.value("outcome", ""),
+        .from = input.value("from", ""),
+        .to = input.value("to", ""),
+        .limit = limit_of(input),
+    };
+}
+
+audit::IdentityOptions identity_options(const ApiContext& context) {
+    return audit::IdentityOptions{
+        .configured_seed = context.identity_seed,
+        .instance_kek = context.instance_kek,
+    };
 }
 
 template <class T>
@@ -202,6 +233,127 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
             if (!ctx.store) return no_store();
             return one_result(ctx.store->create_repository(control::NewRepository{
                 in.value("customer_id", ""), in.value("name", ""), in.value("description", ""), in.value("visibility", "")}));
+        }});
+
+    // ---- instance identity and audit ----
+    registry.add(Capability{
+        .name = "identity",
+        .title = "Lake identity",
+        .description = "The public TAAP/1 identity document for this lake instance.",
+        .input_schema = {{"type", "object"}, {"properties", json::object()}, {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .handler = [](const json&, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            auto value = audit::identity(*context.store, identity_options(context));
+            if (!value) {
+                return ApiResult::failure(value.error().code, value.error().message);
+            }
+            return ApiResult::success(audit::identity_document(*value));
+        }});
+    registry.add(Capability{
+        .name = "rotate_identity",
+        .title = "Rotate lake identity",
+        .description = "Rotate the lake TAAP/1 Ed25519 identity with a dual-signed rotation document.",
+        .input_schema = {{"type", "object"}, {"properties", json::object()}, {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .handler = [](const json&, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            auto value = audit::rotate_identity(*context.store, identity_options(context));
+            if (!value) {
+                return ApiResult::failure(value.error().code, value.error().message);
+            }
+            return ApiResult::success(audit::identity_document(*value));
+        }});
+    registry.add(Capability{
+        .name = "audit",
+        .title = "Query audit events",
+        .description = "Query signed audit events by principal, object, outcome and time.",
+        .input_schema = audit_filter_input(),
+        .output_schema = list_schema(audit_event_schema()),
+        .kind = CapabilityKind::Read,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            auto events = context.store->list_audit_events(audit_filter_of(input));
+            if (!events) {
+                return from_store_error(events.error());
+            }
+            json items = json::array();
+            for (const audit::Event& event : *events) {
+                items.push_back(audit::to_json(event));
+            }
+            return ApiResult::success({{"items", std::move(items)}});
+        }});
+    registry.add(Capability{
+        .name = "export_audit",
+        .title = "Export audit events",
+        .description = "Export matching signed audit events as JSON lines.",
+        .input_schema = audit_filter_input(),
+        .output_schema = {{"type", "object"}, {"properties", {{"jsonl", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Read,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            auto events = context.store->list_audit_events(audit_filter_of(input));
+            if (!events) {
+                return from_store_error(events.error());
+            }
+            return ApiResult::success({{"jsonl", audit::json_lines(*events)}});
+        }});
+    registry.add(Capability{
+        .name = "verify_audit",
+        .title = "Verify audit chain",
+        .description = "Verify the signed audit event digest chain.",
+        .input_schema = {{"type", "object"}, {"properties", json::object()}, {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}, {"properties", {{"verified", {{"type", "boolean"}}}}}},
+        .kind = CapabilityKind::Read,
+        .handler = [](const json&, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            auto events = context.store->list_audit_events(audit::Filter{.limit = 1000000});
+            if (!events) {
+                return from_store_error(events.error());
+            }
+            auto verified = audit::verify(*context.store, *events);
+            if (!verified) {
+                return ApiResult::failure(verified.error().code, verified.error().message);
+            }
+            return ApiResult::success({{"verified", true}});
+        }});
+    registry.add(Capability{
+        .name = "set_audit_retention",
+        .title = "Set audit retention",
+        .description = "Set customer audit retention at or above the 400-day floor.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"customer_id", {{"type", "string"}}}, {"days", {{"type", "integer"}}}}},
+                         {"required", json::array({"customer_id", "days"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}, {"properties", {{"customer_id", {{"type", "string"}}}, {"days", {{"type", "integer"}}}}}},
+        .kind = CapabilityKind::Action,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            const int days = input["days"];
+            auto valid = audit::validate_retention_days(days);
+            if (!valid) {
+                return ApiResult::failure(valid.error().code, valid.error().message);
+            }
+            auto updated = context.store->set_audit_retention_days(input["customer_id"], days);
+            if (!updated) {
+                return from_store_error(updated.error());
+            }
+            return ApiResult::success({{"customer_id", input["customer_id"]}, {"days", days}});
         }});
 }
 

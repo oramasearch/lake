@@ -45,3 +45,24 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     EXPECT_NE(page.find("<h1>ada/liquid</h1>"), std::string::npos);
     EXPECT_NE(lake::api::web_ui_login("bad token").find("bad token"), std::string::npos);
 }
+
+TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
+    lake::audit::Event event{
+        .id = "event-1",
+        .occurred_at = "2026-09-04T00:00:00.000000Z",
+        .draft = {.kind = "capability",
+                  .principal = "<admin>",
+                  .object = "capability/list_users",
+                  .action = "list_users",
+                  .outcome = "success"},
+        .digest = "abcdef",
+    };
+    lake::audit::Filter filter{.principal = "<admin>", .outcome = "success"};
+    const std::string page = lake::api::web_ui_audit({event}, filter);
+    EXPECT_NE(page.find("action=\"/audit\""), std::string::npos);
+    EXPECT_NE(page.find("name=\"principal\""), std::string::npos);
+    EXPECT_NE(page.find("&lt;admin&gt;"), std::string::npos);
+    EXPECT_EQ(page.find("<admin>"), std::string::npos);
+    EXPECT_NE(page.find("capability/list_users"), std::string::npos);
+    EXPECT_NE(page.find("GET /v1/verify_audit"), std::string::npos);
+}

@@ -3,6 +3,8 @@
 #include <chrono>
 #include <exception>
 
+#include "lake/audit/audit.hpp"
+#include "lake/control/memory_store.hpp"
 namespace lake::api {
 
 ApiResult ApiResult::success(nlohmann::json output) {
@@ -75,21 +77,51 @@ std::shared_ptr<const Capability> Registry::find(const std::string& name) const 
 std::vector<std::shared_ptr<const Capability>> Registry::list() const { return entries_; }
 
 ApiResult Registry::call(const std::string& name, const nlohmann::json& input, ApiContext& context) const {
+    if (context.request_id.empty()) {
+        context.request_id = control::new_uuid_v4();
+    }
     const auto capability = find(name);
-    if (!capability) return ApiResult::failure("unknown_capability", "no capability named " + name);
-    if (capability->requires_auth && !context.authorized) {
-        return ApiResult::failure("unauthorized", "a valid admin bearer token is required");
+    if (!capability) {
+        return ApiResult::failure("unknown_capability", "no capability named " + name);
     }
-    if (ApiResult validation = validate_input(*capability, input); !validation.ok) return validation;
-    const auto start = std::chrono::steady_clock::now();
     ApiResult result;
-    try {
-        result = capability->handler(input, context);
-    } catch (const std::exception& error) {
-        result = ApiResult::failure("store_error", error.what());
+    if (capability->requires_auth && !context.authorized) {
+        result = ApiResult::failure("unauthorized", "a valid admin bearer token is required");
+    } else if (ApiResult validation = validate_input(*capability, input); !validation.ok) {
+        result = validation;
+    } else {
+        const auto start = std::chrono::steady_clock::now();
+        try {
+            result = capability->handler(input, context);
+        } catch (const std::exception& error) {
+            result = ApiResult::failure("store_error", error.what());
+        }
+        result.duration_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     }
-    result.duration_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!context.store) {
+        return result;
+    }
+    const std::string kind = name == "set_audit_retention" ? "retention" : "capability";
+    const audit::EventDraft event{
+        .kind = kind,
+        .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
+        .object = "capability/" + name,
+        .action = name,
+        .outcome = result.ok ? "success" : (result.error.code == "unauthorized" ? "denied" : "failure"),
+        .request_id = context.request_id,
+        .method = context.authentication_method,
+        .device = context.device,
+        .details = {{"error_code", result.ok ? "" : result.error.code}},
+    };
+    const audit::IdentityOptions options{
+        .configured_seed = context.identity_seed,
+        .instance_kek = context.instance_kek,
+    };
+    auto recorded = audit::record(*context.store, event, options);
+    if (!recorded) {
+        return ApiResult::failure("store_error", "could not record audit event: " + recorded.error().message);
+    }
     return result;
 }
 

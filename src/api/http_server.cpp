@@ -37,6 +37,8 @@
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
+#include "lake/audit/audit.hpp"
+#include "lake/control/memory_store.hpp"
 #include "lake/control/store.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
@@ -233,7 +235,7 @@ struct ApiServer::Impl {
     std::string route_pattern_for(const boost::http::route_params& route) const {
         static constexpr std::string_view fixed_routes[] = {
             "/",          "/style.css",    "/healthz",    "/readyz",    "/metrics",
-            "/login",     "/session",      "/logout",     "/customers", "/repositories",
+            "/login",     "/session",      "/logout",     "/customers", "/repositories", "/audit",
             "/repository", "/v1/openapi.json", "/mcp",
         };
         const std::string path(route.url.path());
@@ -251,16 +253,46 @@ struct ApiServer::Impl {
         ApiContext ctx;
         ctx.store = options.store.get();
         ctx.node_name = options.node_name;
+        ctx.request_id = control::new_uuid_v4();
+        ctx.identity_seed = options.identity_seed;
+        ctx.instance_kek = options.instance_kek;
+        if (route.req.count(boost::http::field::user_agent) != 0) {
+            ctx.device = std::string(route.req.at(boost::http::field::user_agent));
+        }
         // Authorization: the bearer wins; else the HttpOnly session cookie (its value IS the admin
         // token, validated identically), so the server-rendered pages authenticate with the cookie
         // set by POST /session and the token never touches the page.
         std::string bearer = bearer_of(route);
-        if (bearer.empty()) bearer = cookie_value(route, "lake_session");
+        if (!bearer.empty()) {
+            ctx.authentication_method = "bearer";
+        } else {
+            bearer = cookie_value(route, "lake_session");
+            if (!bearer.empty()) {
+                ctx.authentication_method = "session";
+            }
+        }
         if (!options.admin_token.empty() && !bearer.empty() && constant_time_equal(bearer, options.admin_token)) {
             ctx.authorized = true;
             ctx.acting_identity = "admin";
         }
         return ctx;
+    }
+
+    bool record_direct_event(const ApiContext& context, audit::EventDraft event) const {
+        if (context.store == nullptr) {
+            return true;
+        }
+        if (event.principal.empty()) {
+            event.principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity;
+        }
+        if (event.request_id.empty()) {
+            event.request_id = context.request_id;
+        }
+        const audit::IdentityOptions identity_options{
+            .configured_seed = context.identity_seed,
+            .instance_kek = context.instance_kek,
+        };
+        return audit::record(*context.store, event, identity_options).has_value();
     }
 
     boost::http::route_task serve_web_root(boost::http::route_params& route) {
@@ -290,12 +322,26 @@ struct ApiServer::Impl {
     // POST /session — the sign-in form. A matching token becomes the HttpOnly lake_session cookie.
     boost::http::route_task serve_session(boost::http::route_params& route) {
         namespace http = boost::http;
+        ApiContext context = context_for(route);
+        context.authentication_method = "admin_token";
         StringBodySink sink;
         auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
         if (read_error) co_return http::route_error(read_error);
         const std::string token = form_field(sink.data, "token");
         const bool ok = !options.admin_token.empty() && !token.empty() && constant_time_equal(token, options.admin_token);
         if (!ok) {
+            if (!record_direct_event(context, audit::EventDraft{
+                                          .kind = "authentication",
+                                          .object = "lake",
+                                          .action = "sign_in",
+                                          .outcome = "failure",
+                                          .method = context.authentication_method,
+                                          .device = context.device,
+                                      })) {
+                co_return co_await send_text(route, http::status::service_unavailable,
+                                             error_body("store_error", "could not record authentication failure"),
+                                             "application/json; charset=utf-8", "no-store");
+            }
             const std::string body = web_ui_login("That token did not match.");
             route.status(http::status::unauthorized);
             route.res.set(http::field::content_type, "text/html; charset=utf-8");
@@ -305,12 +351,47 @@ struct ApiServer::Impl {
             if (send_error) co_return http::route_error(send_error);
             co_return http::route_done;
         }
+        context.authorized = true;
+        context.acting_identity = "admin";
+        if (!record_direct_event(context, audit::EventDraft{
+                                      .kind = "authentication",
+                                      .object = "lake",
+                                      .action = "sign_in",
+                                      .outcome = "success",
+                                      .method = context.authentication_method,
+                                      .device = context.device,
+                                  }) ||
+            !record_direct_event(context, audit::EventDraft{
+                                      .kind = "session",
+                                      .object = "lake_session",
+                                      .action = "issue",
+                                      .outcome = "success",
+                                      .method = context.authentication_method,
+                                      .device = context.device,
+                                  })) {
+            co_return co_await send_text(route, http::status::service_unavailable,
+                                         error_body("store_error", "could not record authentication event"),
+                                         "application/json; charset=utf-8", "no-store");
+        }
         std::string cookie = "lake_session=" + token + "; HttpOnly; SameSite=Strict; Path=/";
         if (request_is_https(route)) cookie += "; Secure";
         co_return co_await redirect(route, "/repositories", cookie);
     }
 
     boost::http::route_task serve_logout(boost::http::route_params& route) {
+        const ApiContext context = context_for(route);
+        if (!record_direct_event(context, audit::EventDraft{
+                                      .kind = "session",
+                                      .object = "lake_session",
+                                      .action = "revoke",
+                                      .outcome = context.authorized ? "revoked" : "denied",
+                                      .method = context.authentication_method,
+                                      .device = context.device,
+                                  })) {
+            return send_text(route, boost::http::status::service_unavailable,
+                             error_body("store_error", "could not record session revocation"),
+                             "application/json; charset=utf-8", "no-store");
+        }
         return redirect(route, "/", "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     }
 
@@ -350,6 +431,33 @@ struct ApiServer::Impl {
         }
         auto owner = ctx.store->get_customer(repository->customer_id);
         return send_text(route, boost::http::status::ok, web_ui_repository(*repository, owner ? &*owner : nullptr),
+                         "text/html; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_audit_page(boost::http::route_params& route) {
+        const ApiContext ctx = context_for(route);
+        if (!ctx.authorized) {
+            return redirect(route, "/login");
+        }
+        audit::Filter filter{
+            .principal = query_value(route, "principal"),
+            .object = query_value(route, "object"),
+            .outcome = query_value(route, "outcome"),
+            .from = query_value(route, "from"),
+            .to = query_value(route, "to"),
+            .limit = 500,
+        };
+        std::vector<audit::Event> events;
+        if (ctx.store) {
+            auto rows = ctx.store->list_audit_events(filter);
+            if (!rows) {
+                return send_text(route, boost::http::status::service_unavailable,
+                                 error_body(rows.error().code, rows.error().message),
+                                 "application/json; charset=utf-8", "no-store");
+            }
+            events = std::move(*rows);
+        }
+        return send_text(route, boost::http::status::ok, web_ui_audit(events, filter),
                          "text/html; charset=utf-8", "no-store");
     }
 
@@ -486,6 +594,18 @@ bool ApiServer::start() {
     if (impl.is_running.load()) return true;
     impl.failure_reason.clear();
 
+    if (impl.options.store) {
+        const audit::IdentityOptions identity_options{
+            .configured_seed = impl.options.identity_seed,
+            .instance_kek = impl.options.instance_kek,
+        };
+        auto signing_identity = audit::identity(*impl.options.store, identity_options);
+        if (!signing_identity) {
+            impl.failure_reason = signing_identity.error().message;
+            return false;
+        }
+    }
+
     http::router<http::route_params> router;
     router.use([&impl, cors = http::cors()](http::route_params& route) -> http::route_task {
         const auto start = std::chrono::steady_clock::now();
@@ -527,6 +647,9 @@ bool ApiServer::start() {
     });
     router.add(http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/repository", impl.serve_repository_page(route));
+    });
+    router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/audit", impl.serve_audit_page(route));
     });
     router.add(http::method::get, "/v1/openapi.json", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/v1/openapi.json", impl.serve_openapi(route));

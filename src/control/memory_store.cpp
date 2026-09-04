@@ -193,4 +193,119 @@ Result<Repository> InMemoryStore::get_repository(const std::string& id) {
     return std::unexpected(StoreError{"not_found", "no repository " + id});
 }
 
+audit::Result<audit::Identity> InMemoryStore::current_lake_identity() {
+    std::lock_guard lock(mutex_);
+    for (const audit::Identity& identity : identities_) {
+        if (identity.current) {
+            return identity;
+        }
+    }
+    return std::unexpected(audit::Error{"not_found", "no lake identity exists"});
+}
+
+audit::Result<audit::Identity> InMemoryStore::lake_identity_by_taap_id(const std::string& taap_id) {
+    std::lock_guard lock(mutex_);
+    for (const audit::Identity& identity : identities_) {
+        if (identity.taap_id == taap_id) {
+            return identity;
+        }
+    }
+    return std::unexpected(audit::Error{"not_found", "no lake identity for " + taap_id});
+}
+
+audit::Result<void> InMemoryStore::create_lake_identity(const audit::Identity& identity) {
+    std::lock_guard lock(mutex_);
+    for (const audit::Identity& existing : identities_) {
+        if (existing.current || existing.taap_id == identity.taap_id) {
+            return std::unexpected(audit::Error{"conflict", "a lake identity already exists"});
+        }
+    }
+    identities_.push_back(identity);
+    return {};
+}
+
+audit::Result<void> InMemoryStore::rotate_lake_identity(const audit::Identity& previous,
+                                                         const audit::Identity& replacement) {
+    std::lock_guard lock(mutex_);
+    for (audit::Identity& existing : identities_) {
+        if (existing.id == previous.id && existing.current) {
+            existing.current = false;
+            identities_.push_back(replacement);
+            return {};
+        }
+    }
+    return std::unexpected(audit::Error{"conflict", "the lake identity changed before rotation"});
+}
+
+Result<void> InMemoryStore::append_audit_event(const audit::Event& event) {
+    std::lock_guard lock(mutex_);
+    const std::string previous_digest = audit_events_.empty() ? "" : audit_events_.back().digest;
+    if (event.previous_digest != previous_digest) {
+        return std::unexpected(StoreError{"conflict", "audit event predecessor changed before append"});
+    }
+    audit_events_.push_back(event);
+    return {};
+}
+
+Result<audit::Event> InMemoryStore::latest_audit_event() {
+    std::lock_guard lock(mutex_);
+    if (audit_events_.empty()) {
+        return std::unexpected(StoreError{"not_found", "no audit events exist"});
+    }
+    return audit_events_.back();
+}
+
+Result<std::vector<audit::Event>> InMemoryStore::list_audit_events(const audit::Filter& filter) {
+    std::lock_guard lock(mutex_);
+    std::vector<audit::Event> events;
+    for (const audit::Event& event : audit_events_) {
+        if (!filter.principal.empty() && event.draft.principal != filter.principal) {
+            continue;
+        }
+        if (!filter.object.empty() && event.draft.object != filter.object) {
+            continue;
+        }
+        if (!filter.outcome.empty() && event.draft.outcome != filter.outcome) {
+            continue;
+        }
+        if (!filter.from.empty() && event.occurred_at < filter.from) {
+            continue;
+        }
+        if (!filter.to.empty() && event.occurred_at > filter.to) {
+            continue;
+        }
+        events.push_back(event);
+        if (filter.limit > 0 && events.size() >= static_cast<std::size_t>(filter.limit)) {
+            break;
+        }
+    }
+    return events;
+}
+
+Result<void> InMemoryStore::set_audit_retention_days(const std::string& customer_id, int days) {
+    std::lock_guard lock(mutex_);
+    if (days < audit::retention_floor_days) {
+        return std::unexpected(StoreError{"invalid_input", "audit retention cannot be below 400 days"});
+    }
+    if (customer_id.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "customer_id is required"});
+    }
+    for (const Customer& customer : customers_) {
+        if (customer.id == customer_id) {
+            for (auto& retention : audit_retentions_) {
+                if (retention.first == customer_id) {
+                    if (days < retention.second) {
+                        return std::unexpected(StoreError{"conflict", "audit retention cannot be reduced"});
+                    }
+                    retention.second = days;
+                    return {};
+                }
+            }
+            audit_retentions_.emplace_back(customer_id, days);
+            return {};
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+}
+
 }  // namespace lake::control

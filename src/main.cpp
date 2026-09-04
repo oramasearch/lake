@@ -27,11 +27,14 @@ std::string env_or(const char* name, std::string fallback) {
 
 int usage() {
     std::println("lake {}", lake::version_string());
-    std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] [--admin-token TOKEN] [--memory-store]");
+    std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] [--admin-token TOKEN]");
+    std::println("       [--identity-seed BASE64] [--instance-kek VALUE] [--memory-store]");
     std::println("  lake version");
     std::println("");
     std::println("  --control-db   Postgres URI of the control plane (default $LAKE_CONTROL_DB_URI)");
     std::println("  --admin-token  bearer for /v1 capabilities and MCP tools (default $LAKE_ADMIN_TOKEN)");
+    std::println("  --identity-seed base64 Ed25519 seed for lake's TAAP identity (default $LAKE_IDENTITY_SEED)");
+    std::println("  --instance-kek key-encryption key for a generated identity (default $LAKE_INSTANCE_KEK)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -42,6 +45,8 @@ int main(int argc, char** argv) {
     lake::api::ServerOptions opts;
     std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
     opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");
+    opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
+    opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     bool memory_store = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -72,6 +77,8 @@ int main(int argc, char** argv) {
         if (arg == "--node") { opts.node_name = value("--node"); continue; }
         if (arg == "--control-db") { control_db = value("--control-db"); continue; }
         if (arg == "--admin-token") { opts.admin_token = value("--admin-token"); continue; }
+        if (arg == "--identity-seed") { opts.identity_seed = value("--identity-seed"); continue; }
+        if (arg == "--instance-kek") { opts.instance_kek = value("--instance-kek"); continue; }
         if (arg == "--memory-store") { memory_store = true; continue; }
         std::println(stderr, "lake: unknown argument {}", arg);
         return usage();
