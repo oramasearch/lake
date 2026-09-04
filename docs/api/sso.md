@@ -17,6 +17,11 @@ issues a browser session. A first assertion may create that SCIM user only when 
 enables just-in-time provisioning and supplies the user's TAAP identity. The resulting
 credential has kind `saml` or `oidc`, and the session remains pool-scoped.
 
+`sign_in_saml` accepts a base64 SAML response only after verifying its enveloped RSA-SHA256
+signature and SHA-256 digest with the provider's configured PEM X.509 certificate. The verifier
+uses the exclusive-canonicalization subset in Lake's assertion contract and rejects declarations,
+entities, and XML forms outside that subset.
+
 `upsert_scim_user` implements SCIM user create, update, and deactivation. Deactivation revokes
 every active session for the mapped user. `upsert_scim_group` maps a SCIM group to an
 organization team and grants its active mapped users read access. A later group update removes

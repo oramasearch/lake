@@ -90,6 +90,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
   src/control/lake_identity.cpp
+  src/control/saml.cpp
   src/version.cpp
   src/api/web_ui.cpp
   src/api/oauth.cpp

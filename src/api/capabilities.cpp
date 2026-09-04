@@ -7,6 +7,7 @@
 
 #include "lake/api/oauth.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/saml.hpp"
 
 #include "lake/control/handles.hpp"
 #include "lake/control/store.hpp"
@@ -1248,6 +1249,51 @@ void register_sso_capabilities(Registry& registry) {
                                         input.value("device_name", "browser"),
                                         input.value("claims", json::object())}))
                                  : no_store();
+        }});
+    registry.add(Capability{
+        .name = "sign_in_saml",
+        .title = "Sign in with signed SAML assertion",
+        .description = "Verify the configured SAML signing certificate before issuing a session.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"saml_response", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id", "saml_response"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            auto provider = context.store->get_sso_provider(input.at("provider_id"));
+            if (!provider) {
+                return from_store_error(provider.error());
+            }
+            if (provider->protocol != "saml") {
+                return ApiResult::failure("invalid_input", "provider is not a SAML provider");
+            }
+            auto assertion =
+                control::saml::verify_response(input.at("saml_response").get<std::string>(),
+                                               provider->signing_certificate,
+                                               provider->issuer);
+            if (!assertion) {
+                return ApiResult::failure("unauthorized", assertion.error());
+            }
+            return issued_result(context.store->sign_in_sso({provider->id,
+                                                             assertion->issuer,
+                                                             assertion->subject,
+                                                             assertion->email,
+                                                             assertion->display_name,
+                                                             input.value("taap_id", ""),
+                                                             input.value("device_name", "browser"),
+                                                             assertion->claims}));
         }});
     registry.add(Capability{
         .name = "upsert_scim_user",
