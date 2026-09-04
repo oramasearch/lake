@@ -12,6 +12,10 @@ authorize against the customer object and record a `certificate` audit event on 
 or failure. The X.509 response contains a newly generated workload private key; Lake does not
 persist that leaf key.
 
+The API server owns the PKI service for its process and supplies it to every registry call. The
+customer authority record is the next persistence integration point; callers must not substitute
+an HTTP-local signer for that record.
+
 Private CA material is envelope-encrypted through the control-plane key store. The root is kept
 out of ordinary issuance and the online intermediate signs leaf credentials. X.509 profiles
 default to one hour; JWT SVIDs default to fifteen minutes. A caller requesting a longer lifetime

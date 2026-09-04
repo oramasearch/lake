@@ -69,6 +69,7 @@
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/pki.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
@@ -1979,6 +1980,7 @@ struct ApiServer::Impl {
     telemetry::Metrics metrics;
     mutable LiquidCustomerStores sync_store;
     Registry registry;
+    mutable control::pki::Service pki;
     std::string openapi_body;
     OutboundHttpClient outbound_http;
     struct CachedJwks {
@@ -2121,6 +2123,7 @@ struct ApiServer::Impl {
         ApiContext ctx;
         ctx.store = options.store.get();
         ctx.search = options.search.get();
+        ctx.pki = &pki;
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
