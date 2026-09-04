@@ -81,6 +81,11 @@ public:
     Result<void> enroll_totp(const std::string& user_id,
                              const std::string& pool_id,
                              const std::string& secret) override;
+    Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
+                                     const std::string& pool_id) override;
+    Result<void> disable_mfa(const std::string& user_id,
+                             const std::string& pool_id,
+                             const std::string& code) override;
     Result<IssuedSession> sign_in_totp(const PasswordSignIn&) override;
     Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                          const std::string& pool_id,
@@ -122,6 +127,7 @@ private:
     std::vector<std::pair<std::string, int>> audit_retentions_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
+        std::vector<std::string> recovery_hashes;
     };
     struct PasskeyCredential {
         std::string user_id, pool_id, credential_id, public_key_pem, name;

@@ -370,6 +370,15 @@ public:
                                       const std::string& secret) override {
         return call("enroll_totp", [&] { return store_->enroll_totp(user_id, pool_id, secret); });
     }
+    control::Result<control::MfaEnrollment> enroll_mfa(const std::string& user_id,
+                                                       const std::string& pool_id) override {
+        return call("enroll_mfa", [&] { return store_->enroll_mfa(user_id, pool_id); });
+    }
+    control::Result<void> disable_mfa(const std::string& user_id,
+                                      const std::string& pool_id,
+                                      const std::string& code) override {
+        return call("disable_mfa", [&] { return store_->disable_mfa(user_id, pool_id, code); });
+    }
     control::Result<control::IssuedSession>
     sign_in_totp(const control::PasswordSignIn& value) override {
         return call("sign_in_totp", [&] { return store_->sign_in_totp(value); });

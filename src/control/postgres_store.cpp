@@ -2113,6 +2113,73 @@ public:
             return {};
         });
     }
+    Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
+                                     const std::string& pool_id) override {
+        MfaEnrollment enrollment;
+        enrollment.secret = identity_crypto::new_totp_secret();
+        for (int index = 0; index < 8; ++index) {
+            enrollment.recovery_codes.push_back(identity_crypto::random_secret().substr(0, 12));
+        }
+        if (enrollment.secret.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
+        }
+        return with_tx<MfaEnrollment>([&](pqxx::work& tx) -> Result<MfaEnrollment> {
+            const Result<std::string> encrypted =
+                encrypt_secret(tx, "identity.totp", enrollment.secret);
+            if (!encrypted) {
+                return std::unexpected(encrypted.error());
+            }
+            tx.exec_params(
+                "INSERT INTO credentials (user_id, pool_id, kind, subject, public_data) "
+                "VALUES ($1::uuid, $2, 'totp', $1, jsonb_build_object('encrypted_seed', $3::text)) "
+                "ON CONFLICT (pool_id, kind, subject) DO UPDATE SET public_data = "
+                "EXCLUDED.public_data, revoked_at = NULL",
+                user_id,
+                pool_id,
+                *encrypted);
+            tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
+                           "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL",
+                           user_id,
+                           pool_id);
+            for (const std::string& code : enrollment.recovery_codes) {
+                tx.exec_params(
+                    "INSERT INTO credentials (user_id, pool_id, kind, subject, secret_hash) "
+                    "VALUES ($1::uuid, $2, 'recovery', $3, $4)",
+                    user_id,
+                    pool_id,
+                    identity_crypto::random_secret(),
+                    identity_crypto::hash_secret(code));
+            }
+            return enrollment;
+        });
+    }
+    Result<void> disable_mfa(const std::string& user_id,
+                             const std::string& pool_id,
+                             const std::string& code) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT public_data->>'encrypted_seed' FROM credentials "
+                               "WHERE user_id = $1::uuid AND pool_id = $2 AND kind = 'totp' "
+                               "AND revoked_at IS NULL",
+                               user_id,
+                               pool_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "MFA is not enrolled"});
+            }
+            const Result<std::string> seed =
+                decrypt_secret(tx, "identity.totp", rows[0][0].as<std::string>());
+            if (!seed || !identity_crypto::verify_totp(*seed, code)) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "a fresh TOTP verification is required"});
+            }
+            tx.exec_params(
+                "UPDATE credentials SET revoked_at = now() WHERE user_id = $1::uuid "
+                "AND pool_id = $2 AND kind IN ('totp', 'recovery') AND revoked_at IS NULL",
+                user_id,
+                pool_id);
+            return {};
+        });
+    }
     Result<IssuedSession> sign_in_totp(const PasswordSignIn& in) override {
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
             const pqxx::result password_rows =
@@ -2662,8 +2729,24 @@ private:
         }
         const Result<std::string> seed =
             decrypt_secret(tx, "identity.totp", rows[0][0].as<std::string>());
-        if (!seed || !identity_crypto::verify_totp(*seed, in.totp_code)) {
-            return std::unexpected(StoreError{"not_found", "invalid TOTP code"});
+        if (!seed) {
+            return std::unexpected(seed.error());
+        }
+        if (!identity_crypto::verify_totp(*seed, in.totp_code)) {
+            const pqxx::result recovery_rows = tx.exec_params(
+                "SELECT id::text, secret_hash FROM credentials WHERE user_id = $1::uuid "
+                "AND pool_id = $2 AND kind = 'recovery' AND revoked_at IS NULL",
+                user_id,
+                in.pool_id);
+            auto recovery =
+                std::find_if(recovery_rows.begin(), recovery_rows.end(), [&](const pqxx::row& row) {
+                    return identity_crypto::verify_secret(row[1].as<std::string>(), in.totp_code);
+                });
+            if (recovery == recovery_rows.end()) {
+                return std::unexpected(StoreError{"not_found", "invalid TOTP code"});
+            }
+            tx.exec_params("UPDATE credentials SET revoked_at = now() WHERE id = $1::uuid",
+                           (*recovery)[0].as<std::string>());
         }
         return issue_session(
             tx, user_id, in.pool_id, in.device_name, "browser", "", {"*"}, "", 60 * 60 * 24 * 30);

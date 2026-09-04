@@ -127,6 +127,10 @@ struct NewPasswordUser {
 struct PasswordSignIn {
     std::string pool_id, email, password, totp_code, device_name;
 };
+struct MfaEnrollment {
+    std::string secret;
+    std::vector<std::string> recovery_codes;
+};
 struct NewToken {
     std::string user_id, pool_id, name, reason;
     std::vector<std::string> scopes;
@@ -254,6 +258,11 @@ public:
     virtual Result<void> enroll_totp(const std::string& user_id,
                                      const std::string& pool_id,
                                      const std::string& secret) = 0;
+    virtual Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
+                                             const std::string& pool_id) = 0;
+    virtual Result<void> disable_mfa(const std::string& user_id,
+                                     const std::string& pool_id,
+                                     const std::string& code) = 0;
     virtual Result<IssuedSession> sign_in_totp(const PasswordSignIn&) = 0;
     virtual Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                                  const std::string& pool_id,

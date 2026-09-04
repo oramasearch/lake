@@ -364,6 +364,8 @@ CREATE TABLE IF NOT EXISTS credentials (
     CONSTRAINT credentials_subject_unique UNIQUE (pool_id, kind, subject)
 );
 CREATE INDEX IF NOT EXISTS credentials_user_id_idx ON credentials (user_id, created_at DESC);
+ALTER TABLE credentials DROP CONSTRAINT IF EXISTS credentials_kind_check;
+ALTER TABLE credentials ADD CONSTRAINT credentials_kind_check CHECK (kind IN ('password', 'totp', 'recovery', 'passkey', 'oauth', 'admin'));
 DROP TRIGGER IF EXISTS credentials_set_updated_at ON credentials;
 CREATE TRIGGER credentials_set_updated_at BEFORE UPDATE ON credentials FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
@@ -451,3 +453,4 @@ CREATE TABLE IF NOT EXISTS identity_core_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0007_identity_core') ON CONFLICT DO NOTHING;
+INSERT INTO schema_migrations (version) VALUES ('0008_mfa_recovery') ON CONFLICT DO NOTHING;

@@ -616,7 +616,7 @@ void register_identity_capabilities(Registry& registry) {
                                      input.value("device_name", "browser")}));
                             }});
     registry.add(
-        Capability{.name = "verify_totp",
+        Capability{.name = "verify_mfa",
                    .title = "Verify TOTP",
                    .description = "Verify an enrolled TOTP factor together with the "
                                   "password and issue a browser session.",
@@ -646,14 +646,18 @@ void register_identity_capabilities(Registry& registry) {
                                                         input.value("device_name", "browser")}));
                    }});
     registry.add(Capability{
-        .name = "enroll_totp",
+        .name = "enroll_mfa",
         .title = "Enroll TOTP",
-        .description = "Enroll a TOTP factor for the authenticated user and "
-                       "return its setup secret once.",
+        .description = "Enroll TOTP MFA and return its otpauth URI and recovery codes once.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
-        .output_schema = {{"type", "object"}, {"properties", {{"secret", {{"type", "string"}}}}}},
+        .output_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"secret",
+                {{"type", "string"}},
+                {"otpauth_uri", {{"type", "string"}}, {"recovery_codes", {{"type", "array"}}}}}}}},
         .kind = CapabilityKind::Action,
         .object = "principal",
         .action = "write",
@@ -661,14 +665,14 @@ void register_identity_capabilities(Registry& registry) {
         .handler = [](const json&, ApiContext& context) {
             if (!context.store)
                 return no_store();
-            const std::string secret = control::identity_crypto::new_totp_secret();
-            if (secret.empty())
-                return ApiResult::failure("store_error", "could not create TOTP secret");
-            auto result =
-                context.store->enroll_totp(context.acting_user_id, context.pool_id, secret);
+            auto result = context.store->enroll_mfa(context.acting_user_id, context.pool_id);
             if (!result)
                 return from_store_error(result.error());
-            return ApiResult::success({{"secret", secret}});
+            return ApiResult::success({{"secret", result->secret},
+                                       {"otpauth_uri",
+                                        "otpauth://totp/lake:" + context.acting_user_id +
+                                            "?secret=" + result->secret + "&issuer=lake"},
+                                       {"recovery_codes", result->recovery_codes}});
         }});
     registry.add(Capability{
         .name = "begin_passkey_registration",

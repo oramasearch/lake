@@ -1463,7 +1463,7 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("verify_totp",
+        const ApiResult result = registry.call("verify_mfa",
                                                {{"email", form_field(body, "email")},
                                                 {"password", form_field(body, "password")},
                                                 {"code", form_field(body, "code")},
@@ -1488,7 +1488,7 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("enroll_totp", nlohmann::json::object(), context);
+        const ApiResult result = registry.call("enroll_mfa", nlohmann::json::object(), context);
         if (!result.ok) {
             co_return co_await send_text(route,
                                          http::int_to_status(rest_status(result)),
@@ -1977,7 +1977,7 @@ struct ApiServer::Impl {
             body = rest_envelope(result).dump();
             const bool browser_sign_in =
                 capability->name == "sign_up_password" || capability->name == "sign_in_password" ||
-                capability->name == "verify_totp" || capability->name == "sign_in_passkey";
+                capability->name == "verify_mfa" || capability->name == "sign_in_passkey";
             if (result.ok && browser_sign_in && result.value.contains("secret") &&
                 result.value["secret"].is_string()) {
                 set_cookie =
