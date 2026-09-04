@@ -1271,10 +1271,15 @@ void register_identity_capabilities(Registry& registry) {
                             .object = "principal",
                             .action = "read",
                             .resolve_object = self_object,
+                            .authorizes_candidates = true,
                             .handler = [](const json&, ApiContext& context) {
-                                return context.store ? list_result(context.store->list_sessions(
-                                                           context.acting_user_id, context.pool_id))
-                                                     : no_store();
+                                const auto authorization = authorize_scope(
+                                    context, "principal/" + context.acting_identity, "read");
+                                if (!authorization) {
+                                    return authorization_failure(authorization);
+                                }
+                                return list_result(context.store->list_sessions(
+                                    context.acting_user_id, context.pool_id));
                             }});
     registry.add(Capability{
         .name = "revoke_session",
@@ -1293,23 +1298,28 @@ void register_identity_capabilities(Registry& registry) {
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
         }});
-    registry.add(Capability{.name = "list_devices",
-                            .title = "List devices",
-                            .description = "List the authenticated user's devices and signed "
-                                           "passkey bindings.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties", json::object()},
-                                             {"additionalProperties", false}},
-                            .output_schema = list_schema(device_schema()),
-                            .kind = CapabilityKind::Read,
-                            .object = "principal",
-                            .action = "read",
-                            .resolve_object = self_object,
-                            .handler = [](const json&, ApiContext& context) {
-                                return context.store ? list_result(context.store->list_devices(
-                                                           context.acting_user_id))
-                                                     : no_store();
-                            }});
+    registry.add(
+        Capability{.name = "list_devices",
+                   .title = "List devices",
+                   .description = "List the authenticated user's devices and signed "
+                                  "passkey bindings.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties", json::object()},
+                                    {"additionalProperties", false}},
+                   .output_schema = list_schema(device_schema()),
+                   .kind = CapabilityKind::Read,
+                   .object = "principal",
+                   .action = "read",
+                   .resolve_object = self_object,
+                   .authorizes_candidates = true,
+                   .handler = [](const json&, ApiContext& context) {
+                       const auto authorization =
+                           authorize_scope(context, "principal/" + context.acting_identity, "read");
+                       if (!authorization) {
+                           return authorization_failure(authorization);
+                       }
+                       return list_result(context.store->list_devices(context.acting_user_id));
+                   }});
     registry.add(Capability{
         .name = "revoke_device",
         .title = "Revoke device",
@@ -1700,30 +1710,30 @@ void register_repository_capabilities(Registry& registry) {
 
 void register_organization_capabilities(Registry& registry) {
     // ---- teams and membership ----
-    registry.add(Capability{.name = "list_teams",
-                            .title = "List teams",
-                            .description = "The teams in an organization, newest first.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties",
-                                              {{"organization_id", {{"type", "string"}}},
-                                               {"limit", {{"type", "integer"}}}}},
-                                             {"required", json::array({"organization_id"})},
-                                             {"additionalProperties", false}},
-                            .output_schema = list_schema(team_schema()),
-                            .kind = CapabilityKind::Read,
-                            .object = "organization",
-                            .action = "read",
-                            .resolve_object = entity_object("organization", "organization_id"),
-                            .authorizes_candidates = true,
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                const auto authorization = authorize_entity_scope(
-                                    ctx, "organization", in.at("organization_id"), "read");
-                                if (!authorization) {
-                                    return authorization_failure(authorization);
-                                }
-                                return list_result(
-                                    ctx.store->list_teams(in.at("organization_id"), limit_of(in)));
-                            }});
+    registry.add(Capability{
+        .name = "list_teams",
+        .title = "List teams",
+        .description = "The teams in an organization, newest first.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"limit", {{"type", "integer"}}}}},
+                         {"required", json::array({"organization_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = list_schema(team_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "organization",
+        .action = "read",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .authorizes_candidates = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto authorization =
+                authorize_entity_scope(ctx, "organization", in.at("organization_id"), "read");
+            if (!authorization) {
+                return authorization_failure(authorization);
+            }
+            return list_result(ctx.store->list_teams(in.at("organization_id"), limit_of(in)));
+        }});
     registry.add(Capability{.name = "get_team",
                             .title = "Get team",
                             .description = "One team by id.",

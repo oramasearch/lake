@@ -8,6 +8,8 @@ and MCP tools. `sign_up_password`, `sign_in_password`, `verify_mfa`,
 `enroll_mfa`, `disable_mfa`, `begin_passkey_registration`, `register_passkey`,
 `create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
 the same row-resolved session or operator credential as every other protected capability.
+The session and device lists authorize the authenticated principal through the registry's batched
+authorization path before returning any row.
 
 `sign_up_password` and `sign_in_password` issue browser sessions. Passwords use OpenSSL 3.6.3
 `EVP_KDF` `ARGON2ID` with 64 MiB memory, three iterations, one lane, and a unique 128-bit salt.

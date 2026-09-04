@@ -21,7 +21,9 @@ Scoped lists authorize their scope with the same batched call before returning r
 Row-resolved browser and API-token credentials carry the user's TAAP ID into this same function.
 Identity-management capabilities resolve the synthetic object `principal/<taap_id>`; only that
 principal receives its `admin` action, so one user cannot manage another user's sessions, devices,
-passkeys, or tokens. API-token capability names are checked as scopes before policy evaluation;
+passkeys, or tokens. `authorize_batch` preserves that self-principal decision, so session and
+device lists can use the batched path before returning rows. API-token capability names are
+checked as scopes before policy evaluation;
 the operator bearer remains the explicit break-glass principal.
 
 ## Objects and grants
