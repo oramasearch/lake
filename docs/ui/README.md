@@ -24,9 +24,10 @@ Home, Customers, Organizations, Repositories, Search, Secrets, Audit, SSO, API
 | Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree at a published ref |
 | File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>` | one file, backing blob and escaped contents |
 | Changes | `GET /changes?repository_id=<uuid>` | the libliquid change log |
-| Change | `GET /change?repository_id=<uuid>&id=<change>` | change identity and metadata; diff awaits liquid #166 |
+| Change | `GET /change?repository_id=<uuid>&id=<change>` | change identity, metadata, per-path status, modes, blobs, text hunks, moves, and conflict values |
 | Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |
-| Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | result identity; attestations await liquid #166 |
+| Artifacts | `GET /artifacts?repository_id=<uuid>[&action=<digest>&output=<path>&content=<digest>&cursor=<cursor>&limit=<n>]` | filtered cursor pages of build results |
+| Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |
 | Search | `GET /search?query=<text>` | ranked text, quoted substring, or regex results that the signed-in caller may read |
 | Secret mounts | `GET /secret-mounts[?customer_id=<uuid>&organization_id=<uuid>]` | mounts the caller may read, with links to static secrets and named keys |
 | Static secrets | `GET /secrets?mount_id=<uuid>[&name=<name>]` | custom metadata and version lifecycle; never secret values |

@@ -191,7 +191,7 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
 }
 
-TEST(WebUi, RepositoryContentAndDeferredPagesRenderSafely) {
+TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     const lake::control::Repository repository{
         "r1", "c1", "liquid", "", "public", "", "", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"};
     const lake::api::RepositoryTreeEntry tree_entry{"<readme>.md", "blob", "blob-1", 0644};
@@ -212,19 +212,90 @@ TEST(WebUi, RepositoryContentAndDeferredPagesRenderSafely) {
     EXPECT_NE(log.find("href=\"/change?repository_id=r1&amp;id=change-1\""), std::string::npos);
     EXPECT_NE(log.find("&lt;message&gt;"), std::string::npos);
 
-    const std::string deferred_change = lake::api::web_ui_change(repository, change, false);
-    EXPECT_NE(deferred_change.find("liquid #166"), std::string::npos);
-    EXPECT_NE(deferred_change.find("&lt;message&gt;"), std::string::npos);
+    const lake::api::RepositoryDiffEntry difference{
+        .path = "<readme>.md",
+        .old_path = "old-readme.md",
+        .kind = "blob",
+        .changes = {"moved", "modified", "conflicted"},
+        .old_mode = 0644,
+        .new_mode = 0755,
+        .old_blob = "old-blob",
+        .new_blob = "new-blob",
+        .line_hunks =
+            std::vector<lake::api::RepositoryLineHunk>{{2, 1, 2, 1, {"<old>"}, {"<new>"}}},
+        .old_conflicts = {"left"},
+        .new_conflicts = {"left", "right"},
+    };
+    const std::string change_page =
+        lake::api::web_ui_change(repository, change, {difference}, false);
+    EXPECT_NE(change_page.find("&lt;message&gt;"), std::string::npos);
+    EXPECT_NE(change_page.find("&lt;readme&gt;.md"), std::string::npos);
+    EXPECT_NE(change_page.find("@@ -2,1 +2,1 @@"), std::string::npos);
+    EXPECT_NE(change_page.find("-&lt;old&gt;"), std::string::npos);
+    EXPECT_NE(change_page.find("+&lt;new&gt;"), std::string::npos);
+    EXPECT_NE(change_page.find("Conflict values"), std::string::npos);
+    EXPECT_EQ(change_page.find("<script"), std::string::npos);
+
+    const lake::api::RepositoryDiffEntry reformatting{
+        .path = "readme.md",
+        .kind = "blob",
+        .changes = {"modified"},
+        .line_hunks = std::vector<lake::api::RepositoryLineHunk>{},
+    };
+    const std::string empty_change =
+        lake::api::web_ui_change(repository, change, {reformatting}, false);
+    EXPECT_NE(empty_change.find("No changes to display."), std::string::npos);
+    EXPECT_EQ(empty_change.find("<code>readme.md</code>"), std::string::npos);
 
     const lake::api::RepositoryConflict conflict{"<config>", {"left", "right"}};
     const std::string conflicts =
         lake::api::web_ui_repository_conflicts(repository, {conflict}, false);
     EXPECT_NE(conflicts.find("&lt;config&gt;"), std::string::npos);
 
-    const std::string artifact = lake::api::web_ui_artifact("r1", "result-1", false);
-    EXPECT_NE(artifact.find("result-1"), std::string::npos);
-    EXPECT_NE(artifact.find("liquid #166"), std::string::npos);
-    EXPECT_EQ(artifact.find("<script"), std::string::npos);
+    const lake::api::RepositoryArtifact artifact{
+        .id = "result-1<&",
+        .action = "action-1",
+        .exit_code = 0,
+        .outputs = {{"build/<app>", 0755, "blob-1"}},
+        .timing = {.queued_ms = 1, .sandbox_ms = 2, .exec_ms = 3, .hash_ms = 4, .store_ms = 5},
+        .cache_status = "hit",
+        .worker = "worker-1",
+        .observed_at = "2026-09-04T00:00:00Z",
+        .attestations =
+            {{"attestation-1",
+              "slsa_provenance/1",
+              "subject-1",
+              "taap:1:ed25519:builder",
+              true,
+              ""},
+             {"attestation-2",
+              "reproducibility/1",
+              "subject-2",
+              "taap:1:ed25519:builder",
+              false,
+              "signature mismatch"},
+             {"attestation-3", "sbom/1", "subject-3", "taap:1:ed25519:builder", true, ""}},
+        .trace = lake::api::RepositoryArtifactTrace{"trace-1", 12, 2, 1, 1, 1},
+    };
+    const lake::api::RepositoryArtifactPage page{{artifact}, "next<&", false};
+    const lake::api::RepositoryArtifactFilter filter{
+        .action = "action-1", .output = "build/app", .limit = 1};
+    const std::string artifacts = lake::api::web_ui_artifacts(repository, page, filter, false);
+    EXPECT_NE(artifacts.find("Build results"), std::string::npos);
+    EXPECT_NE(artifacts.find("href=\"/artifact?repository_id=r1&amp;id=result-1%3C%26\""),
+              std::string::npos);
+    EXPECT_NE(artifacts.find("Next page"), std::string::npos);
+    EXPECT_NE(artifacts.find("value=\"build/app\""), std::string::npos);
+
+    const std::string artifact_page = lake::api::web_ui_artifact(repository, artifact, false);
+    EXPECT_NE(artifact_page.find("result-1&lt;&amp;"), std::string::npos);
+    EXPECT_NE(artifact_page.find("build/&lt;app&gt;"), std::string::npos);
+    EXPECT_NE(artifact_page.find("slsa_provenance/1"), std::string::npos);
+    EXPECT_NE(artifact_page.find("reproducibility/1"), std::string::npos);
+    EXPECT_NE(artifact_page.find("sbom/1"), std::string::npos);
+    EXPECT_NE(artifact_page.find("unverified: signature mismatch"), std::string::npos);
+    EXPECT_NE(artifact_page.find("trace-1"), std::string::npos);
+    EXPECT_EQ(artifact_page.find("<script"), std::string::npos);
 }
 
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {

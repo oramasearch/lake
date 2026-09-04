@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -52,6 +53,92 @@ struct RepositoryConflict {
     std::vector<std::string> blobs;
 };
 
+struct RepositoryLineHunk {
+    std::uint64_t old_line = 0;
+    std::uint64_t old_count = 0;
+    std::uint64_t new_line = 0;
+    std::uint64_t new_count = 0;
+    std::vector<std::string> removed_lines;
+    std::vector<std::string> added_lines;
+};
+
+struct RepositoryDiffEntry {
+    std::string path;
+    std::string old_path;
+    std::string kind;
+    std::vector<std::string> changes;
+    std::optional<std::uint32_t> old_mode;
+    std::optional<std::uint32_t> new_mode;
+    std::string old_blob;
+    std::string new_blob;
+    std::optional<std::vector<RepositoryLineHunk>> line_hunks;
+    std::vector<std::string> old_conflicts;
+    std::vector<std::string> new_conflicts;
+};
+
+struct RepositoryArtifactFilter {
+    std::string action;
+    std::string output;
+    std::string content;
+    std::string cursor;
+    std::uint64_t limit = 100;
+};
+
+struct RepositoryArtifactOutput {
+    std::string path;
+    std::uint32_t mode = 0;
+    std::string blob;
+};
+
+struct RepositoryArtifactTiming {
+    std::uint64_t queued_ms = 0;
+    std::uint64_t sandbox_ms = 0;
+    std::uint64_t exec_ms = 0;
+    std::uint64_t hash_ms = 0;
+    std::uint64_t store_ms = 0;
+};
+
+struct RepositoryArtifactAttestation {
+    std::string id;
+    std::string profile;
+    std::string subject;
+    std::string issuer;
+    bool verified = false;
+    std::string reason;
+};
+
+struct RepositoryArtifactTrace {
+    std::string id;
+    std::uint64_t wall_ms = 0;
+    std::uint64_t actions = 0;
+    std::uint64_t dependencies = 0;
+    std::uint64_t cache_hits = 0;
+    std::uint64_t cache_misses = 0;
+};
+
+struct RepositoryArtifact {
+    std::string id;
+    std::string action;
+    int exit_code = 0;
+    std::vector<RepositoryArtifactOutput> outputs;
+    RepositoryArtifactTiming timing;
+    std::string cache_status;
+    bool divergent = false;
+    std::string verification;
+    std::string worker;
+    std::string observed_at;
+    std::string started_at;
+    std::string finished_at;
+    std::vector<RepositoryArtifactAttestation> attestations;
+    std::optional<RepositoryArtifactTrace> trace;
+};
+
+struct RepositoryArtifactPage {
+    std::vector<RepositoryArtifact> items;
+    std::string next_cursor;
+    bool done = false;
+};
+
 // HTTP-free access to the liquid store selected by a repository's customer.
 // The libliquid implementation remains inside the HTTP adapter translation
 // unit.
@@ -79,6 +166,18 @@ public:
                                                             const std::string& path) = 0;
     virtual SyncStoreResult<std::vector<RepositoryChange>>
     repository_log(const std::string& customer_id, const std::string& repository_id) = 0;
+    virtual SyncStoreResult<std::vector<RepositoryDiffEntry>>
+    repository_diff(const std::string& customer_id,
+                    const std::string& repository_id,
+                    const std::string& change_id) = 0;
+    virtual SyncStoreResult<RepositoryArtifactPage>
+    repository_artifacts(const std::string& customer_id,
+                         const std::string& repository_id,
+                         const RepositoryArtifactFilter& filter) = 0;
+    virtual SyncStoreResult<RepositoryArtifact>
+    repository_artifact(const std::string& customer_id,
+                        const std::string& repository_id,
+                        const std::string& result_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id, const std::string& repository_id) = 0;
 

@@ -31,7 +31,10 @@ liquid is the tool. lake is where it collects.
 > the `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
 > `LAKE_STORE_ROOT/<customer>/index/`, publishes a change through atomic manifest replacement,
 > filters candidates with the batched policy engine, and records the signed query outcome through
-> the registry. Migration `0009_secrets` adds customer-namespaced organization mounts, versioned
+> the registry. Change pages render libliquid's per-path structural diff, text hunks, modes, blob
+> identities, moves, and conflict values. Artifact pages provide filtered cursor pages of results
+> plus result outputs, timing, cache state, verified attestations, and retained trace summaries.
+> Migration `0009_secrets` adds customer-namespaced organization mounts, versioned
 > static secrets with delete/restore/destroy history, and named encryption keys with rotation,
 > encrypt/decrypt/rewrap, Ed25519 signatures, HMAC, derivation and customer-KEK rotation. The
 > registry records every operation, including mount-grant denials, and the secrets pages expose
@@ -63,7 +66,7 @@ ctest --test-dir build
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
-| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and artifact records await liquid #166. |
+| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
@@ -138,7 +141,7 @@ by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator)
 ## Internal documentation
 
 [`docs/`](docs/) — one folder per topic: [serving](docs/serving/), [control-plane](docs/control-plane/),
-[deployment](docs/deployment/), [build](docs/build/), [api](docs/api/). Every change to the system lands
+[deployment](docs/deployment/), [build](docs/build/), [api](docs/api/), [ui](docs/ui/). Every change to the system lands
 its doc there in the same change; this README is the summary.
 
 ## Where this sits
