@@ -6,7 +6,8 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (users, organizations, customers, repositories and search over the Postgres control plane and customer stores), the pages to explore them, the OpenAPI
+> capabilities (identity, tenants, repositories, organization administration, policy, and search
+> over the Postgres control plane and customer stores), the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
 > Prometheus metrics and JSON request logs. The control surface and metrics are behind the admin bearer; probes are unauthenticated. The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
@@ -38,16 +39,16 @@ ctest --test-dir build
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
-| `GET /customers`, `/repositories`, `/repository?id=` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
-| `GET /search?query=` | the authenticated server-rendered search page |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: users, organizations, customers, repositories and search; bearer required |
+| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search?query=` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, and search; bearer required |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 
 `lake version` prints the version. The default port is 4900 (`--listen HOST:PORT`);
 `--node NAME` names the node. `--control-db URI` (default `$LAKE_CONTROL_DB_URI`) selects the
-Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-token`
+Postgres control plane, `--store-root` (default `$LAKE_STORE_ROOT`) selects liquid customer stores
+and search indexes, `--memory-store` an in-memory one for demos; `--admin-token`
 (default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
 SIGINT/SIGTERM stop it cleanly.
 
@@ -80,15 +81,15 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/api/server.hpp` | `ApiServer` / `ServerOptions` in Zetta's shape — no HTTP type appears here |
 | `src/api/http_server.cpp` | the **one** translation unit that knows Beast2, `boost::http` and Boost.JSON; serves the registry as REST, OpenAPI and MCP |
 | `include/lake/api/registry.hpp`, `rest.hpp`, `mcp.hpp`, `capabilities.hpp` | the capability registry and its three renderings (HTTP-free) |
-| `include/lake/control/`, `src/control/` | the control-plane store: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
+| `include/lake/control/`, `src/control/` | the control-plane store and policy engine: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
+| `include/lake/search/`, `src/search/` | change segments, atomic manifests, BM25F adapters, and positional trigram postings under `LAKE_STORE_ROOT` |
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
-| `modules/` | `capy`, `corosio`, `http`, `beast2`, `libpqxx`, `liquid`, `oramacore-cpp` — vendored dependencies |
-| `include/lake/search/`, `src/search/` | change segments, atomic manifests and positional trigram postings under `LAKE_STORE_ROOT` |
+| `modules/` | `capy`, `corosio`, `http`, `beast2`, `libpqxx` — vendored at Zetta's exact pins |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** `users`, `organizations`, `customers` (uuid-v4 keys; the customer is the tenant). The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration and the authorization object graph. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 

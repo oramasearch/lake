@@ -58,11 +58,12 @@ content. Non-text/binary format extraction belongs to the format registry work i
 
 ## Access control and audit
 
-The query path batches `{repository-id,read}` candidate requests through
-`policy::Authorizer::authorize(principal, requests)` before it emits any hit. The temporary
-bootstrap implementation permits the `admin` principal and denies every other principal; #16/#19
-replace it with the shared attestation-backed policy engine. #40 remains open because its
-mixed-visibility and anonymous-public-read decisions require that engine.
+The query path resolves each candidate repository to its policy object, batches the object ids
+through `control::authorize_batch(principal, objects, "read", cache)`, and emits only allowed
+hits. This is the shared attestation-backed policy engine; `admin` is its operator principal.
+Anonymous search, including search of public repositories, is intentionally unavailable: the
+registry rejects an unauthenticated request before the query executes. Search therefore satisfies
+#40's query-time filtering and anonymous-public-read decision.
 
 Search does not yet write `audit_events`: the table and control-store writer are owned by #18 and
 are absent from the current schema. When #18 lands, `search` calls must write its documented event
@@ -86,7 +87,7 @@ by CMake, the direct-libliquid fixture reported the following from the committed
 
 | Corpus | Index build | Mean ranked query (100 runs) |
 |---|---:|---:|
-| 10,000 UTF-8 files | 9,376.72 ms | 6,546.41 us |
+| 10,000 UTF-8 files | 9,546.94 ms | 6,598.50 us |
 
 The fixture creates the repository through libliquid, cuts one change, measures `publish`, then
 measures 100 `benchmark` queries. Run it explicitly because CTest leaves performance measurements

@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
@@ -215,6 +216,96 @@ std::string log_timestamp() {
   return std::format("{:%FT%T}Z", now);
 }
 
+std::string json_string(const nlohmann::json &value, std::string_view key) {
+  const auto field = value.find(key);
+  if (field == value.end() || field->is_null()) {
+    return {};
+  }
+  return field->get<std::string>();
+}
+
+control::Organization organization_from_json(const nlohmann::json &value) {
+  return {json_string(value, "id"), json_string(value, "taap_id"),
+          json_string(value, "display_name"), json_string(value, "created_at"),
+          json_string(value, "updated_at")};
+}
+
+control::Customer customer_from_json(const nlohmann::json &value) {
+  return {
+      json_string(value, "id"),        json_string(value, "customer_type"),
+      json_string(value, "user_id"),   json_string(value, "organization_id"),
+      json_string(value, "name"),      json_string(value, "created_at"),
+      json_string(value, "updated_at")};
+}
+
+control::Repository repository_from_json(const nlohmann::json &value) {
+  return {json_string(value, "id"),         json_string(value, "customer_id"),
+          json_string(value, "name"),       json_string(value, "description"),
+          json_string(value, "visibility"), json_string(value, "created_at"),
+          json_string(value, "updated_at")};
+}
+
+control::Team team_from_json(const nlohmann::json &value) {
+  return {
+      json_string(value, "id"),         json_string(value, "organization_id"),
+      json_string(value, "name"),       json_string(value, "display_name"),
+      json_string(value, "created_at"), json_string(value, "updated_at")};
+}
+
+control::Membership membership_from_json(const nlohmann::json &value) {
+  return {json_string(value, "id"),
+          json_string(value, "organization_id"),
+          json_string(value, "team_id"),
+          json_string(value, "principal_type"),
+          json_string(value, "principal_id"),
+          json_string(value, "principal_taap_id"),
+          json_string(value, "role"),
+          json_string(value, "attestation_digest"),
+          json_string(value, "granted_by_taap_id"),
+          json_string(value, "created_at"),
+          json_string(value, "updated_at")};
+}
+
+control::Invitation invitation_from_json(const nlohmann::json &value) {
+  return {json_string(value, "id"),
+          json_string(value, "organization_id"),
+          json_string(value, "team_id"),
+          json_string(value, "invitee_type"),
+          json_string(value, "invitee"),
+          json_string(value, "role"),
+          json_string(value, "expires_at"),
+          json_string(value, "status"),
+          json_string(value, "accepted_membership_id"),
+          json_string(value, "created_by_taap_id"),
+          json_string(value, "created_at"),
+          json_string(value, "updated_at")};
+}
+
+control::PolicyObject object_from_json(const nlohmann::json &value) {
+  return {json_string(value, "id"),          json_string(value, "object_type"),
+          json_string(value, "external_id"), json_string(value, "parent_id"),
+          json_string(value, "created_at"),  json_string(value, "updated_at"),
+          value.value("inherit", true)};
+}
+
+control::Grant grant_from_json(const nlohmann::json &value) {
+  return {json_string(value, "id"),
+          json_string(value, "principal_taap_id"),
+          json_string(value, "object_id"),
+          json_string(value, "role"),
+          json_string(value, "attestation_digest"),
+          json_string(value, "granted_by_taap_id"),
+          json_string(value, "created_at"),
+          json_string(value, "updated_at")};
+}
+
+control::EffectiveAccessEntry access_from_json(const nlohmann::json &value) {
+  return {json_string(value, "principal_taap_id"),
+          json_string(value, "source_object_id"), json_string(value, "role"),
+          value.at("actions").get<std::vector<std::string>>(),
+          value.value("inherited", false)};
+}
+
 } // namespace
 
 struct ApiServer::Impl {
@@ -289,6 +380,12 @@ struct ApiServer::Impl {
         "/session",
         "/logout",
         "/customers",
+        "/organizations",
+        "/teams",
+        "/members",
+        "/invitations",
+        "/grants",
+        "/access",
         "/repositories",
         "/repository",
         "/search",
@@ -324,6 +421,11 @@ struct ApiServer::Impl {
         constant_time_equal(bearer, options.admin_token)) {
       ctx.authorized = true;
       ctx.acting_identity = "admin";
+    }
+    if (route.req.count("x-request-id") != 0) {
+      ctx.request_id = std::string(route.req.at("x-request-id"));
+    } else {
+      ctx.request_id = control::new_uuid_v4();
     }
     return ctx;
   }
@@ -394,15 +496,28 @@ struct ApiServer::Impl {
         "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
   }
 
+  boost::http::route_task serve_page_error(boost::http::route_params &route,
+                                           const ApiResult &result) {
+    return send_text(
+        route,
+        boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+        rest_envelope(result).dump(), "application/json; charset=utf-8",
+        "no-store");
+  }
+
   boost::http::route_task
   serve_customers_page(boost::http::route_params &route) {
-    const ApiContext ctx = context_for(route);
+    ApiContext ctx = context_for(route);
     if (!ctx.authorized)
       return redirect(route, "/login");
     std::vector<control::Customer> customers;
-    if (ctx.store) {
-      if (auto rows = ctx.store->list_customers(500))
-        customers = std::move(*rows);
+    const ApiResult rows =
+        registry.call("list_customers", {{"limit", 500}}, ctx);
+    if (!rows.ok) {
+      return serve_page_error(route, rows);
+    }
+    for (const auto &value : rows.value.at("items")) {
+      customers.push_back(customer_from_json(value));
     }
     return send_text(route, boost::http::status::ok,
                      web_ui_customers(customers), "text/html; charset=utf-8",
@@ -410,20 +525,178 @@ struct ApiServer::Impl {
   }
 
   boost::http::route_task
+  serve_organizations_page(boost::http::route_params &route) {
+    ApiContext ctx = context_for(route);
+    if (!ctx.authorized)
+      return redirect(route, "/login");
+    const ApiResult rows =
+        registry.call("list_organizations", {{"limit", 500}}, ctx);
+    if (!rows.ok) {
+      return serve_page_error(route, rows);
+    }
+    std::vector<control::Organization> organizations;
+    for (const auto &value : rows.value.at("items")) {
+      organizations.push_back(organization_from_json(value));
+    }
+    return send_text(route, boost::http::status::ok,
+                     web_ui_organizations(organizations),
+                     "text/html; charset=utf-8", "no-store");
+  }
+
+  boost::http::route_task serve_teams_page(boost::http::route_params &route) {
+    ApiContext ctx = context_for(route);
+    if (!ctx.authorized)
+      return redirect(route, "/login");
+    const std::string organization_id = query_value(route, "organization_id");
+    if (organization_id.empty())
+      return redirect(route, "/organizations");
+    const ApiResult rows = registry.call(
+        "list_teams", {{"organization_id", organization_id}, {"limit", 500}},
+        ctx);
+    if (!rows.ok) {
+      return serve_page_error(route, rows);
+    }
+    std::vector<control::Team> teams;
+    for (const auto &value : rows.value.at("items")) {
+      teams.push_back(team_from_json(value));
+    }
+    return send_text(route, boost::http::status::ok,
+                     web_ui_teams(organization_id, teams),
+                     "text/html; charset=utf-8", "no-store");
+  }
+
+  boost::http::route_task serve_members_page(boost::http::route_params &route) {
+    ApiContext ctx = context_for(route);
+    if (!ctx.authorized)
+      return redirect(route, "/login");
+    const std::string organization_id = query_value(route, "organization_id");
+    const std::string team_id = query_value(route, "team_id");
+    if (organization_id.empty())
+      return redirect(route, "/organizations");
+    nlohmann::json input{{"organization_id", organization_id}, {"limit", 500}};
+    if (!team_id.empty()) {
+      input["team_id"] = team_id;
+    }
+    const ApiResult rows = registry.call("list_memberships", input, ctx);
+    if (!rows.ok) {
+      return serve_page_error(route, rows);
+    }
+    std::vector<control::Membership> memberships;
+    for (const auto &value : rows.value.at("items")) {
+      memberships.push_back(membership_from_json(value));
+    }
+    return send_text(route, boost::http::status::ok,
+                     web_ui_memberships(organization_id, team_id, memberships),
+                     "text/html; charset=utf-8", "no-store");
+  }
+
+  boost::http::route_task
+  serve_invitations_page(boost::http::route_params &route) {
+    ApiContext ctx = context_for(route);
+    if (!ctx.authorized)
+      return redirect(route, "/login");
+    const std::string organization_id = query_value(route, "organization_id");
+    const std::string team_id = query_value(route, "team_id");
+    if (organization_id.empty())
+      return redirect(route, "/organizations");
+    nlohmann::json input{{"organization_id", organization_id}, {"limit", 500}};
+    if (!team_id.empty()) {
+      input["team_id"] = team_id;
+    }
+    const ApiResult rows = registry.call("list_invitations", input, ctx);
+    if (!rows.ok) {
+      return serve_page_error(route, rows);
+    }
+    std::vector<control::Invitation> invitations;
+    for (const auto &value : rows.value.at("items")) {
+      invitations.push_back(invitation_from_json(value));
+    }
+    return send_text(route, boost::http::status::ok,
+                     web_ui_invitations(organization_id, team_id, invitations),
+                     "text/html; charset=utf-8", "no-store");
+  }
+
+  boost::http::route_task serve_grants_page(boost::http::route_params &route) {
+    ApiContext ctx = context_for(route);
+    if (!ctx.authorized)
+      return redirect(route, "/login");
+    const std::string object_id = query_value(route, "object_id");
+    if (object_id.empty())
+      return redirect(route, "/organizations");
+    const ApiResult object_result =
+        registry.call("get_object", {{"id", object_id}}, ctx);
+    if (!object_result.ok) {
+      return serve_page_error(route, object_result);
+    }
+    const ApiResult grant_result = registry.call(
+        "list_grants", {{"object_id", object_id}, {"limit", 500}}, ctx);
+    if (!grant_result.ok) {
+      return serve_page_error(route, grant_result);
+    }
+    std::vector<control::Grant> grants;
+    for (const auto &value : grant_result.value.at("items")) {
+      grants.push_back(grant_from_json(value));
+    }
+    return send_text(
+        route, boost::http::status::ok,
+        web_ui_grants(object_from_json(object_result.value), grants),
+        "text/html; charset=utf-8", "no-store");
+  }
+
+  boost::http::route_task serve_access_page(boost::http::route_params &route) {
+    ApiContext ctx = context_for(route);
+    if (!ctx.authorized)
+      return redirect(route, "/login");
+    const std::string object_id = query_value(route, "object_id");
+    if (object_id.empty())
+      return redirect(route, "/organizations");
+    const ApiResult object_result =
+        registry.call("get_object", {{"id", object_id}}, ctx);
+    if (!object_result.ok) {
+      return serve_page_error(route, object_result);
+    }
+    const ApiResult access_result =
+        registry.call("effective_access", {{"object_id", object_id}}, ctx);
+    if (!access_result.ok) {
+      return serve_page_error(route, access_result);
+    }
+    std::vector<control::EffectiveAccessEntry> entries;
+    for (const auto &value : access_result.value.at("items")) {
+      entries.push_back(access_from_json(value));
+    }
+    return send_text(
+        route, boost::http::status::ok,
+        web_ui_effective_access(object_from_json(object_result.value), entries),
+        "text/html; charset=utf-8", "no-store");
+  }
+
+  boost::http::route_task
   serve_repositories_page(boost::http::route_params &route) {
-    const ApiContext ctx = context_for(route);
+    ApiContext ctx = context_for(route);
     if (!ctx.authorized)
       return redirect(route, "/login");
     std::vector<control::Repository> repositories;
     std::map<std::string, control::Customer> owners;
-    if (ctx.store) {
-      if (auto rows = ctx.store->list_repositories(
-              query_value(route, "customer_id"), 500))
-        repositories = std::move(*rows);
-      if (auto customers = ctx.store->list_customers(1000)) {
-        for (auto &c : *customers)
-          owners.emplace(c.id, std::move(c));
-      }
+    nlohmann::json input{{"limit", 500}};
+    const std::string customer_id = query_value(route, "customer_id");
+    if (!customer_id.empty()) {
+      input["customer_id"] = customer_id;
+    }
+    const ApiResult rows = registry.call("list_repositories", input, ctx);
+    if (!rows.ok) {
+      return serve_page_error(route, rows);
+    }
+    for (const auto &value : rows.value.at("items")) {
+      repositories.push_back(repository_from_json(value));
+    }
+    const ApiResult customers =
+        registry.call("list_customers", {{"limit", 1000}}, ctx);
+    if (!customers.ok) {
+      return serve_page_error(route, customers);
+    }
+    for (const auto &value : customers.value.at("items")) {
+      control::Customer customer = customer_from_json(value);
+      owners.emplace(customer.id, std::move(customer));
     }
     return send_text(route, boost::http::status::ok,
                      web_ui_repositories(repositories, owners),
@@ -432,34 +705,41 @@ struct ApiServer::Impl {
 
   boost::http::route_task
   serve_repository_page(boost::http::route_params &route) {
-    const ApiContext ctx = context_for(route);
+    ApiContext ctx = context_for(route);
     if (!ctx.authorized)
       return redirect(route, "/login");
     const std::string id = query_value(route, "id");
-    if (!ctx.store || id.empty())
+    if (id.empty())
       return redirect(route, "/repositories");
-    auto repository = ctx.store->get_repository(id);
-    if (!repository) {
-      return send_text(route, boost::http::status::not_found,
-                       error_body("not_found", repository.error().message),
-                       "application/json; charset=utf-8", "no-store");
+    const ApiResult repository_result =
+        registry.call("get_repository", {{"id", id}}, ctx);
+    if (!repository_result.ok) {
+      return serve_page_error(route, repository_result);
     }
-    auto owner = ctx.store->get_customer(repository->customer_id);
+    const control::Repository repository =
+        repository_from_json(repository_result.value);
+    const ApiResult owner_result =
+        registry.call("get_customer", {{"id", repository.customer_id}}, ctx);
+    std::optional<control::Customer> owner;
+    if (owner_result.ok) {
+      owner = customer_from_json(owner_result.value);
+    }
     return send_text(route, boost::http::status::ok,
-                     web_ui_repository(*repository, owner ? &*owner : nullptr),
+                     web_ui_repository(repository, owner ? &*owner : nullptr),
                      "text/html; charset=utf-8", "no-store");
   }
 
   boost::http::route_task serve_search_page(boost::http::route_params &route) {
-    const ApiContext ctx = context_for(route);
+    ApiContext ctx = context_for(route);
     if (!ctx.authorized) {
       return redirect(route, "/login");
     }
     const std::string query = query_value(route, "query");
     std::vector<search::Hit> hits;
-    if (!query.empty() && ctx.search) {
-      const auto results = ctx.search->query(
-          search::Query{query, "", "", "", 100}, ctx.acting_identity);
+    if (!query.empty() && ctx.search && ctx.store) {
+      const auto results =
+          ctx.search->query(search::Query{query, "", "", "", 100},
+                            ctx.acting_identity, *ctx.store);
       if (results) {
         hits = *results;
       }
@@ -678,6 +958,37 @@ bool ApiServer::start() {
              [&impl](http::route_params &route) -> http::route_task {
                return impl.observe_request(route, "/customers",
                                            impl.serve_customers_page(route));
+             });
+  router.add(http::method::get, "/organizations",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(
+                   route, "/organizations",
+                   impl.serve_organizations_page(route));
+             });
+  router.add(http::method::get, "/teams",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/teams",
+                                           impl.serve_teams_page(route));
+             });
+  router.add(http::method::get, "/members",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/members",
+                                           impl.serve_members_page(route));
+             });
+  router.add(http::method::get, "/invitations",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/invitations",
+                                           impl.serve_invitations_page(route));
+             });
+  router.add(http::method::get, "/grants",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/grants",
+                                           impl.serve_grants_page(route));
+             });
+  router.add(http::method::get, "/access",
+             [&impl](http::route_params &route) -> http::route_task {
+               return impl.observe_request(route, "/access",
+                                           impl.serve_access_page(route));
              });
   router.add(http::method::get, "/repositories",
              [&impl](http::route_params &route) -> http::route_task {

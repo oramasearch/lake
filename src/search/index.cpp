@@ -18,7 +18,7 @@
 #include <liquid/liquid.hpp>
 #include <oramacore/index.hpp>
 
-#include "lake/policy/authorize.hpp"
+#include "lake/control/policy.hpp"
 
 namespace lake::search {
 namespace {
@@ -220,17 +220,10 @@ struct Service::Impl {
   };
 
   std::filesystem::path root;
-  std::shared_ptr<const policy::Authorizer> authorizer;
   mutable std::shared_mutex mutex;
   std::map<std::string, CustomerState> customers;
 
-  Impl(std::filesystem::path value,
-       std::shared_ptr<const policy::Authorizer> value_authorizer)
-      : root(std::move(value)), authorizer(std::move(value_authorizer)) {
-    if (!authorizer) {
-      authorizer = policy::make_bootstrap_authorizer();
-    }
-  }
+  explicit Impl(std::filesystem::path value) : root(std::move(value)) {}
 
   [[nodiscard]] std::filesystem::path
   index_path(const std::string &customer) const {
@@ -348,10 +341,8 @@ struct Service::Impl {
   }
 };
 
-Service::Service(std::filesystem::path store_root,
-                 std::shared_ptr<const policy::Authorizer> authorizer)
-    : impl_(std::make_shared<Impl>(std::move(store_root),
-                                   std::move(authorizer))) {}
+Service::Service(std::filesystem::path store_root)
+    : impl_(std::make_shared<Impl>(std::move(store_root))) {}
 
 Result<void> Service::publish(const Publish &publication) {
   try {
@@ -480,7 +471,8 @@ Result<void> Service::publish(const Publish &publication) {
 }
 
 Result<std::vector<Hit>> Service::query(const Query &query,
-                                        const std::string &principal) const {
+                                        const std::string &principal,
+                                        control::Store &store) const {
   try {
     if (query.text.empty()) {
       return std::unexpected(Error{"invalid_input", "query is required"});
@@ -576,8 +568,12 @@ Result<std::vector<Hit>> Service::query(const Query &query,
           }
         }
       }
-      std::vector<policy::Request> requests;
-      std::vector<const Occurrence *> candidates;
+      struct Candidate {
+        const Occurrence *occurrence;
+        std::string policy_object_id;
+      };
+      std::vector<Candidate> candidates;
+      std::vector<std::string> policy_object_ids;
       for (const Occurrence &occurrence : state.occurrences) {
         if (!query.repository.empty() &&
             query.repository != occurrence.repository) {
@@ -590,21 +586,39 @@ Result<std::vector<Hit>> Service::query(const Query &query,
         if (score == scores.end()) {
           continue;
         }
-        candidates.push_back(&occurrence);
-        requests.push_back(
-            policy::Request{{"repository", occurrence.repository}, "read"});
+        std::string policy_object_id = occurrence.repository;
+        if (principal != "admin") {
+          const auto policy_object =
+              store.find_policy_object("repository", occurrence.repository);
+          if (!policy_object) {
+            if (policy_object.error().code == "not_found") {
+              continue;
+            }
+            return std::unexpected(Error{policy_object.error().code,
+                                         policy_object.error().message});
+          }
+          policy_object_id = policy_object->id;
+        }
+        candidates.push_back(Candidate{&occurrence, policy_object_id});
+        policy_object_ids.push_back(policy_object_id);
       }
-      const std::vector<bool> allowed =
-          impl_->authorizer->authorize(principal, requests);
-      if (allowed.size() != candidates.size()) {
-        return std::unexpected(Error{
-            "store_error", "authorizer returned an invalid decision count"});
+      std::sort(policy_object_ids.begin(), policy_object_ids.end());
+      policy_object_ids.erase(
+          std::unique(policy_object_ids.begin(), policy_object_ids.end()),
+          policy_object_ids.end());
+      control::AuthorizationCache cache;
+      const auto decisions = control::authorize_batch(
+          store, principal, policy_object_ids, "read", cache);
+      if (!decisions) {
+        return std::unexpected(
+            Error{decisions.error().code, decisions.error().message});
       }
-      for (std::size_t index = 0; index < candidates.size(); ++index) {
-        if (!allowed[index]) {
+      for (const Candidate &candidate : candidates) {
+        const auto decision = decisions->find(candidate.policy_object_id);
+        if (decision == decisions->end() || !decision->second.allowed) {
           continue;
         }
-        const Occurrence &occurrence = *candidates[index];
+        const Occurrence &occurrence = *candidate.occurrence;
         const auto blob = state.blobs.find(occurrence.blob);
         output.push_back(Hit{customer, occurrence.repository, occurrence.path,
                              occurrence.change,

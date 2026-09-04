@@ -13,6 +13,20 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       DEBIAN_FRONTEND: noninteractive
+      LAKE_TEST_DB_URI: postgresql://postgres:postgres@127.0.0.1:5432/lake_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: lake_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lake_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out source and submodules
         uses: actions/checkout@v4
@@ -32,7 +46,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ca-certificates wget gnupg lsb-release software-properties-common \
             build-essential ninja-build git \
-            libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev
+            libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev postgresql-client
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 19
@@ -50,6 +64,9 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel
+
+      - name: Apply the control-plane schema
+        run: psql "$LAKE_TEST_DB_URI" --set ON_ERROR_STOP=1 --file db/schema.sql
 
       - name: Test
         run: ctest --test-dir build --output-on-failure

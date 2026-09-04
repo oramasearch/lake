@@ -10,7 +10,10 @@
 
 lake today is the control surface: one capability registry rendered as REST `/v1`, OpenAPI and
 MCP; users, organizations, customers and repositories in Postgres; server-rendered pages behind
-the admin sign-in; telemetry; CI. Everything below is added to that shape and keeps its rules
+the admin sign-in; telemetry; CI. Organization administration and the authorization object graph
+described below are implemented by lake issues #16 and #19 in migration
+`0004_organizations_policy`; TAAP credential resolution remains identity-core work. Everything
+else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
 
@@ -57,6 +60,14 @@ resolution walks up the graph once and caches per request; it never consults a s
 Query-time filtering for search and lists calls the same function per candidate object with a
 batched walk, so a result set never shows an object the caller could not open (#40).
 
+**Implemented status (#16, #19).** `teams`, `memberships`, `invitations`, `objects`, and `grants`
+are control-plane tables. Membership and grant rows retain the TAAP attestation digest and the
+granting administrator identity. `Registry::call` invokes `authorize` before protected handlers;
+the server-rendered pages call those same capabilities. `authorize_batch` shares cached ancestor
+and grant loads across candidates, and `effective_access` exposes direct and inherited access.
+The current operator-admin principal is handled as a break-glass principal by the same function;
+identity-core credential resolution will supply user and workload TAAP principals.
+
 ## Audit (decision §13)
 
 One append-only `audit_events` stream: authentication (success and failure, method, device),
@@ -99,9 +110,10 @@ each an audit event.
 **Status: hot branch-tip search is implemented in lake #6.** Indexed by blob once
 (content-addressed: a blob is indexed the first time any repository stores it), with
 oramacore-cpp's BM25F adapter and lake's positional trigram postings, a hot index on branch tips,
-publication atomic per change (a query sees a change entirely or not at all), and a batched policy
-interface filtering candidates at query time. The manifest and segments are files beside the
-customer's liquid store under `LAKE_STORE_ROOT/<customer>/index/`; Zetta object storage follows in
+publication atomic per change (a query sees a change entirely or not at all), and the shared
+batched policy engine filtering candidates at query time. Anonymous search, including search of
+public repositories, is rejected before query execution. The manifest and segments are files beside
+the customer's liquid store under `LAKE_STORE_ROOT/<customer>/index/`; Zetta object storage follows in
 #53. Symbols from the compiler (liquid's build graph knows every translation unit), cold release
 and tag snapshots, and artifact extraction arrive in their respective later issues.
 
@@ -136,8 +148,7 @@ waves that do not collide:
 1. **Identity core** (#14 with #17), **authorisation** (#16 with #19), **audit** (#18),
    **push and pull with lifecycle** (#12 with #13), **search** (#6).
 2. **SSO and federation** (#15, #21), **offline authorisation and recovery** (#22, #23),
-   **secrets, encryption, certificates, callers, break-glass** (#24 to #28), **web UI** (#9),
-   **query-time filtering** (#40).
+   **secrets, encryption, certificates, callers, break-glass** (#24 to #28), **web UI** (#9).
 3. **Transparency log** (#34 to #39), **forge, export, import** (#30 to #32), **drive and models**
    (#7, #8, #43 to #45), **search over history and inside artifacts** (#41, #42), **metering**
    (#33), **auth as a service** (#51).

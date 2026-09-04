@@ -12,13 +12,15 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 `oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
 (`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
 the Postgres control plane (schema `0001` + `0002` applied), plus hot repository search over
-customer stores; server-rendered pages (`/customers`, `/repositories`, `/repository?id=`,
-`/search`) behind the admin sign-in; liveness, readiness,
+customer stores; server-rendered pages for customers, repositories, and search behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
 `server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
 is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
-identities in place of the single admin token (lake #4), push/pull of repositories, persistent
-policy and audit implementations, incremental migrations (operator #126).
+credential resolution in place of the single admin token (lake #4), repositories with content
+once liquid Phase 1 lands, incremental migrations (operator #126). The codebase also includes
+organization administration, one policy engine, migration `0004`, and pages for organizations,
+teams, members, invitations, grants and effective access; those are not yet deployed in the
+production state above.
 
 ## Where to read Zetta
 
@@ -52,8 +54,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
   placeholders until lake has a node to marshal onto.
 - Pages are **server-rendered, self-contained, no script**; renderers in `web_ui.cpp`
-  are pure functions and are the unit-tested surface. Pages read the `Store` directly and can
-  never do what the API cannot.
+  are pure functions and are the unit-tested surface. Data pages call capabilities through
+  `Registry::call` and can never do what the API cannot.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`
@@ -79,7 +81,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `repositories` today, versioned by content hash).
+  `invitations` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

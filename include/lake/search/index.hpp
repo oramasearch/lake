@@ -2,12 +2,11 @@
 
 #include <expected>
 #include <filesystem>
-#include <memory>
 #include <string>
 #include <vector>
 
-namespace lake::policy {
-class Authorizer;
+namespace lake::control {
+class Store;
 }
 
 namespace lake::search {
@@ -45,12 +44,12 @@ struct Hit {
 
 class Service {
 public:
-  explicit Service(std::filesystem::path store_root,
-                   std::shared_ptr<const policy::Authorizer> authorizer = {});
+  explicit Service(std::filesystem::path store_root);
 
   [[nodiscard]] Result<void> publish(const Publish &change);
-  [[nodiscard]] Result<std::vector<Hit>>
-  query(const Query &query, const std::string &principal) const;
+  [[nodiscard]] Result<std::vector<Hit>> query(const Query &query,
+                                               const std::string &principal,
+                                               control::Store &store) const;
 
 private:
   struct Impl;

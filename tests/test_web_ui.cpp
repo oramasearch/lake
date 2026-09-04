@@ -28,21 +28,42 @@ TEST(WebUi, NavigationAndSession) {
   EXPECT_NE(out.find("href=\"/customers\""), std::string::npos);
   EXPECT_NE(out.find("href=\"/repositories\""), std::string::npos);
   EXPECT_NE(out.find("href=\"/search\""), std::string::npos);
+  EXPECT_NE(out.find("href=\"/organizations\""), std::string::npos);
   EXPECT_NE(out.find("href=\"/login\""), std::string::npos);
   const std::string in = lake::api::web_ui_hello("n", "0.0.1", true);
   EXPECT_NE(in.find("action=\"/logout\""), std::string::npos);
   EXPECT_EQ(in.find("<script"), std::string::npos);
 }
 
+TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
+  const lake::control::Organization organization{
+      "o1", "taap:1:ed25519:org", "<Orama>", "2026-09-04T00:00:00Z",
+      "2026-09-04T00:00:00Z"};
+  const std::string organizations =
+      lake::api::web_ui_organizations({organization});
+  EXPECT_NE(organizations.find("&lt;Orama&gt;"), std::string::npos);
+  EXPECT_NE(organizations.find("/teams?organization_id=o1"), std::string::npos);
+  EXPECT_EQ(organizations.find("<script"), std::string::npos);
+
+  const lake::control::PolicyObject object{"p1",      "team",    "t1", "",
+                                           "created", "updated", true};
+  const lake::control::EffectiveAccessEntry entry{
+      "taap:1:ed25519:user", "p0", "admin", {"read", "write"}, true};
+  const std::string access =
+      lake::api::web_ui_effective_access(object, {entry});
+  EXPECT_NE(access.find("inherited from"), std::string::npos);
+  EXPECT_NE(access.find("read, write"), std::string::npos);
+  EXPECT_EQ(access.find("<script"), std::string::npos);
+}
+
 TEST(WebUi, SearchEscapesHitsAndOffersTheQueryForm) {
-  const lake::search::Hit hit{"customer", "repo",    "src/<main>.cpp",
-                              "change",   "<match>", 1.0};
+  const lake::search::Hit hit{"customer", "repository", "<path>",
+                              "change",   "<snippet>",  1.0};
   const std::string page = lake::api::web_ui_search("needle", {hit});
   EXPECT_NE(page.find("action=\"/search\""), std::string::npos);
-  EXPECT_NE(page.find("needle"), std::string::npos);
-  EXPECT_NE(page.find("src/&lt;main&gt;.cpp"), std::string::npos);
-  EXPECT_NE(page.find("&lt;match&gt;"), std::string::npos);
-  EXPECT_EQ(page.find("<script"), std::string::npos);
+  EXPECT_NE(page.find("&lt;path&gt;"), std::string::npos);
+  EXPECT_NE(page.find("&lt;snippet&gt;"), std::string::npos);
+  EXPECT_EQ(page.find("<path>"), std::string::npos);
 }
 
 TEST(WebUi, RepositoriesListEscapesAndLinks) {

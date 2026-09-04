@@ -15,7 +15,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
-#include "lake/policy/authorize.hpp"
+#include "lake/control/memory_store.hpp"
 #include "lake/search/index.hpp"
 
 namespace {
@@ -105,20 +105,6 @@ lake::search::Publish publication(const std::string &customer,
   return {customer, repository, "main", change};
 }
 
-class OneRepositoryAuthorizer final : public lake::policy::Authorizer {
-public:
-  [[nodiscard]] std::vector<bool>
-  authorize(const std::string &principal,
-            const std::vector<lake::policy::Request> &requests) const override {
-    std::vector<bool> output;
-    output.reserve(requests.size());
-    for (const auto &request : requests) {
-      output.push_back(principal == "reader" && request.object.id == "allowed");
-    }
-    return output;
-  }
-};
-
 } // namespace
 
 TEST(Search, IndexesSharedBlobOnceAndReloadsTheManifest) {
@@ -130,11 +116,13 @@ TEST(Search, IndexesSharedBlobOnceAndReloadsTheManifest) {
   const std::string second =
       create_change(root / "customer" / "repositories" / "second",
                     {{"two.txt", "shared orbit token"}});
+  lake::control::InMemoryStore control;
   lake::search::Service service(root);
   ASSERT_TRUE(service.publish(publication("customer", "first", first)));
   ASSERT_TRUE(service.publish(publication("customer", "second", second)));
 
-  const auto hits = service.query({"orbit", "customer", "", "", 20}, "admin");
+  const auto hits =
+      service.query({"orbit", "customer", "", "", 20}, "admin", control);
   ASSERT_TRUE(hits) << hits.error().message;
   ASSERT_EQ(hits->size(), 2U);
 
@@ -144,7 +132,7 @@ TEST(Search, IndexesSharedBlobOnceAndReloadsTheManifest) {
 
   lake::search::Service reopened(root);
   const auto reloaded =
-      reopened.query({"orbit", "customer", "", "", 20}, "admin");
+      reopened.query({"orbit", "customer", "", "", 20}, "admin", control);
   ASSERT_TRUE(reloaded) << reloaded.error().message;
   EXPECT_EQ(reloaded->size(), 2U);
 }
@@ -156,6 +144,7 @@ TEST(Search, PublicationMakesEveryQueryObserveOneCompleteChange) {
   const std::string old_change =
       create_change(repository, {{"old-a.txt", "atomictoken old a"},
                                  {"old-b.txt", "atomictoken old b"}});
+  lake::control::InMemoryStore control;
   lake::search::Service service(root);
   ASSERT_TRUE(service.publish(publication("customer", "repo", old_change)));
   const std::string new_change =
@@ -168,8 +157,8 @@ TEST(Search, PublicationMakesEveryQueryObserveOneCompleteChange) {
     EXPECT_TRUE(published) << published.error().message;
   });
   for (int index = 0; index < 100; ++index) {
-    const auto hits =
-        service.query({"atomictoken", "customer", "repo", "main", 20}, "admin");
+    const auto hits = service.query(
+        {"atomictoken", "customer", "repo", "main", 20}, "admin", control);
     ASSERT_TRUE(hits) << hits.error().message;
     ASSERT_EQ(hits->size(), 2U);
     const bool old_paths = hits->at(0).path.starts_with("old-") &&
@@ -190,12 +179,23 @@ TEST(Search, BatchAuthorizationFiltersRepositoryCandidates) {
   const std::string denied =
       create_change(root / "customer" / "repositories" / "denied",
                     {{"hidden.txt", "access token"}});
-  auto authorizer = std::make_shared<OneRepositoryAuthorizer>();
-  lake::search::Service service(root, authorizer);
+  lake::control::InMemoryStore control;
+  const auto customer = control.create_policy_object(
+      {"customer", "customer", "", "admin", "customer", true});
+  ASSERT_TRUE(customer);
+  const auto allowed_object = control.create_policy_object(
+      {"repository", "allowed", customer->id, "admin", "allowed", true});
+  ASSERT_TRUE(allowed_object);
+  ASSERT_TRUE(control.create_policy_object(
+      {"repository", "denied", customer->id, "admin", "denied", true}));
+  ASSERT_TRUE(control.create_grant({"reader", allowed_object->id, "read",
+                                    "sha512-256:read", "admin", "grant"}));
+  lake::search::Service service(root);
   ASSERT_TRUE(service.publish(publication("customer", "allowed", allowed)));
   ASSERT_TRUE(service.publish(publication("customer", "denied", denied)));
 
-  const auto hits = service.query({"access", "customer", "", "", 20}, "reader");
+  const auto hits =
+      service.query({"access", "customer", "", "", 20}, "reader", control);
   ASSERT_TRUE(hits) << hits.error().message;
   ASSERT_EQ(hits->size(), 1U);
   EXPECT_EQ(hits->front().repository, "allowed");
@@ -209,21 +209,23 @@ TEST(Search, SubstringRegexAndRankedQueriesUseTheirExpectedOrder) {
                     {{"first.txt", "quick brown fox alpha alpha alpha"},
                      {"second.txt", "quick brown fox alpha"},
                      {"third.txt", "unrelated"}});
+  lake::control::InMemoryStore control;
   lake::search::Service service(root);
   ASSERT_TRUE(service.publish(publication("customer", "ranked", change)));
 
-  const auto ranked = service.query({"alpha", "customer", "", "", 20}, "admin");
+  const auto ranked =
+      service.query({"alpha", "customer", "", "", 20}, "admin", control);
   ASSERT_TRUE(ranked) << ranked.error().message;
   ASSERT_EQ(ranked->size(), 2U);
   EXPECT_EQ(ranked->front().path, "first.txt");
 
-  const auto substring =
-      service.query({"\"quick brown\"", "customer", "", "", 20}, "admin");
+  const auto substring = service.query(
+      {"\"quick brown\"", "customer", "", "", 20}, "admin", control);
   ASSERT_TRUE(substring) << substring.error().message;
   EXPECT_EQ(substring->size(), 2U);
 
-  const auto regex =
-      service.query({"/quick\\s+brown/", "customer", "", "", 20}, "admin");
+  const auto regex = service.query({"/quick\\s+brown/", "customer", "", "", 20},
+                                   "admin", control);
   ASSERT_TRUE(regex) << regex.error().message;
   EXPECT_EQ(regex->size(), 2U);
 }
@@ -240,6 +242,8 @@ TEST(Search, RegisteredCapabilityReturnsAuthorizedHits) {
   lake::api::Registry registry;
   lake::api::register_core_capabilities(registry, "test");
   lake::api::ApiContext context;
+  lake::control::InMemoryStore control;
+  context.store = &control;
   context.search = &service;
   context.authorized = true;
   context.acting_identity = "admin";
@@ -269,6 +273,7 @@ TEST(SearchBenchmark, DISABLED_BuildAndQueryTenThousandFiles) {
   ASSERT_TRUE(change) << change.error().message;
 
   lake::search::Service service(root);
+  lake::control::InMemoryStore control;
   const auto build_started = std::chrono::steady_clock::now();
   ASSERT_TRUE(service.publish(
       publication("customer", "benchmark", liquid::to_string(change->value))));
@@ -276,7 +281,7 @@ TEST(SearchBenchmark, DISABLED_BuildAndQueryTenThousandFiles) {
   const auto query_started = std::chrono::steady_clock::now();
   for (int index = 0; index < 100; ++index) {
     const auto hits =
-        service.query({"benchmark", "customer", "", "", 20}, "admin");
+        service.query({"benchmark", "customer", "", "", 20}, "admin", control);
     ASSERT_TRUE(hits) << hits.error().message;
   }
   const auto query_elapsed = std::chrono::steady_clock::now() - query_started;
