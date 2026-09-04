@@ -31,9 +31,12 @@ std::string new_uuid_v4() {
     return out;
 }
 
+std::string iso8601_at(std::chrono::system_clock::time_point value) {
+    return std::format("{:%FT%T}Z", std::chrono::floor<std::chrono::seconds>(value));
+}
+
 std::string now_iso8601() {
-    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    return std::format("{:%FT%T}Z", now);
+    return iso8601_at(std::chrono::system_clock::now());
 }
 
 namespace {
@@ -547,6 +550,60 @@ nlohmann::json to_json(const Session& s) {
             {"revoked_at", nullable(s.revoked_at)},
             {"created_at", s.created_at},
             {"last_used_at", nullable(s.last_used_at)}};
+}
+
+nlohmann::json to_json(const OfflineGrant& value) {
+    return {{"id", value.id},
+            {"user_id", value.user_id},
+            {"principal_taap_id", value.principal_taap_id},
+            {"device_id", value.device_id},
+            {"scopes", value.scopes},
+            {"issued_at", value.issued_at},
+            {"expires_at", value.expires_at},
+            {"revoked_at", nullable(value.revoked_at)},
+            {"credential", value.credential}};
+}
+
+nlohmann::json to_json(const RecoveryAttempt& value) {
+    return {{"id", value.id},
+            {"user_id", value.user_id},
+            {"organization_id", nullable(value.organization_id)},
+            {"method", value.method},
+            {"status", value.status},
+            {"ready_at", value.ready_at},
+            {"expires_at", value.expires_at},
+            {"completed_at", nullable(value.completed_at)},
+            {"approval_count", value.approval_count}};
+}
+
+nlohmann::json to_json(const RecoveryDelivery& value) {
+    return {{"id", value.id},
+            {"recovery_id", value.recovery_id},
+            {"email", value.email},
+            {"token", value.token},
+            {"kind", value.kind},
+            {"created_at", value.created_at},
+            {"delivered_at", nullable(value.delivered_at)}};
+}
+
+nlohmann::json to_json(const RecoveryNotification& value) {
+    return {{"id", value.id},
+            {"recovery_id", value.recovery_id},
+            {"user_id", value.user_id},
+            {"device_id", value.device_id},
+            {"kind", value.kind},
+            {"created_at", value.created_at}};
+}
+
+nlohmann::json to_json(const RecoveryContact& value, bool include_wrapped_key) {
+    nlohmann::json output = {{"repository_id", value.repository_id},
+                             {"contact_taap_id", value.contact_taap_id},
+                             {"created_at", value.created_at},
+                             {"updated_at", value.updated_at}};
+    if (include_wrapped_key) {
+        output["wrapped_key"] = value.wrapped_key;
+    }
+    return output;
 }
 
 nlohmann::json to_json(const SsoProvider& provider) {
@@ -3328,6 +3385,368 @@ Result<CustomerKekRotation> InMemoryStore::rotate_customer_kek(const std::string
     secrets_crypto::cleanse(*generated);
     ++current->version;
     return CustomerKekRotation{customer_id, current->version, rewrapped};
+}
+
+Result<OfflineGrant> InMemoryStore::issue_offline_grant(const NewOfflineGrant& input) {
+    if (input.id.empty() || input.user_id.empty() || input.principal_taap_id.empty() ||
+        input.device_id.empty() || input.scopes.empty() || input.duration_seconds <= 0 ||
+        input.duration_seconds > 604800 || !input.credential.is_object()) {
+        return std::unexpected(StoreError{"invalid_input", "offline grant is incomplete"});
+    }
+    std::lock_guard lock(mutex_);
+    const bool device_exists = std::ranges::any_of(devices_, [&](const Device& device) {
+        return device.id == input.device_id && device.user_id == input.user_id &&
+               device.revoked_at.empty();
+    });
+    if (!device_exists) {
+        return std::unexpected(StoreError{"not_found", "active device not found"});
+    }
+    const auto now = std::chrono::system_clock::now();
+    const auto expires = now + std::chrono::seconds(input.duration_seconds);
+    OfflineGrant grant{input.id,
+                       input.user_id,
+                       input.principal_taap_id,
+                       input.device_id,
+                       input.scopes,
+                       now_iso8601(),
+                       iso8601_at(expires),
+                       {},
+                       input.credential};
+    offline_grants_.push_back(grant);
+    return grant;
+}
+
+Result<std::vector<OfflineGrant>> InMemoryStore::list_offline_grants(const std::string& user_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<OfflineGrant> output;
+    for (const OfflineGrant& grant : offline_grants_) {
+        if (grant.user_id == user_id) {
+            output.push_back(grant);
+        }
+    }
+    return output;
+}
+
+Result<OfflineGrant> InMemoryStore::get_offline_grant(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(offline_grants_, id, &OfflineGrant::id);
+    if (found == offline_grants_.end()) {
+        return std::unexpected(StoreError{"not_found", "offline grant not found"});
+    }
+    return *found;
+}
+
+Result<OfflineGrant> InMemoryStore::revoke_offline_grant(const std::string& user_id,
+                                                         const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(offline_grants_, id, &OfflineGrant::id);
+    if (found == offline_grants_.end() || found->user_id != user_id) {
+        return std::unexpected(StoreError{"not_found", "offline grant not found"});
+    }
+    if (found->revoked_at.empty()) {
+        found->revoked_at = now_iso8601();
+    }
+    return *found;
+}
+
+Result<IssuedSession> InMemoryStore::recover_with_code(const std::string& pool_id,
+                                                       const std::string& email,
+                                                       const std::string& code,
+                                                       const std::string& device_name) {
+    std::lock_guard lock(mutex_);
+    for (PasswordCredential& credential : passwords_) {
+        if (credential.pool_id != pool_id || lower(credential.email) != lower(email)) {
+            continue;
+        }
+        const auto recovery =
+            std::ranges::find_if(credential.recovery_hashes, [&](const std::string& hash) {
+                return identity_crypto::verify_secret(hash, code);
+            });
+        if (recovery == credential.recovery_hashes.end()) {
+            break;
+        }
+        credential.recovery_hashes.erase(recovery);
+        Device& device = add_device(devices_, credential.user_id, device_name);
+        IssuedSession issued = add_session(
+            sessions_, credential.user_id, pool_id, device.id, "browser", "", {"*"}, "", 86400);
+        if (issued.secret.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not issue recovery session"});
+        }
+        issued.session.reason.clear();
+        return issued;
+    }
+    return std::unexpected(StoreError{"unauthorized", "invalid email or recovery code"});
+}
+
+namespace {
+
+void add_recovery_notifications(std::vector<RecoveryNotification>& notifications,
+                                const std::vector<Device>& devices,
+                                const RecoveryAttempt& attempt,
+                                const std::string& kind) {
+    const std::string now = now_iso8601();
+    for (const Device& device : devices) {
+        if (device.user_id == attempt.user_id) {
+            notifications.push_back(
+                {new_uuid_v4(), attempt.id, attempt.user_id, device.id, kind, now});
+        }
+    }
+}
+
+} // namespace
+
+Result<RecoveryAttempt> InMemoryStore::begin_email_recovery(const std::string& pool_id,
+                                                            const std::string& email,
+                                                            int cooling_seconds) {
+    if (cooling_seconds < 3600) {
+        return std::unexpected(
+            StoreError{"invalid_input", "email recovery cooling period is too short"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.pool_id == pool_id && lower(value.email) == lower(email);
+    });
+    if (password == passwords_.end()) {
+        return std::unexpected(StoreError{"not_found", "account not found"});
+    }
+    const auto now = std::chrono::system_clock::now();
+    const auto ready = now + std::chrono::seconds(cooling_seconds);
+    const auto expires = ready + std::chrono::hours(24);
+    const std::string token = identity_crypto::random_secret();
+    const std::string token_hash = identity_crypto::hash_secret(token);
+    if (token.empty() || token_hash.empty()) {
+        return std::unexpected(StoreError{"store_error", "could not create recovery token"});
+    }
+    RecoveryAttempt attempt{new_uuid_v4(),
+                            password->user_id,
+                            {},
+                            "email",
+                            "cooling",
+                            iso8601_at(ready),
+                            iso8601_at(expires),
+                            {},
+                            0};
+    recovery_attempts_.push_back({attempt, token_hash, {}, ready, expires});
+    recovery_deliveries_.push_back(
+        {new_uuid_v4(), attempt.id, email, token, "email_recovery_started", now_iso8601(), {}});
+    add_recovery_notifications(
+        recovery_notifications_, devices_, attempt, "email_recovery_started");
+    return attempt;
+}
+
+Result<RecoveryAttempt> InMemoryStore::begin_admin_recovery(const std::string& organization_id,
+                                                            const std::string& user_id,
+                                                            const std::string& requested_by) {
+    std::lock_guard lock(mutex_);
+    const auto requester = std::ranges::find_if(memberships_, [&](const Membership& membership) {
+        return membership.organization_id == organization_id &&
+               membership.principal_taap_id == requested_by &&
+               (membership.role == "owner" || membership.role == "admin");
+    });
+    const auto target = std::ranges::find_if(memberships_, [&](const Membership& membership) {
+        return membership.organization_id == organization_id &&
+               membership.principal_type == "user" && membership.principal_id == user_id;
+    });
+    if (requester == memberships_.end()) {
+        return std::unexpected(
+            StoreError{"unauthorized", "requester is not an organization admin"});
+    }
+    if (target == memberships_.end()) {
+        return std::unexpected(StoreError{"not_found", "target user is not in the organization"});
+    }
+    const auto now = std::chrono::system_clock::now();
+    const auto expires = now + std::chrono::hours(24);
+    RecoveryAttempt attempt{new_uuid_v4(),
+                            user_id,
+                            organization_id,
+                            "admin",
+                            "pending_approval",
+                            iso8601_at(now),
+                            iso8601_at(expires),
+                            {},
+                            1};
+    recovery_attempts_.push_back({attempt, {}, {requested_by}, now, expires});
+    add_recovery_notifications(
+        recovery_notifications_, devices_, attempt, "admin_recovery_requested");
+    return attempt;
+}
+
+Result<RecoveryAttempt> InMemoryStore::get_recovery_attempt(const std::string& recovery_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+        return value.attempt.id == recovery_id;
+    });
+    if (found == recovery_attempts_.end()) {
+        return std::unexpected(StoreError{"not_found", "recovery attempt not found"});
+    }
+    return found->attempt;
+}
+
+Result<RecoveryAttempt> InMemoryStore::approve_admin_recovery(const std::string& recovery_id,
+                                                              const std::string& approved_by) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+        return value.attempt.id == recovery_id;
+    });
+    if (found == recovery_attempts_.end() || found->attempt.method != "admin") {
+        return std::unexpected(StoreError{"not_found", "admin recovery not found"});
+    }
+    const auto admin = std::ranges::find_if(memberships_, [&](const Membership& membership) {
+        return membership.organization_id == found->attempt.organization_id &&
+               membership.principal_taap_id == approved_by &&
+               (membership.role == "owner" || membership.role == "admin");
+    });
+    if (admin == memberships_.end()) {
+        return std::unexpected(StoreError{"unauthorized", "approver is not an organization admin"});
+    }
+    if (std::ranges::find(found->approvals, approved_by) != found->approvals.end()) {
+        return std::unexpected(
+            StoreError{"conflict", "a different organization admin must approve recovery"});
+    }
+    if (std::chrono::system_clock::now() >= found->expires_at) {
+        return std::unexpected(StoreError{"conflict", "admin recovery has expired"});
+    }
+    found->approvals.push_back(approved_by);
+    found->attempt.approval_count = static_cast<int>(found->approvals.size());
+    if (found->approvals.size() == 2) {
+        const std::string token = identity_crypto::random_secret();
+        found->token_hash = identity_crypto::hash_secret(token);
+        if (token.empty() || found->token_hash.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not create recovery token"});
+        }
+        found->attempt.status = "approved";
+        const auto user = std::ranges::find(users_, found->attempt.user_id, &User::id);
+        if (user == users_.end()) {
+            return std::unexpected(StoreError{"not_found", "target user not found"});
+        }
+        recovery_deliveries_.push_back({new_uuid_v4(),
+                                        found->attempt.id,
+                                        user->email,
+                                        token,
+                                        "admin_recovery_approved",
+                                        now_iso8601(),
+                                        {}});
+        add_recovery_notifications(
+            recovery_notifications_, devices_, found->attempt, "admin_recovery_approved");
+    }
+    return found->attempt;
+}
+
+Result<IssuedSession> InMemoryStore::complete_recovery(const std::string& recovery_id,
+                                                       const std::string& token,
+                                                       const std::string& device_name) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(recovery_attempts_, [&](const RecoveryRecord& value) {
+        return value.attempt.id == recovery_id;
+    });
+    if (found == recovery_attempts_.end() || found->attempt.status == "completed" ||
+        found->token_hash.empty() || !identity_crypto::verify_secret(found->token_hash, token)) {
+        return std::unexpected(StoreError{"unauthorized", "invalid recovery token"});
+    }
+    const auto now = std::chrono::system_clock::now();
+    if (now < found->ready_at) {
+        return std::unexpected(StoreError{"conflict", "recovery cooling period has not ended"});
+    }
+    if (now >= found->expires_at) {
+        return std::unexpected(StoreError{"conflict", "recovery token has expired"});
+    }
+    if (found->attempt.method == "admin" && found->approvals.size() != 2) {
+        return std::unexpected(StoreError{"conflict", "two administrator approvals are required"});
+    }
+    const std::string revoked_at = now_iso8601();
+    for (Session& session : sessions_) {
+        if (session.user_id == found->attempt.user_id && session.revoked_at.empty()) {
+            session.revoked_at = revoked_at;
+        }
+    }
+    const auto password = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return value.user_id == found->attempt.user_id;
+    });
+    if (password == passwords_.end()) {
+        return std::unexpected(StoreError{"not_found", "password credential not found"});
+    }
+    found->attempt.status = "completed";
+    found->attempt.completed_at = revoked_at;
+    add_recovery_notifications(
+        recovery_notifications_, devices_, found->attempt, "account_recovery_completed");
+    Device& device = add_device(devices_, found->attempt.user_id, device_name);
+    IssuedSession issued = add_session(sessions_,
+                                       found->attempt.user_id,
+                                       password->pool_id,
+                                       device.id,
+                                       "browser",
+                                       "",
+                                       {"*"},
+                                       "",
+                                       86400);
+    if (issued.secret.empty()) {
+        return std::unexpected(StoreError{"store_error", "could not issue recovery session"});
+    }
+    issued.session.reason.clear();
+    return issued;
+}
+
+Result<std::vector<RecoveryDelivery>> InMemoryStore::claim_recovery_deliveries(int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<RecoveryDelivery> output;
+    for (RecoveryDelivery& delivery : recovery_deliveries_) {
+        if (!delivery.delivered_at.empty()) {
+            continue;
+        }
+        delivery.delivered_at = now_iso8601();
+        output.push_back(delivery);
+        delivery.token.clear();
+        if (output.size() == static_cast<std::size_t>(limit)) {
+            break;
+        }
+    }
+    return output;
+}
+
+Result<std::vector<RecoveryNotification>>
+InMemoryStore::list_recovery_notifications(const std::string& user_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<RecoveryNotification> output;
+    for (const RecoveryNotification& notification : recovery_notifications_) {
+        if (notification.user_id == user_id) {
+            output.push_back(notification);
+        }
+    }
+    return output;
+}
+
+Result<RecoveryContact> InMemoryStore::configure_recovery_contact(const RecoveryContact& input) {
+    if (input.repository_id.empty() || input.contact_taap_id.empty() || input.wrapped_key.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "recovery contact is incomplete"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(repositories_, [&](const Repository& value) {
+            return value.id == input.repository_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "repository not found"});
+    }
+    const auto found =
+        std::ranges::find(recovery_contacts_, input.repository_id, &RecoveryContact::repository_id);
+    const std::string now = now_iso8601();
+    if (found != recovery_contacts_.end()) {
+        found->contact_taap_id = input.contact_taap_id;
+        found->wrapped_key = input.wrapped_key;
+        found->updated_at = now;
+        return *found;
+    }
+    recovery_contacts_.push_back(
+        {input.repository_id, input.contact_taap_id, input.wrapped_key, now, now});
+    return recovery_contacts_.back();
+}
+
+Result<RecoveryContact> InMemoryStore::get_recovery_contact(const std::string& repository_id) {
+    std::lock_guard lock(mutex_);
+    const auto found =
+        std::ranges::find(recovery_contacts_, repository_id, &RecoveryContact::repository_id);
+    if (found == recovery_contacts_.end()) {
+        return std::unexpected(StoreError{"not_found", "repository has no recovery contact"});
+    }
+    return *found;
 }
 
 } // namespace lake::control

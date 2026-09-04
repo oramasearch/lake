@@ -14,7 +14,8 @@ those routes and media types. MCP omits them because its tool arguments are JSON
 
 **Envelope.** Every response is `{ ok, value | error{code, message, path}, duration_ms }`.
 Status by error code: `invalid_input` 400, `unauthorized` / `mfa_required` 403, `not_found` /
-`unknown_capability` 404, `conflict` 409, `store_unavailable` 503, anything else 500. MCP
+`unknown_capability` 404, `conflict` / `unrecoverable` 409, `store_unavailable` 503, anything else
+500. MCP
 `tools/call` returns the same
 envelope as `structuredContent` (and as text), with `isError` set.
 
@@ -74,6 +75,10 @@ repository and its content; all other repository visibility levels remain protec
 | `start_oauth` | action, public entry | pool, provider, device name, identity document for a new user | authorization URL | [identity.md](identity.md) |
 | `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | token/session data | [identity.md](identity.md) |
 | `list_devices`, `revoke_device` | read/action | device id for revocation | device data, including passkey credential IDs and signed bindings | [identity.md](identity.md) |
+| `issue_offline_grant`, `list_offline_grants`, `revoke_offline_grant`, `check_cached_read` | action/read | device, repository-read scopes, duration, or signed credential | bounded cached-read grant or verification | [offline.md](offline.md) |
+| `recover_with_code`, `begin_email_recovery`, `begin_admin_recovery`, `approve_admin_recovery`, `complete_recovery` | action | recovery proof, organization/user, or one-use token | recovery state or fresh browser session | [recovery.md](recovery.md) |
+| `claim_recovery_deliveries`, `list_recovery_notifications` | action/read | operator limit or authenticated user | queued mail work or per-device notices | [recovery.md](recovery.md) |
+| `configure_recovery_contact`, `repository_recovery_status`, `recover_repository_key` | action/read | repository, contact TAAP identity, opaque wrapped key | custody status or contact-wrapped key | [recovery.md](recovery.md) |
 | `register_sso_provider`, `list_sso_providers`, `test_sso_provider` | action/read | organization, protocol configuration, or provider id | secret-free provider configuration | [sso.md](sso.md) |
 | `create_federation_issuer`, `list_federation_issuers` | action/read | organization, issuer, claim | acceptable issuer-claim policy rows | [sso.md](sso.md) |
 | `sign_in_sso` | action, public entry | provider assertion identity and claims | browser session + secret | [sso.md](sso.md) |

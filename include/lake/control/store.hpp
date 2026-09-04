@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/audit/audit.hpp"
+#include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
 
 // The control-plane store: users and organizations (identity), customers (the
@@ -458,6 +459,35 @@ public:
     virtual Result<void> revoke_device(const std::string& user_id,
                                        const std::string& device_id) = 0;
     virtual Result<Principal> context_for(const std::string& secret) = 0;
+
+    virtual Result<OfflineGrant> issue_offline_grant(const NewOfflineGrant& grant) = 0;
+    virtual Result<std::vector<OfflineGrant>> list_offline_grants(const std::string& user_id) = 0;
+    virtual Result<OfflineGrant> get_offline_grant(const std::string& id) = 0;
+    virtual Result<OfflineGrant> revoke_offline_grant(const std::string& user_id,
+                                                      const std::string& id) = 0;
+
+    virtual Result<IssuedSession> recover_with_code(const std::string& pool_id,
+                                                    const std::string& email,
+                                                    const std::string& code,
+                                                    const std::string& device_name) = 0;
+    virtual Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
+                                                         const std::string& email,
+                                                         int cooling_seconds) = 0;
+    virtual Result<RecoveryAttempt> begin_admin_recovery(const std::string& organization_id,
+                                                         const std::string& user_id,
+                                                         const std::string& requested_by) = 0;
+    virtual Result<RecoveryAttempt> get_recovery_attempt(const std::string& recovery_id) = 0;
+    virtual Result<RecoveryAttempt> approve_admin_recovery(const std::string& recovery_id,
+                                                           const std::string& approved_by) = 0;
+    virtual Result<IssuedSession> complete_recovery(const std::string& recovery_id,
+                                                    const std::string& token,
+                                                    const std::string& device_name) = 0;
+    virtual Result<std::vector<RecoveryDelivery>> claim_recovery_deliveries(int limit) = 0;
+    virtual Result<std::vector<RecoveryNotification>>
+    list_recovery_notifications(const std::string& user_id) = 0;
+
+    virtual Result<RecoveryContact> configure_recovery_contact(const RecoveryContact& contact) = 0;
+    virtual Result<RecoveryContact> get_recovery_contact(const std::string& repository_id) = 0;
 
     virtual Result<SsoProvider> register_sso_provider(const NewSsoProvider&) = 0;
     virtual Result<std::vector<SsoProvider>> list_sso_providers(const std::string& organization_id,

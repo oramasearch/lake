@@ -168,6 +168,32 @@ public:
     Result<std::vector<Device>> list_devices(const std::string& user_id) override;
     Result<void> revoke_device(const std::string& user_id, const std::string& device_id) override;
     Result<Principal> context_for(const std::string& secret) override;
+    Result<OfflineGrant> issue_offline_grant(const NewOfflineGrant& grant) override;
+    Result<std::vector<OfflineGrant>> list_offline_grants(const std::string& user_id) override;
+    Result<OfflineGrant> get_offline_grant(const std::string& id) override;
+    Result<OfflineGrant> revoke_offline_grant(const std::string& user_id,
+                                              const std::string& id) override;
+    Result<IssuedSession> recover_with_code(const std::string& pool_id,
+                                            const std::string& email,
+                                            const std::string& code,
+                                            const std::string& device_name) override;
+    Result<RecoveryAttempt> begin_email_recovery(const std::string& pool_id,
+                                                 const std::string& email,
+                                                 int cooling_seconds) override;
+    Result<RecoveryAttempt> begin_admin_recovery(const std::string& organization_id,
+                                                 const std::string& user_id,
+                                                 const std::string& requested_by) override;
+    Result<RecoveryAttempt> get_recovery_attempt(const std::string& recovery_id) override;
+    Result<RecoveryAttempt> approve_admin_recovery(const std::string& recovery_id,
+                                                   const std::string& approved_by) override;
+    Result<IssuedSession> complete_recovery(const std::string& recovery_id,
+                                            const std::string& token,
+                                            const std::string& device_name) override;
+    Result<std::vector<RecoveryDelivery>> claim_recovery_deliveries(int limit) override;
+    Result<std::vector<RecoveryNotification>>
+    list_recovery_notifications(const std::string& user_id) override;
+    Result<RecoveryContact> configure_recovery_contact(const RecoveryContact& contact) override;
+    Result<RecoveryContact> get_recovery_contact(const std::string& repository_id) override;
     Result<SsoProvider> register_sso_provider(const NewSsoProvider&) override;
     Result<std::vector<SsoProvider>> list_sso_providers(const std::string& organization_id,
                                                         int limit) override;
@@ -274,6 +300,18 @@ private:
     std::vector<Device> devices_;
     std::vector<Session> sessions_;
     std::vector<std::pair<std::string, std::string>> session_secrets_;
+    std::vector<OfflineGrant> offline_grants_;
+    struct RecoveryRecord {
+        RecoveryAttempt attempt;
+        std::string token_hash;
+        std::vector<std::string> approvals;
+        std::chrono::system_clock::time_point ready_at;
+        std::chrono::system_clock::time_point expires_at;
+    };
+    std::vector<RecoveryRecord> recovery_attempts_;
+    std::vector<RecoveryDelivery> recovery_deliveries_;
+    std::vector<RecoveryNotification> recovery_notifications_;
+    std::vector<RecoveryContact> recovery_contacts_;
     std::vector<SsoProvider> sso_providers_;
     std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
     std::vector<std::pair<std::string, std::string>> sso_oidc_secrets_;

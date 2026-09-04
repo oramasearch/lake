@@ -956,22 +956,81 @@ ApiResult from_sync_error(ApiContext& context, SyncStoreError error) {
     return ApiResult::failure(code, message);
 }
 
+bool offline_grant_fields_match(const control::OfflineGrant& grant) {
+    const json& credential = grant.credential;
+    if (!credential.is_object() || !credential.contains("attestation_identifier") ||
+        !credential.at("attestation_identifier").is_string() ||
+        !credential.contains("subject_identifier") ||
+        !credential.at("subject_identifier").is_string() ||
+        !credential.contains("asserted_attributes") ||
+        !credential.at("asserted_attributes").is_object()) {
+        return false;
+    }
+    const json& attributes = credential.at("asserted_attributes");
+    return attributes.contains("device_id") && attributes.at("device_id").is_string() &&
+           credential.at("attestation_identifier").get<std::string>() == grant.id &&
+           credential.at("subject_identifier").get<std::string>() == grant.principal_taap_id &&
+           attributes.at("device_id").get<std::string>() == grant.device_id;
+}
+
 SyncChangeAuthorizer sync_change_authorizer(ApiContext& context, const std::string& repository_id) {
     return [&context, repository_id](const std::string& change_id) -> SyncStoreResult<void> {
+        std::string denial_code;
+        std::string denial_reason;
+        if (!context.offline_grant_id.empty()) {
+            const auto grant = context.store->get_offline_grant(context.offline_grant_id);
+            if (!grant) {
+                denial_code = grant.error().code;
+                denial_reason = "offline grant is not recognized at publication";
+            } else if (grant->principal_taap_id != context.acting_identity ||
+                       grant->user_id != context.acting_user_id ||
+                       grant->device_id != context.credential_device_id) {
+                denial_code = "unauthorized";
+                denial_reason = "offline grant does not belong to the publishing credential";
+            } else if (!grant->revoked_at.empty()) {
+                denial_code = "unauthorized";
+                denial_reason = "offline grant was revoked before publication";
+            } else if (!offline_grant_fields_match(*grant)) {
+                denial_code = "unauthorized";
+                denial_reason = "offline grant signed fields do not match its stored record";
+            } else {
+                const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::system_clock::now().time_since_epoch())
+                                             .count();
+                const std::string scope = "repository:" + repository_id + ":read";
+                const auto verified =
+                    audit::verify_offline_grant(*context.store, grant->credential, scope, now);
+                if (!verified) {
+                    denial_code = verified.error().code;
+                    denial_reason = verified.error().message;
+                }
+            }
+        }
         auto object = context.store->find_policy_object("repository", repository_id);
-        if (!object) {
+        if (!object && denial_reason.empty()) {
             return std::unexpected(SyncStoreError{
                 object.error().code, object.error().message, "repository authorization"});
         }
-        auto decision = control::authorize(*context.store,
-                                           context.acting_identity,
-                                           object->id,
-                                           "write",
-                                           context.authorization_cache);
+        control::Result<control::AuthorizationDecision> decision =
+            std::unexpected(control::StoreError{denial_code, denial_reason});
+        if (denial_reason.empty()) {
+            decision = control::authorize(*context.store,
+                                          context.acting_identity,
+                                          object->id,
+                                          "write",
+                                          context.authorization_cache);
+        }
         const bool allowed = decision && decision->allowed;
-        const std::string outcome = !decision ? "failure" : (allowed ? "success" : "denied");
         const std::string error_code =
             !decision ? decision.error().code : (allowed ? "" : "unauthorized");
+        const std::string outcome =
+            allowed ? "success" : (error_code == "unauthorized" ? "denied" : "failure");
+        const std::string reason = !decision
+                                       ? decision.error().message
+                                       : (allowed ? "current policy permits publication"
+                                                  : "current policy no longer permits writes");
+        context.reauthorization_results.push_back(
+            {{"change", change_id}, {"allowed", allowed}, {"reason", reason}});
         const audit::EventDraft event{
             .kind = "repository_sync",
             .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
@@ -981,7 +1040,10 @@ SyncChangeAuthorizer sync_change_authorizer(ApiContext& context, const std::stri
             .request_id = context.request_id,
             .method = context.authentication_method,
             .device = context.device,
-            .details = {{"change", change_id}, {"error_code", error_code}},
+            .details = {{"change", change_id},
+                        {"error_code", error_code},
+                        {"offline_grant_id", context.offline_grant_id},
+                        {"reason", reason}},
         };
         auto recorded = audit::record(*context.store, event, identity_options(context));
         if (!recorded) {
@@ -989,12 +1051,11 @@ SyncChangeAuthorizer sync_change_authorizer(ApiContext& context, const std::stri
                 recorded.error().code, recorded.error().message, "repository sync audit"});
         }
         if (!decision) {
-            return std::unexpected(SyncStoreError{
-                decision.error().code, decision.error().message, "repository authorization"});
+            return std::unexpected(
+                SyncStoreError{decision.error().code, decision.error().message, change_id});
         }
         if (!decision->allowed) {
-            return std::unexpected(SyncStoreError{
-                "unauthorized", "principal is not allowed to write repository", change_id});
+            return std::unexpected(SyncStoreError{"unauthorized", reason, change_id});
         }
         return {};
     };
@@ -3007,6 +3068,7 @@ void register_repository_capabilities(Registry& registry) {
         .object = "repository",
         .action = "write",
         .resolve_object = entity_object("repository", "repository_id"),
+        .authorizes_candidates = true,
         .handler = [](const json& input, ApiContext& context) {
             if (auto wire = require_sync_wire(context); !wire.ok) {
                 return wire;
@@ -3759,6 +3821,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_search_capability(registry);
     register_audit_capabilities(registry);
     register_secret_capabilities(registry);
+    register_offline_recovery_capabilities(registry);
 }
 
 } // namespace lake::api

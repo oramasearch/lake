@@ -26,7 +26,10 @@ liquid is the tool. lake is where it collects.
 > customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160 and #165's client,
 > public server, and protocol contract are pinned. Lake serves push, pull, missing-object
 > negotiation, chunk upload, and ranged chunk read through the registry, with per-change policy,
-> atomic refusal, and signed outcome audit. Hot branch-tip
+> offline-grant revocation checks, exact refusal reasons, atomic refusal, and signed outcome audit.
+> Migration `0011_offline_recovery` adds bounded cached-read grants, recovery codes, 24-hour email
+> recovery, two-administrator organization recovery, device notices, and designated custody of
+> client-wrapped repository keys. Account recovery does not recreate a lost repository key. Hot branch-tip
 > search is available over those stores through the registry, including REST, OpenAPI, MCP, and
 > the `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
 > `LAKE_STORE_ROOT/<customer>/index/`, publishes a change through atomic manifest replacement,
@@ -67,8 +70,8 @@ ctest --test-dir build
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
-| `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points |
+| `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
@@ -119,7 +122,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 

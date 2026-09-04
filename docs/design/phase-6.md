@@ -38,6 +38,13 @@ implemented in `0010_sso_federation`. Provider configuration, testing, federatio
 provisioning, and SSO sign-in are registry capabilities and append signed audit events. Their
 contract is documented in [`../api/sso.md`](../api/sso.md).
 
+**Offline authorization and recovery status (#22, #23): implemented.** Migration
+`0011_offline_recovery` adds lake-signed device grants, publication-time grant and policy checks,
+recovery codes, email recovery with a 24-hour cooling period, recovery approved by two distinct
+organization administrators, per-device notices, and advance custody of client-wrapped repository
+keys. The API contracts are [`../api/offline.md`](../api/offline.md) and
+[`../api/recovery.md`](../api/recovery.md).
+
 ## Identity: one substrate, three principals
 
 Every principal is a TAAP identity (liquid `docs/library/identity.md`: Ed25519 keys, SHA-512/256
@@ -96,6 +103,14 @@ identity-core issue keeps `pool_id` on its tables and in its capability inputs f
   `identity_webauthn_challenges`, expire after five minutes, and are consumed once. The accepted
   registration attestation format is `none`; assertions verify the stored public key and sign
   counter.
+- Account recovery has three explicit paths: one-use MFA recovery code, a one-use email token
+  gated by a 24-hour cooling period, or organization assistance with approvals from two distinct
+  owners/administrators. Completion revokes existing sessions, issues one new browser session,
+  and notifies every existing device. The operator claims email work from an outbox that clears
+  plaintext tokens after delivery.
+- Account recovery never restores end-to-end encrypted repository keys. A client must designate a
+  recovery contact in advance and store a trust-domain key wrapped to that contact. Without that
+  custody record, a key held only by a lost device and its repository content are lost.
 
 ## Authorisation: one policy engine, one object graph
 
@@ -121,6 +136,14 @@ The current operator-admin principal is handled as a break-glass principal by th
 Identity-core credential resolution supplies user TAAP principals; self-management resolves
 `principal/<taap_id>`, and scoped API tokens are narrowed before policy evaluation. Workload TAAP
 principals remain part of the workload-identity follow-up.
+
+**Offline rule (#22).** A signed `offline_grant/1` attestation permits only cached repository reads,
+only for its explicit scopes, device, and duration (at most seven days). Revocation cannot erase
+disconnected cached bytes, so those reads remain valid until embedded expiry. Publication never
+uses cached authorization: push binds the grant to the live credential, rejects missing, expired,
+revoked, or mismatched grants, and calls `authorize` against current write policy for every change.
+The client receives the checked change ID and exact decision explanation; one refusal leaves the
+atomic batch unpublished.
 
 ## Audit (decision §13)
 

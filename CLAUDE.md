@@ -45,6 +45,13 @@ SSO federation adds `0010_sso_federation`, organization SAML/OIDC provider confi
 federation issuer-claim policy, SCIM user/group mappings, deactivation session revocation,
 provisioning logs, the `/sso` page, and provider-bearer SCIM 2.0 `/scim/v2/Users` and `/Groups`
 resources. The operator copies the schema once per wave in its own operator pull request.
+Offline authorization and account recovery add `0011_offline_recovery`: lake-signed device-bound
+cached-read grants with a seven-day maximum, per-change publication checks against grant revocation
+and current policy, one-use recovery codes, email recovery with a 24-hour cooling period,
+two-administrator organization recovery, per-device notices, and designated custody of opaque
+client-wrapped repository trust-domain keys. Account recovery restores sign-in but cannot recreate
+a repository key held only on a lost device. The full contracts are `docs/api/offline.md` and
+`docs/api/recovery.md`.
 Hot branch-tip search persists blob-deduplicated BM25F and positional-trigram segments at
 `LAKE_STORE_ROOT/<customer>/index/`, atomically publishes each change through its manifest,
 filters candidates with batched policy authorization, and records the signed query outcome
@@ -117,7 +124,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `sso_federation_guard` today, versioned by content hash).
+  `offline_recovery_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

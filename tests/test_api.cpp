@@ -156,7 +156,11 @@ struct RepositoryFixtureStore final : SyncStore {
     SyncStoreResult<std::vector<std::byte>> push(const std::string&,
                                                  const std::string&,
                                                  std::span<const std::byte>,
-                                                 SyncChangeAuthorizer) override {
+                                                 SyncChangeAuthorizer authorize) override {
+        const auto authorized = authorize("change-refused");
+        if (!authorized) {
+            return std::unexpected(authorized.error());
+        }
         return std::vector<std::byte>{};
     }
 
@@ -1144,6 +1148,69 @@ TEST(SyncRegistry, DeclaresTransportPolicyAndRecordsDenial) {
     ASSERT_FALSE(events->empty());
     EXPECT_EQ(events->back().draft.action, "push");
     EXPECT_EQ(events->back().draft.outcome, "denied");
+}
+
+TEST(SyncRegistry, RevokedOfflineGrantRefusesPublicationWithChangeAndReason) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    const auto issued = surface.store.sign_up_password({"lake",
+                                                        "offline-writer@example.test",
+                                                        "correct horse battery staple",
+                                                        "Offline writer",
+                                                        "offline device",
+                                                        "{}"});
+    ASSERT_TRUE(issued) << issued.error().message;
+    const auto principal = surface.store.context_for(issued->secret);
+    ASSERT_TRUE(principal) << principal.error().message;
+    const auto customer =
+        surface.store.create_customer({"individual", principal->user_id, "", "offline-writer"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository =
+        surface.store.create_repository({customer->id, "offline-sync", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto object = surface.store.find_policy_object("repository", repository->id);
+    ASSERT_TRUE(object) << object.error().message;
+    ASSERT_TRUE(surface.store.create_grant({principal->taap_id,
+                                            object->id,
+                                            "write",
+                                            "offline-sync-attestation",
+                                            "admin",
+                                            "offline-sync"}));
+    surface.ctx.authorized = true;
+    surface.ctx.operator_credential = false;
+    surface.ctx.session_credential = true;
+    surface.ctx.acting_user_id = principal->user_id;
+    surface.ctx.acting_identity = principal->taap_id;
+    surface.ctx.credential_device_id = principal->device_id;
+    surface.ctx.scopes = principal->scopes;
+    const std::string scope = "repository:" + repository->id + ":read";
+    const ApiResult grant = surface.call("issue_offline_grant",
+                                         {{"device_id", principal->device_id},
+                                          {"scopes", json::array({scope})},
+                                          {"duration_seconds", 3600}});
+    ASSERT_TRUE(grant.ok) << grant.error.message;
+    ASSERT_TRUE(surface.call("revoke_offline_grant", {{"id", grant.value["id"]}}).ok);
+
+    surface.ctx.sync_store = &repository_store;
+    surface.ctx.sync_wire_request = true;
+    surface.ctx.offline_grant_id = grant.value["id"];
+    surface.ctx.reauthorization_results = json::array();
+    const ApiResult pushed = surface.call("push", {{"repository_id", repository->id}});
+    ASSERT_FALSE(pushed.ok);
+    EXPECT_EQ(pushed.error.code, "unauthorized");
+    ASSERT_EQ(surface.ctx.reauthorization_results.size(), 1U);
+    EXPECT_EQ(surface.ctx.reauthorization_results[0]["change"], "change-refused");
+    EXPECT_FALSE(surface.ctx.reauthorization_results[0]["allowed"]);
+    EXPECT_EQ(surface.ctx.reauthorization_results[0]["reason"],
+              "offline grant was revoked before publication");
+    const auto events = surface.store.list_audit_events({.limit = 1000});
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
+        return event.draft.action == "push_change" && event.draft.outcome == "denied" &&
+               event.draft.details.value("change", "") == "change-refused" &&
+               event.draft.details.value("reason", "") ==
+                   "offline grant was revoked before publication";
+    }));
 }
 
 TEST(Mcp, InitializeListAndCall) {

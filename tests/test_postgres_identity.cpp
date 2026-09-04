@@ -13,7 +13,10 @@
 #include <liquid/runtime.hpp>
 
 #include <openssl/evp.h>
+#include <pqxx/pqxx>
 
+#include "lake/api/capabilities.hpp"
+#include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "webauthn_test_support.hpp"
@@ -310,6 +313,208 @@ TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
     EXPECT_TRUE(std::ranges::any_of(*logs, [](const lake::control::ProvisioningLog& log) {
         return log.resource == "user" && log.operation == "deactivate";
     }));
+}
+
+TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    setenv(
+        "LAKE_INSTANCE_KEK", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1);
+    std::unique_ptr<lake::control::Store> store = lake::control::make_postgres_store(uri);
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto create_account = [&](const std::string& label) {
+        return store->sign_up_password({"lake",
+                                        label + "-" + suffix + "@example.test",
+                                        "correct horse battery staple",
+                                        label,
+                                        label + " integration device",
+                                        signed_identity_document(label + "-" + suffix)});
+    };
+    const auto target = create_account("offline-target");
+    const auto first_admin = create_account("offline-admin-one");
+    const auto second_admin = create_account("offline-admin-two");
+    const auto contact = create_account("offline-contact");
+    ASSERT_TRUE(target) << target.error().message;
+    ASSERT_TRUE(first_admin) << first_admin.error().message;
+    ASSERT_TRUE(second_admin) << second_admin.error().message;
+    ASSERT_TRUE(contact) << contact.error().message;
+    const auto target_principal = store->context_for(target->secret);
+    const auto first_principal = store->context_for(first_admin->secret);
+    const auto second_principal = store->context_for(second_admin->secret);
+    const auto contact_principal = store->context_for(contact->secret);
+    ASSERT_TRUE(target_principal) << target_principal.error().message;
+    ASSERT_TRUE(first_principal) << first_principal.error().message;
+    ASSERT_TRUE(second_principal) << second_principal.error().message;
+    ASSERT_TRUE(contact_principal) << contact_principal.error().message;
+
+    const auto context_for = [&](const lake::control::Principal& principal) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.authorized = true;
+        context.session_credential = true;
+        context.acting_user_id = principal.user_id;
+        context.acting_identity = principal.taap_id;
+        context.credential_device_id = principal.device_id;
+        context.scopes = principal.scopes;
+        context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        return context;
+    };
+    lake::api::ApiContext target_context = context_for(*target_principal);
+    lake::api::ApiContext first_context = context_for(*first_principal);
+    lake::api::ApiContext second_context = context_for(*second_principal);
+    lake::api::ApiContext contact_context = context_for(*contact_principal);
+    lake::api::ApiContext anonymous;
+    anonymous.store = store.get();
+    anonymous.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    lake::api::ApiContext operator_context = anonymous;
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+
+    const auto customer =
+        store->create_customer({"individual", target_principal->user_id, "", "offline-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository =
+        store->create_repository({customer->id, "encrypted-" + suffix, "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto object = store->find_policy_object("repository", repository->id);
+    ASSERT_TRUE(object) << object.error().message;
+    ASSERT_TRUE(store->create_grant({target_principal->taap_id,
+                                     object->id,
+                                     "write",
+                                     "offline-postgres-attestation",
+                                     "admin",
+                                     "offline-postgres"}));
+    const std::string scope = "repository:" + repository->id + ":read";
+    const lake::api::ApiResult grant = registry.call("issue_offline_grant",
+                                                     {{"device_id", target_principal->device_id},
+                                                      {"scopes", nlohmann::json::array({scope})},
+                                                      {"duration_seconds", 3600}},
+                                                     target_context);
+    ASSERT_TRUE(grant.ok) << grant.error.message;
+    EXPECT_TRUE(registry.call("list_offline_grants", nlohmann::json::object(), target_context).ok);
+    EXPECT_TRUE(registry
+                    .call("check_cached_read",
+                          {{"credential", grant.value["credential"]}, {"scope", scope}},
+                          anonymous)
+                    .ok);
+    const lake::api::ApiResult revoked =
+        registry.call("revoke_offline_grant", {{"id", grant.value["id"]}}, target_context);
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    EXPECT_TRUE(registry
+                    .call("check_cached_read",
+                          {{"credential", grant.value["credential"]}, {"scope", scope}},
+                          anonymous)
+                    .ok);
+
+    const auto enrolled = store->enroll_mfa(target_principal->user_id, "lake");
+    ASSERT_TRUE(enrolled) << enrolled.error().message;
+    const lake::api::ApiResult code =
+        registry.call("recover_with_code",
+                      {{"email", "offline-target-" + suffix + "@example.test"},
+                       {"code", enrolled->recovery_codes.front()}},
+                      anonymous);
+    ASSERT_TRUE(code.ok) << code.error.message;
+    EXPECT_TRUE(store->context_for(code.value["secret"]));
+
+    const lake::api::ApiResult email =
+        registry.call("begin_email_recovery",
+                      {{"email", "offline-target-" + suffix + "@example.test"}},
+                      anonymous);
+    ASSERT_TRUE(email.ok) << email.error.message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work transaction(connection);
+        transaction.exec("UPDATE offline_recovery_attempts SET ready_at = now() - interval '1 "
+                         "second' WHERE id = $1::uuid",
+                         pqxx::params{email.value["id"].get<std::string>()});
+        transaction.commit();
+    }
+    const lake::api::ApiResult email_claimed =
+        registry.call("claim_recovery_deliveries", {{"limit", 1000}}, operator_context);
+    ASSERT_TRUE(email_claimed.ok) << email_claimed.error.message;
+    const auto email_delivery =
+        std::ranges::find_if(email_claimed.value["items"], [&](const nlohmann::json& item) {
+            return item["recovery_id"] == email.value["id"];
+        });
+    ASSERT_NE(email_delivery, email_claimed.value["items"].end());
+    const lake::api::ApiResult email_restored =
+        registry.call("complete_recovery",
+                      {{"recovery_id", email.value["id"]}, {"token", (*email_delivery)["token"]}},
+                      anonymous);
+    ASSERT_TRUE(email_restored.ok) << email_restored.error.message;
+    EXPECT_TRUE(store->context_for(email_restored.value["secret"]));
+
+    const auto organization = store->create_organization(
+        {"taap:1:ed25519:offline-org-" + suffix, "Offline recovery organization", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto add_member = [&](const lake::control::Principal& principal,
+                                const std::string& role) {
+        return store->create_membership({organization->id,
+                                         "",
+                                         "user",
+                                         principal.user_id,
+                                         principal.taap_id,
+                                         role,
+                                         "offline-membership-attestation",
+                                         "admin",
+                                         "offline-membership"});
+    };
+    ASSERT_TRUE(add_member(*target_principal, "member"));
+    ASSERT_TRUE(add_member(*first_principal, "admin"));
+    ASSERT_TRUE(add_member(*second_principal, "admin"));
+    const lake::api::ApiResult admin_started = registry.call(
+        "begin_admin_recovery",
+        {{"organization_id", organization->id}, {"user_id", target_principal->user_id}},
+        first_context);
+    ASSERT_TRUE(admin_started.ok) << admin_started.error.message;
+    EXPECT_EQ(registry
+                  .call("approve_admin_recovery",
+                        {{"recovery_id", admin_started.value["id"]}},
+                        first_context)
+                  .error.code,
+              "conflict");
+    const lake::api::ApiResult admin_approved = registry.call(
+        "approve_admin_recovery", {{"recovery_id", admin_started.value["id"]}}, second_context);
+    ASSERT_TRUE(admin_approved.ok) << admin_approved.error.message;
+    EXPECT_EQ(admin_approved.value["approval_count"], 2);
+    const lake::api::ApiResult admin_claimed =
+        registry.call("claim_recovery_deliveries", {{"limit", 1000}}, operator_context);
+    ASSERT_TRUE(admin_claimed.ok) << admin_claimed.error.message;
+    const auto admin_delivery =
+        std::ranges::find_if(admin_claimed.value["items"], [&](const nlohmann::json& item) {
+            return item["recovery_id"] == admin_started.value["id"];
+        });
+    ASSERT_NE(admin_delivery, admin_claimed.value["items"].end());
+    const lake::api::ApiResult admin_restored = registry.call(
+        "complete_recovery",
+        {{"recovery_id", admin_started.value["id"]}, {"token", (*admin_delivery)["token"]}},
+        anonymous);
+    ASSERT_TRUE(admin_restored.ok) << admin_restored.error.message;
+    EXPECT_TRUE(store->context_for(admin_restored.value["secret"]));
+    EXPECT_TRUE(
+        registry.call("list_recovery_notifications", nlohmann::json::object(), target_context).ok);
+
+    const lake::api::ApiResult missing = registry.call(
+        "repository_recovery_status", {{"repository_id", repository->id}}, operator_context);
+    ASSERT_TRUE(missing.ok) << missing.error.message;
+    EXPECT_FALSE(missing.value["recoverable"]);
+    const lake::api::ApiResult configured =
+        registry.call("configure_recovery_contact",
+                      {{"repository_id", repository->id},
+                       {"contact_taap_id", contact_principal->taap_id},
+                       {"wrapped_key", "postgres-client-wrapped-key"}},
+                      operator_context);
+    ASSERT_TRUE(configured.ok) << configured.error.message;
+    const lake::api::ApiResult recovered = registry.call(
+        "recover_repository_key", {{"repository_id", repository->id}}, contact_context);
+    ASSERT_TRUE(recovered.ok) << recovered.error.message;
+    EXPECT_EQ(recovered.value["wrapped_key"], "postgres-client-wrapped-key");
 }
 
 } // namespace
