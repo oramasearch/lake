@@ -276,8 +276,11 @@ waves that do not collide:
    (#7, #8, #43 to #45), **search over history and inside artifacts** (#41, #42), **metering**
    (#33), **auth as a service** (#51).
 
-Each wave rebases onto the previous; the schema grows by numbered migrations (the operator's
-incremental-migration follow-up is a prerequisite for wave 2 and is raised there).
+Each wave rebases onto the previous; the schema grows by numbered, idempotent migrations. Until
+the operator's incremental-migration follow-up lands, its vendored schema copy and guard table
+are updated once per wave in a separate operator pull request. This wave-level waiver preserves
+the control-plane migration contract without making the operator follow-up a prerequisite for
+lake work.
 
 ## How to verify
 
