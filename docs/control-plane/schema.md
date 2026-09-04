@@ -105,13 +105,35 @@ an encrypted `totp` credential and eight independently Argon2id-hashed recovery 
 Successful recovery-code verification revokes that row immediately. Re-enrollment and verified
 disablement revoke all prior recovery rows. `identity_mfa_guard` is the migration guard.
 
+## Static secrets and encryption (migration `0009_secrets`)
+
+| Table | Purpose |
+|---|---|
+| `secrets_mounts` | Organization mount inside a customer namespace; unique lowercase name per customer and organization. |
+| `secrets_entries` | One static-secret name, current-version pointer and JSON custom metadata per mount. |
+| `secrets_versions` | Immutable numbered ciphertext plus soft-delete and irreversible-destroy timestamps. Destroy clears ciphertext but retains the history row. |
+| `secrets_encryption_keys` | Named key metadata, current version and optional derived-parent link. |
+| `secrets_data_keys` | Each mount data key and each named-key version, wrapped by its customer KEK. |
+| `keystore` | Gains nullable `customer_id`; one unique row holds each customer KEK wrapped by `LAKE_INSTANCE_KEK`. Existing purpose rows remain valid. |
+| `secrets_guard` | Guard table for migration `0009_secrets`. |
+
+The secret tables carry the area prefix required for parallel schema work. Mount creation verifies
+that the organization policy object is below the named customer and creates the corresponding
+environment and mount policy objects in the same transaction. The first value for a name creates
+the child secret object.
+
+Static values use one mount data key and associated data containing mount, name and version.
+Named encryption keys have one data-key row per version. Customer-KEK rotation locks the customer
+KEK and all of its data-key rows, rewraps those rows and updates the KEK in one transaction. It
+does not update `secrets_versions`.
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`identity_mfa_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`secrets_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -126,9 +148,8 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    before `CREATE TRIGGER`), append a new `INSERT INTO schema_migrations`.
 2. Copy to the operator's `assets/lake-schema.sql`; the version hash changes automatically. During
    the Phase 6 waves this copy and the `GuardTable` update land once per wave in a separate operator
-   pull request (orama-operator #134 carries migration `0006`; identity core still needs its
-   operator copy), never
-   a partial schema between waves. The `0008_mfa_recovery` copy remains required in the operator.
+   pull request, never a partial schema between waves. Migration `0009_secrets` requires the
+   matching operator copy and `GuardTable` update.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
    lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a
@@ -141,5 +162,5 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets')"
 ```
