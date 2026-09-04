@@ -59,14 +59,50 @@ batched walk, so a result set never shows an object the caller could not open (#
 
 ## Audit (decision §13)
 
-One append-only `audit_events` stream: authentication (success and failure, method, device),
-session and token issuance and revocation, every authorisation decision that denied, every
-grant change, every secret and certificate issuance, access, renewal and revocation, and every
-administrative action. Each event carries the acting principal, the object, the outcome, the
-request id and a signature by lake's own identity over the canonical event, chained by digest so
-a gap is detectable. Exported as JSON lines and queryable through a capability and a page. SOC 2
-evidence (access reviews, change management) is a query over this stream plus the forge's
-change records; nothing is reconstructed after the fact.
+**Status: the audit event contract is published for #18.** The implementation creates the
+append-only `audit_events` stream and all wave-one branches write this shape through
+`audit::record`; a later wave may add event kinds but may not reinterpret an existing field.
+
+One append-only `audit_events` stream records authentication (success and failure, method,
+device), session and token issuance and revocation, every authorisation decision that denied,
+every grant change, every secret and certificate issuance, access, renewal and revocation, and
+every administrative action. The canonical signed payload is canonical CBOR with this versioned
+shape:
+
+| Field | Meaning |
+|---|---|
+| `version` | `audit_event/1`; a new canonical shape receives a new version. |
+| `id`, `occurred_at` | UUID event identifier and UTC RFC 3339 timestamp with microsecond precision. |
+| `customer_id` | Owning customer when an event is customer-scoped; null for lake-instance events. |
+| `kind` | Stable event name such as `capability`, `authentication`, `session`, `token`, `authorisation`, `grant`, `secret`, `certificate`, `administrative`, or `retention`. |
+| `principal` | The acting TAAP identity; `anonymous` is used before authentication identifies a principal. |
+| `object` | Stable object identifier, including its type, or `lake` for instance-wide actions. |
+| `action`, `outcome` | Attempted action and one of `success`, `failure`, `denied`, or `revoked`. |
+| `request_id` | Opaque request correlation identifier, generated before registry dispatch. |
+| `method`, `device` | Authentication method and device identifier when known; otherwise null. |
+| `details` | Canonical JSON-compatible facts needed to interpret the event; secrets, credentials and private key material never appear here. |
+| `previous_digest` | SHA-512/256 digest of the preceding stored event, or null for the first event. |
+| `signer` | lake's TAAP identity. |
+| `signature` | Base64 Ed25519 signature by `signer` over `TAAP/1 audit_event/1`, a zero byte, and the canonical CBOR payload. |
+| `digest` | SHA-512/256 digest of the complete stored event excluding `digest`; it is the next event's `previous_digest`. |
+
+`audit::record` appends exactly one signed event for each registry capability outcome, including
+authorization and validation failures. Identity, policy, secrets and certificate code calls the
+same function for events that do not originate in a registry call. The verifier recomputes each
+signature and digest and checks each predecessor link, so a deleted or reordered row is detected.
+
+The instance signing identity is a TAAP/1 Ed25519 identity. At first start lake uses
+`LAKE_IDENTITY_SEED` when configured; otherwise it creates an Ed25519 seed and persists it
+wrapped by the customer-independent instance KEK in `lake_identity`. `GET /v1/identity` publishes
+the identity document. `rotate_identity` creates and verifies the TAAP dual-signed rotation
+document, appends it to the identity chain, and records its audit event.
+
+The `audit` capability and its server-rendered page filter by principal, object, outcome and time.
+`export_audit` returns the matching rows as JSON lines for evidence handling and round-trip
+verification. Retention is configurable upward per customer with a non-negotiable 400-day floor;
+an attempted deletion below the floor is refused and recorded as a `retention` event. SOC 2
+evidence (access reviews, change management) is a query over this stream plus the forge's change
+records; nothing is reconstructed after the fact.
 
 ## The data plane: repositories on Zetta
 
