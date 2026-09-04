@@ -1378,6 +1378,46 @@ void register_sso_capabilities(Registry& registry) {
                                  : no_store();
         }});
     registry.add(Capability{
+        .name = "scim_upsert_user",
+        .title = "SCIM user resource",
+        .description = "Authenticate a provider bearer token and apply a SCIM user resource.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"bearer_token", {{"type", "string"}}},
+                           {"external_id", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"active", {{"type", "boolean"}}},
+                           {"attributes", {{"type", "object"}}}}},
+                         {"required",
+                          json::array(
+                              {"provider_id", "bearer_token", "external_id", "taap_id", "active"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            const auto provider =
+                context.store->authenticate_scim(input.at("provider_id"), input.at("bearer_token"));
+            if (!provider)
+                return from_store_error(provider.error());
+            return one_result(
+                context.store->upsert_scim_user({input.at("provider_id"),
+                                                 input.at("external_id"),
+                                                 input.value("email", ""),
+                                                 input.value("display_name", ""),
+                                                 input.at("taap_id"),
+                                                 input.at("active"),
+                                                 input.value("attributes", json::object())}));
+        }});
+    registry.add(Capability{
         .name = "upsert_scim_group",
         .title = "Provision SCIM group",
         .description = "Create or update a SCIM group and map its users to a lake team.",
