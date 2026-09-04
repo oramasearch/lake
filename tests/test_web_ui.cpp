@@ -62,11 +62,13 @@ TEST(WebUi, IdentityFormsUseCapabilityBackedActions) {
     EXPECT_NE(sign_in.find("action=\"/identity/oauth\""), std::string::npos);
     EXPECT_EQ(sign_in.find("<script"), std::string::npos);
 
-    const std::string verify = lake::api::web_ui_mfa("", "", false);
+    const std::string verify = lake::api::web_ui_mfa("", "", {}, false);
     EXPECT_NE(verify.find("action=\"/identity/mfa/verify\""), std::string::npos);
-    const std::string enroll = lake::api::web_ui_mfa("", "secret<&", true);
+    const std::string enroll = lake::api::web_ui_mfa("", "otpauth://secret<&", {"recover<&"}, true);
     EXPECT_NE(enroll.find("action=\"/identity/mfa/enroll\""), std::string::npos);
-    EXPECT_NE(enroll.find("secret&lt;&amp;"), std::string::npos);
+    EXPECT_NE(enroll.find("action=\"/identity/mfa/disable\""), std::string::npos);
+    EXPECT_NE(enroll.find("otpauth://secret&lt;&amp;"), std::string::npos);
+    EXPECT_NE(enroll.find("recover&lt;&amp;"), std::string::npos);
     EXPECT_EQ(enroll.find("<script"), std::string::npos);
 }
 

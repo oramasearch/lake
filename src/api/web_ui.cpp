@@ -492,27 +492,39 @@ std::string web_ui_sign_in(std::string_view error) {
     return web_ui_shell("lake — sign in", "identity", content, false);
 }
 
-std::string web_ui_mfa(std::string_view error, std::string_view secret, bool signed_in) {
+std::string web_ui_mfa(std::string_view error,
+                       std::string_view otpauth_uri,
+                       const std::vector<std::string>& recovery_codes,
+                       bool signed_in) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Multi-factor authentication</h1>";
     content += error_markup(error);
     if (signed_in) {
-        content += "<p class=\"sub\">Enroll a TOTP authenticator for password "
-                   "sign-in.</p>";
-        if (!secret.empty()) {
-            content +=
-                std::format("<p class=\"notice\">Add this setup secret now: <code>{}</code></p>",
-                            web_ui_escape(secret));
+        content += "<p class=\"sub\">Enroll or replace a TOTP authenticator for password "
+                   "sign-in. A new enrollment replaces existing recovery codes.</p>";
+        if (!otpauth_uri.empty()) {
+            content += std::format(
+                "<p class=\"notice\">Save this authenticator URI now: <code>{}</code></p>",
+                web_ui_escape(otpauth_uri));
+            content += "<h2>Recovery codes</h2><p>Save these now. Each code works once.</p><ul>";
+            for (const std::string& code : recovery_codes) {
+                content += std::format("<li><code>{}</code></li>", web_ui_escape(code));
+            }
+            content += "</ul>";
         }
         content +=
             R"html(<form class="stack" method="post" action="/identity/mfa/enroll">
-<button class="primary" type="submit">Create setup secret</button></form>)html";
+<button class="primary" type="submit">Enroll or replace MFA</button></form>
+<h2>Disable MFA</h2>
+<form class="stack" method="post" action="/identity/mfa/disable">
+<label>Current TOTP or recovery code<input type="text" name="code" autocomplete="one-time-code" required></label>
+<button type="submit">Disable MFA</button></form>)html";
     } else {
         content +=
-            R"html(<p class="sub">Verify your password and current six-digit TOTP code.</p>
+            R"html(<p class="sub">Verify your password with a current TOTP or unused recovery code.</p>
 <form class="stack" method="post" action="/identity/mfa/verify">
 <label>Email<input type="email" name="email" autocomplete="username" required></label>
 <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
-<label>TOTP code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required></label>
+<label>TOTP or recovery code<input type="text" name="code" autocomplete="one-time-code" required></label>
 <label>Device name<input type="text" name="device_name" value="browser" required></label>
 <button class="primary" type="submit">Verify and sign in</button></form>)html";
     }

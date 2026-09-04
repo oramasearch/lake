@@ -242,6 +242,9 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
     const std::string page = http_get(server.port(), "/sign-up");
     EXPECT_NE(page.find(" 200 "), std::string::npos);
     EXPECT_NE(page.find("action=\"/identity/sign-up\""), std::string::npos);
+    const std::string mfa_challenge = http_get(server.port(), "/mfa");
+    EXPECT_NE(mfa_challenge.find(" 200 "), std::string::npos);
+    EXPECT_NE(mfa_challenge.find("action=\"/identity/mfa/verify\""), std::string::npos);
 
     const std::string operator_page =
         http_get(server.port(), "/sign-in", "Bearer operator-page-token");
@@ -270,6 +273,17 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
         http_request(server.port(), "GET", "/sessions", "", "text/plain", cookie);
     EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
     EXPECT_NE(sessions.find("Sessions and devices"), std::string::npos);
+
+    const std::string mfa_enrollment = http_request(server.port(),
+                                                    "POST",
+                                                    "/identity/mfa/enroll",
+                                                    "",
+                                                    "application/x-www-form-urlencoded",
+                                                    cookie);
+    EXPECT_NE(mfa_enrollment.find(" 200 "), std::string::npos) << mfa_enrollment;
+    EXPECT_NE(mfa_enrollment.find("otpauth://totp/lake:"), std::string::npos);
+    EXPECT_NE(mfa_enrollment.find("Recovery codes"), std::string::npos);
+    EXPECT_NE(mfa_enrollment.find("action=\"/identity/mfa/disable\""), std::string::npos);
 
     const std::string rest_signup = http_request(
         server.port(),
@@ -538,6 +552,7 @@ TEST(Rest, PathsMethodsAndQueryCoercion) {
     const json envelope = rest_envelope(ApiResult::failure("not_found", "gone", "/id"));
     EXPECT_FALSE(envelope["ok"]);
     EXPECT_EQ(envelope["error"]["code"], "not_found");
+    EXPECT_EQ(rest_status(ApiResult::failure("mfa_required", "verify MFA")), 403);
     EXPECT_EQ(rest_status(ApiResult::failure("store_unavailable", "")), 503);
 }
 
@@ -705,6 +720,40 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     user_context.instance_kek = s.ctx.instance_kek;
     user_context.session_credential = true;
     user_context.scopes = principal->scopes;
+
+    const ApiResult enrollment = s.registry.call("enroll_mfa", json::object(), user_context);
+    ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
+    EXPECT_TRUE(
+        enrollment.value["otpauth_uri"].get<std::string>().starts_with("otpauth://totp/lake:"));
+    ASSERT_EQ(enrollment.value["recovery_codes"].size(), 8);
+    EXPECT_FALSE(enrollment.value.contains("secret"));
+    const std::string first_recovery = enrollment.value["recovery_codes"][0];
+    const std::string second_recovery = enrollment.value["recovery_codes"][1];
+
+    const json sign_in_input = {{"email", "ada@example.com"},
+                                {"password", "correct horse battery"}};
+    const ApiResult mfa_required = s.call("sign_in_password", sign_in_input);
+    EXPECT_EQ(mfa_required.error.code, "mfa_required");
+    const ApiResult verified = s.call("verify_mfa",
+                                      {{"email", "ada@example.com"},
+                                       {"password", "correct horse battery"},
+                                       {"code", first_recovery}});
+    ASSERT_TRUE(verified.ok) << verified.error.message;
+    EXPECT_TRUE(s.store.context_for(verified.value["secret"]));
+    const ApiResult reused = s.call("verify_mfa",
+                                    {{"email", "ada@example.com"},
+                                     {"password", "correct horse battery"},
+                                     {"code", first_recovery}});
+    EXPECT_FALSE(reused.ok);
+
+    const ApiResult stale_disable =
+        s.registry.call("disable_mfa", {{"code", first_recovery}}, user_context);
+    EXPECT_EQ(stale_disable.error.code, "unauthorized");
+    const ApiResult disabled =
+        s.registry.call("disable_mfa", {{"code", second_recovery}}, user_context);
+    ASSERT_TRUE(disabled.ok) << disabled.error.message;
+    EXPECT_TRUE(s.call("sign_in_password", sign_in_input).ok);
+
     const ApiResult token =
         s.registry.call("create_token",
                         {{"name", "read sessions"}, {"scopes", json::array({"list_sessions"})}},

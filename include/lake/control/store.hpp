@@ -255,9 +255,6 @@ public:
     // request so a revoked session or device is rejected immediately.
     virtual Result<IssuedSession> sign_up_password(const NewPasswordUser&) = 0;
     virtual Result<IssuedSession> sign_in_password(const PasswordSignIn&) = 0;
-    virtual Result<void> enroll_totp(const std::string& user_id,
-                                     const std::string& pool_id,
-                                     const std::string& secret) = 0;
     virtual Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
                                              const std::string& pool_id) = 0;
     virtual Result<void> disable_mfa(const std::string& user_id,

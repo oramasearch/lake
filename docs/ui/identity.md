@@ -8,7 +8,8 @@ The identity UI exposes the identity-core capabilities as server-rendered pages:
 |---|---|---|
 | Sign up | `GET /sign-up`, `POST /identity/sign-up` | `sign_up_password` |
 | Sign in | `GET /sign-in`, `POST /identity/sign-in`, `POST /identity/oauth` | `sign_in_password`, `start_oauth` |
-| MFA | `GET /mfa`, `POST /identity/mfa/verify`, `POST /identity/mfa/enroll` | `verify_totp`, `enroll_totp` |
+| MFA challenge | `GET /mfa`, `POST /identity/mfa/verify` | `verify_mfa` with a TOTP or one-use recovery code |
+| MFA management | `GET /mfa`, `POST /identity/mfa/enroll`, `POST /identity/mfa/disable` | `enroll_mfa`, `disable_mfa` |
 | Passkey sign-in | `GET /passkey-sign-in` | `begin_passkey_sign_in`, `sign_in_passkey` |
 | Passkey registration | `GET /passkeys` | `begin_passkey_registration`, `register_passkey` |
 | Sessions and devices | `GET /sessions`, `POST /identity/session/revoke`, `POST /identity/device/revoke` | `list_sessions`, `revoke_session`, `list_devices`, `revoke_device` |
@@ -17,7 +18,9 @@ The identity UI exposes the identity-core capabilities as server-rendered pages:
 The `POST /identity/*` routes are form adapters. They construct the same JSON input and call the
 single registry, so a page cannot perform an action the REST and MCP surfaces do not expose.
 Passwords and TAAP documents are never put in a URL. A newly created token is shown once, escaped
-inside the response page.
+inside the response page. MFA enrollment likewise shows the authenticator URI and recovery codes
+once, with every value HTML-escaped. Re-enrollment replaces the current seed and recovery codes;
+disablement requires a fresh TOTP or unused recovery code.
 
 ## Browser sessions
 
@@ -44,8 +47,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure -R 'WebUi|IdentityHttp|WebAuthn'
 ```
 
-The renderer tests cover form actions, escaping, absence of scripts, and the one-script passkey
-exception. `IdentityHttp.PagesIssueAndResolveHttpOnlySessions` submits the sign-up form, checks the
+The renderer tests cover MFA enrollment, challenge and disable forms, one-use value escaping,
+absence of scripts, and the one-script passkey exception.
+`IdentityHttp.PagesIssueAndResolveHttpOnlySessions` submits the sign-up form, checks the
 cookie attributes, loads the authenticated sessions page, and checks that a REST sign-up response
 also sets an HttpOnly cookie.
 

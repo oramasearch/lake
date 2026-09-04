@@ -18,7 +18,8 @@ else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
 
-Identity-core status on this branch: verified TAAP documents, password plus TOTP, persisted
+Identity-core status on this branch: verified TAAP documents, password plus TOTP with one-use
+recovery codes and fresh-verification disablement, persisted
 WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
 hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use those capabilities.
 The signed audit substrate from #18 is integrated. A distinct signed passkey-binding attestation

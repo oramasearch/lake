@@ -586,19 +586,6 @@ Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& inpu
     return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
 }
 
-Result<void> InMemoryStore::enroll_totp(const std::string& user_id,
-                                        const std::string& pool_id,
-                                        const std::string& secret) {
-    std::lock_guard lock(mutex_);
-    for (auto& credential : passwords_) {
-        if (credential.user_id == user_id && credential.pool_id == pool_id) {
-            credential.totp_secret = secret;
-            return {};
-        }
-    }
-    return std::unexpected(StoreError{"not_found", "password credential not found"});
-}
-
 Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
                                                 const std::string& pool_id) {
     MfaEnrollment enrollment;
@@ -607,7 +594,12 @@ Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
         return std::unexpected(StoreError{"store_error", "could not create TOTP secret"});
     }
     for (int index = 0; index < 8; ++index) {
-        enrollment.recovery_codes.push_back(identity_crypto::random_secret().substr(0, 12));
+        const std::string code = identity_crypto::random_secret().substr(0, 12);
+        if (code.size() != 12) {
+            return std::unexpected(
+                StoreError{"store_error", "could not create MFA recovery codes"});
+        }
+        enrollment.recovery_codes.push_back(code);
     }
     std::lock_guard lock(mutex_);
     for (auto& credential : passwords_) {
@@ -615,7 +607,14 @@ Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
             credential.totp_secret = enrollment.secret;
             credential.recovery_hashes.clear();
             for (const std::string& code : enrollment.recovery_codes) {
-                credential.recovery_hashes.push_back(identity_crypto::hash_secret(code));
+                const std::string hash = identity_crypto::hash_secret(code);
+                if (hash.empty()) {
+                    credential.totp_secret.clear();
+                    credential.recovery_hashes.clear();
+                    return std::unexpected(
+                        StoreError{"store_error", "could not protect MFA recovery codes"});
+                }
+                credential.recovery_hashes.push_back(hash);
             }
             return enrollment;
         }
@@ -628,14 +627,22 @@ Result<void> InMemoryStore::disable_mfa(const std::string& user_id,
                                         const std::string& code) {
     std::lock_guard lock(mutex_);
     for (auto& credential : passwords_) {
-        if (credential.user_id == user_id && credential.pool_id == pool_id &&
-            identity_crypto::verify_totp(credential.totp_secret, code)) {
+        if (credential.user_id != user_id || credential.pool_id != pool_id ||
+            credential.totp_secret.empty()) {
+            continue;
+        }
+        const bool valid_totp = identity_crypto::verify_totp(credential.totp_secret, code);
+        const auto recovery = std::find_if(
+            credential.recovery_hashes.begin(),
+            credential.recovery_hashes.end(),
+            [&](const std::string& hash) { return identity_crypto::verify_secret(hash, code); });
+        if (valid_totp || recovery != credential.recovery_hashes.end()) {
             credential.totp_secret.clear();
             credential.recovery_hashes.clear();
             return {};
         }
     }
-    return std::unexpected(StoreError{"unauthorized", "a fresh TOTP verification is required"});
+    return std::unexpected(StoreError{"unauthorized", "a fresh MFA verification is required"});
 }
 
 Result<IssuedSession> InMemoryStore::sign_in_totp(const PasswordSignIn& input) {

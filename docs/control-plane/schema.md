@@ -92,11 +92,18 @@ attempt in the signed audit stream.
 | `oauth_providers` | Pool-scoped provider configuration and encrypted client secret. |
 | `identity_oauth_flows` | Five-minute, one-use OAuth state, encrypted PKCE verifier, nonce, and initiating device. |
 | `identity_webauthn_challenges` | Five-minute, one-use registration/assertion challenge with pool, RP ID, and origin. |
-| `identity_core_guard` | Final guard table for operator schema application. |
+| `identity_core_guard` | Guard table for the identity-core migration. |
 
 Migration numbers `0004`–`0006` landed first from parallel branches, so identity core follows as
 `0007`. It uses the signed `audit_events` and `lake_identity` tables from migration `0005`; it does
 not recreate the provisional audit shape from the earlier identity checkpoint.
+
+## MFA recovery (migration `0008_mfa_recovery`)
+
+The `credentials` kind constraint accepts `recovery`. Each MFA enrollment stores its TOTP seed as
+an encrypted `totp` credential and eight independently Argon2id-hashed recovery credentials.
+Successful recovery-code verification revokes that row immediately. Re-enrollment and verified
+disablement revoke all prior recovery rows. `identity_mfa_guard` is the migration guard.
 
 ## How it is applied
 
@@ -104,7 +111,7 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`identity_core_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`identity_mfa_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -121,7 +128,7 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    the Phase 6 waves this copy and the `GuardTable` update land once per wave in a separate operator
    pull request (orama-operator #134 carries migration `0006`; identity core still needs its
    operator copy), never
-   a partial schema between waves.
+   a partial schema between waves. The `0008_mfa_recovery` copy remains required in the operator.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
    lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a
@@ -134,5 +141,5 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version='0007_identity_core'"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery')"
 ```

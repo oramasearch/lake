@@ -365,11 +365,6 @@ public:
     sign_in_password(const control::PasswordSignIn& value) override {
         return call("sign_in_password", [&] { return store_->sign_in_password(value); });
     }
-    control::Result<void> enroll_totp(const std::string& user_id,
-                                      const std::string& pool_id,
-                                      const std::string& secret) override {
-        return call("enroll_totp", [&] { return store_->enroll_totp(user_id, pool_id, secret); });
-    }
     control::Result<control::MfaEnrollment> enroll_mfa(const std::string& user_id,
                                                        const std::string& pool_id) override {
         return call("enroll_mfa", [&] { return store_->enroll_mfa(user_id, pool_id); });

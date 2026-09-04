@@ -890,6 +890,7 @@ struct ApiServer::Impl {
             "/identity/sign-in",
             "/identity/mfa/verify",
             "/identity/mfa/enroll",
+            "/identity/mfa/disable",
             "/identity/oauth",
             "/identity/session/revoke",
             "/identity/device/revoke",
@@ -1322,7 +1323,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_mfa("", "", context.authorized),
+                         web_ui_mfa("", "", {}, context.authorized),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -1472,7 +1473,7 @@ struct ApiServer::Impl {
         if (!result.ok) {
             co_return co_await send_text(route,
                                          http::int_to_status(rest_status(result)),
-                                         web_ui_mfa(result.error.message, "", false),
+                                         web_ui_mfa(result.error.message, "", {}, false),
                                          "text/html; charset=utf-8",
                                          "no-store");
         }
@@ -1490,17 +1491,46 @@ struct ApiServer::Impl {
         ApiContext context = context_for(route);
         const ApiResult result = registry.call("enroll_mfa", nlohmann::json::object(), context);
         if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_mfa(result.error.message, "", context.authorized),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_mfa(result.error.message, "", {}, context.authorized),
+                "text/html; charset=utf-8",
+                "no-store");
         }
-        co_return co_await send_text(route,
-                                     http::status::ok,
-                                     web_ui_mfa("", result.value.value("secret", ""), true),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
+        std::vector<std::string> recovery_codes;
+        for (const nlohmann::json& code :
+             result.value.value("recovery_codes", nlohmann::json::array())) {
+            if (code.is_string()) {
+                recovery_codes.push_back(code.get<std::string>());
+            }
+        }
+        co_return co_await send_text(
+            route,
+            http::status::ok,
+            web_ui_mfa("", result.value.value("otpauth_uri", ""), recovery_codes, true),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_identity_mfa_disable(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result =
+            registry.call("disable_mfa", {{"code", form_field(body, "code")}}, context);
+        if (!result.ok) {
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_mfa(result.error.message, "", {}, context.authorized),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        co_return co_await redirect(route, "/mfa");
     }
 
     boost::http::route_task serve_identity_oauth(boost::http::route_params& route) {
@@ -2190,6 +2220,12 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/mfa/enroll", impl.serve_identity_mfa_enroll(route));
+               });
+    router.add(http::method::post,
+               "/identity/mfa/disable",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/identity/mfa/disable", impl.serve_identity_mfa_disable(route));
                });
     router.add(http::method::post,
                "/identity/oauth",

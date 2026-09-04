@@ -84,12 +84,30 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
     ASSERT_TRUE(token) << token.error().message;
     EXPECT_TRUE(store->context_for(token->secret));
 
-    const auto enrolled = store->enroll_totp(context->user_id, "lake", "0011223344556677");
+    const auto enrolled = store->enroll_mfa(context->user_id, "lake");
     ASSERT_TRUE(enrolled) << enrolled.error().message;
+    ASSERT_EQ(enrolled->recovery_codes.size(), 8);
     const auto mfa_required = store->sign_in_password(
         {"lake", email, "correct horse battery staple", "", "integration test"});
     ASSERT_FALSE(mfa_required);
     EXPECT_EQ(mfa_required.error().code, "mfa_required");
+    const auto verified = store->sign_in_totp({"lake",
+                                               email,
+                                               "correct horse battery staple",
+                                               enrolled->recovery_codes[0],
+                                               "integration test"});
+    ASSERT_TRUE(verified) << verified.error().message;
+    EXPECT_TRUE(store->context_for(verified->secret));
+    EXPECT_FALSE(store->sign_in_totp({"lake",
+                                      email,
+                                      "correct horse battery staple",
+                                      enrolled->recovery_codes[0],
+                                      "integration test"}));
+    EXPECT_FALSE(store->disable_mfa(context->user_id, "lake", enrolled->recovery_codes[0]));
+    const auto disabled = store->disable_mfa(context->user_id, "lake", enrolled->recovery_codes[1]);
+    ASSERT_TRUE(disabled) << disabled.error().message;
+    EXPECT_TRUE(store->sign_in_password(
+        {"lake", email, "correct horse battery staple", "", "integration test"}));
 
     const std::string provider_name = "stub-" + std::to_string(static_cast<long long>(getpid()));
     const auto registered = store->register_oauth_provider({"lake",

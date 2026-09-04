@@ -30,9 +30,10 @@ page. Those capabilities use the policy metadata and are recorded by the registr
 Lake links libliquid as a library-only submodule and opens one customer store at
 `LAKE_STORE_ROOT/<customer id>/store`; liquid #160's contract is pinned, while push and pull await
 the public repository/store binding and protocol codec required by lake's server. Identity core
-adds migration `0007_identity_core`, verified TAAP documents, password plus TOTP, persisted
-WebAuthn, OAuth, row-resolved sessions, scoped tokens, device revocation, and the hosted identity
-pages. Identity documents are verified through libliquid's public canonical-CBOR codec.
+adds migrations `0007_identity_core` and `0008_mfa_recovery`, verified TAAP documents, password
+plus TOTP with one-use recovery codes, persisted WebAuthn, OAuth, row-resolved sessions, scoped
+tokens, device revocation, and the hosted identity pages. Identity documents are verified through
+libliquid's public canonical-CBOR codec.
 
 ## Where to read Zetta
 
@@ -94,7 +95,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `identity_core_guard` today, versioned by content hash).
+  `identity_mfa_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

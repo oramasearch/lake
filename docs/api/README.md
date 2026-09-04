@@ -9,8 +9,9 @@ an object resolver, and a handler. REST and MCP go through the same `Registry::c
 authorize, validate and fail identically.
 
 **Envelope.** Every response is `{ ok, value | error{code, message, path}, duration_ms }`.
-Status by error code: `invalid_input` 400, `unauthorized` 403, `not_found` / `unknown_capability`
-404, `conflict` 409, `store_unavailable` 503, anything else 500. MCP `tools/call` returns the same
+Status by error code: `invalid_input` 400, `unauthorized` / `mfa_required` 403, `not_found` /
+`unknown_capability` 404, `conflict` 409, `store_unavailable` 503, anything else 500. MCP
+`tools/call` returns the same
 envelope as `structuredContent` (and as text), with `isError` set.
 
 **Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
@@ -53,8 +54,8 @@ the lake `identity`, and the identity sign-up/sign-in entry capabilities documen
 | `export_audit` | read | audit filters | `{jsonl}` | [audit.md](audit.md) |
 | `verify_audit` | read | — | `{verified: true}` | [audit.md](audit.md) |
 | `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days}` | [audit.md](audit.md) |
-| `sign_up_password`, `sign_in_password`, `verify_totp` | action, public entry | credentials and optional TOTP code | browser session + secret | [identity.md](identity.md) |
-| `enroll_totp` | action | authenticated user | setup secret | [identity.md](identity.md) |
+| `sign_up_password`, `sign_in_password`, `verify_mfa` | action, public entry | password credentials; verify also takes a TOTP or recovery code | browser session + secret | [identity.md](identity.md) |
+| `enroll_mfa`, `disable_mfa` | action | authenticated user; disable takes a fresh TOTP or recovery code | one-use setup URI and recovery codes, or confirmation | [identity.md](identity.md) |
 | `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation | [identity.md](identity.md) |
 | `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |
 | `register_oauth_provider` | action, operator | issuer, client id, secret, scopes | confirmation | [identity.md](identity.md) |

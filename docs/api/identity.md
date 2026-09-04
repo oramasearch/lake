@@ -3,21 +3,26 @@
 ## What
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,
-and MCP tools. `sign_up_password`, `sign_in_password`, `verify_totp`,
+and MCP tools. `sign_up_password`, `sign_in_password`, `verify_mfa`,
 `begin_passkey_sign_in`, `sign_in_passkey`, and `start_oauth` are unauthenticated entry points.
-`enroll_totp`, `begin_passkey_registration`, `register_passkey`,
+`enroll_mfa`, `disable_mfa`, `begin_passkey_registration`, `register_passkey`,
 `create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
 the same row-resolved session or operator credential as every other protected capability.
 
 `sign_up_password` and `sign_in_password` issue browser sessions. Passwords use OpenSSL 3.6.3
 `EVP_KDF` `ARGON2ID` with 64 MiB memory, three iterations, one lane, and a unique 128-bit salt.
 A user with an enrolled TOTP factor receives `mfa_required` from password sign-in and must use
-`verify_totp`. Tokens are named sessions with explicit capability-name scopes. Ordinary tokens
+`verify_mfa` with a current TOTP or an unused recovery code. `enroll_mfa` returns an `otpauth` URI
+and eight recovery codes once; replacing the enrollment invalidates the previous seed and codes.
+Recovery codes are single-use. `disable_mfa` requires a fresh TOTP or unused recovery code and
+revokes the seed and every remaining recovery code. Tokens are named sessions with explicit
+capability-name scopes. Ordinary tokens
 default to a 30-day expiry; a non-expiring static token requires a non-empty reason.
 
 TOTP seeds are never stored in credential JSON as plaintext. OpenSSL AES-256-GCM seals each value
 with a purpose-specific random data key; `keystore` stores that key wrapped under the required
-32-byte hexadecimal `LAKE_INSTANCE_KEK`. OAuth client secrets use the same envelope format.
+32-byte hexadecimal `LAKE_INSTANCE_KEK`. Recovery codes use independent Argon2id hashes and are
+revoked as they are consumed. OAuth client secrets use the same envelope format.
 
 `register_oauth_provider` records the issuer, client id, encrypted client secret, and requested
 scopes for a provider in a user pool. `start_oauth` creates a five-minute, one-use state record,
@@ -75,13 +80,14 @@ cmake --build build
 ctest --test-dir build --output-on-failure -R 'Identity|OAuth|WebAuthn'
 ```
 
-The `Identity.PasswordSessionsTokensAndRevocation` test covers Argon2id password sign-up, session
+The `Identity.PasswordSessionsTokensAndRevocation` test covers Argon2id password sign-up, MFA
+enrollment, recovery-code sign-in and one-use enforcement, fresh-verification disablement, session
 resolution, narrowed token scope, static-token reason validation, and next-request revocation.
 `OAuth.AuthorizationCodePkceOidcAndCachedJwks` runs the browser redirects against a stub OpenID
 Connect provider, verifies PKCE at its token endpoint, signs an id token, serves JWKS, checks the
 session cookie, proves cache reuse, and rejects state replay.
-The Postgres identity test also reads back the encrypted provider secret and proves that persisted
-OAuth state returns its verifier once and only once.
+The Postgres identity test repeats the MFA recovery and disable flow, reads back the encrypted
+provider secret, and proves that persisted OAuth state returns its verifier once and only once.
 `WebAuthn.PersistedRegistrationAssertionAndSignCount` uses a software ES256 authenticator to
 produce `clientDataJSON`, authenticator data, a CBOR attestation object and signed assertions. It
 proves origin binding, first-attempt challenge consumption, session issue and sign-count replay

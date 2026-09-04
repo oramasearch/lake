@@ -2,7 +2,8 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `identity_core_guard` table, versioned by content hash).
+-- PostgresSchema (one transaction, guarded on the `identity_mfa_guard` table, versioned by
+-- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
 -- Postgres 18. Applied with `psql --single-transaction`: no BEGIN/COMMIT here. Idempotent.
@@ -323,8 +324,8 @@ CREATE TABLE IF NOT EXISTS repository_refs (
 INSERT INTO schema_migrations (version) VALUES ('0006_repository_lifecycle') ON CONFLICT DO NOTHING;
 -- Identity core (migration 0007): credentials prove control of a user's durable TAAP identity;
 -- sessions are row-resolved bearer credentials, so revocation is effective on the next request.
--- `identity_core_guard` is intentionally the final table: the operator uses it as the guard for
--- this wave until its incremental migration work (orama-operator #126) lands.
+-- Each migration ends in a guard table. The operator uses the newest one until its incremental
+-- migration work (orama-operator #126) lands.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS identity_documents (
     user_id       uuid        PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -364,8 +365,6 @@ CREATE TABLE IF NOT EXISTS credentials (
     CONSTRAINT credentials_subject_unique UNIQUE (pool_id, kind, subject)
 );
 CREATE INDEX IF NOT EXISTS credentials_user_id_idx ON credentials (user_id, created_at DESC);
-ALTER TABLE credentials DROP CONSTRAINT IF EXISTS credentials_kind_check;
-ALTER TABLE credentials ADD CONSTRAINT credentials_kind_check CHECK (kind IN ('password', 'totp', 'recovery', 'passkey', 'oauth', 'admin'));
 DROP TRIGGER IF EXISTS credentials_set_updated_at ON credentials;
 CREATE TRIGGER credentials_set_updated_at BEFORE UPDATE ON credentials FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
@@ -453,4 +452,14 @@ CREATE TABLE IF NOT EXISTS identity_core_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0007_identity_core') ON CONFLICT DO NOTHING;
+
+-- MFA recovery (migration 0008): recovery codes are password-grade hashes, used once and revoked.
+ALTER TABLE credentials DROP CONSTRAINT IF EXISTS credentials_kind_check;
+ALTER TABLE credentials ADD CONSTRAINT credentials_kind_check
+    CHECK (kind IN ('password', 'totp', 'recovery', 'passkey', 'oauth', 'admin'));
+
+CREATE TABLE IF NOT EXISTS identity_mfa_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
 INSERT INTO schema_migrations (version) VALUES ('0008_mfa_recovery') ON CONFLICT DO NOTHING;

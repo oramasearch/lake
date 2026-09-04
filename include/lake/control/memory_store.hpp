@@ -78,9 +78,6 @@ public:
     Result<void> set_audit_retention_days(const std::string& customer_id, int days) override;
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
-    Result<void> enroll_totp(const std::string& user_id,
-                             const std::string& pool_id,
-                             const std::string& secret) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
                                      const std::string& pool_id) override;
     Result<void> disable_mfa(const std::string& user_id,

@@ -652,12 +652,11 @@ void register_identity_capabilities(Registry& registry) {
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
-        .output_schema =
-            {{"type", "object"},
-             {"properties",
-              {{"secret",
-                {{"type", "string"}},
-                {"otpauth_uri", {{"type", "string"}}, {"recovery_codes", {{"type", "array"}}}}}}}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"otpauth_uri", {{"type", "string"}}},
+                            {"recovery_codes",
+                             {{"type", "array"}, {"items", {{"type", "string"}}}}}}}},
         .kind = CapabilityKind::Action,
         .object = "principal",
         .action = "write",
@@ -668,11 +667,32 @@ void register_identity_capabilities(Registry& registry) {
             auto result = context.store->enroll_mfa(context.acting_user_id, context.pool_id);
             if (!result)
                 return from_store_error(result.error());
-            return ApiResult::success({{"secret", result->secret},
-                                       {"otpauth_uri",
+            return ApiResult::success({{"otpauth_uri",
                                         "otpauth://totp/lake:" + context.acting_user_id +
                                             "?secret=" + result->secret + "&issuer=lake"},
                                        {"recovery_codes", result->recovery_codes}});
+        }});
+    registry.add(Capability{
+        .name = "disable_mfa",
+        .title = "Disable MFA",
+        .description = "Disable TOTP MFA after a fresh TOTP or recovery-code verification.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"code", {{"type", "string"}}}}},
+                         {"required", json::array({"code"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            const auto result = context.store->disable_mfa(
+                context.acting_user_id, context.pool_id, input.value("code", ""));
+            return result ? ApiResult::success({{"disabled", true}})
+                          : from_store_error(result.error());
         }});
     registry.add(Capability{
         .name = "begin_passkey_registration",

@@ -46,7 +46,10 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter);
 std::string web_ui_sign_up(std::string_view error);
 std::string web_ui_sign_in(std::string_view error);
-std::string web_ui_mfa(std::string_view error, std::string_view secret, bool signed_in);
+std::string web_ui_mfa(std::string_view error,
+                       std::string_view otpauth_uri,
+                       const std::vector<std::string>& recovery_codes,
+                       bool signed_in);
 std::string web_ui_passkeys(std::string_view error);
 std::string web_ui_passkey_sign_in(std::string_view error);
 std::string web_ui_sessions(const std::vector<control::Session>& sessions,

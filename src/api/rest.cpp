@@ -80,13 +80,25 @@ nlohmann::json rest_input_from_query(const Capability& capability,
 }
 
 int rest_status(const ApiResult& result) {
-    if (result.ok) return 200;
+    if (result.ok) {
+        return 200;
+    }
     const std::string& code = result.error.code;
-    if (code == "invalid_input") return 400;
-    if (code == "unauthorized") return 403;
-    if (code == "not_found" || code == "unknown_capability") return 404;
-    if (code == "conflict") return 409;
-    if (code == "store_unavailable") return 503;
+    if (code == "invalid_input") {
+        return 400;
+    }
+    if (code == "unauthorized" || code == "mfa_required") {
+        return 403;
+    }
+    if (code == "not_found" || code == "unknown_capability") {
+        return 404;
+    }
+    if (code == "conflict") {
+        return 409;
+    }
+    if (code == "store_unavailable") {
+        return 503;
+    }
     return 500;
 }
 
