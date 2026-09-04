@@ -34,9 +34,11 @@ cmake --build build
 ctest --test-dir build --output-on-failure -R 'Sso|Scim|Postgres'
 ```
 
-The SSO tests configure one SAML and one OIDC stub provider, cover both successful assertions,
-verify a refused unlisted issuer is audited, and exercise SCIM create, update, group membership
-replacement, and deactivation with immediate session rejection.
+The in-memory SSO tests configure one SAML and one OIDC stub provider, cover both successful
+assertions, verify a refused unlisted issuer is audited, and exercise SCIM create, update, group
+membership replacement, and deactivation with immediate session rejection. The Postgres identity
+test repeats provider registration, federation policy, SCIM user/group writes, sign-in, and
+session revocation. Set `LAKE_TEST_DB_URI` to run its database-backed portion.
 
 ## How to change
 
