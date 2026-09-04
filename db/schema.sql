@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `audit_events` table, versioned by content hash).
+-- PostgresSchema (one transaction, guarded on the `repository_refs` table, versioned by content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
 -- Postgres 18. Applied with `psql --single-transaction`: no BEGIN/COMMIT here. Idempotent.
@@ -296,3 +296,28 @@ DROP TRIGGER IF EXISTS audit_retention_set_updated_at ON audit_retention;
 CREATE TRIGGER audit_retention_set_updated_at BEFORE UPDATE ON audit_retention FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 INSERT INTO schema_migrations (version) VALUES ('0005_audit') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Repository lifecycle (migration 0006): names and owners can change, deletion is a tombstone
+-- retained before collection, and organization visibility sits between private and public.
+-- repository_refs is the migration guard for the operator. Lifecycle operations are recorded by
+-- the signed audit stream above through the capability registry.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+ALTER TABLE repositories ADD COLUMN IF NOT EXISTS retention_until timestamptz;
+ALTER TABLE repositories DROP CONSTRAINT IF EXISTS repository_visibility_check;
+ALTER TABLE repositories ADD CONSTRAINT repository_visibility_check
+    CHECK (visibility IN ('private', 'organization', 'public'));
+
+CREATE INDEX IF NOT EXISTS repositories_live_customer_id_idx
+    ON repositories (customer_id) WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS repository_refs (
+    repository_id uuid         NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    name          varchar(256) NOT NULL,
+    head          text         NOT NULL,
+    updated_at    timestamptz  NOT NULL DEFAULT now(),
+    PRIMARY KEY (repository_id, name)
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0006_repository_lifecycle') ON CONFLICT DO NOTHING;

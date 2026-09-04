@@ -118,26 +118,20 @@ an attempted deletion below the floor is refused and recorded as a `retention` e
 evidence (access reviews, change management) is a query over this stream plus the forge's change
 records; nothing is reconstructed after the fact.
 
-## The data plane: repositories on Zetta
+## The data plane: customer liquid stores
 
 The control plane (Postgres) knows *that* a repository exists, who may touch it and what its
-heads are. The content lives in Zetta (decision §6): lake keeps a liquid store per customer
-whose packs, index runs and manifest are Zetta objects under `customers/<id>/store/…`, written
-through Zetta's API from the lake pods, never through a shared filesystem. liquid's store code
-runs inside lake (lake links libliquid) with a Zetta-backed `store` backend behind the same
-interface the disk backend implements; the chunk index is liquid's own, as decided, held per
-customer store.
+heads are. The content lives in one liquid disk store per customer at
+`LAKE_STORE_ROOT/<customer id>/store`. `LAKE_STORE_ROOT` is a read-write PersistentVolume mounted
+by the operator (operator #132); lake does not provision or select that volume. liquid's store
+code runs inside lake as the library-only `liquid::liquid` target, and its pack files, index runs,
+manifest, and collector state remain libliquid-owned. The chunk index is liquid's own, held per
+customer store. Zetta remains lake’s serving-model reference, not this repository-data backend.
 
-**Push and pull (#12)** is liquid's own protocol over HTTP/1.1, not REAPI: a client `POST`s a
-sync request naming the repository, its heads and the drips it has since a cursor; lake answers
-with the drips it lacks and the chunk digests it needs (`find_missing` over the customer store);
-chunks travel in the existing pack framing in both directions; the CRDT sync framing from
-liquid's `src/crdt` carries the per-directory documents; every drip and change is verified
-against the TAAP signature of its author before it is stored, and a push is authorised at the
-change (decision: checked at commit, not at open). The client side is liquid's
-`remote_blob_source` plus a `sync_endpoint` implemented over `oramasearch/http`; the server side
-is capabilities in the registry (`push`, `pull`, `find_missing`, `refs`) rendered as REST like
-everything else, with streaming bodies through the one adapter TU.
+**Push and pull (#12)** waits for liquid #160 to publish `docs/library/sync.md` and its public
+sync API. Lake has the customer-store adapter and the library-only liquid dependency, but does
+not register `refs`, `find_missing`, `push`, or `pull` until it can implement the published
+contract without inventing wire framing.
 
 **Repository lifecycle (#13)** stays in the control plane: create, rename, transfer between
 customers, delete (tombstone first, content collected by the customer store's collector after
@@ -149,9 +143,13 @@ each an audit event.
 Indexed by blob once (content-addressed: a blob is indexed the first time any repository stores
 it), with oramacore-cpp's BM25F and positional trigram index as the engines, a hot index on branch
 tips and cold snapshots for releases and tags, publication atomic per change (a query sees a
-change entirely or not at all), and the policy engine filtering candidates at query time. Symbols
+change entirely or not at all), and the policy engine filtering candidates at query time. The
+shared framing will be published in liquid `docs/library/sync.md` and mirrored here as
+`docs/api/sync.md`; liquid #160 supplies the library export/import and CLI client. Until that
+library pin advances, lake does not implement or test a guessed server framing. Symbols
 from the compiler (liquid's build graph knows every translation unit) arrive when Phase 4's
-incremental engine lands. Index storage is Zetta objects beside the customer store.
+incremental engine lands. Search-index storage is specified by the search work; repository content
+and its liquid-owned metadata remain on the customer store volume.
 
 ## Secrets, encryption and PKI (decision §12)
 

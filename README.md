@@ -14,7 +14,12 @@ liquid is the tool. lake is where it collects.
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
 > The image `oramasearch/lake` (private) runs under the `Lake` CR on `orama-operator`; see
 > **Container image** below. GitHub Actions defines matching pull-request builds and tagged image
-> publishing; it becomes active once its required credentials are configured.
+> publishing; it becomes active once its required credentials are configured. Repository lifecycle
+> capabilities now create, rename, transfer, set `private` / `organization` / `public` visibility,
+> and tombstone repositories in migration `0006_repository_lifecycle`; every outcome is recorded
+> through the signed audit registry. Lake links libliquid as a library-only submodule and opens one
+> customer store below `LAKE_STORE_ROOT/<customer id>/store`. Push and pull remain deferred until
+> liquid #160 publishes its sync contract and public API.
 
 ## Build and run
 
@@ -86,7 +91,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
-| `modules/` | `capy`, `corosio`, `http`, `beast2`, `libpqxx` — vendored at Zetta's exact pins |
+| `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
 | `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, the authorization object graph, the lake identity and the signed audit stream. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 

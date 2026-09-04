@@ -31,9 +31,9 @@ LAKE_TEST_DB_URI='postgresql://postgres:postgres@127.0.0.1:55416/lake_test' \
 docker rm -f lake-postgres
 ```
 
-The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost,
-nlohmann/json and GoogleTest. Its key includes the hash of `CMakeLists.txt`; a missing cache is
-valid and CMake downloads the dependencies again.
+The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost and
+GoogleTest. libliquid supplies nlohmann/json and its own transitive dependencies. Its key includes
+the hash of `CMakeLists.txt`; a missing cache is valid and CMake downloads the dependencies again.
 
 ## Tagged image workflow
 

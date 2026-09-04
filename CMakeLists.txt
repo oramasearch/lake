@@ -38,25 +38,18 @@ option(LAKE_BUILD_TESTS "Build the test suite" ON)
 include(FetchContent)
 
 # -----------------------------------------------------------------------------
-# Vendored modules — the SAME stack, at the SAME pins, as Zetta (modules/).
-# Capy: coroutine foundation. Corosio: networking (private oramasearch carrier).
-# http + beast2: sans-I/O HTTP + router, and the coroutine-native HTTP/1 server.
-# Order matters: capy → OpenSSL → corosio → Boost core libs → http → beast2.
+# Vendored modules — libliquid is library-only and provides Capy and Corosio
+# to its consumers. http + beast2 remain lake's Zetta-shaped serving stack.
+# Order matters: liquid → OpenSSL → Boost core libs → http → beast2.
 # -----------------------------------------------------------------------------
-set(BOOST_CAPY_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BOOST_CAPY_BUILD_BENCH    OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/capy EXCLUDE_FROM_ALL)
+set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
 
 if(APPLE)
   list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/openssl@3)
 endif()
 find_package(OpenSSL REQUIRED)
-set(BOOST_COROSIO_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(BOOST_COROSIO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BOOST_COROSIO_BUILD_PERF     OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/corosio EXCLUDE_FROM_ALL)
-
 # http/beast2 expect the Boost:: targets to already exist (they do not self-resolve
 # Boost as subdirectories), so the official boost-cmake release comes first.
 set(BOOST_INCLUDE_LIBRARIES json url assert config core describe endian mp11 static_assert system throw_exception type_traits variant2 winapi)
@@ -76,13 +69,8 @@ set(BOOST_BEAST2_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/beast2 EXCLUDE_FROM_ALL)
 
 # -----------------------------------------------------------------------------
-# nlohmann/json — the document type of the API layer (registry, REST envelope, OpenAPI, MCP),
-# as in Zetta. Header-only.
-FetchContent_Declare(nlohmann_json
-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-set(JSON_BuildTests OFF CACHE INTERNAL "")
-FetchContent_MakeAvailable(nlohmann_json)
+# nlohmann/json — the document type of the API layer (registry, REST envelope,
+# OpenAPI, MCP). libliquid's automerge dependency provides the same CMake target.
 
 # libpqxx — the Postgres client for the control plane, a submodule at Zetta's pin (jtv/libpqxx
 # 7.10.7) on libpq. Only lake-control-postgres names it, so lake-core links no libpq.
@@ -105,6 +93,7 @@ add_library(lake-core STATIC
   src/api/rest.cpp
   src/api/mcp.cpp
   src/api/capabilities.cpp
+  src/audit/audit.cpp
   src/control/handles.cpp
   src/control/policy.cpp
   src/control/memory_store.cpp
@@ -112,7 +101,7 @@ add_library(lake-core STATIC
 )
 target_include_directories(lake-core PUBLIC include)
 target_compile_features(lake-core PUBLIC cxx_std_26)
-target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json OpenSSL::Crypto)
+target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid OpenSSL::Crypto)
 
 # lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
 add_library(lake-control-postgres STATIC src/control/postgres_store.cpp)

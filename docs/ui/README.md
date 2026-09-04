@@ -17,7 +17,7 @@ navigation is on every page: Home, Customers, Organizations, Repositories, API
 | Grants | `GET /grants?object_id=<uuid>` | direct policy grants and their attestation evidence |
 | Effective access | `GET /access?object_id=<uuid>` | direct and inherited principals, roles and allowed actions |
 | Repositories | `GET /repositories[?customer_id=<uuid>]` | every repository newest first as `<owner>/<name>`, owner, visibility, description, created |
-| Repository | `GET /repository?id=<uuid>` | one repository: owner, visibility, timestamps, the API call that returns it |
+| Repository | `GET /repository?id=<uuid>` | one repository: owner, visibility, timestamps, lifecycle state, and the API call that returns it |
 
 **Session.** `POST /session` compares the form token with the admin token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the
@@ -29,6 +29,10 @@ the UI never has a second auth path. A wrong token answers `401` with the form a
 **Data.** Data pages call the same registry capabilities as REST and MCP, with the session's
 principal and one per-request authorization cache. Lists are capped by their capability limits
 and returned newest first. Nothing on a page can do what the API cannot.
+
+**Lifecycle.** The repository page renders a deletion tombstone and its retention deadline when
+present. The signed audit page exposes the registry outcomes for lifecycle capability calls.
+Lifecycle mutations remain capability-only; the page has no mutation form.
 
 **Verify.** `./build/lake --listen 127.0.0.1:4902 --memory-store --admin-token t`, then with a
 cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (200, the table),

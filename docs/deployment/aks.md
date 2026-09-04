@@ -36,10 +36,19 @@ audit event, pod argument, or log line.
 `rotate_identity` creates a generated successor identity, so retain `LAKE_INSTANCE_KEK` even when
 `LAKE_IDENTITY_SEED` supplies the current identity.
 
-The audit migration (`0005_audit`) is subject to the Phase 6 operator waiver: lake carries the
-source schema now, while the operator's vendored schema, guard table, and Secret projection land
-once per completed wave in a separate operator pull request. Until that PR is deployed, do not
-enable audit on an existing production Lake with a schema guard older than `audit_events`.
+The audit and lifecycle migrations (`0005_audit` and `0006_repository_lifecycle`) are subject to
+the Phase 6 operator waiver: lake carries the source schema now, while the operator's vendored
+schema, guard table, and Secret projection land once per completed wave in a separate operator
+pull request. Until that PR is deployed, do not enable these features on an existing production
+Lake with a schema guard older than `repository_refs`.
+
+## Repository store volume
+
+Lake opens one libliquid store for each customer at
+`LAKE_STORE_ROOT/<customer id>/store`. The operator supplies `LAKE_STORE_ROOT` as a writable
+PersistentVolume mount; Lake neither creates nor selects it. The required operator work is issue
+#132 and the companion schema and guard update is pull request #134. Push and pull endpoints stay
+absent until liquid #160 publishes its sync contract and public API.
 
 ## Runbook
 
