@@ -96,6 +96,10 @@ repository and its content; all other repository visibility levels remain protec
 | `create_encryption_key`, `list_encryption_keys`, `get_encryption_key`, `rotate_encryption_key` | action/read | mount and key name | named-key metadata only | [encryption.md](encryption.md) |
 | `encrypt`, `decrypt`, `rewrap`, `sign`, `verify`, `hmac`, `derive_encryption_key` | action | mount, key and base64url payload fields | protected result and key version | [encryption.md](encryption.md) |
 | `rotate_customer_kek` | action | `customer_id` | KEK version and rewrapped-key count | [encryption.md](encryption.md) |
+| `create_pki_authority` | action | `customer_id` | customer root certificate and intermediate chain | [pki.md](pki.md) |
+| `issue_x509_svid` | action | customer, SPIFFE ID, optional lifetime | short-lived X.509 SVID, private key, and chain | [pki.md](pki.md) |
+| `issue_jwt_svid` | action | customer, SPIFFE ID, audience, optional lifetime | short-lived ES256 JWT SVID | [pki.md](pki.md) |
+| `exchange_kubernetes_attestation` | action, public entry | customer, organization, projected token, workload TAAP ID, audiences | short-lived workload credential | [callers.md](callers.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

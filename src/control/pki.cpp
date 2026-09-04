@@ -635,4 +635,86 @@ Result<std::vector<std::byte>> recover_secret(const std::vector<ShamirShare>& sh
     return secret;
 }
 
+Result<AuthorityPublic> Service::create_authority(std::string_view customer_id) {
+    std::lock_guard lock(mutex_);
+    if (authorities_.contains(std::string(customer_id))) {
+        return std::unexpected(Error{"conflict", "customer already has a certificate authority"});
+    }
+    auto authority = pki::create_authority(customer_id);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    AuthorityPublic output{authority->root_certificate_pem,
+                           authority->intermediate_certificate_pem +
+                               authority->root_certificate_pem};
+    authorities_.emplace(std::string(customer_id), std::move(*authority));
+    return output;
+}
+
+Result<X509Svid> Service::issue_x509_svid(std::string_view customer_id,
+                                          std::string_view spiffe_id,
+                                          int lifetime_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto authority = authorities_.find(std::string(customer_id));
+    if (authority == authorities_.end()) {
+        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
+    }
+    return pki::issue_x509_svid(authority->second, spiffe_id, lifetime_seconds);
+}
+
+Result<JwtSvid> Service::issue_jwt_svid(std::string_view customer_id,
+                                        std::string_view spiffe_id,
+                                        std::string_view audience,
+                                        int lifetime_seconds) {
+    std::lock_guard lock(mutex_);
+    const auto authority = authorities_.find(std::string(customer_id));
+    if (authority == authorities_.end()) {
+        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
+    }
+    return pki::issue_jwt_svid(authority->second, spiffe_id, audience, lifetime_seconds);
+}
+
+Result<RecoveryCeremony>
+Service::begin_recovery(std::string_view customer_id, int threshold, int share_count) {
+    std::lock_guard lock(mutex_);
+    const auto authority = authorities_.find(std::string(customer_id));
+    if (authority == authorities_.end()) {
+        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
+    }
+    std::vector<std::byte> root;
+    root.reserve(authority->second.root_private_key_pem.size());
+    for (const char character : authority->second.root_private_key_pem) {
+        root.push_back(static_cast<std::byte>(character));
+    }
+    auto shares = split_secret(root, threshold, share_count);
+    if (!shares) {
+        return std::unexpected(shares.error());
+    }
+    return RecoveryCeremony{std::string(customer_id), threshold, std::move(*shares)};
+}
+
+Result<void> Service::recover_root(std::string_view customer_id,
+                                   const RecoveryCeremony& ceremony,
+                                   const std::vector<ShamirShare>& shares) {
+    std::lock_guard lock(mutex_);
+    const auto authority = authorities_.find(std::string(customer_id));
+    if (authority == authorities_.end() || ceremony.id != customer_id) {
+        return std::unexpected(Error{"not_found", "customer certificate authority does not exist"});
+    }
+    auto recovered = recover_secret(shares, ceremony.threshold);
+    if (!recovered) {
+        return std::unexpected(recovered.error());
+    }
+    std::string root;
+    root.reserve(recovered->size());
+    for (const std::byte byte : *recovered) {
+        root.push_back(static_cast<char>(byte));
+    }
+    if (root != authority->second.root_private_key_pem) {
+        return std::unexpected(
+            Error{"unauthorized", "recovery shares do not restore the customer root"});
+    }
+    return {};
+}
+
 } // namespace lake::control::pki

@@ -3,6 +3,9 @@
 #include <string>
 #include <vector>
 
+#include "lake/api/capabilities.hpp"
+#include "lake/api/registry.hpp"
+#include "lake/control/memory_store.hpp"
 #include "lake/control/pki.hpp"
 
 namespace {
@@ -39,6 +42,40 @@ TEST(Pki, ShamirRecoveryRequiresConfiguredQuorum) {
     auto recovered = lake::control::pki::recover_secret(quorum, 3);
     ASSERT_TRUE(recovered) << recovered.error().message;
     EXPECT_EQ(*recovered, secret);
+}
+
+TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::control::InMemoryStore store;
+    lake::control::pki::Service pki;
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.pki = &pki;
+    context.authorized = true;
+    context.acting_identity = "admin";
+    context.instance_kek = "0123456789abcdef0123456789abcdef";
+
+    const auto organization =
+        store.create_organization({"taap:1:ed25519:organization", "Organization", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto customer =
+        store.create_customer({"organization", "", organization->id, "pki-customer"});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    const auto authority =
+        registry.call("create_pki_authority", {{"customer_id", customer->id}}, context);
+    ASSERT_TRUE(authority.ok) << authority.error.message;
+    context.request_id.clear();
+    const auto svid =
+        registry.call("issue_x509_svid",
+                      {{"customer_id", customer->id}, {"spiffe_id", "spiffe://lake.test/api"}},
+                      context);
+    ASSERT_TRUE(svid.ok) << svid.error.message;
+    const auto event = store.latest_audit_event();
+    ASSERT_TRUE(event) << event.error().message;
+    EXPECT_EQ(event->draft.kind, "certificate");
+    EXPECT_EQ(event->draft.action, "issue_x509_svid");
 }
 
 } // namespace

@@ -7,6 +7,11 @@ signs short-lived X.509 SPIFFE SVIDs, JWT SVIDs, ACME certificates, SSH certific
 and device certificates. The certificate profiles are credentials for a TAAP workload identity;
 they do not create a second identity system.
 
+`create_pki_authority`, `issue_x509_svid`, and `issue_jwt_svid` are registry capabilities. They
+authorize against the customer object and record a `certificate` audit event on success, refusal,
+or failure. The X.509 response contains a newly generated workload private key; Lake does not
+persist that leaf key.
+
 Private CA material is envelope-encrypted through the control-plane key store. The root is kept
 out of ordinary issuance and the online intermediate signs leaf credentials. X.509 profiles
 default to one hour; JWT SVIDs default to fifteen minutes. A caller requesting a longer lifetime
