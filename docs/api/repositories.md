@@ -32,9 +32,10 @@ handler and appends its signed outcome to `audit_events` through `audit::record`
 ## Lifecycle
 
 Rename changes only the repository slug. Transfer moves the repository record to another customer
-after checking the destination's name namespace. Repository content synchronization is deferred
-until liquid #160 publishes its sync API and wire-format document; no push or pull endpoint is
-registered before that contract is available.
+after checking the destination's name namespace. liquid #160 publishes the sync API and
+wire-format document. Lake cannot register its push or pull endpoint until libliquid exposes a
+repository over the required customer store and the documented protocol codec at a public boundary;
+[`sync.md`](sync.md) records that required follow-up.
 
 Delete is a tombstone, not an immediate erase: `deleted_at` and `retention_until` are stored on the
 repository record. The collector may reclaim data after the documented 30-day retention period,
@@ -60,8 +61,9 @@ curl -H "$H" -H 'content-type: application/json' \
 ```
 
 The UI lists them at `/repositories` ([`../ui/README.md`](../ui/README.md)); the detail page
-displays the tombstone state. Repository content uses the libliquid customer store. Sync protocol
-documentation and its endpoints wait for liquid #160.
+displays the tombstone state. Repository content uses the libliquid customer store. The published
+sync contract is mirrored in [`sync.md`](sync.md); its lake endpoints await the public
+server-facing bindings described there.
 
 ## Verify
 

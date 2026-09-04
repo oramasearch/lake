@@ -39,6 +39,7 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
+| `refs`, `find_missing`, `push`, `pull` | read/action | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
 | `list_memberships`, `create_membership` | read/action | scope, principal, role, TAAP evidence | membership(s) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
@@ -54,6 +55,10 @@ envelope as `structuredContent` (and as text), with `isError` set.
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
+
+The sync row documents the reserved capability names and their published wire contract. It is not
+registered until libliquid exposes the server-facing repository/store binding and codec described
+in [`sync.md`](sync.md).
 
 ## Adding a capability
 

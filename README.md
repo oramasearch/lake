@@ -18,8 +18,9 @@ liquid is the tool. lake is where it collects.
 > capabilities now create, rename, transfer, set `private` / `organization` / `public` visibility,
 > and tombstone repositories in migration `0006_repository_lifecycle`; every outcome is recorded
 > through the signed audit registry. Lake links libliquid as a library-only submodule and opens one
-> customer store below `LAKE_STORE_ROOT/<customer id>/store`. Push and pull remain deferred until
-> liquid #160 publishes its sync contract and public API.
+> customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160's sync contract and
+> client API are pinned; lake's push and pull endpoints await libliquid's public repository/store
+> binding and protocol codec required to preserve the one-customer-store design.
 
 ## Build and run
 

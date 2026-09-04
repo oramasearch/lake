@@ -128,10 +128,11 @@ code runs inside lake as the library-only `liquid::liquid` target, and its pack 
 manifest, and collector state remain libliquid-owned. The chunk index is liquid's own, held per
 customer store. Zetta remains lake’s serving-model reference, not this repository-data backend.
 
-**Push and pull (#12)** waits for liquid #160 to publish `docs/library/sync.md` and its public
-sync API. Lake has the customer-store adapter and the library-only liquid dependency, but does
-not register `refs`, `find_missing`, `push`, or `pull` until it can implement the published
-contract without inventing wire framing.
+**Push and pull (#12)** uses liquid #160's published `docs/library/sync.md` and public sync API.
+Lake has the customer-store adapter and the library-only liquid dependency, but does not register
+`refs`, `find_missing`, `push`, or `pull` until libliquid publicly binds repository metadata to the
+required customer store and exposes the documented codec at the server boundary. That preserves
+the contract without inventing framing or creating a repository-local store.
 
 **Repository lifecycle (#13)** stays in the control plane: create, rename, transfer between
 customers, delete (tombstone first, content collected by the customer store's collector after
