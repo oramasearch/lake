@@ -8,6 +8,10 @@
 
 #include <nlohmann/json.hpp>
 
+namespace lake::control {
+class Store;
+}
+
 namespace lake::control::callers {
 
 struct Error {
@@ -66,8 +70,8 @@ public:
                                                  std::string_view document) = 0;
 };
 
-// This matches the SSO branch's federation_issuers policy lookup. Its storage implementation
-// moves to Store when issue-15-sso-federation lands; callers depend only on this narrow contract.
+// Caller verification depends on this narrow contract while production resolves claims through
+// the SSO federation_issuers store.
 class FederationIssuerPolicy {
 public:
     virtual ~FederationIssuerPolicy() = default;
@@ -84,6 +88,17 @@ public:
 
 private:
     std::map<std::string, bool> entries_;
+};
+
+class StoreFederationIssuerPolicy final : public FederationIssuerPolicy {
+public:
+    explicit StoreFederationIssuerPolicy(Store* store);
+    Result<bool> allows(std::string_view organization_id,
+                        std::string_view issuer,
+                        std::string_view claim) override;
+
+private:
+    Store* store_;
 };
 
 class Service {

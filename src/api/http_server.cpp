@@ -2020,6 +2020,7 @@ struct ApiServer::Impl {
     mutable LiquidCustomerStores sync_store;
     Registry registry;
     mutable control::pki::Service pki;
+    std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
     OutboundHttpClient outbound_http;
@@ -2037,12 +2038,7 @@ struct ApiServer::Impl {
     std::mutex work_mutex;
     std::condition_variable work_cv;
 
-    explicit Impl(ServerOptions opts)
-        : options(std::move(opts)), sync_store(options.store_root),
-          callers(std::make_unique<control::callers::Service>(options.token_reviewer,
-                                                              options.jwt_verifier,
-                                                              options.cloud_identity_verifier,
-                                                              options.federation_issuer_policy)) {
+    explicit Impl(ServerOptions opts) : options(std::move(opts)), sync_store(options.store_root) {
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
         metrics.set_gauge("lake_build_info",
@@ -2050,6 +2046,15 @@ struct ApiServer::Impl {
                           1.0);
         metrics.set_gauge("lake_up", {}, 0.0);
         options.store = telemetry::instrument_store(std::move(options.store), metrics);
+        store_federation_policy =
+            std::make_unique<control::callers::StoreFederationIssuerPolicy>(options.store.get());
+        control::callers::FederationIssuerPolicy* issuer_policy =
+            options.federation_issuer_policy ? options.federation_issuer_policy
+                                             : store_federation_policy.get();
+        callers = std::make_unique<control::callers::Service>(options.token_reviewer,
+                                                              options.jwt_verifier,
+                                                              options.cloud_identity_verifier,
+                                                              issuer_policy);
     }
 
     void record_request(const boost::http::route_params& route,

@@ -728,6 +728,13 @@ public:
         return call("list_federation_issuers",
                     [&] { return store_->list_federation_issuers(organization_id, limit); });
     }
+    control::Result<bool> allows_federation_claim(const std::string& organization_id,
+                                                  const std::string& issuer,
+                                                  const std::string& claim) override {
+        return call("allows_federation_claim", [&] {
+            return store_->allows_federation_claim(organization_id, issuer, claim);
+        });
+    }
     control::Result<control::IssuedSession>
     sign_in_sso(const control::SsoIdentity& value) override {
         return call("sign_in_sso", [&] { return store_->sign_in_sso(value); });

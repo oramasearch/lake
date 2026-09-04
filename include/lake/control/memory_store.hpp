@@ -228,6 +228,9 @@ public:
     Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) override;
     Result<std::vector<FederationIssuer>>
     list_federation_issuers(const std::string& organization_id, int limit) override;
+    Result<bool> allows_federation_claim(const std::string& organization_id,
+                                         const std::string& issuer,
+                                         const std::string& claim) override;
     Result<IssuedSession> sign_in_sso(const SsoIdentity&) override;
     Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
                                                   int limit) override;

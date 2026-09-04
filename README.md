@@ -44,10 +44,11 @@ liquid is the tool. lake is where it collects.
 > metadata without rendering protected values or key material.
 > Customer PKI adds private root and online-intermediate authorities, SPIFFE X.509 and JWT SVIDs,
 > client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555
-> ACME HTTP-01 order flow. ACME
-> requests use one-use nonces and ES256 account JWS, and finalization signs the submitted CSR key.
+> ACME HTTP-01 order flow under migration `0012_pki`. ACME requests use one-use nonces and ES256
+> account JWS, and finalization signs the submitted CSR key.
 > Caller exchanges persist verified non-secret metadata, while root-recovery ceremonies persist
-> quorum, expiry, completion, and one-way share evidence. Both remain on the signed audit path.
+> quorum, expiry, completion, and one-way share evidence. OIDC/JWT claim policy comes from the
+> shared federation issuer store. All remain on the signed audit path.
 
 ## Build and run
 

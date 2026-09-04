@@ -1,5 +1,7 @@
 #include "lake/control/callers.hpp"
 
+#include "lake/control/store.hpp"
+
 #include <array>
 #include <chrono>
 #include <format>
@@ -60,6 +62,22 @@ Result<bool> InMemoryFederationIssuerPolicy::allows(std::string_view organizatio
                                                     std::string_view issuer,
                                                     std::string_view claim) {
     return entries_.contains(policy_key(organization_id, issuer, claim));
+}
+
+StoreFederationIssuerPolicy::StoreFederationIssuerPolicy(Store* store) : store_(store) {}
+
+Result<bool> StoreFederationIssuerPolicy::allows(std::string_view organization_id,
+                                                 std::string_view issuer,
+                                                 std::string_view claim) {
+    if (!store_) {
+        return std::unexpected(Error{"store_unavailable", "federation store is unavailable"});
+    }
+    auto allowed = store_->allows_federation_claim(
+        std::string(organization_id), std::string(issuer), std::string(claim));
+    if (!allowed) {
+        return std::unexpected(Error{allowed.error().code, allowed.error().message});
+    }
+    return *allowed;
 }
 
 Service::Service(TokenReviewer* token_reviewer,

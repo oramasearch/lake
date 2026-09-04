@@ -91,25 +91,26 @@ TEST(Callers, RegistryRecordsFederatedAndCloudExchanges) {
     StubTokenReviewer reviewer;
     StubJwtVerifier jwt;
     StubCloudVerifier cloud;
-    lake::control::callers::InMemoryFederationIssuerPolicy policy;
-    policy.allow("organization", "https://issuer.example.test", "namespace");
-    lake::control::callers::Service callers(&reviewer, &jwt, &cloud, &policy);
     lake::control::InMemoryStore store;
-    lake::api::Registry registry;
-    lake::api::register_core_capabilities(registry, "test");
-    lake::api::ApiContext context;
-    context.store = &store;
-    context.callers = &callers;
     const auto organization =
         store.create_organization({"taap:1:ed25519:caller-registry", "Callers", ""});
     ASSERT_TRUE(organization) << organization.error().message;
     const auto customer =
         store.create_customer({"organization", "", organization->id, "caller-registry"});
     ASSERT_TRUE(customer) << customer.error().message;
+    ASSERT_TRUE(store.create_federation_issuer(
+        {organization->id, "https://issuer.example.test", "namespace"}));
+    lake::control::callers::StoreFederationIssuerPolicy policy(&store);
+    lake::control::callers::Service callers(&reviewer, &jwt, &cloud, &policy);
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.callers = &callers;
 
     const auto federation = registry.call("exchange_jwt_attestation",
                                           {{"customer_id", customer->id},
-                                           {"organization_id", "organization"},
+                                           {"organization_id", organization->id},
                                            {"token", "external-jwt"},
                                            {"workload_taap_id", "taap:1:ed25519:workload"}},
                                           context);
@@ -135,7 +136,7 @@ TEST(Callers, RegistryRecordsFederatedAndCloudExchanges) {
     EXPECT_FALSE(records->front().attributes.contains("credential"));
 }
 
-TEST(PostgresCallers, PersistsKubernetesCredentialMetadata) {
+TEST(PostgresCallers, PersistsKubernetesAndFederatedCredentialMetadata) {
     const char* uri = std::getenv("LAKE_TEST_DB_URI");
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
@@ -143,8 +144,6 @@ TEST(PostgresCallers, PersistsKubernetesCredentialMetadata) {
     StubTokenReviewer reviewer;
     StubJwtVerifier jwt;
     StubCloudVerifier cloud;
-    lake::control::callers::InMemoryFederationIssuerPolicy policy;
-    lake::control::callers::Service callers(&reviewer, &jwt, &cloud, &policy);
     auto store = lake::control::make_postgres_store(uri);
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
@@ -154,6 +153,10 @@ TEST(PostgresCallers, PersistsKubernetesCredentialMetadata) {
     const auto customer =
         store->create_customer({"organization", "", organization->id, "caller-pg-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
+    ASSERT_TRUE(store->create_federation_issuer(
+        {organization->id, "https://issuer.example.test", "namespace"}));
+    lake::control::callers::StoreFederationIssuerPolicy policy(store.get());
+    lake::control::callers::Service callers(&reviewer, &jwt, &cloud, &policy);
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
     lake::api::ApiContext context;
@@ -169,15 +172,23 @@ TEST(PostgresCallers, PersistsKubernetesCredentialMetadata) {
                                          {"audiences", {"lake"}}},
                                         context);
     ASSERT_TRUE(exchange.ok) << exchange.error.message;
+    context.request_id.clear();
+    const auto federation = registry.call("exchange_jwt_attestation",
+                                          {{"customer_id", customer->id},
+                                           {"organization_id", organization->id},
+                                           {"token", "external-jwt"},
+                                           {"workload_taap_id", "taap:1:ed25519:workload"}},
+                                          context);
+    ASSERT_TRUE(federation.ok) << federation.error.message;
     const auto records = store->list_pki_callers(customer->id, 10);
     ASSERT_TRUE(records) << records.error().message;
-    ASSERT_EQ(records->size(), 1);
-    EXPECT_EQ(records->front().id, exchange.value.at("caller_id").get<std::string>());
-    EXPECT_EQ(records->front().issuer, "kubernetes");
+    ASSERT_EQ(records->size(), 2);
+    EXPECT_EQ(records->front().id, federation.value.at("caller_id").get<std::string>());
+    EXPECT_EQ(records->front().issuer, "https://issuer.example.test");
     EXPECT_EQ(records->front().attributes.at("namespace"), "payments");
-    EXPECT_EQ(
-        records->front().attributes.dump().find(exchange.value.at("credential").get<std::string>()),
-        std::string::npos);
+    EXPECT_EQ(records->front().attributes.dump().find(
+                  federation.value.at("credential").get<std::string>()),
+              std::string::npos);
 }
 
 } // namespace

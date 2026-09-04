@@ -608,6 +608,9 @@ public:
     virtual Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) = 0;
     virtual Result<std::vector<FederationIssuer>>
     list_federation_issuers(const std::string& organization_id, int limit) = 0;
+    virtual Result<bool> allows_federation_claim(const std::string& organization_id,
+                                                 const std::string& issuer,
+                                                 const std::string& claim) = 0;
     virtual Result<IssuedSession> sign_in_sso(const SsoIdentity&) = 0;
     virtual Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
                                                           int limit) = 0;

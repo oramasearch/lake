@@ -248,7 +248,8 @@ signed audit fields and pages are documented in [`../api/secrets.md`](../api/sec
 [`../api/encryption.md`](../api/encryption.md). PKI authority custody, SPIFFE X.509 and JWT SVIDs,
 client and device profiles, OpenSSH user and host certificates, and the customer-scoped RFC 8555
 ACME HTTP-01 flow, durable caller metadata, and durable recovery-ceremony evidence are implemented
-on the #26 branch. Federation integration remains in #27.
+on the #26 branch. OIDC/JWT caller exchange resolves each asserted claim through the shared
+`federation_issuers` store from #15 and #21.
 
 ## The forge, the drive, models, metering, migration
 

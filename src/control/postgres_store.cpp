@@ -3416,6 +3416,20 @@ public:
             });
     }
 
+    Result<bool> allows_federation_claim(const std::string& organization_id,
+                                         const std::string& issuer,
+                                         const std::string& claim) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            return !tx.exec_params("SELECT 1 FROM federation_issuers "
+                                   "WHERE organization_id = $1::uuid AND issuer = $2 "
+                                   "AND claim = $3",
+                                   organization_id,
+                                   issuer,
+                                   claim)
+                        .empty();
+        });
+    }
+
     Result<IssuedSession> sign_in_sso(const SsoIdentity& input) override {
         if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
             !input.claims.is_object()) {

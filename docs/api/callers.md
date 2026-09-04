@@ -7,9 +7,9 @@ identity. Supported attestation types are Kubernetes projected service-account t
 configured TokenReview endpoint, OIDC/JWT federation, AWS instance identity, and Azure instance
 identity. No workload bootstrap secret is required.
 
-Federated issuers use the `federation_issuers` policy table introduced by the SSO branch. Until
-that branch merges, this work exposes a narrow issuer-policy interface with an in-memory stand-in;
-the rebase replaces it with the SSO store implementation without changing the attestation API.
+Federated issuers use the `federation_issuers` policy table shared with organization SAML/OIDC
+configuration. Production caller exchange performs an exact store lookup for every asserted claim;
+an injected policy implementation remains available to isolated verifier tests.
 
 The attestation boundary has four injected verifiers: Kubernetes TokenReview, JWT/OIDC signature
 verification, AWS instance identity, and Azure instance identity. A verified result is insufficient
@@ -31,8 +31,8 @@ record ID so an operator can correlate the exchange with its signed audit event.
 The caller suite exchanges a Kubernetes token against a TokenReview double, rejects an
 unregistered issuer claim, accepts a configured federation claim, and verifies the minted
 credential expires. Every result is present in the signed audit stream.
-The Postgres-backed test repeats the Kubernetes exchange and reads its durable caller metadata
-through a new store instance.
+The Postgres-backed test repeats Kubernetes and JWT exchanges, resolves the JWT claim through a
+durable federation issuer, and reads both durable caller records.
 
 ## How to change
 

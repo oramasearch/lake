@@ -1451,6 +1451,16 @@ InMemoryStore::list_federation_issuers(const std::string& organization_id, int l
     return result;
 }
 
+Result<bool> InMemoryStore::allows_federation_claim(const std::string& organization_id,
+                                                    const std::string& issuer,
+                                                    const std::string& claim) {
+    std::lock_guard lock(mutex_);
+    return std::ranges::any_of(federation_issuers_, [&](const FederationIssuer& value) {
+        return value.organization_id == organization_id && value.issuer == issuer &&
+               value.claim == claim;
+    });
+}
+
 Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
     if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
         !input.claims.is_object()) {
