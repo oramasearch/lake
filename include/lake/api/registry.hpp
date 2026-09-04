@@ -42,6 +42,13 @@ struct ApiResult {
     static ApiResult failure(std::string code, std::string message, std::string path = {});
 };
 
+struct WebhookDeliveryResult {
+    int status = 0;
+    std::string error;
+};
+using WebhookSender = std::function<WebhookDeliveryResult(
+    const std::string& url, const nlohmann::json& headers, const std::string& payload)>;
+
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
@@ -58,6 +65,7 @@ struct ApiContext {
     std::string credential_device_id;
     std::string identity_seed;
     std::string instance_kek;
+    WebhookSender webhook_sender;
     SyncStore* sync_store = nullptr;
     bool sync_wire_request = false;
     std::span<const std::byte> sync_request;

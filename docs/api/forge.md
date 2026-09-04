@@ -46,6 +46,19 @@ attestation. The release record copies each selected result's ID, action, output
 attestation identifiers and subjects. This creates a durable release-to-evidence link even when
 build records are later queried independently.
 
+## Webhooks
+
+`create_webhook` stores an event subscription, endpoint, and signing secret. Lake sends events for
+issues, reviews, and releases only to subscriptions that name that event or `*`. Each attempt has
+canonical JSON payload bytes, an `x-lake-event` header, and an HMAC-SHA-256
+`x-lake-signature-256` header. The durable delivery record retains the status, failure text,
+signature, payload, and attempt count. `retry_webhook_delivery` creates a new attempt only when a
+prior attempt was unsuccessful; it never overwrites the event log.
+
+The sender is an injected service at the API boundary so the registry and its tests do not perform
+network I/O. The HTTP service supplies that sender in deployment. If a sender is unavailable, the
+attempt is retained as a failed delivery and can be retried when delivery is configured.
+
 ## Verify
 
 ```sh

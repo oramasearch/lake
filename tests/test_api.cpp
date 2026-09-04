@@ -1378,6 +1378,54 @@ TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
     EXPECT_EQ(release.value["value"]["artifacts"][0]["attestations"][0]["id"], "attestation-1");
 }
 
+TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "hooks"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    const ApiResult webhook = surface.call("create_webhook",
+                                           {{"repository_id", repository_id},
+                                            {"url", "https://example.test/lake"},
+                                            {"events", json::array({"issue"})},
+                                            {"secret", "delivery-secret"}});
+    ASSERT_TRUE(webhook.ok) << webhook.error.message;
+
+    int calls = 0;
+    surface.ctx.webhook_sender = [&calls](const std::string&,
+                                          const json& headers,
+                                          const std::string&) -> WebhookDeliveryResult {
+        EXPECT_TRUE(headers.at("x-lake-signature-256").get<std::string>().starts_with("sha256="));
+        ++calls;
+        if (calls == 1) {
+            return {.status = 503, .error = "service unavailable"};
+        }
+        return {.status = 204};
+    };
+    ASSERT_TRUE(
+        surface.call("create_issue", {{"repository_id", repository_id}, {"title", "Trigger hook"}})
+            .ok);
+
+    const ApiResult listed =
+        surface.call("list_webhook_deliveries", {{"repository_id", repository_id}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 1);
+    EXPECT_FALSE(listed.value["items"][0]["value"]["delivered"]);
+    const ApiResult retried = surface.call(
+        "retry_webhook_delivery",
+        {{"repository_id", repository_id}, {"delivery_id", listed.value["items"][0]["id"]}});
+    ASSERT_TRUE(retried.ok) << retried.error.message;
+    EXPECT_TRUE(retried.value["value"]["delivered"]);
+    EXPECT_EQ(retried.value["value"]["attempt"], 2);
+    EXPECT_EQ(calls, 2);
+}
+
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
     Surface s;
     const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});

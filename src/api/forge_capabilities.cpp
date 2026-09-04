@@ -57,6 +57,10 @@ json repository_input(json properties, json required) {
             {"additionalProperties", false}};
 }
 
+void deliver_event(const std::string& event,
+                   const control::ForgeRecord& subject,
+                   ApiContext& context);
+
 ApiResult create_record(const std::string& kind, const json& value, ApiContext& context) {
     if (!context.store) {
         return ApiResult::failure("store_unavailable", "no control-plane store is configured");
@@ -68,6 +72,13 @@ ApiResult create_record(const std::string& kind, const json& value, ApiContext& 
     }
     context.audit_object = "repository/" + record->repository_id;
     context.audit_details = {{"forge_kind", kind}, {"record_id", record->id}};
+    const std::string event = kind == "issue" || kind == "issue_comment"     ? "issue"
+                              : kind == "review" || kind == "review_comment" ? "review"
+                              : kind == "release"                            ? "release"
+                                                                             : "";
+    if (!event.empty()) {
+        deliver_event(event, *record, context);
+    }
     return ApiResult::success(control::to_json(*record));
 }
 
@@ -254,6 +265,120 @@ std::string webhook_signature(std::string_view secret, std::string_view payload)
     }
     return "sha256=" + control::identity_crypto::base64url_encode(
                            std::string_view(reinterpret_cast<const char*>(digest), size));
+}
+
+bool webhook_accepts_event(const control::ForgeRecord& webhook, const std::string& event) {
+    if (!webhook.value.contains("events") || !webhook.value["events"].is_array()) {
+        return false;
+    }
+    return std::ranges::any_of(webhook.value["events"], [&event](const json& configured) {
+        return configured.is_string() &&
+               (configured.get<std::string>() == event || configured.get<std::string>() == "*");
+    });
+}
+
+std::expected<control::ForgeRecord, ApiResult>
+record_webhook_attempt(const control::ForgeRecord& webhook,
+                       const std::string& event,
+                       const json& payload,
+                       int attempt,
+                       ApiContext& context) {
+    const std::string encoded_payload = payload.dump();
+    const std::string signature =
+        webhook_signature(webhook.value.value("secret", ""), encoded_payload);
+    WebhookDeliveryResult delivery{.error = "webhook sender is not configured"};
+    if (context.webhook_sender) {
+        delivery = context.webhook_sender(webhook.value.value("url", ""),
+                                          {{"content-type", "application/json"},
+                                           {"x-lake-event", event},
+                                           {"x-lake-signature-256", signature}},
+                                          encoded_payload);
+    }
+    const bool delivered =
+        delivery.error.empty() && delivery.status >= 200 && delivery.status < 300;
+    const auto record =
+        context.store->create_forge_record(control::NewForgeRecord{webhook.repository_id,
+                                                                   "webhook_delivery",
+                                                                   {{"webhook_id", webhook.id},
+                                                                    {"event", event},
+                                                                    {"payload", payload},
+                                                                    {"signature", signature},
+                                                                    {"attempt", attempt},
+                                                                    {"status", delivery.status},
+                                                                    {"error", delivery.error},
+                                                                    {"delivered", delivered}}});
+    if (!record) {
+        return std::unexpected(from_store_error(record.error()));
+    }
+    return *record;
+}
+
+void deliver_event(const std::string& event,
+                   const control::ForgeRecord& subject,
+                   ApiContext& context) {
+    if (!context.store) {
+        return;
+    }
+    const auto webhooks = context.store->list_forge_records(subject.repository_id, "webhook", 1000);
+    if (!webhooks) {
+        return;
+    }
+    const json payload = {{"event", event},
+                          {"repository_id", subject.repository_id},
+                          {"record", control::to_json(subject)}};
+    for (const control::ForgeRecord& webhook : *webhooks) {
+        if (!webhook_accepts_event(webhook, event)) {
+            continue;
+        }
+        static_cast<void>(record_webhook_attempt(webhook, event, payload, 1, context));
+    }
+}
+
+ApiResult deliver_webhook(const json& input, ApiContext& context) {
+    const auto webhook = get_kind(input, context, "webhook", "webhook_id");
+    if (!webhook) {
+        return webhook.error();
+    }
+    if (!webhook_accepts_event(*webhook, input.at("event").get<std::string>())) {
+        return ApiResult::failure("conflict", "webhook does not subscribe to this event", "/event");
+    }
+    const auto delivery = record_webhook_attempt(
+        *webhook, input.at("event").get<std::string>(), input.at("payload"), 1, context);
+    if (!delivery) {
+        return delivery.error();
+    }
+    context.audit_object = "repository/" + webhook->repository_id;
+    context.audit_details = {{"forge_kind", "webhook_delivery"}, {"record_id", delivery->id}};
+    return ApiResult::success(control::to_json(*delivery));
+}
+
+ApiResult retry_webhook_delivery(const json& input, ApiContext& context) {
+    const auto delivery = get_kind(input, context, "webhook_delivery", "delivery_id");
+    if (!delivery) {
+        return delivery.error();
+    }
+    if (delivery->value.value("delivered", false)) {
+        return ApiResult::failure("conflict", "delivered webhook events are not retried");
+    }
+    const auto webhook_id = delivery->value.value("webhook_id", "");
+    const auto webhook = context.store->get_forge_record(webhook_id);
+    if (!webhook) {
+        return from_store_error(webhook.error());
+    }
+    if (webhook->repository_id != delivery->repository_id || webhook->kind != "webhook") {
+        return ApiResult::failure("not_found", "delivery webhook does not match repository");
+    }
+    const auto retried = record_webhook_attempt(*webhook,
+                                                delivery->value.value("event", ""),
+                                                delivery->value.value("payload", json::object()),
+                                                delivery->value.value("attempt", 0) + 1,
+                                                context);
+    if (!retried) {
+        return retried.error();
+    }
+    context.audit_object = "repository/" + webhook->repository_id;
+    context.audit_details = {{"forge_kind", "webhook_delivery"}, {"record_id", retried->id}};
+    return ApiResult::success(control::to_json(*retried));
 }
 
 json map_anchor(json anchor, const json& hunks, const std::string& target_change) {
@@ -491,37 +616,31 @@ void register_forge_capabilities(Registry& registry) {
     add_list(registry, "list_webhooks", "List webhooks", "webhook");
 
     registry.add(Capability{
-        .name = "record_webhook_delivery",
-        .title = "Record signed webhook delivery",
-        .description = "Create a signed delivery attempt and durable event log record.",
-        .input_schema =
-            repository_input({{"webhook_id", {{"type", "string"}}},
-                              {"event", {{"type", "string"}}},
-                              {"payload", {{"type", "object"}}},
-                              {"delivered", {{"type", "boolean"}}}},
-                             json::array({"webhook_id", "event", "payload", "delivered"})),
+        .name = "deliver_webhook",
+        .title = "Deliver signed webhook",
+        .description = "Send one signed webhook event and record its delivery attempt.",
+        .input_schema = repository_input({{"webhook_id", {{"type", "string"}}},
+                                          {"event", {{"type", "string"}}},
+                                          {"payload", {{"type", "object"}}}},
+                                         json::array({"webhook_id", "event", "payload"})),
         .output_schema = record_schema(),
         .kind = CapabilityKind::Action,
         .object = "repository",
         .action = "write",
         .resolve_object = repository_object,
-        .handler = [](const json& input, ApiContext& context) {
-            const auto webhook = get_kind(input, context, "webhook", "webhook_id");
-            if (!webhook) {
-                return webhook.error();
-            }
-            const std::string payload = input.at("payload").dump();
-            const json value = {
-                {"webhook_id", webhook->id},
-                {"event", input.at("event")},
-                {"payload", input.at("payload")},
-                {"signature", webhook_signature(webhook->value.value("secret", ""), payload)},
-                {"attempt", 1},
-                {"delivered", input.at("delivered")}};
-            return create_record("webhook_delivery",
-                                 {{"repository_id", input.at("repository_id")}, {"value", value}},
-                                 context);
-        }});
+        .handler = deliver_webhook});
+    registry.add(
+        Capability{.name = "retry_webhook_delivery",
+                   .title = "Retry webhook delivery",
+                   .description = "Retry a failed signed webhook delivery and retain each attempt.",
+                   .input_schema = repository_input({{"delivery_id", {{"type", "string"}}}},
+                                                    json::array({"delivery_id"})),
+                   .output_schema = record_schema(),
+                   .kind = CapabilityKind::Action,
+                   .object = "repository",
+                   .action = "write",
+                   .resolve_object = repository_object,
+                   .handler = retry_webhook_delivery});
     add_list(registry, "list_webhook_deliveries", "List webhook deliveries", "webhook_delivery");
 
     add_create(registry,
