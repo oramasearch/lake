@@ -2,6 +2,7 @@
 
 #include "lake/control/store.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <memory>
@@ -64,6 +65,11 @@ struct EcdsaSignatureDeleter {
         ECDSA_SIG_free(value);
     }
 };
+struct RequestDeleter {
+    void operator()(X509_REQ* value) const {
+        X509_REQ_free(value);
+    }
+};
 
 using Bio = std::unique_ptr<BIO, BioDeleter>;
 using Pkey = std::unique_ptr<EVP_PKEY, PkeyDeleter>;
@@ -73,6 +79,7 @@ using StoreContext = std::unique_ptr<X509_STORE_CTX, StoreContextDeleter>;
 using CertificateStack = std::unique_ptr<STACK_OF(X509), StackDeleter>;
 using MdContext = std::unique_ptr<EVP_MD_CTX, MdContextDeleter>;
 using EcdsaSignature = std::unique_ptr<ECDSA_SIG, EcdsaSignatureDeleter>;
+using Request = std::unique_ptr<X509_REQ, RequestDeleter>;
 
 Error crypto_error(std::string message) {
     return {"crypto_error", std::move(message)};
@@ -224,7 +231,8 @@ Result<Certificate> make_certificate(EVP_PKEY* subject_key,
                                      std::string_view common_name,
                                      int lifetime_seconds,
                                      bool is_authority,
-                                     std::string_view uri_san = {}) {
+                                     std::string_view uri_san = {},
+                                     std::string_view dns_san = {}) {
     Certificate certificate(X509_new());
     if (!certificate) {
         return std::unexpected(crypto_error("could not allocate certificate"));
@@ -282,6 +290,13 @@ Result<Certificate> make_certificate(EVP_PKEY* subject_key,
     }
     if (!uri_san.empty()) {
         const std::string san = "URI:" + std::string(uri_san);
+        const auto extension = add_extension(certificate.get(), NID_subject_alt_name, san);
+        if (!extension) {
+            return std::unexpected(extension.error());
+        }
+    }
+    if (!dns_san.empty()) {
+        const std::string san = "DNS:" + std::string(dns_san);
         const auto extension = add_extension(certificate.get(), NID_subject_alt_name, san);
         if (!extension) {
             return std::unexpected(extension.error());
@@ -398,6 +413,137 @@ verify_jws(EVP_PKEY* key, std::string_view input, const std::vector<unsigned cha
         return std::unexpected(Error{"unauthorized", "JWT signature does not verify"});
     }
     return {};
+}
+
+Result<Pkey> key_from_acme_jwk(const AcmeJwk& jwk) {
+    auto x = base64url_decode(jwk.x);
+    auto y = base64url_decode(jwk.y);
+    if (!x || !y || x->size() != 32 || y->size() != 32) {
+        return std::unexpected(Error{"invalid_input", "ACME account JWK must be P-256"});
+    }
+    EC_KEY* raw_ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    if (!raw_ec) {
+        return std::unexpected(crypto_error("could not allocate ACME account key"));
+    }
+    std::unique_ptr<EC_KEY, decltype(&EC_KEY_free)> ec(raw_ec, EC_KEY_free);
+    const EC_GROUP* group = EC_KEY_get0_group(ec.get());
+    EC_POINT* raw_point = EC_POINT_new(group);
+    if (!raw_point) {
+        return std::unexpected(crypto_error("could not allocate ACME account point"));
+    }
+    std::unique_ptr<EC_POINT, decltype(&EC_POINT_free)> point(raw_point, EC_POINT_free);
+    std::array<unsigned char, 65> encoded{};
+    encoded[0] = POINT_CONVERSION_UNCOMPRESSED;
+    std::copy(x->begin(), x->end(), encoded.begin() + 1);
+    std::copy(y->begin(), y->end(), encoded.begin() + 33);
+    if (EC_POINT_oct2point(group, point.get(), encoded.data(), encoded.size(), nullptr) != 1 ||
+        EC_KEY_set_public_key(ec.get(), point.get()) != 1 || EC_KEY_check_key(ec.get()) != 1) {
+        return std::unexpected(Error{"invalid_input", "ACME account JWK is invalid"});
+    }
+    Pkey key(EVP_PKEY_new());
+    if (!key || EVP_PKEY_assign_EC_KEY(key.get(), ec.release()) != 1) {
+        return std::unexpected(crypto_error("could not retain ACME account key"));
+    }
+    return key;
+}
+
+Result<std::string> acme_thumbprint(const AcmeJwk& jwk) {
+    const std::string canonical =
+        json{{"crv", "P-256"}, {"kty", "EC"}, {"x", jwk.x}, {"y", jwk.y}}.dump();
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned digest_size = 0;
+    if (EVP_Digest(canonical.data(),
+                   canonical.size(),
+                   digest.data(),
+                   &digest_size,
+                   EVP_sha256(),
+                   nullptr) != 1) {
+        return std::unexpected(crypto_error("could not hash ACME account key"));
+    }
+    return base64url_encode(digest.data(), digest_size);
+}
+
+Result<std::string> random_acme_value(std::size_t size) {
+    std::vector<unsigned char> bytes(size);
+    if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
+        return std::unexpected(crypto_error("could not create ACME random value"));
+    }
+    return base64url_encode(bytes.data(), bytes.size());
+}
+
+Result<X509Svid> issue_acme_certificate(const Authority& authority,
+                                        std::string_view identifier,
+                                        std::string_view encoded_csr) {
+    auto csr_bytes = base64url_decode(std::string(encoded_csr));
+    if (!csr_bytes || csr_bytes->empty()) {
+        return std::unexpected(Error{"invalid_input", "ACME finalize requires a DER CSR"});
+    }
+    const unsigned char* cursor = csr_bytes->data();
+    Request request(d2i_X509_REQ(nullptr, &cursor, static_cast<long>(csr_bytes->size())));
+    if (!request || cursor != csr_bytes->data() + csr_bytes->size()) {
+        return std::unexpected(Error{"invalid_input", "ACME CSR is invalid"});
+    }
+    Pkey subject_key(X509_REQ_get_pubkey(request.get()));
+    if (!subject_key || X509_REQ_verify(request.get(), subject_key.get()) != 1) {
+        return std::unexpected(Error{"unauthorized", "ACME CSR signature does not verify"});
+    }
+    bool names_identifier = false;
+    STACK_OF(X509_EXTENSION)* extensions = X509_REQ_get_extensions(request.get());
+    if (extensions) {
+        const int count = sk_X509_EXTENSION_num(extensions);
+        for (int index = 0; index < count; ++index) {
+            X509_EXTENSION* extension = sk_X509_EXTENSION_value(extensions, index);
+            if (OBJ_obj2nid(X509_EXTENSION_get_object(extension)) != NID_subject_alt_name) {
+                continue;
+            }
+            GENERAL_NAMES* names = static_cast<GENERAL_NAMES*>(X509V3_EXT_d2i(extension));
+            if (!names) {
+                continue;
+            }
+            const int name_count = sk_GENERAL_NAME_num(names);
+            for (int name_index = 0; name_index < name_count; ++name_index) {
+                const GENERAL_NAME* name = sk_GENERAL_NAME_value(names, name_index);
+                if (name->type != GEN_DNS) {
+                    continue;
+                }
+                const unsigned char* data = ASN1_STRING_get0_data(name->d.dNSName);
+                const int length = ASN1_STRING_length(name->d.dNSName);
+                names_identifier = std::string_view(reinterpret_cast<const char*>(data),
+                                                    static_cast<std::size_t>(length)) == identifier;
+                if (names_identifier) {
+                    break;
+                }
+            }
+            GENERAL_NAMES_free(names);
+        }
+        sk_X509_EXTENSION_pop_free(extensions, X509_EXTENSION_free);
+    }
+    if (!names_identifier) {
+        return std::unexpected(
+            Error{"unauthorized", "ACME CSR does not contain the ordered DNS identifier"});
+    }
+    auto intermediate_key = private_key_from_pem(authority.intermediate_private_key_pem);
+    auto intermediate_certificate = certificate_from_pem(authority.intermediate_certificate_pem);
+    if (!intermediate_key || !intermediate_certificate) {
+        return std::unexpected(Error{"invalid_input", "authority material is invalid"});
+    }
+    auto certificate = make_certificate(subject_key.get(),
+                                        intermediate_key->get(),
+                                        intermediate_certificate->get(),
+                                        identifier,
+                                        3600,
+                                        false,
+                                        {},
+                                        identifier);
+    if (!certificate) {
+        return std::unexpected(certificate.error());
+    }
+    auto pem = pem_of_certificate(certificate->get());
+    if (!pem) {
+        return std::unexpected(pem.error());
+    }
+    return X509Svid{
+        *pem, {}, authority.intermediate_certificate_pem + authority.root_certificate_pem};
 }
 
 } // namespace
@@ -855,8 +1001,64 @@ Result<void> Service::recover_root(::lake::control::Store& store,
     return verify_recovered_root(*authority, ceremony, shares);
 }
 
+Result<std::string> Service::new_acme_nonce() {
+    auto nonce = random_acme_value(16);
+    if (!nonce) {
+        return std::unexpected(nonce.error());
+    }
+    std::lock_guard lock(mutex_);
+    acme_nonces_.insert(*nonce);
+    return nonce;
+}
+
+Result<void> Service::consume_acme_nonce(std::string_view nonce) {
+    std::lock_guard lock(mutex_);
+    if (acme_nonces_.erase(std::string(nonce)) != 1) {
+        return std::unexpected(Error{"unauthorized", "ACME nonce is missing or was already used"});
+    }
+    return {};
+}
+
+Result<AcmeAccount> Service::create_acme_account(std::string_view customer_id, const AcmeJwk& jwk) {
+    if (customer_id.empty()) {
+        return std::unexpected(Error{"invalid_input", "ACME customer is required"});
+    }
+    auto key = key_from_acme_jwk(jwk);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    AcmeAccount account{new_uuid_v4(), std::string(customer_id), jwk};
+    std::lock_guard lock(mutex_);
+    acme_accounts_.emplace(account.id, account);
+    return account;
+}
+
+Result<void> Service::verify_acme_signature(std::string_view account_id,
+                                            const std::optional<AcmeJwk>& jwk,
+                                            std::string_view signing_input,
+                                            std::string_view signature) {
+    AcmeJwk selected;
+    if (jwk) {
+        selected = *jwk;
+    } else {
+        std::lock_guard lock(mutex_);
+        const auto account = acme_accounts_.find(std::string(account_id));
+        if (account == acme_accounts_.end()) {
+            return std::unexpected(Error{"unauthorized", "ACME account does not exist"});
+        }
+        selected = account->second.jwk;
+    }
+    auto key = key_from_acme_jwk(selected);
+    auto raw_signature = base64url_decode(std::string(signature));
+    if (!key || !raw_signature) {
+        return std::unexpected(Error{"unauthorized", "ACME JWS is invalid"});
+    }
+    return verify_jws(key->get(), signing_input, *raw_signature);
+}
+
 Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
                                              std::string_view customer_id,
+                                             std::string_view account_id,
                                              std::string_view identifier,
                                              std::string_view instance_kek) {
     if (identifier.empty() || identifier.find('.') == std::string_view::npos) {
@@ -866,35 +1068,123 @@ Result<AcmeOrder> Service::create_acme_order(::lake::control::Store& store,
     if (!authority) {
         return std::unexpected(authority.error());
     }
+    auto token = random_acme_value(24);
+    if (!token) {
+        return std::unexpected(token.error());
+    }
     std::lock_guard lock(mutex_);
-    AcmeOrder order{
-        new_uuid_v4(), std::string(customer_id), std::string(identifier), "pending", {}};
+    const auto account = acme_accounts_.find(std::string(account_id));
+    if (account == acme_accounts_.end() || account->second.customer_id != customer_id) {
+        return std::unexpected(Error{"unauthorized", "ACME account does not own this customer"});
+    }
+    auto thumbprint = acme_thumbprint(account->second.jwk);
+    if (!thumbprint) {
+        return std::unexpected(thumbprint.error());
+    }
+    const std::string order_id = new_uuid_v4();
+    const std::string authorization_id = new_uuid_v4();
+    AcmeOrder order{order_id,
+                    std::string(customer_id),
+                    std::string(account_id),
+                    std::string(identifier),
+                    authorization_id,
+                    "pending",
+                    {}};
+    AcmeAuthorization authorization{authorization_id,
+                                    order_id,
+                                    std::string(identifier),
+                                    *token,
+                                    *token + "." + *thumbprint,
+                                    "pending"};
     acme_orders_.emplace(order.id, order);
+    acme_authorizations_.emplace(authorization.id, authorization);
     return order;
 }
 
-Result<AcmeOrder> Service::authorize_acme_order(std::string_view order_id) {
+Result<AcmeOrder> Service::acme_order(std::string_view customer_id,
+                                      std::string_view account_id,
+                                      std::string_view order_id) {
     std::lock_guard lock(mutex_);
     const auto order = acme_orders_.find(std::string(order_id));
-    if (order == acme_orders_.end()) {
+    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
+        order->second.account_id != account_id) {
         return std::unexpected(Error{"not_found", "ACME order does not exist"});
     }
-    order->second.status = "ready";
     return order->second;
 }
 
+Result<AcmeAuthorization> Service::acme_authorization(std::string_view customer_id,
+                                                      std::string_view account_id,
+                                                      std::string_view authorization_id) {
+    std::lock_guard lock(mutex_);
+    const auto authorization = acme_authorizations_.find(std::string(authorization_id));
+    if (authorization == acme_authorizations_.end()) {
+        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
+    }
+    const auto order = acme_orders_.find(authorization->second.order_id);
+    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
+        order->second.account_id != account_id) {
+        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
+    }
+    return authorization->second;
+}
+
+Result<AcmeAuthorization> Service::authorize_acme_order(std::string_view customer_id,
+                                                        std::string_view account_id,
+                                                        std::string_view authorization_id) {
+    std::lock_guard lock(mutex_);
+    const auto authorization = acme_authorizations_.find(std::string(authorization_id));
+    if (authorization == acme_authorizations_.end()) {
+        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
+    }
+    const auto order = acme_orders_.find(authorization->second.order_id);
+    if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
+        order->second.account_id != account_id) {
+        return std::unexpected(Error{"not_found", "ACME authorization does not exist"});
+    }
+    authorization->second.status = "valid";
+    order->second.status = "ready";
+    return authorization->second;
+}
+
+Result<std::string> Service::acme_http01_response(std::string_view token) {
+    std::lock_guard lock(mutex_);
+    const auto authorization = std::ranges::find_if(
+        acme_authorizations_, [&](const auto& value) { return value.second.token == token; });
+    if (authorization == acme_authorizations_.end()) {
+        return std::unexpected(Error{"not_found", "ACME HTTP-01 token does not exist"});
+    }
+    return authorization->second.key_authorization;
+}
+
 Result<AcmeOrder> Service::finalize_acme_order(::lake::control::Store& store,
+                                               std::string_view customer_id,
+                                               std::string_view account_id,
                                                std::string_view order_id,
+                                               std::string_view csr,
                                                std::string_view instance_kek) {
+    AcmeOrder pending;
+    {
+        std::lock_guard lock(mutex_);
+        const auto order = acme_orders_.find(std::string(order_id));
+        if (order == acme_orders_.end() || order->second.customer_id != customer_id ||
+            order->second.account_id != account_id || order->second.status != "ready") {
+            return std::unexpected(Error{"invalid_input", "ACME order is not ready to finalize"});
+        }
+        pending = order->second;
+    }
+    auto authority = load_authority(store, pending.customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    auto certificate = issue_acme_certificate(*authority, pending.identifier, csr);
+    if (!certificate) {
+        return std::unexpected(certificate.error());
+    }
     std::lock_guard lock(mutex_);
     const auto order = acme_orders_.find(std::string(order_id));
     if (order == acme_orders_.end() || order->second.status != "ready") {
-        return std::unexpected(Error{"invalid_input", "ACME order is not ready to finalize"});
-    }
-    auto certificate = issue_x509_certificate(
-        store, order->second.customer_id, order->second.identifier, instance_kek);
-    if (!certificate) {
-        return std::unexpected(certificate.error());
+        return std::unexpected(Error{"conflict", "ACME order changed during finalization"});
     }
     order->second.status = "valid";
     order->second.certificate_pem = certificate->certificate_pem + certificate->chain_pem;

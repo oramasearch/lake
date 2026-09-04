@@ -1110,7 +1110,7 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     const json doc = openapi_document(s.registry, "0.0.1");
     EXPECT_EQ(doc["openapi"], "3.1.0");
     for (const auto& capability : s.registry.list()) {
-        if (capability->transport == CapabilityTransport::LiquidSync) {
+        if (capability->transport != CapabilityTransport::Json) {
             continue;
         }
         const std::string method = rest_method(*capability) == "GET" ? "get" : "post";

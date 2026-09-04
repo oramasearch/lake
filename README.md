@@ -42,6 +42,9 @@ liquid is the tool. lake is where it collects.
 > encrypt/decrypt/rewrap, Ed25519 signatures, HMAC, derivation and customer-KEK rotation. The
 > registry records every operation, including mount-grant denials, and the secrets pages expose
 > metadata without rendering protected values or key material.
+> Customer PKI adds private root and online-intermediate authorities, SPIFFE X.509 and JWT SVIDs,
+> client and device certificates, and a customer-scoped RFC 8555 ACME HTTP-01 order flow. ACME
+> requests use one-use nonces and ES256 account JWS, and finalization signs the submitted CSR key.
 
 ## Build and run
 
@@ -76,6 +79,7 @@ ctest --test-dir build
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
 | `/scim/v2/Users`, `/scim/v2/Groups` and `/:id` | provider-bearer SCIM 2.0 filtered list, get, create, PATCH and delete resources |
+| `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 

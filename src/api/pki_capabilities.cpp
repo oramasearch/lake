@@ -212,10 +212,9 @@ void register_pki_capabilities(Registry& registry) {
                 {{"token", svid->token}, {"issuer", svid->issuer}, {"subject", svid->subject}});
         }});
     for (const auto& [name, title, profile] :
-         std::array<std::tuple<std::string, std::string, std::string>, 3>{
+         std::array<std::tuple<std::string, std::string, std::string>, 2>{
              {{"issue_client_certificate", "Issue client certificate", "client"},
-              {"issue_device_certificate", "Issue device certificate", "device"},
-              {"issue_acme_certificate", "Issue ACME certificate", "acme"}}}) {
+              {"issue_device_certificate", "Issue device certificate", "device"}}}) {
         registry.add(Capability{
             .name = name,
             .title = title,
@@ -253,6 +252,260 @@ void register_pki_capabilities(Registry& registry) {
                                            {"chain_pem", certificate->chain_pem}});
             }});
     }
+    registry.add(
+        Capability{.name = "acme_new_account",
+                   .title = "Create ACME account",
+                   .description = "Register an RFC 8555 account key for one customer.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"customer_id", {{"type", "string"}}},
+                                      {"x", {{"type", "string"}}},
+                                      {"y", {{"type", "string"}}}}},
+                                    {"required", json::array({"customer_id", "x", "y"})},
+                                    {"additionalProperties", false}},
+                   .output_schema = {{"type", "object"},
+                                     {"properties", {{"account_id", {{"type", "string"}}}}}},
+                   .kind = CapabilityKind::Action,
+                   .transport = CapabilityTransport::Acme,
+                   .requires_auth = false,
+                   .handler = [](const json& input, ApiContext& context) {
+                       if (!context.pki) {
+                           return no_pki();
+                       }
+                       auto account = context.pki->create_acme_account(
+                           input.at("customer_id").get<std::string>(),
+                           {input.at("x").get<std::string>(), input.at("y").get<std::string>()});
+                       if (!account) {
+                           return from_pki_error(account.error());
+                       }
+                       context.audit_customer_id = account->customer_id;
+                       context.audit_kind = "certificate";
+                       context.audit_object = "acme-account/" + account->id;
+                       return ApiResult::success({{"account_id", account->id}});
+                   }});
+    registry.add(Capability{
+        .name = "acme_new_order",
+        .title = "Create ACME order",
+        .description = "Create an RFC 8555 DNS identifier order.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"account_id", {{"type", "string"}}},
+                           {"identifier", {{"type", "string"}}}}},
+                         {"required", json::array({"customer_id", "account_id", "identifier"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}, {"properties", {}}},
+        .kind = CapabilityKind::Action,
+        .transport = CapabilityTransport::Acme,
+        .requires_auth = false,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki || !context.store) {
+                return no_pki();
+            }
+            auto order = context.pki->create_acme_order(*context.store,
+                                                        input.at("customer_id").get<std::string>(),
+                                                        input.at("account_id").get<std::string>(),
+                                                        input.at("identifier").get<std::string>(),
+                                                        context.instance_kek);
+            if (!order) {
+                return from_pki_error(order.error());
+            }
+            auto authorization = context.pki->acme_authorization(
+                order->customer_id, order->account_id, order->authorization_id);
+            if (!authorization) {
+                return from_pki_error(authorization.error());
+            }
+            context.audit_customer_id = order->customer_id;
+            context.audit_kind = "certificate";
+            context.audit_object = "acme-order/" + order->id;
+            return ApiResult::success({{"order_id", order->id},
+                                       {"authorization_id", order->authorization_id},
+                                       {"token", authorization->token},
+                                       {"status", order->status}});
+        }});
+    const auto add_acme_lookup = [&registry](std::string name, bool authorization_lookup) {
+        registry.add(Capability{
+            .name = std::move(name),
+            .title = authorization_lookup ? "Read ACME authorization" : "Read ACME order",
+            .description = "Return current RFC 8555 state.",
+            .input_schema =
+                {{"type", "object"},
+                 {"properties",
+                  {{"customer_id", {{"type", "string"}}},
+                   {"account_id", {{"type", "string"}}},
+                   {authorization_lookup ? "authorization_id" : "order_id", {{"type", "string"}}}}},
+                 {"required",
+                  json::array({"customer_id",
+                               "account_id",
+                               authorization_lookup ? "authorization_id" : "order_id"})},
+                 {"additionalProperties", false}},
+            .output_schema = {{"type", "object"}, {"properties", {}}},
+            .kind = CapabilityKind::Read,
+            .transport = CapabilityTransport::Acme,
+            .requires_auth = false,
+            .handler = [authorization_lookup](const json& input, ApiContext& context) {
+                if (!context.pki) {
+                    return no_pki();
+                }
+                const std::string customer_id = input.at("customer_id").get<std::string>();
+                const std::string account_id = input.at("account_id").get<std::string>();
+                context.audit_customer_id = customer_id;
+                context.audit_kind = "certificate";
+                if (authorization_lookup) {
+                    auto authorization = context.pki->acme_authorization(
+                        customer_id, account_id, input.at("authorization_id").get<std::string>());
+                    if (!authorization) {
+                        return from_pki_error(authorization.error());
+                    }
+                    context.audit_object = "acme-authorization/" + authorization->id;
+                    return ApiResult::success({{"authorization_id", authorization->id},
+                                               {"identifier", authorization->identifier},
+                                               {"token", authorization->token},
+                                               {"status", authorization->status}});
+                }
+                auto order = context.pki->acme_order(
+                    customer_id, account_id, input.at("order_id").get<std::string>());
+                if (!order) {
+                    return from_pki_error(order.error());
+                }
+                context.audit_object = "acme-order/" + order->id;
+                return ApiResult::success({{"order_id", order->id},
+                                           {"authorization_id", order->authorization_id},
+                                           {"identifier", order->identifier},
+                                           {"status", order->status},
+                                           {"has_certificate", !order->certificate_pem.empty()}});
+            }});
+    };
+    add_acme_lookup("acme_order", false);
+    add_acme_lookup("acme_authorization", true);
+    registry.add(Capability{
+        .name = "acme_http01_challenge",
+        .title = "Accept ACME HTTP-01 challenge",
+        .description = "Validate the account-bound HTTP-01 response and ready the order.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"account_id", {{"type", "string"}}},
+                           {"authorization_id", {{"type", "string"}}}}},
+                         {"required",
+                          json::array({"customer_id", "account_id", "authorization_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}, {"properties", {}}},
+        .kind = CapabilityKind::Action,
+        .transport = CapabilityTransport::Acme,
+        .requires_auth = false,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki) {
+                return no_pki();
+            }
+            auto authorization =
+                context.pki->authorize_acme_order(input.at("customer_id").get<std::string>(),
+                                                  input.at("account_id").get<std::string>(),
+                                                  input.at("authorization_id").get<std::string>());
+            if (!authorization) {
+                return from_pki_error(authorization.error());
+            }
+            context.audit_customer_id = input.at("customer_id").get<std::string>();
+            context.audit_kind = "certificate";
+            context.audit_object = "acme-authorization/" + authorization->id;
+            return ApiResult::success(
+                {{"authorization_id", authorization->id}, {"status", authorization->status}});
+        }});
+    registry.add(Capability{
+        .name = "acme_finalize_order",
+        .title = "Finalize ACME order",
+        .description = "Verify a DER CSR and issue the ordered certificate.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"account_id", {{"type", "string"}}},
+                           {"order_id", {{"type", "string"}}},
+                           {"csr", {{"type", "string"}}}}},
+                         {"required",
+                          json::array({"customer_id", "account_id", "order_id", "csr"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}, {"properties", {}}},
+        .kind = CapabilityKind::Action,
+        .transport = CapabilityTransport::Acme,
+        .requires_auth = false,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki || !context.store) {
+                return no_pki();
+            }
+            auto order =
+                context.pki->finalize_acme_order(*context.store,
+                                                 input.at("customer_id").get<std::string>(),
+                                                 input.at("account_id").get<std::string>(),
+                                                 input.at("order_id").get<std::string>(),
+                                                 input.at("csr").get<std::string>(),
+                                                 context.instance_kek);
+            if (!order) {
+                return from_pki_error(order.error());
+            }
+            context.audit_customer_id = order->customer_id;
+            context.audit_kind = "certificate";
+            context.audit_object = "acme-order/" + order->id;
+            return ApiResult::success({{"order_id", order->id}, {"status", order->status}});
+        }});
+    registry.add(Capability{
+        .name = "acme_certificate",
+        .title = "Download ACME certificate",
+        .description = "Return the PEM certificate chain for a valid order.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"account_id", {{"type", "string"}}},
+                           {"order_id", {{"type", "string"}}}}},
+                         {"required", json::array({"customer_id", "account_id", "order_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"certificate_pem", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Read,
+        .transport = CapabilityTransport::Acme,
+        .requires_auth = false,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki) {
+                return no_pki();
+            }
+            auto order = context.pki->acme_order(input.at("customer_id").get<std::string>(),
+                                                 input.at("account_id").get<std::string>(),
+                                                 input.at("order_id").get<std::string>());
+            if (!order) {
+                return from_pki_error(order.error());
+            }
+            if (order->status != "valid" || order->certificate_pem.empty()) {
+                return ApiResult::failure("invalid_input", "ACME order is not valid");
+            }
+            context.audit_customer_id = order->customer_id;
+            context.audit_kind = "certificate";
+            context.audit_object = "acme-order/" + order->id;
+            return ApiResult::success({{"certificate_pem", order->certificate_pem}});
+        }});
+    registry.add(Capability{
+        .name = "acme_http01_response",
+        .title = "Serve ACME HTTP-01 response",
+        .description = "Return the account-key authorization for an active challenge token.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"token", {{"type", "string"}}}}},
+                         {"required", json::array({"token"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"key_authorization", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Read,
+        .transport = CapabilityTransport::Acme,
+        .requires_auth = false,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki) {
+                return no_pki();
+            }
+            auto response = context.pki->acme_http01_response(input.at("token").get<std::string>());
+            if (!response) {
+                return from_pki_error(response.error());
+            }
+            context.audit_kind = "certificate";
+            context.audit_object = "acme-http-01/" + input.at("token").get<std::string>();
+            return ApiResult::success({{"key_authorization", *response}});
+        }});
     registry.add(Capability{
         .name = "exchange_kubernetes_attestation",
         .title = "Exchange Kubernetes attestation",

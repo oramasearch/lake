@@ -4,6 +4,8 @@
 #include <expected>
 #include <map>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,9 +61,31 @@ struct RecoveryCeremony {
 struct AcmeOrder {
     std::string id;
     std::string customer_id;
+    std::string account_id;
     std::string identifier;
+    std::string authorization_id;
     std::string status;
     std::string certificate_pem;
+};
+
+struct AcmeJwk {
+    std::string x;
+    std::string y;
+};
+
+struct AcmeAccount {
+    std::string id;
+    std::string customer_id;
+    AcmeJwk jwk;
+};
+
+struct AcmeAuthorization {
+    std::string id;
+    std::string order_id;
+    std::string identifier;
+    std::string token;
+    std::string key_authorization;
+    std::string status;
 };
 
 Result<Authority> create_authority(std::string_view customer_id);
@@ -126,20 +150,44 @@ public:
                               std::string_view instance_kek,
                               const RecoveryCeremony& ceremony,
                               const std::vector<ShamirShare>& shares);
+    Result<std::string> new_acme_nonce();
+    Result<void> consume_acme_nonce(std::string_view nonce);
+    Result<AcmeAccount> create_acme_account(std::string_view customer_id, const AcmeJwk& jwk);
+    Result<void> verify_acme_signature(std::string_view account_id,
+                                       const std::optional<AcmeJwk>& jwk,
+                                       std::string_view signing_input,
+                                       std::string_view signature);
     Result<AcmeOrder> create_acme_order(Store& store,
                                         std::string_view customer_id,
+                                        std::string_view account_id,
                                         std::string_view identifier,
                                         std::string_view instance_kek);
-    Result<AcmeOrder> authorize_acme_order(std::string_view order_id);
-    Result<AcmeOrder>
-    finalize_acme_order(Store& store, std::string_view order_id, std::string_view instance_kek);
+    Result<AcmeOrder> acme_order(std::string_view customer_id,
+                                 std::string_view account_id,
+                                 std::string_view order_id);
+    Result<AcmeAuthorization> acme_authorization(std::string_view customer_id,
+                                                 std::string_view account_id,
+                                                 std::string_view authorization_id);
+    Result<AcmeAuthorization> authorize_acme_order(std::string_view customer_id,
+                                                   std::string_view account_id,
+                                                   std::string_view authorization_id);
+    Result<std::string> acme_http01_response(std::string_view token);
+    Result<AcmeOrder> finalize_acme_order(Store& store,
+                                          std::string_view customer_id,
+                                          std::string_view account_id,
+                                          std::string_view order_id,
+                                          std::string_view csr,
+                                          std::string_view instance_kek);
 
 private:
     Result<Authority>
     load_authority(Store& store, std::string_view customer_id, std::string_view instance_kek);
     std::mutex mutex_;
     std::map<std::string, Authority> authorities_;
+    std::set<std::string> acme_nonces_;
+    std::map<std::string, AcmeAccount> acme_accounts_;
     std::map<std::string, AcmeOrder> acme_orders_;
+    std::map<std::string, AcmeAuthorization> acme_authorizations_;
 };
 
 } // namespace lake::control::pki

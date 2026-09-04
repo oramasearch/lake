@@ -58,7 +58,7 @@ using WebhookSender = std::function<WebhookDeliveryResult(
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
-enum class CapabilityTransport { Json, LiquidSync };
+enum class CapabilityTransport { Json, LiquidSync, Acme };
 
 struct ApiContext {
     control::Store* store = nullptr; // null = no control-plane store configured

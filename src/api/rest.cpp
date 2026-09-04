@@ -229,6 +229,9 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
 
     nlohmann::json paths = nlohmann::json::object();
     for (const auto& capability : registry.list()) {
+        if (capability->transport == CapabilityTransport::Acme) {
+            continue;
+        }
         if (capability->transport == CapabilityTransport::LiquidSync) {
             const std::string method = capability->name == "read_chunk" ? "get" : "post";
             paths[sync_path(*capability)][method] = sync_operation(*capability);
