@@ -24,7 +24,7 @@ Home, Customers, Organizations, Repositories, Search, Secrets, Audit, SSO, API
 | Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree at a published ref |
 | File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>` | one file, backing blob and escaped contents |
 | Changes | `GET /changes?repository_id=<uuid>` | the libliquid change log |
-| Change | `GET /change?repository_id=<uuid>&id=<change>` | change identity and metadata; diff awaits liquid #166 |
+| Change | `GET /change?repository_id=<uuid>&id=<change>` | change identity, metadata, per-path status, modes, blobs, text hunks, moves, and conflict values |
 | Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | result identity; attestations await liquid #166 |
 | Search | `GET /search?query=<text>` | ranked text, quoted substring, or regex results that the signed-in caller may read |

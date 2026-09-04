@@ -112,6 +112,22 @@ json repository_conflict_schema() {
             {"properties", {{"path", {{"type", "string"}}}, {"blobs", {{"type", "array"}}}}}};
 }
 
+json repository_diff_entry_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"path", {{"type", "string"}}},
+              {"old_path", {{"type", "string"}}},
+              {"kind", {{"type", "string"}}},
+              {"changes", {{"type", "array"}}},
+              {"old_mode", {{"type", {"integer", "null"}}}},
+              {"new_mode", {{"type", {"integer", "null"}}}},
+              {"old_blob", {{"type", "string"}}},
+              {"new_blob", {{"type", "string"}}},
+              {"line_hunks", {{"type", {"array", "null"}}}},
+              {"old_conflicts", {{"type", "array"}}},
+              {"new_conflicts", {{"type", "array"}}}}}};
+}
+
 json repository_ref_json(const RepositoryContentRef& ref) {
     return {{"name", ref.name}, {"change", ref.change}};
 }
@@ -135,6 +151,32 @@ json repository_change_json(const RepositoryChange& change) {
 
 json repository_conflict_json(const RepositoryConflict& conflict) {
     return {{"path", conflict.path}, {"blobs", conflict.blobs}};
+}
+
+json repository_diff_entry_json(const RepositoryDiffEntry& entry) {
+    json hunks = nullptr;
+    if (entry.line_hunks) {
+        hunks = json::array();
+        for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
+            hunks.push_back({{"old_line", hunk.old_line},
+                             {"old_count", hunk.old_count},
+                             {"new_line", hunk.new_line},
+                             {"new_count", hunk.new_count},
+                             {"removed_lines", hunk.removed_lines},
+                             {"added_lines", hunk.added_lines}});
+        }
+    }
+    return {{"path", entry.path},
+            {"old_path", entry.old_path},
+            {"kind", entry.kind},
+            {"changes", entry.changes},
+            {"old_mode", entry.old_mode ? json(*entry.old_mode) : json(nullptr)},
+            {"new_mode", entry.new_mode ? json(*entry.new_mode) : json(nullptr)},
+            {"old_blob", entry.old_blob},
+            {"new_blob", entry.new_blob},
+            {"line_hunks", std::move(hunks)},
+            {"old_conflicts", entry.old_conflicts},
+            {"new_conflicts", entry.new_conflicts}};
 }
 
 template <class T, class ToJson>
@@ -2662,7 +2704,7 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "get_change",
         .title = "Get repository change",
-        .description = "One change identity and metadata; structural diff follows liquid #166.",
+        .description = "One change identity and metadata.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}}, {"change_id", {{"type", "string"}}}}},
@@ -2695,6 +2737,37 @@ void register_repository_capabilities(Registry& registry) {
                 return ApiResult::failure("not_found", "no change " + change_id);
             }
             return ApiResult::success(repository_change_json(*found));
+        }});
+    registry.add(Capability{
+        .name = "change_diff",
+        .title = "Diff a repository change",
+        .description = "The structural and text diff between a change and its first parent.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}}, {"change_id", {{"type", "string"}}}}},
+                         {"required", json::array({"id", "change_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = list_schema(repository_diff_entry_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            return repository_content_list_result(
+                ctx.sync_store->repository_diff(repository->customer_id,
+                                                repository->id,
+                                                in.at("change_id").get<std::string>()),
+                repository_diff_entry_json);
         }});
     registry.add(Capability{
         .name = "list_conflicts",

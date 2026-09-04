@@ -566,6 +566,38 @@ RepositoryConflict repository_conflict_from_json(const nlohmann::json& value) {
     return {json_string(value, "path"), value.value("blobs", std::vector<std::string>{})};
 }
 
+RepositoryDiffEntry repository_diff_entry_from_json(const nlohmann::json& value) {
+    RepositoryDiffEntry entry{
+        .path = json_string(value, "path"),
+        .old_path = json_string(value, "old_path"),
+        .kind = json_string(value, "kind"),
+        .changes = value.value("changes", std::vector<std::string>{}),
+        .old_blob = json_string(value, "old_blob"),
+        .new_blob = json_string(value, "new_blob"),
+        .old_conflicts = value.value("old_conflicts", std::vector<std::string>{}),
+        .new_conflicts = value.value("new_conflicts", std::vector<std::string>{}),
+    };
+    if (value.contains("old_mode") && value.at("old_mode").is_number_unsigned()) {
+        entry.old_mode = value.at("old_mode").get<std::uint32_t>();
+    }
+    if (value.contains("new_mode") && value.at("new_mode").is_number_unsigned()) {
+        entry.new_mode = value.at("new_mode").get<std::uint32_t>();
+    }
+    if (value.contains("line_hunks") && value.at("line_hunks").is_array()) {
+        entry.line_hunks.emplace();
+        for (const nlohmann::json& hunk : value.at("line_hunks")) {
+            entry.line_hunks->push_back(
+                {hunk.value("old_line", std::uint64_t{0}),
+                 hunk.value("old_count", std::uint64_t{0}),
+                 hunk.value("new_line", std::uint64_t{0}),
+                 hunk.value("new_count", std::uint64_t{0}),
+                 hunk.value("removed_lines", std::vector<std::string>{}),
+                 hunk.value("added_lines", std::vector<std::string>{})});
+        }
+    }
+    return entry;
+}
+
 control::Team team_from_json(const nlohmann::json& value) {
     return {json_string(value, "id"),
             json_string(value, "organization_id"),
@@ -942,6 +974,94 @@ public:
         return output;
     }
 
+    SyncStoreResult<std::vector<RepositoryDiffEntry>>
+    repository_diff(const std::string& customer_id,
+                    const std::string& repository_id,
+                    const std::string& change_id) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto changes = liquid::runtime::block_on((*repository)->log());
+        if (!changes) {
+            return std::unexpected(error_of(changes.error()));
+        }
+        const auto found = std::ranges::find_if(*changes, [&](const liquid::change& change) {
+            return liquid::to_string(change.id.value) == change_id;
+        });
+        if (found == changes->end()) {
+            return std::unexpected(SyncStoreError{"not_found", "no change " + change_id});
+        }
+
+        liquid::result<std::vector<liquid::tree_diff_entry>> differences;
+        if (found->parents.empty()) {
+            const auto current = liquid::runtime::block_on((*repository)->at(found->id));
+            if (!current) {
+                return std::unexpected(error_of(current.error()));
+            }
+            differences = liquid::runtime::block_on(
+                (*repository)->diff(liquid::tree{}, current->root, {.text = true}));
+        } else {
+            differences = liquid::runtime::block_on(
+                (*repository)->diff(found->parents.front().id, found->id, {.text = true}));
+        }
+        if (!differences) {
+            return std::unexpected(error_of(differences.error()));
+        }
+
+        std::vector<RepositoryDiffEntry> output;
+        output.reserve(differences->size());
+        for (const liquid::tree_diff_entry& difference : *differences) {
+            RepositoryDiffEntry entry{
+                .path = difference.path,
+                .old_path = difference.old_path.value_or(""),
+                .kind = node_kind_name(difference.kind),
+                .old_mode = difference.old_mode,
+                .new_mode = difference.new_mode,
+                .old_blob = difference.old_blob ? liquid::to_string(*difference.old_blob) : "",
+                .new_blob = difference.new_blob ? liquid::to_string(*difference.new_blob) : "",
+            };
+            entry.changes.reserve(difference.changes.size());
+            for (const liquid::tree_diff_kind change : difference.changes) {
+                entry.changes.push_back(tree_diff_kind_name(change));
+            }
+            for (const liquid::digest& conflict : difference.old_conflicts) {
+                entry.old_conflicts.push_back(liquid::to_string(conflict));
+            }
+            for (const liquid::digest& conflict : difference.new_conflicts) {
+                entry.new_conflicts.push_back(liquid::to_string(conflict));
+            }
+            if (difference.line_hunks) {
+                entry.line_hunks.emplace();
+                for (const liquid::line_change& hunk : *difference.line_hunks) {
+                    auto removed = hunk_lines(**repository,
+                                              difference.old_blob,
+                                              hunk.old_line,
+                                              hunk.old_count);
+                    if (!removed) {
+                        return std::unexpected(removed.error());
+                    }
+                    auto added = hunk_lines(**repository,
+                                            difference.new_blob,
+                                            hunk.new_line,
+                                            hunk.new_count);
+                    if (!added) {
+                        return std::unexpected(added.error());
+                    }
+                    entry.line_hunks->push_back({hunk.old_line,
+                                                 hunk.old_count,
+                                                 hunk.new_line,
+                                                 hunk.new_count,
+                                                 std::move(*removed),
+                                                 std::move(*added)});
+                }
+            }
+            output.push_back(std::move(entry));
+        }
+        return output;
+    }
+
     SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id,
                          const std::string& repository_id) override {
@@ -1048,6 +1168,66 @@ private:
             return "repository";
         }
         return "object";
+    }
+
+    static std::string tree_diff_kind_name(liquid::tree_diff_kind kind) {
+        switch (kind) {
+        case liquid::tree_diff_kind::added:
+            return "added";
+        case liquid::tree_diff_kind::removed:
+            return "removed";
+        case liquid::tree_diff_kind::modified:
+            return "modified";
+        case liquid::tree_diff_kind::moved:
+            return "moved";
+        case liquid::tree_diff_kind::mode_changed:
+            return "mode changed";
+        case liquid::tree_diff_kind::conflicted:
+            return "conflicted";
+        }
+        return "changed";
+    }
+
+    static std::vector<std::string> text_lines(const std::vector<std::byte>& bytes) {
+        const std::string_view text{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+        std::vector<std::string> output;
+        std::size_t offset = 0;
+        while (offset < text.size()) {
+            const std::size_t newline = text.find('\n', offset);
+            const std::size_t length =
+                newline == std::string_view::npos ? text.size() - offset : newline - offset;
+            output.emplace_back(text.substr(offset, length));
+            if (newline == std::string_view::npos) {
+                break;
+            }
+            offset = newline + 1;
+        }
+        return output;
+    }
+
+    static SyncStoreResult<std::vector<std::string>>
+    hunk_lines(liquid::repository& repository,
+               const std::optional<liquid::digest>& blob,
+               std::uint64_t first,
+               std::uint64_t count) {
+        if (count == 0) {
+            return std::vector<std::string>{};
+        }
+        if (!blob || first == 0) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid text hunk range"});
+        }
+        const auto contents = liquid::runtime::block_on(repository.blob(*blob));
+        if (!contents) {
+            return std::unexpected(error_of(contents.error()));
+        }
+        const std::vector<std::string> lines = text_lines(*contents);
+        const std::uint64_t offset = first - 1;
+        if (offset > lines.size() || count > lines.size() - offset) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid text hunk range"});
+        }
+        return std::vector<std::string>(lines.begin() + static_cast<std::ptrdiff_t>(offset),
+                                        lines.begin() +
+                                            static_cast<std::ptrdiff_t>(offset + count));
     }
 
     static SyncStoreResult<void> walk_tree(liquid::repository& repository,
@@ -2801,10 +2981,20 @@ struct ApiServer::Impl {
         if (!change_result.ok) {
             return serve_repository_page_error(route, ctx, change_result);
         }
+        const ApiResult diff_result =
+            registry.call("change_diff", {{"id", id}, {"change_id", change_id}}, ctx);
+        if (!diff_result.ok) {
+            return serve_repository_page_error(route, ctx, diff_result);
+        }
+        std::vector<RepositoryDiffEntry> differences;
+        for (const nlohmann::json& value : diff_result.value.at("items")) {
+            differences.push_back(repository_diff_entry_from_json(value));
+        }
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_change(repository_from_json(repository_result.value),
                                        repository_change_from_json(change_result.value),
+                                       differences,
                                        ctx.authorized),
                          "text/html; charset=utf-8",
                          "no-store");

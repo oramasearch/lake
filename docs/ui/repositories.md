@@ -11,7 +11,7 @@ capability as REST and MCP, so authorization and audit recording have one path.
 | Tree | `GET /repository/tree?id=<id>&ref=<ref>` | `repository_tree` | paths, kinds, blobs and modes at the ref |
 | File | `GET /file?repository_id=<id>&ref=<ref>&path=<path>` | `repository_file` | a file, its backing blob and escaped contents |
 | Change log | `GET /changes?repository_id=<id>` | `list_changes` | libliquid change identities and metadata |
-| Change | `GET /change?repository_id=<id>&id=<change>` | `get_change` | change identity and metadata; structural diff is deferred to liquid #166 |
+| Change | `GET /change?repository_id=<id>&id=<change>` | `get_change`, `change_diff` | change identity and its first-parent structural diff, including text hunks |
 | Conflicts | `GET /conflicts?repository_id=<id>` | `list_conflicts` | unresolved conflict paths and their blob values |
 | Artifact | `GET /artifact?repository_id=<id>&id=<result>` | `get_artifact` | result identity; records and attestations are deferred to liquid #166 |
 | Repository access | `GET /repository/access?id=<id>` | `entity_effective_access` | direct and inherited effective access |
@@ -23,9 +23,13 @@ or organization repository is omitted from the list and its direct page redirect
 The same rule covers repository refs, trees, files, logs, changes, conflict values and the artifact
 placeholder. Signed-in calls use the policy engine instead.
 
-## Deferred data
+## Change diffs
 
-The change page intentionally has no diff output until liquid #166 exposes a public structural
-diff API. The artifact page intentionally has no record or attestation output until that issue
-exposes public enumeration for results, provenance, reproducibility, traces and SBOMs. Both pages
-render the requested identity now, making the later extension localized and visible to users.
+`change_diff` calls libliquid's public `repository::diff` with text hunks enabled. Each path keeps
+its added, removed, modified, moved, mode-changed, and conflicted status; old and new modes and blob
+digests remain visible. Text hunks include their old/new ranges and escaped removed/added lines.
+Conflict digests are values on the path instead of an error state. A change with no visible hunks
+renders the explicit empty state.
+
+The artifact page still has no record or attestation output while lake integrates liquid #166's
+public enumeration for results, provenance, reproducibility, traces, and SBOMs.

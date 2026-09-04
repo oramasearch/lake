@@ -49,6 +49,7 @@ form.login input,.filters input,form.search input{font:inherit;padding:.5rem .6r
 form.inline{display:inline}form.inline button{background:transparent;color:var(--accent);padding:0}.error{color:#a12a2a;margin:0 0 .5rem}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}dt{color:var(--muted)}dd{margin:0}
 .filters{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:0 0 1.5rem}.filters label{display:grid;gap:.2rem;color:var(--muted);font-size:.8rem}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef1f4;padding:1rem;border-radius:6px}
+.diff-entry{margin-top:1rem}.diff-entry h2{font-size:1rem;margin:0 0 .75rem}.diff-entry .badge{margin-left:.35rem}.diff-hunk{margin:.75rem 0 0}.diff-hunk span{display:block}.diff-remove{color:#8b1a1a}.diff-add{color:#176b35}
 form.stack{display:grid;gap:.75rem;max-width:36rem}form.stack label{display:grid;gap:.25rem;color:var(--muted)}
 form.stack input,form.stack textarea,form.stack select{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
 form.stack textarea{min-height:8rem}button.primary{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer;width:max-content}
@@ -107,6 +108,26 @@ std::string error_markup(std::string_view error) {
 
 std::string state_badge(bool active) {
     return std::format("<span class=\"badge\">{}</span>", active ? "active" : "revoked");
+}
+
+std::string joined(const std::vector<std::string>& values) {
+    std::string output;
+    for (const std::string& value : values) {
+        if (!output.empty()) {
+            output += ", ";
+        }
+        output += value;
+    }
+    return output;
+}
+
+std::string mode_text(const std::optional<std::uint32_t>& mode) {
+    return mode ? std::format("{:o}", *mode) : "—";
+}
+
+bool hidden_reformatting_entry(const RepositoryDiffEntry& entry) {
+    return entry.changes.size() == 1 && entry.changes.front() == "modified" &&
+           entry.line_hunks && entry.line_hunks->empty();
 }
 
 } // namespace
@@ -353,6 +374,7 @@ std::string web_ui_repository_log(const control::Repository& repository,
 
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
+                          const std::vector<RepositoryDiffEntry>& differences,
                           bool signed_in) {
     std::string parents;
     for (const std::string& parent : change.parents) {
@@ -361,17 +383,69 @@ std::string web_ui_change(const control::Repository& repository,
         }
         parents += parent;
     }
-    const std::string content = std::format(
+    std::string content = std::format(
         "<p class=\"eyebrow\">change</p><h1>{}</h1><p class=\"sub\">{}</p>"
         "<div class=\"panel\"><dl><dt>author</dt><dd><code>{}</code></dd><dt>created</dt>"
-        "<dd>{}</dd><dt>parents</dt><dd><code>{}</code></dd></dl></div>"
-        "<div class=\"panel\"><h2>Structural diff</h2><p>Structural diff rendering arrives "
-        "with liquid #166.</p></div>",
+        "<dd>{}</dd><dt>parents</dt><dd><code>{}</code></dd></dl></div>",
         web_ui_escape(change.id),
         web_ui_escape(change.message),
         web_ui_escape(change.author),
         web_ui_escape(change.occurred_at),
         web_ui_escape(parents));
+    std::size_t visible = 0;
+    for (const RepositoryDiffEntry& entry : differences) {
+        if (hidden_reformatting_entry(entry)) {
+            continue;
+        }
+        ++visible;
+        std::string badges;
+        for (const std::string& status : entry.changes) {
+            badges += std::format("<span class=\"badge\">{}</span>", web_ui_escape(status));
+        }
+        content += std::format(
+            "<section class=\"panel diff-entry\"><h2><code>{}</code>{}</h2><dl>"
+            "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
+            "<dt>mode</dt><dd><code>{} → {}</code></dd><dt>blobs</dt>"
+            "<dd><code>{} → {}</code></dd></dl>",
+            web_ui_escape(entry.path),
+            badges,
+            web_ui_escape(entry.kind),
+            web_ui_escape(entry.old_path.empty() ? "—" : entry.old_path),
+            mode_text(entry.old_mode),
+            mode_text(entry.new_mode),
+            web_ui_escape(entry.old_blob.empty() ? "—" : entry.old_blob),
+            web_ui_escape(entry.new_blob.empty() ? "—" : entry.new_blob));
+        if (!entry.old_conflicts.empty() || !entry.new_conflicts.empty()) {
+            content += std::format(
+                "<div class=\"notice\"><strong>Conflict values</strong><br>old: "
+                "<code>{}</code><br>new: <code>{}</code></div>",
+                web_ui_escape(joined(entry.old_conflicts)),
+                web_ui_escape(joined(entry.new_conflicts)));
+        }
+        if (entry.line_hunks) {
+            for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
+                content += std::format(
+                    "<pre class=\"diff-hunk\"><span>@@ -{},{} +{},{} @@</span>",
+                    hunk.old_line,
+                    hunk.old_count,
+                    hunk.new_line,
+                    hunk.new_count);
+                for (const std::string& line : hunk.removed_lines) {
+                    content += std::format(
+                        "<span class=\"diff-remove\">-{}</span>", web_ui_escape(line));
+                }
+                for (const std::string& line : hunk.added_lines) {
+                    content += std::format(
+                        "<span class=\"diff-add\">+{}</span>", web_ui_escape(line));
+                }
+                content += "</pre>";
+            }
+        }
+        content += "</section>";
+    }
+    if (visible == 0) {
+        content += "<div class=\"panel empty diff-entry\">No changes to display.</div>";
+    }
     return web_ui_shell("lake — change", repository_name(repository), content, signed_in);
 }
 

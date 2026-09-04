@@ -191,7 +191,7 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
 }
 
-TEST(WebUi, RepositoryContentAndDeferredPagesRenderSafely) {
+TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     const lake::control::Repository repository{
         "r1", "c1", "liquid", "", "public", "", "", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"};
     const lake::api::RepositoryTreeEntry tree_entry{"<readme>.md", "blob", "blob-1", 0644};
@@ -212,9 +212,40 @@ TEST(WebUi, RepositoryContentAndDeferredPagesRenderSafely) {
     EXPECT_NE(log.find("href=\"/change?repository_id=r1&amp;id=change-1\""), std::string::npos);
     EXPECT_NE(log.find("&lt;message&gt;"), std::string::npos);
 
-    const std::string deferred_change = lake::api::web_ui_change(repository, change, false);
-    EXPECT_NE(deferred_change.find("liquid #166"), std::string::npos);
-    EXPECT_NE(deferred_change.find("&lt;message&gt;"), std::string::npos);
+    const lake::api::RepositoryDiffEntry difference{
+        .path = "<readme>.md",
+        .old_path = "old-readme.md",
+        .kind = "blob",
+        .changes = {"moved", "modified", "conflicted"},
+        .old_mode = 0644,
+        .new_mode = 0755,
+        .old_blob = "old-blob",
+        .new_blob = "new-blob",
+        .line_hunks =
+            std::vector<lake::api::RepositoryLineHunk>{{2, 1, 2, 1, {"<old>"}, {"<new>"}}},
+        .old_conflicts = {"left"},
+        .new_conflicts = {"left", "right"},
+    };
+    const std::string change_page =
+        lake::api::web_ui_change(repository, change, {difference}, false);
+    EXPECT_NE(change_page.find("&lt;message&gt;"), std::string::npos);
+    EXPECT_NE(change_page.find("&lt;readme&gt;.md"), std::string::npos);
+    EXPECT_NE(change_page.find("@@ -2,1 +2,1 @@"), std::string::npos);
+    EXPECT_NE(change_page.find("-&lt;old&gt;"), std::string::npos);
+    EXPECT_NE(change_page.find("+&lt;new&gt;"), std::string::npos);
+    EXPECT_NE(change_page.find("Conflict values"), std::string::npos);
+    EXPECT_EQ(change_page.find("<script"), std::string::npos);
+
+    const lake::api::RepositoryDiffEntry reformatting{
+        .path = "readme.md",
+        .kind = "blob",
+        .changes = {"modified"},
+        .line_hunks = std::vector<lake::api::RepositoryLineHunk>{},
+    };
+    const std::string empty_change =
+        lake::api::web_ui_change(repository, change, {reformatting}, false);
+    EXPECT_NE(empty_change.find("No changes to display."), std::string::npos);
+    EXPECT_EQ(empty_change.find("<code>readme.md</code>"), std::string::npos);
 
     const lake::api::RepositoryConflict conflict{"<config>", {"left", "right"}};
     const std::string conflicts =

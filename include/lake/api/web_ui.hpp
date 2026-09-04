@@ -72,6 +72,7 @@ std::string web_ui_repository_log(const control::Repository& repository,
                                   bool signed_in);
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
+                          const std::vector<RepositoryDiffEntry>& differences,
                           bool signed_in);
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,

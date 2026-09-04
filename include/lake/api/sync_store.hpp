@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -52,6 +53,29 @@ struct RepositoryConflict {
     std::vector<std::string> blobs;
 };
 
+struct RepositoryLineHunk {
+    std::uint64_t old_line = 0;
+    std::uint64_t old_count = 0;
+    std::uint64_t new_line = 0;
+    std::uint64_t new_count = 0;
+    std::vector<std::string> removed_lines;
+    std::vector<std::string> added_lines;
+};
+
+struct RepositoryDiffEntry {
+    std::string path;
+    std::string old_path;
+    std::string kind;
+    std::vector<std::string> changes;
+    std::optional<std::uint32_t> old_mode;
+    std::optional<std::uint32_t> new_mode;
+    std::string old_blob;
+    std::string new_blob;
+    std::optional<std::vector<RepositoryLineHunk>> line_hunks;
+    std::vector<std::string> old_conflicts;
+    std::vector<std::string> new_conflicts;
+};
+
 // HTTP-free access to the liquid store selected by a repository's customer.
 // The libliquid implementation remains inside the HTTP adapter translation
 // unit.
@@ -79,6 +103,10 @@ public:
                                                             const std::string& path) = 0;
     virtual SyncStoreResult<std::vector<RepositoryChange>>
     repository_log(const std::string& customer_id, const std::string& repository_id) = 0;
+    virtual SyncStoreResult<std::vector<RepositoryDiffEntry>>
+    repository_diff(const std::string& customer_id,
+                    const std::string& repository_id,
+                    const std::string& change_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id, const std::string& repository_id) = 0;
 

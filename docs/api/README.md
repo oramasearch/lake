@@ -47,7 +47,7 @@ repository and its content; all other repository visibility levels remain protec
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
-| `list_changes`, `get_change`, `list_conflicts` | read | repository id plus change id where required | change metadata or conflict values | [repositories.md](repositories.md) |
+| `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata, per-path diffs with text hunks, or conflict values | [repositories.md](repositories.md) |
 | `get_artifact` | read | repository id, result id | result identity and liquid #166 deferred-data status | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |

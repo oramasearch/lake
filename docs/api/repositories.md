@@ -28,6 +28,7 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 | `repository_file` | read | `id`, `ref`, `path` | `{path, blob, contents, size}` |
 | `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
 | `get_change` | read | `id`, `change_id` | change identity and metadata |
+| `change_diff` | read | `id`, `change_id` | `{items: [{path, old_path, kind, changes, old_mode, new_mode, old_blob, new_blob, line_hunks, old_conflicts, new_conflicts}]}` |
 | `list_conflicts` | read | `id` | `{items: [{path, blobs}]}` |
 | `get_artifact` | read | `id`, `result_id` | result identity and deferred-data status |
 | `refs` | read | `repository_id` | `404 not_found`, `409 conflict` (tombstoned) |
@@ -44,18 +45,21 @@ capabilities authorize the repository before opening its libliquid data. The oth
 lists follow their policy-object or scoped parent authorization paths, and the registry records
 every successful or denied call.
 
-## Repository data and deferred pages
+## Repository data and change pages
 
 `repository_refs`, `repository_tree`, `repository_file`, `list_changes`, and `list_conflicts`
 read libliquid directly through the lake repository-store adapter. Tree output is recursive;
 every file links to its backing blob identity and rendered contents. Conflict records remain
 first-class values containing a path and the competing blob references.
 
-The public `repository::diff` API required for structural change rendering is not available
-until liquid #166. Therefore `get_change` returns the selected change's identity and metadata,
-and the corresponding page explicitly marks the diff as deferred. `get_artifact` similarly
-renders only a requested result identity until liquid #166 provides public enumeration of
-results, records, provenance, reproducibility, traces, and SBOMs.
+`change_diff` compares the selected change with its first parent through libliquid's public
+`repository::diff` API. A root change is compared with an empty tree. The result retains every
+per-path status, old/new mode and blob digest, move origin, conflict digest, and optional text hunk.
+Lake reads the hunk ranges from their blobs so the API and page show escaped removed and added
+lines. A change without visible hunks produces the page's empty state.
+
+`get_artifact` still renders only a requested result identity while lake integrates liquid #166's
+public enumeration of results, records, provenance, reproducibility, traces, and SBOMs.
 
 ## Public repositories
 

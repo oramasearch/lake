@@ -94,6 +94,19 @@ struct RepositoryFixtureStore final : SyncStore {
             {"change-1", {}, "taap:1:ed25519:author", "initial", "2026-09-04T00:00:00Z"}};
     }
 
+    SyncStoreResult<std::vector<RepositoryDiffEntry>>
+    repository_diff(const std::string&, const std::string&, const std::string&) override {
+        return std::vector<RepositoryDiffEntry>{
+            {.path = "readme.md",
+             .kind = "modified",
+             .changes = {"modified"},
+             .old_mode = 0644,
+             .new_mode = 0644,
+             .old_blob = "blob-1",
+             .new_blob = "blob-2",
+             .line_hunks = std::vector<RepositoryLineHunk>{{1, 1, 1, 1, {"old"}, {"hello"}}}}};
+    }
+
     SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string&, const std::string&) override {
         return std::vector<RepositoryConflict>{{"readme.md", {"blob-1", "blob-2"}}};
@@ -1234,6 +1247,11 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(
         s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}}).value["message"],
         "initial");
+    const ApiResult difference =
+        s.call("change_diff", {{"id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(difference.ok) << difference.error.message;
+    EXPECT_EQ(difference.value["items"][0]["path"], "readme.md");
+    EXPECT_EQ(difference.value["items"][0]["line_hunks"][0]["added_lines"][0], "hello");
     EXPECT_EQ(s.call("list_conflicts", {{"id", repository_id}}).value["items"][0]["blobs"].size(),
               2u);
     EXPECT_EQ(
@@ -1252,8 +1270,11 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
         store->create_repository({customer->id, "public-repository", "visible", "public"});
     const auto private_repository =
         store->create_repository({customer->id, "private-repository", "hidden", "private"});
+    const auto reformatting_repository =
+        store->create_repository({customer->id, "reformatting-repository", "empty diff", "public"});
     ASSERT_TRUE(public_repository);
     ASSERT_TRUE(private_repository);
+    ASSERT_TRUE(reformatting_repository);
 
     const std::filesystem::path repository_path =
         root.path() / customer->id / "repositories" / public_repository->id;
@@ -1267,8 +1288,28 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     ASSERT_TRUE(opened) << opened.error().message;
     auto repository = std::move(*opened);
     ASSERT_TRUE(liquid::runtime::block_on(repository.write("readme.md", bytes("public content"))));
-    const auto change = liquid::runtime::block_on(repository.cut("initial public content"));
-    ASSERT_TRUE(change) << change.error().message;
+    const auto first_change = liquid::runtime::block_on(repository.cut("initial public content"));
+    ASSERT_TRUE(first_change) << first_change.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(
+        repository.write("readme.md", bytes("public content\nupdated\n"))));
+    ASSERT_TRUE(liquid::runtime::block_on(repository.write("notes.md", bytes("new file\n"))));
+    const auto second_change = liquid::runtime::block_on(repository.cut("update public content"));
+    ASSERT_TRUE(second_change) << second_change.error().message;
+
+    const std::filesystem::path reformatting_path =
+        root.path() / customer->id / "repositories" / reformatting_repository->id;
+    auto reformatting_opened =
+        liquid::runtime::block_on(liquid::repository::create(reformatting_path));
+    ASSERT_TRUE(reformatting_opened) << reformatting_opened.error().message;
+    auto reformatting_source = std::move(*reformatting_opened);
+    ASSERT_TRUE(
+        liquid::runtime::block_on(reformatting_source.write("format.cpp", bytes("int value;\n"))));
+    const auto formatted_before =
+        liquid::runtime::block_on(reformatting_source.cut("before formatting"));
+    ASSERT_TRUE(formatted_before) << formatted_before.error().message;
+    const auto formatting_change =
+        liquid::runtime::block_on(reformatting_source.cut("reformatting"));
+    ASSERT_TRUE(formatting_change) << formatting_change.error().message;
 
     ServerOptions options;
     options.port = 0;
@@ -1296,10 +1337,28 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
         server.port(), "/file?repository_id=" + public_repository->id + "&ref=main&path=readme.md");
     EXPECT_NE(file_page.find(" 200 "), std::string::npos);
     EXPECT_NE(file_page.find("public content"), std::string::npos);
+    const std::string change_page = http_get(server.port(),
+                                             "/change?repository_id=" + public_repository->id +
+                                                 "&id=" + liquid::to_string(second_change->value));
+    EXPECT_NE(change_page.find(" 200 "), std::string::npos);
+    EXPECT_NE(change_page.find("readme.md"), std::string::npos);
+    EXPECT_NE(change_page.find("notes.md"), std::string::npos);
+    EXPECT_NE(change_page.find("@@ -2,0 +2,1 @@"), std::string::npos);
+    EXPECT_NE(change_page.find("+updated"), std::string::npos);
+    const std::string reformatting_page =
+        http_get(server.port(),
+                 "/change?repository_id=" + reformatting_repository->id +
+                     "&id=" + liquid::to_string(formatting_change->value));
+    EXPECT_NE(reformatting_page.find(" 200 "), std::string::npos);
+    EXPECT_NE(reformatting_page.find("No changes to display."), std::string::npos);
+    EXPECT_EQ(reformatting_page.find("<code>format.cpp</code>"), std::string::npos);
 
     const std::string private_page =
         http_get(server.port(), "/repository?id=" + private_repository->id);
     EXPECT_NE(private_page.find(" 302 "), std::string::npos);
+    const std::string private_change =
+        http_get(server.port(), "/change?repository_id=" + private_repository->id + "&id=hidden");
+    EXPECT_NE(private_change.find(" 302 "), std::string::npos);
     EXPECT_NE(private_page.find("Location: /login"), std::string::npos);
     const std::string private_api =
         http_get(server.port(), "/v1/get_repository?id=" + private_repository->id);
