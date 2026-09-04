@@ -109,7 +109,7 @@ ApiResult Registry::call(const std::string &name, const nlohmann::json &input,
     } else if (ApiResult validation = validate_input(*capability, input); !validation.ok) {
         result = validation;
         proceed = false;
-    } else if (capability->requires_auth) {
+    } else if (capability->requires_auth && !capability->authorizes_candidates) {
         if (capability->object.empty() || capability->action.empty() ||
             !capability->resolve_object) {
             result = ApiResult::failure("store_error",

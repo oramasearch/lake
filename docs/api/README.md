@@ -52,6 +52,7 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `export_audit` | read | audit filters | `{jsonl}` | [audit.md](audit.md) |
 | `verify_audit` | read | — | `{verified: true}` | [audit.md](audit.md) |
 | `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days}` | [audit.md](audit.md) |
+| `search` | read | `query`, `customer?`, `repository?`, `ref?`, `limit?` | `{items: [ranked hit]}` | [search.md](search.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
@@ -68,6 +69,8 @@ in [`sync.md`](sync.md).
    `properties`, `required`, `additionalProperties: false`; an output schema for the value.
 3. Name the authorization object and action and provide the resolver that maps validated input to
    the object id. `Registry::call` rejects protected capabilities missing this metadata.
+   A candidate-returning capability may instead declare its batched authorization and invoke
+   `authorize_batch` before it returns any candidate.
 4. Register it in `src/api/capabilities.cpp`. It appears on REST, in OpenAPI and as an MCP tool
    automatically; `test_api.cpp`'s OpenAPI test proves it.
 5. Tests against `InMemoryStore` and the Postgres fixture; a page under `docs/api/` in the same

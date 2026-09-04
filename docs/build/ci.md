@@ -50,6 +50,10 @@ oramasearch/lake:sha-<short-sha>
 `latest` is rejected. Git tags used for images must also be valid Docker tag strings. Deployments
 reference the Git-tag image; the SHA tag provides a second immutable source identifier.
 
+The Linux/amd64 image is verified by this native CI worker or the AKS builder after
+`ORAMA_SUBMODULES_TOKEN` is available. Apple Silicon developer machines do not need to emulate the
+amd64 image recipe; that emulation is not a release proof.
+
 The workflow can also be dispatched manually with the required `tag` input. Use that path only to
 retry an unpublished tag, selecting the matching Git tag as the workflow ref:
 

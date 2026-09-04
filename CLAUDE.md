@@ -30,6 +30,11 @@ page. Those capabilities use the policy metadata and are recorded by the registr
 Lake links libliquid as a library-only submodule and opens one customer store at
 `LAKE_STORE_ROOT/<customer id>/store`; liquid #160's contract is pinned, while push and pull await
 the public repository/store binding and protocol codec required by lake's server.
+Hot branch-tip search follows that repository-store work: it persists blob-deduplicated BM25F and
+positional-trigram segments at `LAKE_STORE_ROOT/<customer>/index/`, atomically publishes each
+change through its manifest, filters candidates with batched policy authorization, and records the
+signed query outcome through `Registry::call`. REST, OpenAPI, MCP, and the `/search` page expose
+the same capability.
 
 ## Where to read Zetta
 
