@@ -19,10 +19,10 @@ else below is added to that shape and keeps its rules
 the API cannot).
 
 **Web UI status: repository browsing is implemented in lake #9.** Repository lists, refs,
-trees, files, structural change diffs, conflict values, organization and team access views render without
-client-side code. Every returned repository candidate passes batched policy authorization, and
-anonymous requests can read only public repositories. Artifact records and attestations remain
-deferred while lake integrates liquid #166's public result APIs.
+trees, files, structural change diffs, conflict values, paged build results, verified provenance,
+reproducibility and SBOM attestations, trace summaries, and organization/team access views render
+without client-side code. Every returned repository candidate passes batched policy authorization,
+and anonymous requests can read only public repositories.
 
 Identity-core status on this branch: verified TAAP documents, password plus TOTP with one-use
 recovery codes and fresh-verification disablement, persisted

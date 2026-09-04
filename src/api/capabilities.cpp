@@ -128,6 +128,25 @@ json repository_diff_entry_schema() {
               {"new_conflicts", {{"type", "array"}}}}}};
 }
 
+json repository_artifact_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"id", {{"type", "string"}}},
+              {"action", {{"type", "string"}}},
+              {"exit_code", {{"type", "integer"}}},
+              {"outputs", {{"type", "array"}}},
+              {"timing", {{"type", "object"}}},
+              {"cache_status", {{"type", "string"}}},
+              {"divergent", {{"type", "boolean"}}},
+              {"verification", {{"type", "string"}}},
+              {"worker", {{"type", "string"}}},
+              {"observed_at", {{"type", "string"}}},
+              {"started_at", {{"type", "string"}}},
+              {"finished_at", {{"type", "string"}}},
+              {"attestations", {{"type", "array"}}},
+              {"trace", {{"type", {"object", "null"}}}}}}};
+}
+
 json repository_ref_json(const RepositoryContentRef& ref) {
     return {{"name", ref.name}, {"change", ref.change}};
 }
@@ -177,6 +196,50 @@ json repository_diff_entry_json(const RepositoryDiffEntry& entry) {
             {"line_hunks", std::move(hunks)},
             {"old_conflicts", entry.old_conflicts},
             {"new_conflicts", entry.new_conflicts}};
+}
+
+json repository_artifact_json(const RepositoryArtifact& artifact) {
+    json outputs = json::array();
+    for (const RepositoryArtifactOutput& output : artifact.outputs) {
+        outputs.push_back({{"path", output.path}, {"mode", output.mode}, {"blob", output.blob}});
+    }
+    json attestations = json::array();
+    for (const RepositoryArtifactAttestation& attestation : artifact.attestations) {
+        attestations.push_back({{"id", attestation.id},
+                                {"profile", attestation.profile},
+                                {"subject", attestation.subject},
+                                {"issuer", attestation.issuer},
+                                {"verified", attestation.verified},
+                                {"reason", attestation.reason}});
+    }
+    json trace = nullptr;
+    if (artifact.trace) {
+        trace = {{"id", artifact.trace->id},
+                 {"wall_ms", artifact.trace->wall_ms},
+                 {"actions", artifact.trace->actions},
+                 {"dependencies", artifact.trace->dependencies},
+                 {"cache_hits", artifact.trace->cache_hits},
+                 {"cache_misses", artifact.trace->cache_misses}};
+    }
+    return {{"id", artifact.id},
+            {"action", artifact.action},
+            {"exit_code", artifact.exit_code},
+            {"outputs", std::move(outputs)},
+            {"timing",
+             {{"queued_ms", artifact.timing.queued_ms},
+              {"sandbox_ms", artifact.timing.sandbox_ms},
+              {"exec_ms", artifact.timing.exec_ms},
+              {"hash_ms", artifact.timing.hash_ms},
+              {"store_ms", artifact.timing.store_ms}}},
+            {"cache_status", artifact.cache_status},
+            {"divergent", artifact.divergent},
+            {"verification", artifact.verification},
+            {"worker", artifact.worker},
+            {"observed_at", artifact.observed_at},
+            {"started_at", artifact.started_at},
+            {"finished_at", artifact.finished_at},
+            {"attestations", std::move(attestations)},
+            {"trace", std::move(trace)}};
 }
 
 template <class T, class ToJson>
@@ -2764,9 +2827,8 @@ void register_repository_capabilities(Registry& registry) {
                 return no_repository_store();
             }
             return repository_content_list_result(
-                ctx.sync_store->repository_diff(repository->customer_id,
-                                                repository->id,
-                                                in.at("change_id").get<std::string>()),
+                ctx.sync_store->repository_diff(
+                    repository->customer_id, repository->id, in.at("change_id").get<std::string>()),
                 repository_diff_entry_json);
         }});
     registry.add(Capability{
@@ -2794,20 +2856,69 @@ void register_repository_capabilities(Registry& registry) {
                 ctx.sync_store->repository_conflicts(repository->customer_id, repository->id),
                 repository_conflict_json);
         }});
+    registry.add(Capability{.name = "list_artifacts",
+                            .title = "List repository artifacts",
+                            .description = "A filtered cursor page of libliquid build results.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties",
+                                              {{"id", {{"type", "string"}}},
+                                               {"action", {{"type", "string"}}},
+                                               {"output", {{"type", "string"}}},
+                                               {"content", {{"type", "string"}}},
+                                               {"cursor", {{"type", "string"}}},
+                                               {"limit", {{"type", "integer"}}}}},
+                                             {"required", json::array({"id"})},
+                                             {"additionalProperties", false}},
+                            .output_schema = {{"type", "object"},
+                                              {"properties",
+                                               {{"items", {{"type", "array"}}},
+                                                {"next_cursor", {{"type", "string"}}},
+                                                {"done", {{"type", "boolean"}}}}}},
+                            .kind = CapabilityKind::Read,
+                            .object = "repository",
+                            .action = "read",
+                            .resolve_object = entity_object("repository", "id"),
+                            .authorizes_candidates = true,
+                            .allows_anonymous_public_read = true,
+                            .handler = [](const json& in, ApiContext& ctx) {
+                                const auto repository = readable_repository(in, ctx);
+                                if (!repository) {
+                                    return ApiResult::failure(repository.error().code,
+                                                              repository.error().message,
+                                                              repository.error().path);
+                                }
+                                if (!ctx.sync_store) {
+                                    return no_repository_store();
+                                }
+                                const auto page = ctx.sync_store->repository_artifacts(
+                                    repository->customer_id,
+                                    repository->id,
+                                    {.action = in.value("action", ""),
+                                     .output = in.value("output", ""),
+                                     .content = in.value("content", ""),
+                                     .cursor = in.value("cursor", ""),
+                                     .limit = static_cast<std::uint64_t>(limit_of(in))});
+                                if (!page) {
+                                    return from_sync_store_error(page.error());
+                                }
+                                json items = json::array();
+                                for (const RepositoryArtifact& artifact : page->items) {
+                                    items.push_back(repository_artifact_json(artifact));
+                                }
+                                return ApiResult::success({{"items", std::move(items)},
+                                                           {"next_cursor", page->next_cursor},
+                                                           {"done", page->done}});
+                            }});
     registry.add(Capability{
         .name = "get_artifact",
-        .title = "Get artifact placeholder",
-        .description = "A result identity; result enumeration and attestations follow liquid #166.",
+        .title = "Get repository artifact",
+        .description = "One result with outputs, timing, cache state, attestations, and trace.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}}, {"result_id", {{"type", "string"}}}}},
                          {"required", json::array({"id", "result_id"})},
                          {"additionalProperties", false}},
-        .output_schema = {{"type", "object"},
-                          {"properties",
-                           {{"repository_id", {{"type", "string"}}},
-                            {"result_id", {{"type", "string"}}},
-                            {"status", {{"type", "string"}}}}}},
+        .output_schema = repository_artifact_schema(),
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",
@@ -2819,9 +2930,15 @@ void register_repository_capabilities(Registry& registry) {
                 return ApiResult::failure(
                     repository.error().code, repository.error().message, repository.error().path);
             }
-            return ApiResult::success({{"repository_id", repository->id},
-                                       {"result_id", in.at("result_id")},
-                                       {"status", "waiting for liquid #166"}});
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            const auto artifact = ctx.sync_store->repository_artifact(
+                repository->customer_id, repository->id, in.at("result_id"));
+            if (!artifact) {
+                return from_sync_store_error(artifact.error());
+            }
+            return ApiResult::success(repository_artifact_json(*artifact));
         }});
     registry.add(Capability{
         .name = "refs",

@@ -386,6 +386,18 @@ std::optional<std::uint64_t> decimal_value(std::string_view value) {
     return output;
 }
 
+std::uint64_t query_page_limit(const boost::http::route_params& route) {
+    const std::string text = query_value(route, "limit");
+    if (text.empty()) {
+        return 100;
+    }
+    std::uint64_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    return error == std::errc{} && end == text.data() + text.size() && value > 0 && value <= 1'000
+               ? value
+               : 100;
+}
+
 std::string browser_session_cookie(const boost::http::route_params& route,
                                    std::string_view secret) {
     std::string cookie = "lake_session=" + std::string(secret) + "; HttpOnly; SameSite=Lax; Path=/";
@@ -586,16 +598,61 @@ RepositoryDiffEntry repository_diff_entry_from_json(const nlohmann::json& value)
     if (value.contains("line_hunks") && value.at("line_hunks").is_array()) {
         entry.line_hunks.emplace();
         for (const nlohmann::json& hunk : value.at("line_hunks")) {
-            entry.line_hunks->push_back(
-                {hunk.value("old_line", std::uint64_t{0}),
-                 hunk.value("old_count", std::uint64_t{0}),
-                 hunk.value("new_line", std::uint64_t{0}),
-                 hunk.value("new_count", std::uint64_t{0}),
-                 hunk.value("removed_lines", std::vector<std::string>{}),
-                 hunk.value("added_lines", std::vector<std::string>{})});
+            entry.line_hunks->push_back({hunk.value("old_line", std::uint64_t{0}),
+                                         hunk.value("old_count", std::uint64_t{0}),
+                                         hunk.value("new_line", std::uint64_t{0}),
+                                         hunk.value("new_count", std::uint64_t{0}),
+                                         hunk.value("removed_lines", std::vector<std::string>{}),
+                                         hunk.value("added_lines", std::vector<std::string>{})});
         }
     }
     return entry;
+}
+
+RepositoryArtifact repository_artifact_from_json(const nlohmann::json& value) {
+    RepositoryArtifact artifact{
+        .id = json_string(value, "id"),
+        .action = json_string(value, "action"),
+        .exit_code = value.value("exit_code", 0),
+        .cache_status = json_string(value, "cache_status"),
+        .divergent = value.value("divergent", false),
+        .verification = json_string(value, "verification"),
+        .worker = json_string(value, "worker"),
+        .observed_at = json_string(value, "observed_at"),
+        .started_at = json_string(value, "started_at"),
+        .finished_at = json_string(value, "finished_at"),
+    };
+    for (const nlohmann::json& output : value.value("outputs", nlohmann::json::array())) {
+        artifact.outputs.push_back({json_string(output, "path"),
+                                    output.value("mode", std::uint32_t{0}),
+                                    json_string(output, "blob")});
+    }
+    if (value.contains("timing") && value.at("timing").is_object()) {
+        const nlohmann::json& timing = value.at("timing");
+        artifact.timing = {timing.value("queued_ms", std::uint64_t{0}),
+                           timing.value("sandbox_ms", std::uint64_t{0}),
+                           timing.value("exec_ms", std::uint64_t{0}),
+                           timing.value("hash_ms", std::uint64_t{0}),
+                           timing.value("store_ms", std::uint64_t{0})};
+    }
+    for (const nlohmann::json& attestation : value.value("attestations", nlohmann::json::array())) {
+        artifact.attestations.push_back({json_string(attestation, "id"),
+                                         json_string(attestation, "profile"),
+                                         json_string(attestation, "subject"),
+                                         json_string(attestation, "issuer"),
+                                         attestation.value("verified", false),
+                                         json_string(attestation, "reason")});
+    }
+    if (value.contains("trace") && value.at("trace").is_object()) {
+        const nlohmann::json& trace = value.at("trace");
+        artifact.trace = RepositoryArtifactTrace{json_string(trace, "id"),
+                                                 trace.value("wall_ms", std::uint64_t{0}),
+                                                 trace.value("actions", std::uint64_t{0}),
+                                                 trace.value("dependencies", std::uint64_t{0}),
+                                                 trace.value("cache_hits", std::uint64_t{0}),
+                                                 trace.value("cache_misses", std::uint64_t{0})};
+    }
+    return artifact;
 }
 
 control::Team team_from_json(const nlohmann::json& value) {
@@ -983,7 +1040,7 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        const auto changes = liquid::runtime::block_on((*repository)->log());
+        const auto changes = liquid::runtime::block_on((*repository)->subject->log());
         if (!changes) {
             return std::unexpected(error_of(changes.error()));
         }
@@ -996,15 +1053,15 @@ public:
 
         liquid::result<std::vector<liquid::tree_diff_entry>> differences;
         if (found->parents.empty()) {
-            const auto current = liquid::runtime::block_on((*repository)->at(found->id));
+            const auto current = liquid::runtime::block_on((*repository)->subject->at(found->id));
             if (!current) {
                 return std::unexpected(error_of(current.error()));
             }
             differences = liquid::runtime::block_on(
-                (*repository)->diff(liquid::tree{}, current->root, {.text = true}));
+                (*repository)->subject->diff(liquid::tree{}, current->root, {.text = true}));
         } else {
             differences = liquid::runtime::block_on(
-                (*repository)->diff(found->parents.front().id, found->id, {.text = true}));
+                (*repository)->subject->diff(found->parents.front().id, found->id, {.text = true}));
         }
         if (!differences) {
             return std::unexpected(error_of(differences.error()));
@@ -1035,14 +1092,14 @@ public:
             if (difference.line_hunks) {
                 entry.line_hunks.emplace();
                 for (const liquid::line_change& hunk : *difference.line_hunks) {
-                    auto removed = hunk_lines(**repository,
+                    auto removed = hunk_lines(*(*repository)->subject,
                                               difference.old_blob,
                                               hunk.old_line,
                                               hunk.old_count);
                     if (!removed) {
                         return std::unexpected(removed.error());
                     }
-                    auto added = hunk_lines(**repository,
+                    auto added = hunk_lines(*(*repository)->subject,
                                             difference.new_blob,
                                             hunk.new_line,
                                             hunk.new_count);
@@ -1058,6 +1115,162 @@ public:
                 }
             }
             output.push_back(std::move(entry));
+        }
+        return output;
+    }
+
+    SyncStoreResult<RepositoryArtifactPage>
+    repository_artifacts(const std::string& customer_id,
+                         const std::string& repository_id,
+                         const RepositoryArtifactFilter& filter) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        auto liquid_filter = liquid::result_filter{};
+        auto action = optional_digest(filter.action);
+        if (!action) {
+            return std::unexpected(action.error());
+        }
+        liquid_filter.action = *action;
+        liquid_filter.output =
+            filter.output.empty() ? std::nullopt : std::optional<std::string>{filter.output};
+        auto content = optional_digest(filter.content);
+        if (!content) {
+            return std::unexpected(content.error());
+        }
+        liquid_filter.content = *content;
+        liquid_filter.page.limit = filter.limit;
+        if (!filter.cursor.empty()) {
+            liquid_filter.page.cursor = liquid::record_cursor{filter.cursor};
+        }
+        const auto page = liquid::runtime::block_on((*repository)->subject->results(liquid_filter));
+        if (!page) {
+            return std::unexpected(error_of(page.error()));
+        }
+        auto output = RepositoryArtifactPage{.done = page->done};
+        output.items.reserve(page->records.size());
+        for (const liquid::repository_result& record : page->records) {
+            output.items.push_back(artifact_record(record));
+        }
+        if (page->next) {
+            output.next_cursor = page->next->token;
+        }
+        return output;
+    }
+
+    SyncStoreResult<RepositoryArtifact> repository_artifact(const std::string& customer_id,
+                                                            const std::string& repository_id,
+                                                            const std::string& result_id) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto parsed = liquid::parse_digest(result_id);
+        if (!parsed) {
+            return std::unexpected(error_of(parsed.error()));
+        }
+        const liquid::result_id id{*parsed};
+        const auto results = liquid::runtime::block_on(
+            (*repository)->subject->results({.id = id, .page = {.limit = 1}}));
+        if (!results) {
+            return std::unexpected(error_of(results.error()));
+        }
+        if (results->records.empty()) {
+            return std::unexpected(SyncStoreError{"not_found", "no result " + result_id});
+        }
+        RepositoryArtifact output = artifact_record(results->records.front());
+
+        if (results->records.front().value.provenance) {
+            const auto provenance = liquid::runtime::block_on(
+                liquid::build::verify_provenance(*(*repository)->subject, id));
+            if (!provenance) {
+                return std::unexpected(error_of(provenance.error()));
+            }
+            append_attestation(output,
+                               provenance->attestation,
+                               provenance->statement,
+                               provenance->verified,
+                               provenance->reason);
+        }
+
+        if (results->records.front().verification) {
+            const auto verification = liquid::runtime::block_on(
+                (*repository)
+                    ->subject->attestations(
+                        {.id = results->records.front().verification, .page = {.limit = 1}}));
+            if (!verification) {
+                return std::unexpected(error_of(verification.error()));
+            }
+            for (const liquid::repository_attestation& attestation : verification->records) {
+                append_verified_attestation(output, attestation.id, attestation.value);
+            }
+        }
+
+        auto attestation_page = liquid::record_page_options{.limit = 1'000};
+        for (;;) {
+            const auto attestations = liquid::runtime::block_on(
+                (*repository)
+                    ->subject->attestations({.subject = id.value, .page = attestation_page}));
+            if (!attestations) {
+                return std::unexpected(error_of(attestations.error()));
+            }
+            for (const liquid::repository_attestation& attestation : attestations->records) {
+                append_verified_attestation(output, attestation.id, attestation.value);
+            }
+            if (attestations->done || !attestations->next) {
+                break;
+            }
+            attestation_page.cursor = attestations->next;
+        }
+
+        auto sbom_page = liquid::record_page_options{.limit = 1'000};
+        for (;;) {
+            const auto sboms =
+                liquid::runtime::block_on((*repository)->subject->sboms(id, sbom_page));
+            if (!sboms) {
+                return std::unexpected(error_of(sboms.error()));
+            }
+            for (const liquid::sbom_report& sbom : sboms->records) {
+                append_attestation(
+                    output, sbom.attestation, sbom.statement, sbom.verified, sbom.reason);
+            }
+            if (sboms->done || !sboms->next) {
+                break;
+            }
+            sbom_page.cursor = sboms->next;
+        }
+
+        auto trace_page = liquid::record_page_options{.limit = 1'000};
+        for (;;) {
+            const auto traces =
+                liquid::runtime::block_on((*repository)->subject->traces(trace_page));
+            if (!traces) {
+                return std::unexpected(error_of(traces.error()));
+            }
+            for (const liquid::build_trace& trace : traces->records) {
+                const auto action = std::ranges::find_if(
+                    trace.actions, [&](const liquid::build_trace_action& value) {
+                        return liquid::to_string(value.result.value) == result_id;
+                    });
+                if (action != trace.actions.end()) {
+                    output.trace = RepositoryArtifactTrace{
+                        .id = liquid::to_string(trace.id),
+                        .wall_ms = milliseconds(trace.wall_time),
+                        .actions = static_cast<std::uint64_t>(trace.actions.size()),
+                        .dependencies = static_cast<std::uint64_t>(trace.edges.size()),
+                        .cache_hits = trace.cache.hits,
+                        .cache_misses = trace.cache.misses,
+                    };
+                    break;
+                }
+            }
+            if (output.trace || traces->done || !traces->next) {
+                break;
+            }
+            trace_page.cursor = traces->next;
         }
         return output;
     }
@@ -1111,6 +1324,92 @@ private:
         } else {
             return std::move(*result);
         }
+    }
+
+    static SyncStoreResult<std::optional<liquid::digest>> optional_digest(const std::string& text) {
+        if (text.empty()) {
+            return std::optional<liquid::digest>{};
+        }
+        const auto value = liquid::parse_digest(text);
+        if (!value) {
+            return std::unexpected(error_of(value.error()));
+        }
+        return std::optional<liquid::digest>{*value};
+    }
+
+    static std::uint64_t milliseconds(std::chrono::milliseconds value) {
+        return value.count() < 0 ? 0 : static_cast<std::uint64_t>(value.count());
+    }
+
+    static std::string cache_status_name(liquid::cache_status status) {
+        switch (status) {
+        case liquid::cache_status::miss:
+            return "miss";
+        case liquid::cache_status::hit:
+            return "hit";
+        case liquid::cache_status::divergent:
+            return "divergent";
+        }
+        return "unknown";
+    }
+
+    static std::string timestamp(std::chrono::sys_seconds value) {
+        return value == std::chrono::sys_seconds{} ? "" : std::format("{:%FT%TZ}", value);
+    }
+
+    static RepositoryArtifact artifact_record(const liquid::repository_result& record) {
+        RepositoryArtifact output{
+            .id = liquid::to_string(record.id.value),
+            .action = liquid::to_string(record.value.action),
+            .exit_code = record.value.exit,
+            .timing = {.queued_ms = milliseconds(record.value.timing.queued),
+                       .sandbox_ms = milliseconds(record.value.timing.sandbox),
+                       .exec_ms = milliseconds(record.value.timing.exec),
+                       .hash_ms = milliseconds(record.value.timing.hash),
+                       .store_ms = milliseconds(record.value.timing.store)},
+            .cache_status = cache_status_name(record.value.cache),
+            .divergent = record.divergent,
+            .verification = record.verification ? liquid::to_string(*record.verification) : "",
+            .worker = record.value.worker,
+            .observed_at = timestamp(record.value.observed_at),
+            .started_at = record.value.started_at ? timestamp(*record.value.started_at) : "",
+            .finished_at = record.value.finished_at ? timestamp(*record.value.finished_at) : "",
+        };
+        output.outputs.reserve(record.value.outputs.size());
+        for (const liquid::action_output& artifact : record.value.outputs) {
+            output.outputs.push_back(
+                {artifact.path, artifact.mode, liquid::to_string(artifact.blob)});
+        }
+        return output;
+    }
+
+    static void append_attestation(RepositoryArtifact& artifact,
+                                   const liquid::digest& id,
+                                   const liquid::attestation& statement,
+                                   bool verified,
+                                   const std::string& reason) {
+        const std::string text = liquid::to_string(id);
+        if (std::ranges::find(artifact.attestations, text, &RepositoryArtifactAttestation::id) !=
+            artifact.attestations.end()) {
+            return;
+        }
+        artifact.attestations.push_back({text,
+                                         statement.profile,
+                                         liquid::to_string(statement.subject),
+                                         statement.issuer.taap_id,
+                                         verified,
+                                         reason});
+    }
+
+    static void append_verified_attestation(RepositoryArtifact& artifact,
+                                            const liquid::digest& id,
+                                            const liquid::attestation& statement) {
+        const auto verification = liquid::verify_attestation(statement);
+        if (!verification) {
+            append_attestation(artifact, id, statement, false, verification.error().message);
+            return;
+        }
+        append_attestation(artifact, id, statement, verification->verified, verification->reason);
     }
 
     SyncStoreResult<liquid::store*> open_customer(const std::string& customer_id) {
@@ -3034,6 +3333,10 @@ struct ApiServer::Impl {
         if (id.empty() || result_id.empty()) {
             return redirect(route, "/repositories");
         }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
         const ApiResult artifact_result =
             registry.call("get_artifact", {{"id", id}, {"result_id", result_id}}, ctx);
         if (!artifact_result.ok) {
@@ -3041,9 +3344,53 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_artifact(id, result_id, ctx.authorized),
+                         web_ui_artifact(repository_from_json(repository_result.value),
+                                         repository_artifact_from_json(artifact_result.value),
+                                         ctx.authorized),
                          "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    boost::http::route_task serve_artifacts_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        if (id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const RepositoryArtifactFilter filter{
+            .action = query_value(route, "action"),
+            .output = query_value(route, "output"),
+            .content = query_value(route, "content"),
+            .cursor = query_value(route, "cursor"),
+            .limit = query_page_limit(route),
+        };
+        const ApiResult result = registry.call("list_artifacts",
+                                               {{"id", id},
+                                                {"action", filter.action},
+                                                {"output", filter.output},
+                                                {"content", filter.content},
+                                                {"cursor", filter.cursor},
+                                                {"limit", filter.limit}},
+                                               ctx);
+        if (!result.ok) {
+            return serve_repository_page_error(route, ctx, result);
+        }
+        RepositoryArtifactPage page{.next_cursor = json_string(result.value, "next_cursor"),
+                                    .done = result.value.value("done", false)};
+        for (const nlohmann::json& value : result.value.at("items")) {
+            page.items.push_back(repository_artifact_from_json(value));
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_artifacts(
+                repository_from_json(repository_result.value), page, filter, ctx.authorized),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task serve_search_page(boost::http::route_params& route) {
@@ -3753,6 +4100,10 @@ bool ApiServer::start() {
     router.add(
         http::method::get, "/conflicts", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/conflicts", impl.serve_conflicts_page(route));
+        });
+    router.add(
+        http::method::get, "/artifacts", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/artifacts", impl.serve_artifacts_page(route));
         });
     router.add(
         http::method::get, "/artifact", [&impl](http::route_params& route) -> http::route_task {

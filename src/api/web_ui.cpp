@@ -126,8 +126,8 @@ std::string mode_text(const std::optional<std::uint32_t>& mode) {
 }
 
 bool hidden_reformatting_entry(const RepositoryDiffEntry& entry) {
-    return entry.changes.size() == 1 && entry.changes.front() == "modified" &&
-           entry.line_hunks && entry.line_hunks->empty();
+    return entry.changes.size() == 1 && entry.changes.front() == "modified" && entry.line_hunks &&
+           entry.line_hunks->empty();
 }
 
 } // namespace
@@ -287,8 +287,9 @@ std::string web_ui_repository(const control::Repository& repository,
         }
         content += "</ul>";
     }
-    content += std::format("<p>{} · {} · {}</p></div>",
+    content += std::format("<p>{} · {} · {} · {}</p></div>",
                            row_link("/changes?repository_id=" + repository.id, "Change log"),
+                           row_link("/artifacts?repository_id=" + repository.id, "Artifacts"),
                            row_link("/conflicts?repository_id=" + repository.id, "Conflicts"),
                            row_link("/repository/access?id=" + repository.id, "Effective access"));
     return web_ui_shell("lake — " + owner_name + "/" + repository.name,
@@ -402,41 +403,38 @@ std::string web_ui_change(const control::Repository& repository,
         for (const std::string& status : entry.changes) {
             badges += std::format("<span class=\"badge\">{}</span>", web_ui_escape(status));
         }
-        content += std::format(
-            "<section class=\"panel diff-entry\"><h2><code>{}</code>{}</h2><dl>"
-            "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
-            "<dt>mode</dt><dd><code>{} → {}</code></dd><dt>blobs</dt>"
-            "<dd><code>{} → {}</code></dd></dl>",
-            web_ui_escape(entry.path),
-            badges,
-            web_ui_escape(entry.kind),
-            web_ui_escape(entry.old_path.empty() ? "—" : entry.old_path),
-            mode_text(entry.old_mode),
-            mode_text(entry.new_mode),
-            web_ui_escape(entry.old_blob.empty() ? "—" : entry.old_blob),
-            web_ui_escape(entry.new_blob.empty() ? "—" : entry.new_blob));
+        content += std::format("<section class=\"panel diff-entry\"><h2><code>{}</code>{}</h2><dl>"
+                               "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
+                               "<dt>mode</dt><dd><code>{} → {}</code></dd><dt>blobs</dt>"
+                               "<dd><code>{} → {}</code></dd></dl>",
+                               web_ui_escape(entry.path),
+                               badges,
+                               web_ui_escape(entry.kind),
+                               web_ui_escape(entry.old_path.empty() ? "—" : entry.old_path),
+                               mode_text(entry.old_mode),
+                               mode_text(entry.new_mode),
+                               web_ui_escape(entry.old_blob.empty() ? "—" : entry.old_blob),
+                               web_ui_escape(entry.new_blob.empty() ? "—" : entry.new_blob));
         if (!entry.old_conflicts.empty() || !entry.new_conflicts.empty()) {
-            content += std::format(
-                "<div class=\"notice\"><strong>Conflict values</strong><br>old: "
-                "<code>{}</code><br>new: <code>{}</code></div>",
-                web_ui_escape(joined(entry.old_conflicts)),
-                web_ui_escape(joined(entry.new_conflicts)));
+            content += std::format("<div class=\"notice\"><strong>Conflict values</strong><br>old: "
+                                   "<code>{}</code><br>new: <code>{}</code></div>",
+                                   web_ui_escape(joined(entry.old_conflicts)),
+                                   web_ui_escape(joined(entry.new_conflicts)));
         }
         if (entry.line_hunks) {
             for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
-                content += std::format(
-                    "<pre class=\"diff-hunk\"><span>@@ -{},{} +{},{} @@</span>",
-                    hunk.old_line,
-                    hunk.old_count,
-                    hunk.new_line,
-                    hunk.new_count);
+                content += std::format("<pre class=\"diff-hunk\"><span>@@ -{},{} +{},{} @@</span>",
+                                       hunk.old_line,
+                                       hunk.old_count,
+                                       hunk.new_line,
+                                       hunk.new_count);
                 for (const std::string& line : hunk.removed_lines) {
-                    content += std::format(
-                        "<span class=\"diff-remove\">-{}</span>", web_ui_escape(line));
+                    content +=
+                        std::format("<span class=\"diff-remove\">-{}</span>", web_ui_escape(line));
                 }
                 for (const std::string& line : hunk.added_lines) {
-                    content += std::format(
-                        "<span class=\"diff-add\">+{}</span>", web_ui_escape(line));
+                    content +=
+                        std::format("<span class=\"diff-add\">+{}</span>", web_ui_escape(line));
                 }
                 content += "</pre>";
             }
@@ -476,15 +474,155 @@ std::string web_ui_repository_conflicts(const control::Repository& repository,
     return web_ui_shell("lake — conflicts", repository_name(repository), content, signed_in);
 }
 
-std::string
-web_ui_artifact(std::string_view repository_id, std::string_view result_id, bool signed_in) {
-    const std::string content = std::format(
-        "<p class=\"eyebrow\">artifact</p><h1>{}</h1><p class=\"sub\">Repository "
-        "<code>{}</code>.</p><div class=\"panel\"><h2>Attestations</h2><p>Artifact result, "
-        "provenance, reproducibility, and SBOM rendering arrive with liquid #166.</p></div>",
-        web_ui_escape(result_id),
-        web_ui_escape(repository_id));
-    return web_ui_shell("lake — artifact", repository_id, content, signed_in);
+std::string web_ui_artifacts(const control::Repository& repository,
+                             const RepositoryArtifactPage& page,
+                             const RepositoryArtifactFilter& filter,
+                             bool signed_in) {
+    std::string content = std::format(
+        "<p class=\"eyebrow\">repository artifacts</p><h1>Build results</h1>"
+        "<p class=\"sub\">{}</p><form class=\"filters\" method=\"get\" action=\"/artifacts\" "
+        "aria-label=\"Filter build results\"><input type=\"hidden\" name=\"repository_id\" "
+        "value=\"{}\"><label>Action<input name=\"action\" value=\"{}\"></label>"
+        "<label>Output path<input name=\"output\" value=\"{}\"></label>"
+        "<label>Content digest<input name=\"content\" value=\"{}\"></label>"
+        "<label>Page size<input name=\"limit\" type=\"number\" min=\"1\" max=\"1000\" "
+        "value=\"{}\"></label><button type=\"submit\">Filter</button></form>",
+        web_ui_escape(repository_name(repository)),
+        web_ui_escape(repository.id),
+        web_ui_escape(filter.action),
+        web_ui_escape(filter.output),
+        web_ui_escape(filter.content),
+        filter.limit);
+    if (page.items.empty()) {
+        content += "<div class=\"panel empty\">No build results match these filters.</div>";
+    } else {
+        content += "<table><thead><tr><th>Result</th><th>Action</th><th>Outputs</th>"
+                   "<th>Cache</th><th>Observed</th></tr></thead><tbody>";
+        for (const RepositoryArtifact& artifact : page.items) {
+            std::vector<std::string> paths;
+            paths.reserve(artifact.outputs.size());
+            for (const RepositoryArtifactOutput& output : artifact.outputs) {
+                paths.push_back(output.path);
+            }
+            content +=
+                std::format("<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td><span "
+                            "class=\"badge\">{}</span></td><td>{}</td></tr>",
+                            row_link("/artifact?repository_id=" + repository.id +
+                                         "&id=" + url_component(artifact.id),
+                                     artifact.id),
+                            web_ui_escape(artifact.action),
+                            web_ui_escape(joined(paths)),
+                            web_ui_escape(artifact.divergent ? "divergent" : artifact.cache_status),
+                            web_ui_escape(artifact.observed_at));
+        }
+        content += "</tbody></table>";
+    }
+    if (!page.done && !page.next_cursor.empty()) {
+        std::string next = "/artifacts?repository_id=" + repository.id +
+                           "&cursor=" + url_component(page.next_cursor) +
+                           "&limit=" + std::to_string(filter.limit);
+        if (!filter.action.empty()) {
+            next += "&action=" + url_component(filter.action);
+        }
+        if (!filter.output.empty()) {
+            next += "&output=" + url_component(filter.output);
+        }
+        if (!filter.content.empty()) {
+            next += "&content=" + url_component(filter.content);
+        }
+        content += std::format("<p>{}</p>", row_link(next, "Next page"));
+    }
+    content +=
+        std::format("<p>{}</p>", row_link("/repository?id=" + repository.id, "Back to repository"));
+    return web_ui_shell("lake — artifacts", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_artifact(const control::Repository& repository,
+                            const RepositoryArtifact& artifact,
+                            bool signed_in) {
+    std::string content =
+        std::format("<p class=\"eyebrow\">artifact result</p><h1>{}</h1><p class=\"sub\">{}</p>"
+                    "<div class=\"panel\"><dl><dt>action</dt><dd><code>{}</code></dd>"
+                    "<dt>exit</dt><dd>{}</dd><dt>cache</dt><dd><span class=\"badge\">{}</span></dd>"
+                    "<dt>divergent</dt><dd>{}</dd><dt>worker</dt><dd>{}</dd>"
+                    "<dt>observed</dt><dd>{}</dd><dt>started</dt><dd>{}</dd>"
+                    "<dt>finished</dt><dd>{}</dd></dl></div>",
+                    web_ui_escape(artifact.id),
+                    web_ui_escape(repository_name(repository)),
+                    web_ui_escape(artifact.action),
+                    artifact.exit_code,
+                    web_ui_escape(artifact.cache_status),
+                    artifact.divergent ? "yes" : "no",
+                    web_ui_escape(artifact.worker),
+                    web_ui_escape(artifact.observed_at),
+                    web_ui_escape(artifact.started_at.empty() ? "—" : artifact.started_at),
+                    web_ui_escape(artifact.finished_at.empty() ? "—" : artifact.finished_at));
+    content += "<section class=\"panel diff-entry\"><h2>Outputs</h2>";
+    if (artifact.outputs.empty()) {
+        content += "<p class=\"muted\">No outputs.</p>";
+    } else {
+        content += "<table><thead><tr><th>Path</th><th>Mode</th><th>Blob</th></tr></thead><tbody>";
+        for (const RepositoryArtifactOutput& output : artifact.outputs) {
+            content += std::format("<tr><td><code>{}</code></td><td><code>{:o}</code></td>"
+                                   "<td><code>{}</code></td></tr>",
+                                   web_ui_escape(output.path),
+                                   output.mode,
+                                   web_ui_escape(output.blob));
+        }
+        content += "</tbody></table>";
+    }
+    content += "</section>";
+    content += std::format("<section class=\"panel diff-entry\"><h2>Timing</h2><dl>"
+                           "<dt>queued</dt><dd>{} ms</dd><dt>sandbox</dt><dd>{} ms</dd>"
+                           "<dt>execute</dt><dd>{} ms</dd><dt>hash</dt><dd>{} ms</dd>"
+                           "<dt>store</dt><dd>{} ms</dd></dl></section>",
+                           artifact.timing.queued_ms,
+                           artifact.timing.sandbox_ms,
+                           artifact.timing.exec_ms,
+                           artifact.timing.hash_ms,
+                           artifact.timing.store_ms);
+    content += "<section class=\"panel diff-entry\"><h2>Attestations</h2>";
+    if (artifact.attestations.empty()) {
+        content += "<p class=\"muted\">No attestations.</p>";
+    } else {
+        content += "<table><thead><tr><th>Profile</th><th>Subject</th><th>Issuer</th>"
+                   "<th>Verification</th></tr></thead><tbody>";
+        for (const RepositoryArtifactAttestation& attestation : artifact.attestations) {
+            const std::string verification =
+                attestation.verified
+                    ? "verified"
+                    : "unverified" +
+                          (attestation.reason.empty() ? std::string() : ": " + attestation.reason);
+            content +=
+                std::format("<tr><td><span class=\"badge\">{}</span><br><code>{}</code></td>"
+                            "<td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+                            web_ui_escape(attestation.profile),
+                            web_ui_escape(attestation.id),
+                            web_ui_escape(attestation.subject),
+                            web_ui_escape(attestation.issuer),
+                            web_ui_escape(verification));
+        }
+        content += "</tbody></table>";
+    }
+    content += "</section><section class=\"panel diff-entry\"><h2>Trace</h2>";
+    if (!artifact.trace) {
+        content += "<p class=\"muted\">No retained trace contains this result.</p>";
+    } else {
+        content +=
+            std::format("<dl><dt>trace</dt><dd><code>{}</code></dd><dt>wall time</dt><dd>{} ms</dd>"
+                        "<dt>actions</dt><dd>{}</dd><dt>dependencies</dt><dd>{}</dd>"
+                        "<dt>cache</dt><dd>{} hits, {} misses</dd></dl>",
+                        web_ui_escape(artifact.trace->id),
+                        artifact.trace->wall_ms,
+                        artifact.trace->actions,
+                        artifact.trace->dependencies,
+                        artifact.trace->cache_hits,
+                        artifact.trace->cache_misses);
+    }
+    content += std::format("</section><p>{} · {}</p>",
+                           row_link("/artifacts?repository_id=" + repository.id, "All artifacts"),
+                           row_link("/repository?id=" + repository.id, "Back to repository"));
+    return web_ui_shell("lake — artifact", repository_name(repository), content, signed_in);
 }
 
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations) {

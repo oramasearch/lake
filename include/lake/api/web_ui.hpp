@@ -77,8 +77,13 @@ std::string web_ui_change(const control::Repository& repository,
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
                                         bool signed_in);
-std::string
-web_ui_artifact(std::string_view repository_id, std::string_view result_id, bool signed_in);
+std::string web_ui_artifacts(const control::Repository& repository,
+                             const RepositoryArtifactPage& page,
+                             const RepositoryArtifactFilter& filter,
+                             bool signed_in);
+std::string web_ui_artifact(const control::Repository& repository,
+                            const RepositoryArtifact& artifact,
+                            bool signed_in);
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations);
 std::string web_ui_teams(std::string_view organization_id, const std::vector<control::Team>& teams);
 std::string web_ui_memberships(std::string_view organization_id,

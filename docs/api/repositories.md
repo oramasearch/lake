@@ -30,7 +30,8 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 | `get_change` | read | `id`, `change_id` | change identity and metadata |
 | `change_diff` | read | `id`, `change_id` | `{items: [{path, old_path, kind, changes, old_mode, new_mode, old_blob, new_blob, line_hunks, old_conflicts, new_conflicts}]}` |
 | `list_conflicts` | read | `id` | `{items: [{path, blobs}]}` |
-| `get_artifact` | read | `id`, `result_id` | result identity and deferred-data status |
+| `list_artifacts` | read | `id`, `action?`, `output?`, `content?`, `cursor?`, `limit?` | `{items: [result], next_cursor, done}` |
+| `get_artifact` | read | `id`, `result_id` | one result with outputs, timings, cache/divergence state, attestations and trace |
 | `refs` | read | `repository_id` | `404 not_found`, `409 conflict` (tombstoned) |
 | repository sync routes | binary read/action | repository URL and liquid protocol body | liquid protocol errors; see [`sync.md`](sync.md) |
 | `audit` | read | audit filters | [`audit.md`](audit.md), including the lifecycle capability calls |
@@ -58,8 +59,19 @@ per-path status, old/new mode and blob digest, move origin, conflict digest, and
 Lake reads the hunk ranges from their blobs so the API and page show escaped removed and added
 lines. A change without visible hunks produces the page's empty state.
 
-`get_artifact` still renders only a requested result identity while lake integrates liquid #166's
-public enumeration of results, records, provenance, reproducibility, traces, and SBOMs.
+## Artifact data
+
+`list_artifacts` maps its filters and opaque cursor directly to libliquid's paged
+`repository::results` query. The page size is limited to 1–1000. `get_artifact` loads exactly one
+result, its output blob records, action-phase timing, cache/divergence state, worker, and timestamps.
+It verifies the linked SLSA provenance against the signed result/action, verifies direct result
+attestations such as `reproducibility/1` through the registered TAAP profile, and carries each
+`sbom/1` report's verification outcome. It scans retained trace pages for the trace containing the
+result and returns its wall time, action/dependency totals, and cache summary.
+
+Both capabilities authorize the repository object before opening its customer data. The result
+list is marked as candidate-returning and uses the same batched repository authorization path as
+the other lists. Anonymous callers may reach it only for a public repository.
 
 ## Public repositories
 

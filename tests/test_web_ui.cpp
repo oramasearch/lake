@@ -252,10 +252,50 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
         lake::api::web_ui_repository_conflicts(repository, {conflict}, false);
     EXPECT_NE(conflicts.find("&lt;config&gt;"), std::string::npos);
 
-    const std::string artifact = lake::api::web_ui_artifact("r1", "result-1", false);
-    EXPECT_NE(artifact.find("result-1"), std::string::npos);
-    EXPECT_NE(artifact.find("liquid #166"), std::string::npos);
-    EXPECT_EQ(artifact.find("<script"), std::string::npos);
+    const lake::api::RepositoryArtifact artifact{
+        .id = "result-1<&",
+        .action = "action-1",
+        .exit_code = 0,
+        .outputs = {{"build/<app>", 0755, "blob-1"}},
+        .timing = {.queued_ms = 1, .sandbox_ms = 2, .exec_ms = 3, .hash_ms = 4, .store_ms = 5},
+        .cache_status = "hit",
+        .worker = "worker-1",
+        .observed_at = "2026-09-04T00:00:00Z",
+        .attestations =
+            {{"attestation-1",
+              "slsa_provenance/1",
+              "subject-1",
+              "taap:1:ed25519:builder",
+              true,
+              ""},
+             {"attestation-2",
+              "reproducibility/1",
+              "subject-2",
+              "taap:1:ed25519:builder",
+              false,
+              "signature mismatch"},
+             {"attestation-3", "sbom/1", "subject-3", "taap:1:ed25519:builder", true, ""}},
+        .trace = lake::api::RepositoryArtifactTrace{"trace-1", 12, 2, 1, 1, 1},
+    };
+    const lake::api::RepositoryArtifactPage page{{artifact}, "next<&", false};
+    const lake::api::RepositoryArtifactFilter filter{
+        .action = "action-1", .output = "build/app", .limit = 1};
+    const std::string artifacts = lake::api::web_ui_artifacts(repository, page, filter, false);
+    EXPECT_NE(artifacts.find("Build results"), std::string::npos);
+    EXPECT_NE(artifacts.find("href=\"/artifact?repository_id=r1&amp;id=result-1%3C%26\""),
+              std::string::npos);
+    EXPECT_NE(artifacts.find("Next page"), std::string::npos);
+    EXPECT_NE(artifacts.find("value=\"build/app\""), std::string::npos);
+
+    const std::string artifact_page = lake::api::web_ui_artifact(repository, artifact, false);
+    EXPECT_NE(artifact_page.find("result-1&lt;&amp;"), std::string::npos);
+    EXPECT_NE(artifact_page.find("build/&lt;app&gt;"), std::string::npos);
+    EXPECT_NE(artifact_page.find("slsa_provenance/1"), std::string::npos);
+    EXPECT_NE(artifact_page.find("reproducibility/1"), std::string::npos);
+    EXPECT_NE(artifact_page.find("sbom/1"), std::string::npos);
+    EXPECT_NE(artifact_page.find("unverified: signature mismatch"), std::string::npos);
+    EXPECT_NE(artifact_page.find("trace-1"), std::string::npos);
+    EXPECT_EQ(artifact_page.find("<script"), std::string::npos);
 }
 
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {

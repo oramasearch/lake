@@ -28,8 +28,8 @@ Postgres store runs. Repository lifecycle adds migration `0006_repository_lifecy
 rename, transfer, visibility and tombstone capabilities, and lifecycle state on the repository
 page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
 The codebase now also renders repository refs, trees, files, change logs, structural change diffs,
-conflict values, and effective access; anonymous readers receive only public repositories. Artifact
-records remain deferred while their repository result APIs are integrated. These repository
+conflict values, paged artifact results with verified attestations and trace summaries, and
+effective access; anonymous readers receive only public repositories. These repository
 data pages are not part of the production state above.
 Lake links libliquid as a library-only submodule and opens one customer store at
 `LAKE_STORE_ROOT/<customer id>/store`; liquid #160 and #165's client, server, and protocol contract
