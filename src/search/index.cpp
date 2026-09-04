@@ -350,7 +350,15 @@ Result<void> Service::publish(const Publish& publication) {
         }
         const std::filesystem::path repository_path =
             impl_->root / publication.customer / "repositories" / publication.repository;
-        auto opened = liquid::runtime::block_on(liquid::repository::open(repository_path));
+        auto customer_store = liquid::runtime::block_on(
+            liquid::store::open(impl_->root / publication.customer / "store"));
+        if (!customer_store) {
+            return std::unexpected(Error{"store_error", customer_store.error().message});
+        }
+        liquid::repository_options repository_options;
+        repository_options.store = &*customer_store;
+        auto opened = liquid::runtime::block_on(
+            liquid::repository::open(repository_path, repository_options));
         if (!opened) {
             return std::unexpected(Error{"store_error", opened.error().message});
         }

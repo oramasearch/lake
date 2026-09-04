@@ -67,6 +67,76 @@ nlohmann::json error_response(std::string_view description) {
             {"content", {{"application/json", {{"schema", {{"$ref", "#/components/schemas/error_envelope"}}}}}}}};
 }
 
+std::string sync_path(const Capability& capability) {
+    const std::string base = "/v1/repositories/{repository_id}/sync/";
+    if (capability.name == "find_missing") {
+        return base + "find-missing";
+    }
+    if (capability.name == "upload_chunks") {
+        return base + "chunks";
+    }
+    if (capability.name == "read_chunk") {
+        return base + "chunks/{digest}";
+    }
+    return base + capability.name;
+}
+
+nlohmann::json sync_parameter(std::string name, std::string location, bool required) {
+    return {{"name", std::move(name)},
+            {"in", std::move(location)},
+            {"required", required},
+            {"schema", {{"type", "string"}}}};
+}
+
+nlohmann::json sync_operation(const Capability& capability) {
+    nlohmann::json operation;
+    operation["operationId"] = capability.name;
+    operation["summary"] = capability.title;
+    operation["description"] = capability.description;
+    operation["tags"] = nlohmann::json::array({"liquid-sync"});
+    operation["parameters"] =
+        nlohmann::json::array({sync_parameter("repository_id", "path", true)});
+    if (capability.name == "read_chunk") {
+        operation["parameters"].push_back(sync_parameter("digest", "path", true));
+        auto offset = sync_parameter("offset", "query", true);
+        offset["schema"]["type"] = "integer";
+        offset["schema"]["minimum"] = 0;
+        operation["parameters"].push_back(std::move(offset));
+        auto length = sync_parameter("length", "query", true);
+        length["schema"]["type"] = "integer";
+        length["schema"]["minimum"] = 0;
+        operation["parameters"].push_back(std::move(length));
+    } else {
+        operation["requestBody"] = {
+            {"required", true},
+            {"content",
+             {{"application/vnd.liquid.sync-v1",
+               {{"schema", {{"type", "string"}, {"format", "binary"}}}}}}},
+        };
+    }
+    nlohmann::json success = {{"description", "the sync operation succeeded"}};
+    if (capability.name != "upload_chunks") {
+        success["content"] = {
+            {"application/vnd.liquid.sync-v1",
+             {{"schema", {{"type", "string"}, {"format", "binary"}}}}},
+        };
+    }
+    operation["responses"] = {
+        {"200", std::move(success)},
+        {"4XX",
+         {{"description", "the request or authorization was rejected"},
+          {"content",
+           {{"application/vnd.liquid.error-v1",
+             {{"schema", {{"type", "string"}, {"format", "binary"}}}}}}}}},
+        {"5XX",
+         {{"description", "the repository store failed"},
+          {"content",
+           {{"application/vnd.liquid.error-v1",
+             {{"schema", {{"type", "string"}, {"format", "binary"}}}}}}}}},
+    };
+    return operation;
+}
+
 }  // namespace
 
 nlohmann::json rest_input_from_query(const Capability& capability,
@@ -117,13 +187,15 @@ nlohmann::json rest_envelope(const ApiResult& result) {
 nlohmann::json openapi_document(const Registry& registry, std::string_view version) {
     nlohmann::json document;
     document["openapi"] = "3.1.0";
-    document["info"] = {
-        {"title", "lake control surface"},
-        {"version", std::string(version)},
-        {"description",
-         "The capability registry rendered as HTTP routes: reads are GET /v1/<name> (input in the query "
-         "string), actions are POST /v1/<name> (input as the JSON body). The same registry is served as "
-         "MCP tools on POST /mcp — one registry, two renderings, zero drift."}};
+    document["info"] = {{"title", "lake control surface"},
+                        {"version", std::string(version)},
+                        {"description",
+                         "The capability registry rendered as HTTP routes: JSON reads are GET "
+                         "/v1/<name> (input in the "
+                         "query string), JSON actions are POST /v1/<name> (input as the body), and "
+                         "liquid sync uses "
+                         "repository-scoped binary routes. JSON capabilities are also served as "
+                         "MCP tools on POST /mcp."}};
     document["servers"] = nlohmann::json::array({{{"url", "/"}}});
     document["components"] = {
         {"securitySchemes",
@@ -138,6 +210,11 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
 
     nlohmann::json paths = nlohmann::json::object();
     for (const auto& capability : registry.list()) {
+        if (capability->transport == CapabilityTransport::LiquidSync) {
+            const std::string method = capability->name == "read_chunk" ? "get" : "post";
+            paths[sync_path(*capability)][method] = sync_operation(*capability);
+            continue;
+        }
         nlohmann::json operation;
         operation["operationId"] = capability->name;
         operation["summary"] = capability->title;
@@ -172,10 +249,16 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
     paths["/mcp"]["post"] = {
         {"operationId", "mcp"},
         {"summary", "MCP (JSON-RPC 2.0): initialize, ping, tools/list, tools/call"},
-        {"description", "Every registry entry is a tool; tools/call runs the same authorized, validated call as its REST route."},
+        {"description",
+         "Every JSON registry entry is a tool; tools/call runs the same authorized, validated call "
+         "as its REST route."},
         {"tags", nlohmann::json::array({"mcp"})},
-        {"requestBody", {{"required", true}, {"content", {{"application/json", {{"schema", {{"type", "object"}}}}}}}}},
-        {"responses", {{"200", {{"description", "a JSON-RPC 2.0 response"}}}, {"202", {{"description", "a notification was accepted"}}}}}};
+        {"requestBody",
+         {{"required", true},
+          {"content", {{"application/json", {{"schema", {{"type", "object"}}}}}}}}},
+        {"responses",
+         {{"200", {{"description", "a JSON-RPC 2.0 response"}}},
+          {"202", {{"description", "a notification was accepted"}}}}}};
     document["paths"] = std::move(paths);
     return document;
 }

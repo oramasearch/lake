@@ -52,7 +52,15 @@ std::vector<std::byte> bytes(const std::string& value) {
 
 std::string create_change(const std::filesystem::path& path,
                           const std::vector<std::pair<std::string, std::string>>& files) {
-    auto opened = liquid::runtime::block_on(liquid::repository::create(path));
+    auto customer_store =
+        liquid::runtime::block_on(liquid::store::open(path.parent_path().parent_path() / "store"));
+    EXPECT_TRUE(customer_store) << customer_store.error().message;
+    if (!customer_store) {
+        return {};
+    }
+    liquid::repository_options options;
+    options.store = &*customer_store;
+    auto opened = liquid::runtime::block_on(liquid::repository::create(path, options));
     EXPECT_TRUE(opened) << opened.error().message;
     if (!opened) {
         return {};
@@ -69,7 +77,15 @@ std::string create_change(const std::filesystem::path& path,
 
 std::string update_change(const std::filesystem::path& path,
                           const std::vector<std::pair<std::string, std::string>>& files) {
-    auto opened = liquid::runtime::block_on(liquid::repository::open(path));
+    auto customer_store =
+        liquid::runtime::block_on(liquid::store::open(path.parent_path().parent_path() / "store"));
+    EXPECT_TRUE(customer_store) << customer_store.error().message;
+    if (!customer_store) {
+        return {};
+    }
+    liquid::repository_options options;
+    options.store = &*customer_store;
+    auto opened = liquid::runtime::block_on(liquid::repository::open(path, options));
     EXPECT_TRUE(opened) << opened.error().message;
     if (!opened) {
         return {};
@@ -238,7 +254,12 @@ TEST(SearchBenchmark, DISABLED_BuildAndQueryTenThousandFiles) {
     TemporaryStore store;
     const auto root = store.path();
     const auto repository = root / "customer" / "repositories" / "benchmark";
-    auto opened = liquid::runtime::block_on(liquid::repository::create(repository));
+    auto customer_store =
+        liquid::runtime::block_on(liquid::store::open(root / "customer" / "store"));
+    ASSERT_TRUE(customer_store) << customer_store.error().message;
+    liquid::repository_options options;
+    options.store = &*customer_store;
+    auto opened = liquid::runtime::block_on(liquid::repository::create(repository, options));
     ASSERT_TRUE(opened) << opened.error().message;
     auto source = std::move(*opened);
     for (int index = 0; index < 10'000; ++index) {

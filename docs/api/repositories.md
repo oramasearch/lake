@@ -30,6 +30,8 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 | `get_change` | read | `id`, `change_id` | change identity and metadata |
 | `list_conflicts` | read | `id` | `{items: [{path, blobs}]}` |
 | `get_artifact` | read | `id`, `result_id` | result identity and deferred-data status |
+| `refs` | read | `repository_id` | `404 not_found`, `409 conflict` (tombstoned) |
+| repository sync routes | binary read/action | repository URL and liquid protocol body | liquid protocol errors; see [`sync.md`](sync.md) |
 | `audit` | read | audit filters | [`audit.md`](audit.md), including the lifecycle capability calls |
 
 Every lifecycle capability carries the repository or customer authorization object and its
@@ -65,10 +67,10 @@ into a sign-in redirect. A signed-in caller continues through the repository pol
 ## Lifecycle
 
 Rename changes only the repository slug. Transfer moves the repository record to another customer
-after checking the destination's name namespace. liquid #160 publishes the sync API and
-wire-format document. Lake cannot register its push or pull endpoint until libliquid exposes a
-repository over the required customer store and the documented protocol codec at a public boundary;
-[`sync.md`](sync.md) records that required follow-up.
+after checking the destination's name namespace. liquid #160 and #165 publish the sync client,
+server, and wire contract. Lake exposes that contract at
+`/v1/repositories/<repository-id>/sync/*`; [`sync.md`](sync.md) records the routes, binary bodies,
+authorization, and atomic-rejection guarantees.
 
 Delete is a tombstone, not an immediate erase: `deleted_at` and `retention_until` are stored on the
 repository record. The collector may reclaim data after the documented 30-day retention period,
@@ -95,15 +97,18 @@ curl -H "$H" -H 'content-type: application/json' \
 
 The UI lists them at `/repositories` ([`../ui/README.md`](../ui/README.md)); the detail page
 displays the tombstone state. Repository content uses the libliquid customer store. The published
-sync contract is mirrored in [`sync.md`](sync.md); its lake endpoints await the public
-server-facing bindings described there.
+sync contract and lake adapter are documented in [`sync.md`](sync.md). Every repository is opened
+with `repository_options.store` over the one caller-owned store at
+`LAKE_STORE_ROOT/<customer-id>/store`; it does not get a private `.liquid-store`.
 
 ## Verify
 
 Run `ctest --test-dir build --output-on-failure`. The repository lifecycle tests create two
 customers, change visibility, rename, transfer, tombstone, verify policy denial, and verify the
 signed audit stream contains the deletion outcome. For Postgres, apply `db/schema.sql` through
-the operator’s `PostgresSchema` before running the integration test.
+the operator’s `PostgresSchema` before running the integration test. `SyncHttp.*` proves push,
+incremental chunk transfer, pull, atomic bad-signature rejection, policy denial, and audit records.
+`PostgresSync.*` repeats the exchange with the production control store.
 
 ## Change
 
