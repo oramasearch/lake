@@ -78,7 +78,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 `Search.*` covers deduplication across repositories, reload from the persisted manifest, atomic
-publication, batched filtering, substring/regex matching, and ranked order.
+publication, batched filtering, substring/regex matching, and ranked order. The Postgres fixture
+also proves that a real policy-store batch hides a denied repository from search results.
 
 ## 10,000-file measurement
 
