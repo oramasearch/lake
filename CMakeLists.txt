@@ -89,16 +89,16 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 # lake-core: HTTP-free. Version, the pure web_ui renderers, the capability registry and its
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
+  src/control/lake_identity.cpp
   src/version.cpp
   src/api/web_ui.cpp
+  src/api/oauth.cpp
   src/api/registry.cpp
   src/api/rest.cpp
   src/api/mcp.cpp
   src/api/capabilities.cpp
-  src/audit/audit.cpp
   src/control/handles.cpp
   src/control/policy.cpp
-  src/control/memory_store.cpp
   src/search/index.cpp
   src/telemetry/metrics.cpp
 )
@@ -107,7 +107,10 @@ target_compile_features(lake-core PUBLIC cxx_std_26)
 target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto)
 
 # lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
-add_library(lake-control-postgres STATIC src/control/postgres_store.cpp)
+add_library(lake-control-postgres STATIC
+  src/control/memory_store.cpp
+  src/control/postgres_store.cpp
+)
 target_link_libraries(lake-control-postgres PUBLIC lake-core PRIVATE pqxx OpenSSL::Crypto)
 
 # lake-api: the Beast2 adapter — the ONE translation unit that knows beast2 / http / Boost.JSON.

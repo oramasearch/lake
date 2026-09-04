@@ -28,7 +28,7 @@ TEST(WebUi, NavigationAndSession) {
     EXPECT_NE(out.find("href=\"/customers\""), std::string::npos);
     EXPECT_NE(out.find("href=\"/repositories\""), std::string::npos);
     EXPECT_NE(out.find("href=\"/organizations\""), std::string::npos);
-    EXPECT_NE(out.find("href=\"/login\""), std::string::npos);
+    EXPECT_NE(out.find("href=\"/sign-in\""), std::string::npos);
     const std::string in = lake::api::web_ui_hello("n", "0.0.1", true);
     EXPECT_NE(in.find("action=\"/logout\""), std::string::npos);
     EXPECT_EQ(in.find("<script"), std::string::npos);
@@ -58,6 +58,76 @@ TEST(WebUi, SearchEscapesHitsAndOffersTheQueryForm) {
     EXPECT_NE(page.find("&lt;path&gt;"), std::string::npos);
     EXPECT_NE(page.find("&lt;snippet&gt;"), std::string::npos);
     EXPECT_EQ(page.find("<path>"), std::string::npos);
+}
+
+TEST(WebUi, IdentityFormsUseCapabilityBackedActions) {
+    const std::string sign_up = lake::api::web_ui_sign_up("bad <identity>");
+    EXPECT_NE(sign_up.find("action=\"/identity/sign-up\""), std::string::npos);
+    EXPECT_NE(sign_up.find("bad &lt;identity&gt;"), std::string::npos);
+    EXPECT_EQ(sign_up.find("<script"), std::string::npos);
+
+    const std::string sign_in = lake::api::web_ui_sign_in("");
+    EXPECT_NE(sign_in.find("action=\"/identity/sign-in\""), std::string::npos);
+    EXPECT_NE(sign_in.find("action=\"/identity/oauth\""), std::string::npos);
+    EXPECT_EQ(sign_in.find("<script"), std::string::npos);
+
+    const std::string verify = lake::api::web_ui_mfa("", "", {}, false);
+    EXPECT_NE(verify.find("action=\"/identity/mfa/verify\""), std::string::npos);
+    const std::string enroll = lake::api::web_ui_mfa("", "otpauth://secret<&", {"recover<&"}, true);
+    EXPECT_NE(enroll.find("action=\"/identity/mfa/enroll\""), std::string::npos);
+    EXPECT_NE(enroll.find("action=\"/identity/mfa/disable\""), std::string::npos);
+    EXPECT_NE(enroll.find("otpauth://secret&lt;&amp;"), std::string::npos);
+    EXPECT_NE(enroll.find("recover&lt;&amp;"), std::string::npos);
+    EXPECT_EQ(enroll.find("<script"), std::string::npos);
+}
+
+TEST(WebUi, PasskeyPagesCarryOnlyTheirDocumentedScript) {
+    const std::string registration = lake::api::web_ui_passkeys("");
+    EXPECT_NE(registration.find("navigator.credentials.create"), std::string::npos);
+    EXPECT_EQ(registration.find("<script"), registration.rfind("<script"));
+    const std::string assertion = lake::api::web_ui_passkey_sign_in("");
+    EXPECT_NE(assertion.find("navigator.credentials.get"), std::string::npos);
+    EXPECT_EQ(assertion.find("<script"), assertion.rfind("<script"));
+    EXPECT_EQ(assertion.find("document.cookie"), std::string::npos);
+}
+
+TEST(WebUi, SessionsDevicesAndTokensEscapeStoredValues) {
+    lake::control::Session browser{"s1",
+                                   "u1",
+                                   "d1",
+                                   "lake",
+                                   "browser",
+                                   "<session>",
+                                   "",
+                                   "2026-10-01T00:00:00Z",
+                                   "",
+                                   "2026-09-04T00:00:00Z",
+                                   "",
+                                   {"*"}};
+    lake::control::Device device{"d1", "u1", "device<&", "", "2026-09-04T00:00:00Z", ""};
+    const std::string sessions = lake::api::web_ui_sessions({browser}, {device}, "");
+    EXPECT_NE(sessions.find("&lt;session&gt;"), std::string::npos);
+    EXPECT_NE(sessions.find("device&lt;&amp;"), std::string::npos);
+    EXPECT_NE(sessions.find("action=\"/identity/session/revoke\""), std::string::npos);
+    EXPECT_NE(sessions.find("action=\"/identity/device/revoke\""), std::string::npos);
+
+    lake::control::Session token{"t1",
+                                 "u1",
+                                 "",
+                                 "lake",
+                                 "api_token",
+                                 "token<&",
+                                 "",
+                                 "2026-10-01T00:00:00Z",
+                                 "",
+                                 "2026-09-04T00:00:00Z",
+                                 "",
+                                 {"read"}};
+    const std::string tokens = lake::api::web_ui_tokens({token}, "secret<&", "");
+    EXPECT_NE(tokens.find("token&lt;&amp;"), std::string::npos);
+    EXPECT_NE(tokens.find("secret&lt;&amp;"), std::string::npos);
+    EXPECT_NE(tokens.find("action=\"/identity/token/create\""), std::string::npos);
+    EXPECT_EQ(tokens.find("<script"), std::string::npos);
 }
 
 TEST(WebUi, RepositoriesListEscapesAndLinks) {

@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
+    opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     bool memory_store = false;
 
     for (int i = 1; i < argc; ++i) {

@@ -5,6 +5,9 @@
 
 #include "lake/audit/audit.hpp"
 
+#include "lake/api/oauth.hpp"
+#include "lake/control/identity_crypto.hpp"
+
 #include "lake/control/handles.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
@@ -57,6 +60,10 @@ ApiResult search_result(search::Result<std::vector<search::Hit>> hits) {
 
 std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
     return std::string{};
+}
+
+std::expected<std::string, ApiError> self_object(const json&, ApiContext& context) {
+    return "principal/" + context.acting_identity;
 }
 
 CapabilityObjectResolver entity_object(std::string object_type, std::string input_field) {
@@ -258,6 +265,31 @@ json list_schema(json item) {
     return {{"type", "object"},
             {"properties", {{"items", {{"type", "array"}, {"items", std::move(item)}}}}}};
 }
+json session_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"id", {{"type", "string"}}},
+              {"user_id", {{"type", {"string", "null"}}}},
+              {"device_id", {{"type", {"string", "null"}}}},
+              {"pool_id", {{"type", "string"}}},
+              {"kind", {{"type", "string"}}},
+              {"name", {{"type", "string"}}},
+              {"scopes", {{"type", "array"}}},
+              {"expires_at", {{"type", {"string", "null"}}}},
+              {"revoked_at", {{"type", {"string", "null"}}}},
+              {"created_at", {{"type", "string"}}}}}};
+}
+json device_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"id", {{"type", "string"}}},
+              {"user_id", {{"type", "string"}}},
+              {"name", {{"type", "string"}}},
+              {"passkey_credential_id", {{"type", {"string", "null"}}}},
+              {"passkey_binding_attestation", {{"type", {"object", "null"}}}},
+              {"revoked_at", {{"type", {"string", "null"}}}},
+              {"created_at", {{"type", "string"}}}}}};
+}
 
 int limit_of(const json& input) {
     const int limit = input.value("limit", 100);
@@ -311,6 +343,13 @@ template <class T> ApiResult one_result(control::Result<T> row) {
     if (!row)
         return from_store_error(row.error());
     return ApiResult::success(control::to_json(*row));
+}
+
+ApiResult issued_result(control::Result<control::IssuedSession> issued) {
+    if (!issued)
+        return from_store_error(issued.error());
+    return ApiResult::success(
+        {{"session", control::to_json(issued->session)}, {"secret", issued->secret}});
 }
 
 ApiResult authorized_object_list_result(control::Result<std::vector<control::PolicyObject>> rows,
@@ -547,6 +586,490 @@ void register_identity_capabilities(Registry& registry) {
             }
             return ApiResult::failure("conflict",
                                       "could not find a free generated handle; pass name");
+        }});
+    const json session_issue_schema = {
+        {"type", "object"},
+        {"properties", {{"session", session_schema()}, {"secret", {{"type", "string"}}}}}};
+    registry.add(Capability{
+        .name = "sign_up_password",
+        .title = "Sign up with password",
+        .description = "Create a lake-pool user with an Argon2id password "
+                       "credential and issue a browser session.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"password", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"identity_document", {{"type", "string"}}}}},
+                         {"required", json::array({"email", "password", "identity_document"})},
+                         {"additionalProperties", false}},
+        .output_schema = session_issue_schema,
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            return issued_result(
+                context.store->sign_up_password({input.value("pool_id", "lake"),
+                                                 input.value("email", ""),
+                                                 input.value("password", ""),
+                                                 input.value("display_name", ""),
+                                                 input.value("device_name", "browser"),
+                                                 input.value("identity_document", "")}));
+        }});
+    registry.add(Capability{.name = "sign_in_password",
+                            .title = "Sign in with password",
+                            .description = "Verify a password credential. A user with enrolled MFA "
+                                           "receives mfa_required until TOTP is verified.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties",
+                                              {{"pool_id", {{"type", "string"}}},
+                                               {"email", {{"type", "string"}}},
+                                               {"password", {{"type", "string"}}},
+                                               {"device_name", {{"type", "string"}}}}},
+                                             {"required", json::array({"email", "password"})},
+                                             {"additionalProperties", false}},
+                            .output_schema = session_issue_schema,
+                            .kind = CapabilityKind::Action,
+                            .requires_auth = false,
+                            .object = "authentication",
+                            .action = "write",
+                            .resolve_object = global_object,
+                            .handler = [](const json& input, ApiContext& context) {
+                                if (!context.store)
+                                    return no_store();
+                                return issued_result(context.store->sign_in_password(
+                                    {input.value("pool_id", "lake"),
+                                     input.value("email", ""),
+                                     input.value("password", ""),
+                                     "",
+                                     input.value("device_name", "browser")}));
+                            }});
+    registry.add(
+        Capability{.name = "verify_mfa",
+                   .title = "Verify TOTP",
+                   .description = "Verify an enrolled TOTP factor together with the "
+                                  "password and issue a browser session.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"pool_id", {{"type", "string"}}},
+                                      {"email", {{"type", "string"}}},
+                                      {"password", {{"type", "string"}}},
+                                      {"code", {{"type", "string"}}},
+                                      {"device_name", {{"type", "string"}}}}},
+                                    {"required", json::array({"email", "password", "code"})},
+                                    {"additionalProperties", false}},
+                   .output_schema = session_issue_schema,
+                   .kind = CapabilityKind::Action,
+                   .requires_auth = false,
+                   .object = "authentication",
+                   .action = "write",
+                   .resolve_object = global_object,
+                   .handler = [](const json& input, ApiContext& context) {
+                       if (!context.store)
+                           return no_store();
+                       return issued_result(
+                           context.store->sign_in_totp({input.value("pool_id", "lake"),
+                                                        input.value("email", ""),
+                                                        input.value("password", ""),
+                                                        input.value("code", ""),
+                                                        input.value("device_name", "browser")}));
+                   }});
+    registry.add(Capability{
+        .name = "enroll_mfa",
+        .title = "Enroll TOTP",
+        .description = "Enroll TOTP MFA and return its otpauth URI and recovery codes once.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"otpauth_uri", {{"type", "string"}}},
+                            {"recovery_codes",
+                             {{"type", "array"}, {"items", {{"type", "string"}}}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json&, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            auto result = context.store->enroll_mfa(context.acting_user_id, context.pool_id);
+            if (!result)
+                return from_store_error(result.error());
+            return ApiResult::success({{"otpauth_uri",
+                                        "otpauth://totp/lake:" + context.acting_user_id +
+                                            "?secret=" + result->secret + "&issuer=lake"},
+                                       {"recovery_codes", result->recovery_codes}});
+        }});
+    registry.add(Capability{
+        .name = "disable_mfa",
+        .title = "Disable MFA",
+        .description = "Disable TOTP MFA after a fresh TOTP or recovery-code verification.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"code", {{"type", "string"}}}}},
+                         {"required", json::array({"code"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            const auto result = context.store->disable_mfa(
+                context.acting_user_id, context.pool_id, input.value("code", ""));
+            return result ? ApiResult::success({{"disabled", true}})
+                          : from_store_error(result.error());
+        }});
+    registry.add(Capability{
+        .name = "begin_passkey_registration",
+        .title = "Begin passkey registration",
+        .description = "Create five-minute WebAuthn registration options for "
+                       "the authenticated user.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"pool_id", {{"type", "string"}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            if (context.public_host.empty()) {
+                return ApiResult::failure("store_unavailable",
+                                          "LAKE_PUBLIC_HOST is required for passkey registration");
+            }
+            const std::string pool_id =
+                context.operator_credential ? input.value("pool_id", "lake") : context.pool_id;
+            const auto user = context.store->get_user(context.acting_user_id);
+            if (!user) {
+                return from_store_error(user.error());
+            }
+            const std::string origin = "https://" + context.public_host;
+            const auto challenge = context.store->begin_passkey_registration(
+                context.acting_user_id, pool_id, context.public_host, origin);
+            if (!challenge) {
+                return from_store_error(challenge.error());
+            }
+            return ApiResult::success(
+                {{"public_key",
+                  {{"challenge", challenge->challenge},
+                   {"rp", {{"id", challenge->rp_id}, {"name", "lake"}}},
+                   {"user",
+                    {{"id", control::identity_crypto::base64url_encode(user->id)},
+                     {"name", user->email.empty() ? user->id : user->email},
+                     {"displayName", user->display_name.empty() ? user->id : user->display_name}}},
+                   {"pubKeyCredParams", json::array({{{"type", "public-key"}, {"alg", -7}}})},
+                   {"timeout", 300000},
+                   {"attestation", "none"}}}});
+        }});
+    registry.add(Capability{
+        .name = "register_passkey",
+        .title = "Register passkey",
+        .description = "Record an attestation-less WebAuthn credential and a lake-signed TAAP "
+                       "identity binding for the authenticated user.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"challenge", {{"type", "string"}}},
+                           {"client_data_json", {{"type", "string"}}},
+                           {"attestation_object", {{"type", "string"}}},
+                           {"name", {{"type", "string"}}}}},
+                         {"required",
+                          json::array({"challenge", "client_data_json", "attestation_object"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            const std::string pool_id =
+                context.operator_credential ? input.value("pool_id", "lake") : context.pool_id;
+            auto result = context.store->register_passkey({context.acting_user_id,
+                                                           pool_id,
+                                                           input.value("challenge", ""),
+                                                           input.value("client_data_json", ""),
+                                                           input.value("attestation_object", ""),
+                                                           input.value("name", "passkey"),
+                                                           identity_options(context)});
+            return result ? ApiResult::success({{"registered", true}})
+                          : from_store_error(result.error());
+        }});
+    registry.add(Capability{
+        .name = "begin_passkey_sign_in",
+        .title = "Begin passkey sign-in",
+        .description = "Create five-minute WebAuthn assertion options for a user pool.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"pool_id", {{"type", "string"}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            if (context.public_host.empty()) {
+                return ApiResult::failure("store_unavailable",
+                                          "LAKE_PUBLIC_HOST is required for passkey sign-in");
+            }
+            const std::string pool_id = input.value("pool_id", "lake");
+            const std::string origin = "https://" + context.public_host;
+            const auto challenge =
+                context.store->begin_passkey_sign_in(pool_id, context.public_host, origin);
+            if (!challenge) {
+                return from_store_error(challenge.error());
+            }
+            return ApiResult::success({{"public_key",
+                                        {{"challenge", challenge->challenge},
+                                         {"rpId", challenge->rp_id},
+                                         {"timeout", 300000},
+                                         {"userVerification", "preferred"}}}});
+        }});
+    registry.add(Capability{
+        .name = "sign_in_passkey",
+        .title = "Sign in with passkey",
+        .description = "Complete a verified WebAuthn assertion and issue a browser session.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"challenge", {{"type", "string"}}},
+                           {"credential_id", {{"type", "string"}}},
+                           {"client_data_json", {{"type", "string"}}},
+                           {"authenticator_data", {{"type", "string"}}},
+                           {"signature", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}}}},
+                         {"required",
+                          json::array({"challenge",
+                                       "credential_id",
+                                       "client_data_json",
+                                       "authenticator_data",
+                                       "signature"})},
+                         {"additionalProperties", false}},
+        .output_schema = session_issue_schema,
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return context.store ? issued_result(context.store->sign_in_passkey(
+                                       {input.value("pool_id", "lake"),
+                                        input.value("challenge", ""),
+                                        input.value("credential_id", ""),
+                                        input.value("client_data_json", ""),
+                                        input.value("authenticator_data", ""),
+                                        input.value("signature", ""),
+                                        input.value("device_name", "browser")}))
+                                 : no_store();
+        }});
+    registry.add(Capability{
+        .name = "register_oauth_provider",
+        .title = "Register OAuth provider",
+        .description = "Register a pool-scoped OAuth or OpenID Connect provider.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"provider", {{"type", "string"}}},
+                           {"issuer", {{"type", "string"}}},
+                           {"client_id", {{"type", "string"}}},
+                           {"client_secret", {{"type", "string"}}},
+                           {"scopes", {{"type", "array"}}}}},
+                         {"required",
+                          json::array(
+                              {"provider", "issuer", "client_id", "client_secret", "scopes"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"registered", {{"type", "boolean"}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "OAuth provider registry",
+        .action = "admin",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            const auto result = context.store->register_oauth_provider(
+                {input.value("pool_id", "lake"),
+                 input.value("provider", ""),
+                 input.value("issuer", ""),
+                 input.value("client_id", ""),
+                 input.value("client_secret", ""),
+                 input.value("scopes", std::vector<std::string>{})});
+            return result ? ApiResult::success({{"registered", true}})
+                          : from_store_error(result.error());
+        }});
+    registry.add(Capability{
+        .name = "start_oauth",
+        .title = "Start OAuth sign-in",
+        .description = "Create a one-use OAuth authorization flow with PKCE and state.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"provider", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"identity_document", {{"type", "string"}}}}},
+                         {"required", json::array({"provider"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"authorization_url", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            if (context.public_host.empty()) {
+                return ApiResult::failure("store_unavailable",
+                                          "LAKE_PUBLIC_HOST is required for OAuth sign-in");
+            }
+            const std::string pool_id = input.value("pool_id", "lake");
+            const std::string provider_name = input.value("provider", "");
+            const auto provider = context.store->get_oauth_provider(pool_id, provider_name);
+            if (!provider) {
+                return from_store_error(provider.error());
+            }
+            if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
+                return ApiResult::failure("invalid_input",
+                                          "OAuth endpoints must use HTTPS outside loopback tests");
+            }
+            control::OAuthFlow flow{pool_id,
+                                    provider_name,
+                                    control::identity_crypto::random_secret(),
+                                    control::identity_crypto::random_secret(),
+                                    control::identity_crypto::random_secret(),
+                                    input.value("device_name", "browser"),
+                                    input.value("identity_document", "")};
+            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
+                return ApiResult::failure("store_error", "could not generate OAuth flow material");
+            }
+            const auto started = context.store->begin_oauth(flow);
+            if (!started) {
+                return from_store_error(started.error());
+            }
+            return ApiResult::success(
+                {{"authorization_url",
+                  oauth_authorization_url(*provider, flow, context.public_host)}});
+        }});
+    registry.add(Capability{.name = "create_token",
+                            .title = "Create API token",
+                            .description = "Issue a named, scoped API-token session. Static tokens "
+                                           "require a reason and are audited.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties",
+                                              {{"name", {{"type", "string"}}},
+                                               {"scopes", {{"type", "array"}}},
+                                               {"expires_in_seconds", {{"type", "integer"}}},
+                                               {"static", {{"type", "boolean"}}},
+                                               {"reason", {{"type", "string"}}}}},
+                                             {"required", json::array({"name", "scopes"})},
+                                             {"additionalProperties", false}},
+                            .output_schema = session_issue_schema,
+                            .kind = CapabilityKind::Action,
+                            .object = "principal",
+                            .action = "write",
+                            .resolve_object = self_object,
+                            .handler = [](const json& input, ApiContext& context) {
+                                const bool is_static = input.value("static", false);
+                                const int expires_in_seconds = input.value(
+                                    "expires_in_seconds", is_static ? 0 : 60 * 60 * 24 * 30);
+                                return context.store
+                                           ? issued_result(context.store->create_token(
+                                                 {context.acting_user_id,
+                                                  context.pool_id,
+                                                  input.value("name", ""),
+                                                  input.value("reason", ""),
+                                                  input.value("scopes", std::vector<std::string>{}),
+                                                  expires_in_seconds,
+                                                  is_static}))
+                                           : no_store();
+                            }});
+    registry.add(Capability{.name = "list_sessions",
+                            .title = "List sessions",
+                            .description = "List the authenticated user's sessions and tokens.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties", json::object()},
+                                             {"additionalProperties", false}},
+                            .output_schema = list_schema(session_schema()),
+                            .kind = CapabilityKind::Read,
+                            .object = "principal",
+                            .action = "read",
+                            .resolve_object = self_object,
+                            .handler = [](const json&, ApiContext& context) {
+                                return context.store ? list_result(context.store->list_sessions(
+                                                           context.acting_user_id, context.pool_id))
+                                                     : no_store();
+                            }});
+    registry.add(Capability{
+        .name = "revoke_session",
+        .title = "Revoke session",
+        .description = "Revoke one of the authenticated user's sessions or tokens.",
+        .input_schema = id_input(),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            auto result = context.store->revoke_session(context.acting_user_id, input["id"]);
+            return result ? ApiResult::success({{"revoked", true}})
+                          : from_store_error(result.error());
+        }});
+    registry.add(Capability{.name = "list_devices",
+                            .title = "List devices",
+                            .description = "List the authenticated user's devices and signed "
+                                           "passkey bindings.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties", json::object()},
+                                             {"additionalProperties", false}},
+                            .output_schema = list_schema(device_schema()),
+                            .kind = CapabilityKind::Read,
+                            .object = "principal",
+                            .action = "read",
+                            .resolve_object = self_object,
+                            .handler = [](const json&, ApiContext& context) {
+                                return context.store ? list_result(context.store->list_devices(
+                                                           context.acting_user_id))
+                                                     : no_store();
+                            }});
+    registry.add(Capability{
+        .name = "revoke_device",
+        .title = "Revoke device",
+        .description = "Revoke a device; attached sessions fail on their next request.",
+        .input_schema = id_input(),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            auto result = context.store->revoke_device(context.acting_user_id, input["id"]);
+            return result ? ApiResult::success({{"revoked", true}})
+                          : from_store_error(result.error());
         }});
 }
 

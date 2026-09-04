@@ -12,10 +12,18 @@ lake today is the control surface: one capability registry rendered as REST `/v1
 MCP; users, organizations, customers and repositories in Postgres; server-rendered pages behind
 the admin sign-in; telemetry; CI. Organization administration and the authorization object graph
 described below are implemented by lake issues #16 and #19 in migration
-`0004_organizations_policy`; TAAP credential resolution remains identity-core work. Everything
+`0004_organizations_policy`; identity core is implemented in migration `0007_identity_core`.
+Everything
 else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
+
+Identity-core status on this branch: verified TAAP documents, password plus TOTP with one-use
+recovery codes and fresh-verification disablement, persisted
+WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
+hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use those capabilities.
+The signed audit substrate from #18 is integrated, and every passkey registration stores a
+lake-signed TAAP binding beside the credential. Application user pools remain owned by #51.
 
 ## Identity: one substrate, three principals
 
@@ -45,6 +53,37 @@ per application audience with a JWKS endpoint, and lifecycle webhooks. Nothing i
 core is written twice; the application-facing surface is the follow-up epic (#51) and every
 identity-core issue keeps `pool_id` on its tables and in its capability inputs from the start.
 
+### Identity-core security decisions
+
+- A person's TAAP private key never reaches lake. The client holds it. lake stores identity
+  documents and rotation chains and verifies their signatures. A WebAuthn credential is the
+  browser device key; lake stores its credential-id and public-key binding to the user's TAAP
+  identity after an attestation-less registration, records the registration in the signed audit
+  stream, and stores a `passkey_binding/1` TAAP attestation signed by lake's current instance
+  identity. The binding remains verifiable through identity history after rotation. lake issues a
+  session only after a successful assertion. lake #18 supplies lake's instance identity: it is
+  generated on first start, its seed is wrapped by the instance KEK (or provided as
+  `LAKE_IDENTITY_SEED`), and its public document is exposed at `GET /v1/identity`. Identity
+  capabilities and the OAuth callback write through its signed audit stream.
+  lake verifies identity documents through libliquid's public canonical-CBOR codec.
+- TOTP seeds and OAuth client secrets are encrypted with AES-256-GCM under a
+  purpose-specific data key. `keystore(purpose, wrapped_key, version)` holds those keys wrapped
+  by the instance KEK; #24/#25 generalise the table and its lifecycle.
+- Passwords use OpenSSL 3.2+ `EVP_KDF` `ARGON2ID`; lake's current build uses OpenSSL 3.6.3 with
+  64 MiB memory, three iterations, and one lane. An older build must use the documented scrypt
+  fallback until its OpenSSL is upgraded.
+- OAuth providers are registered per pool with issuer, client id, encrypted client secret and
+  scopes. The authorization-code flow uses PKCE and callback
+  `https://<LAKE_PUBLIC_HOST>/v1/oauth/<provider>/callback`; Google id tokens are verified against
+  cached issuer JWKS, while GitHub uses its authenticated user endpoint. The first providers are
+  GitHub and Google. OAuth state and the encrypted PKCE verifier expire after five minutes and are
+  consumed once.
+- `LAKE_PUBLIC_HOST` is required for WebAuthn RP ID and OAuth callback construction. Each pool
+  configures its allowed origins. Registration and assertion challenges live in
+  `identity_webauthn_challenges`, expire after five minutes, and are consumed once. The accepted
+  registration attestation format is `none`; assertions verify the stored public key and sign
+  counter.
+
 ## Authorisation: one policy engine, one object graph
 
 Repository, drive and platform permissions are three surfaces over one engine. The object graph
@@ -65,12 +104,14 @@ are control-plane tables. Membership and grant rows retain the TAAP attestation 
 granting administrator identity. `Registry::call` invokes `authorize` before protected handlers;
 the server-rendered pages call those same capabilities. `authorize_batch` shares cached ancestor
 and grant loads across candidates, and `effective_access` exposes direct and inherited access.
-The current operator-admin principal is handled as a break-glass principal by the same function;
-identity-core credential resolution will supply user and workload TAAP principals.
+The current operator-admin principal is handled as a break-glass principal by the same function.
+Identity-core credential resolution supplies user TAAP principals; self-management resolves
+`principal/<taap_id>`, and scoped API tokens are narrowed before policy evaluation. Workload TAAP
+principals remain part of the workload-identity follow-up.
 
 ## Audit (decision §13)
 
-**Status: the audit event contract is published for #18.** The implementation creates the
+**Implemented status (#18).** The implementation creates the
 append-only `audit_events` stream and all wave-one branches write this shape through
 `audit::record`; a later wave may add event kinds but may not reinterpret an existing field.
 

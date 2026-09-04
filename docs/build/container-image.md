@@ -1,9 +1,9 @@
 # Linux/amd64 container image
 
 `Dockerfile` builds `lake` on Ubuntu 24.04 with clang-19 from the LLVM apt channel,
-`libstdc++-14-dev`, OpenSSL, libpq development packages, `pkg-config` and `libfuse3-dev` for
-libliquid discovery, Ninja, and CMake 3.31.5. The runtime image contains the matching FUSE,
-OpenSSL, C++ and libpq runtime libraries and runs as numeric UID/GID `10001`.
+`libstdc++-14-dev`, checksum-verified OpenSSL 3.6.3, libpq development packages, `pkg-config` and
+`libfuse3-dev` for libliquid discovery, Ninja, and CMake 3.31.5. The runtime image contains the
+matching FUSE, OpenSSL, C++ and libpq runtime libraries and runs as numeric UID/GID `10001`.
 
 ## Publish a deployment image
 
@@ -32,7 +32,8 @@ docker run --rm -p 4900:4900 oramasearch/lake:<local-tag> version
 ```
 
 Do not deploy or push a workstation-built image. A CI-built immutable tag is the deployment
-artifact.
+artifact. The local emulated `linux/amd64` build is not required on Apple Silicon; CI or the AKS
+amd64 builder produces the image.
 
 ## Change the image recipe
 

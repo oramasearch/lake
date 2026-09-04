@@ -94,6 +94,18 @@ Result<Identity> identity(control::Store &store,
 Result<Identity> rotate_identity(control::Store &store,
                                  const IdentityOptions &options);
 
+// Signs and verifies the TAAP identity binding stored with a passkey credential.
+Result<nlohmann::json> sign_passkey_binding(control::Store& store,
+                                            const std::string& subject_taap_id,
+                                            const std::string& credential_id,
+                                            const std::string& pool_id,
+                                            const IdentityOptions& options);
+Result<void> verify_passkey_binding(control::Store& store,
+                                    const nlohmann::json& attestation,
+                                    const std::string& subject_taap_id,
+                                    const std::string& credential_id,
+                                    const std::string& pool_id);
+
 Result<void> validate_retention_days(int days);
 
 } // namespace lake::audit

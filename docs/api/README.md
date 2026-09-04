@@ -9,11 +9,13 @@ an object resolver, and a handler. REST and MCP go through the same `Registry::c
 authorize, validate and fail identically.
 
 **Envelope.** Every response is `{ ok, value | error{code, message, path}, duration_ms }`.
-Status by error code: `invalid_input` 400, `unauthorized` 403, `not_found` / `unknown_capability`
-404, `conflict` 409, `store_unavailable` 503, anything else 500. MCP `tools/call` returns the same
+Status by error code: `invalid_input` 400, `unauthorized` / `mfa_required` 403, `not_found` /
+`unknown_capability` 404, `conflict` 409, `store_unavailable` 503, anything else 500. MCP
+`tools/call` returns the same
 envelope as `structuredContent` (and as text), with `isError` set.
 
-**Auth.** Bearer token, see [`auth.md`](auth.md). Everything except `server_info` requires it.
+**Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
+the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
 
 ## Operational routes
 
@@ -39,7 +41,7 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
-| `refs`, `find_missing`, `push`, `pull` | read/action | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
+| `refs`, `find_missing`, `push`, `pull` | read/action, reserved | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
 | `list_memberships`, `create_membership` | read/action | scope, principal, role, TAAP evidence | membership(s) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
@@ -52,6 +54,14 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `export_audit` | read | audit filters | `{jsonl}` | [audit.md](audit.md) |
 | `verify_audit` | read | — | `{verified: true}` | [audit.md](audit.md) |
 | `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days}` | [audit.md](audit.md) |
+| `sign_up_password`, `sign_in_password`, `verify_mfa` | action, public entry | password credentials; verify also takes a TOTP or recovery code | browser session + secret | [identity.md](identity.md) |
+| `enroll_mfa`, `disable_mfa` | action | authenticated user; disable takes a fresh TOTP or recovery code | one-use setup URI and recovery codes, or confirmation | [identity.md](identity.md) |
+| `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation with a lake-signed TAAP binding stored on the device | [identity.md](identity.md) |
+| `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |
+| `register_oauth_provider` | action, operator | issuer, client id, secret, scopes | confirmation | [identity.md](identity.md) |
+| `start_oauth` | action, public entry | pool, provider, device name, identity document for a new user | authorization URL | [identity.md](identity.md) |
+| `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | token/session data | [identity.md](identity.md) |
+| `list_devices`, `revoke_device` | read/action | device id for revocation | device data, including passkey credential IDs and signed bindings | [identity.md](identity.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `limit?` | `{items: [ranked hit]}` | [search.md](search.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
@@ -60,6 +70,10 @@ from the registry.
 The sync row documents the reserved capability names and their published wire contract. It is not
 registered until libliquid exposes the server-facing repository/store binding and codec described
 in [`sync.md`](sync.md).
+
+OAuth providers return the browser to `GET /v1/oauth/<provider>/callback`. This callback is the
+documented provider-facing route outside the registry; it consumes one-use state and issues the
+same `lake_session` cookie returned by the identity capabilities.
 
 ## Adding a capability
 

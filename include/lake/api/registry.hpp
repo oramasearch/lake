@@ -46,7 +46,8 @@ std::string_view to_string(CapabilityKind kind);
 struct ApiContext {
     control::Store* store = nullptr; // null = no control-plane store configured
     std::string node_name;
-    std::string acting_identity; // "admin" for the bearer, empty otherwise
+    std::string acting_identity; // TAAP id, "admin" for operator, empty otherwise
+    std::string acting_user_id;  // database user id for identity operations
     std::string request_id;
     std::string authentication_method;
     std::string device;
@@ -55,6 +56,11 @@ struct ApiContext {
     SyncStore* sync_store = nullptr;
     search::Service* search = nullptr;
     bool authorized = false;
+    bool operator_credential = false;
+    bool session_credential = false;
+    std::string public_host;
+    std::string pool_id = "lake";
+    std::vector<std::string> scopes;
     control::AuthorizationCache authorization_cache;
 };
 

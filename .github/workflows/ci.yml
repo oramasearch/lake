@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       DEBIAN_FRONTEND: noninteractive
+      LAKE_INSTANCE_KEK: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
       LAKE_TEST_DB_URI: postgresql://postgres:postgres@127.0.0.1:5432/lake_test
     services:
       postgres:
@@ -20,6 +21,7 @@ jobs:
         env:
           POSTGRES_DB: lake_test
           POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
@@ -50,6 +52,17 @@ jobs:
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 19
+          wget -qO /tmp/openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          echo "${OPENSSL_SHA256}  /tmp/openssl.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/openssl.tar.gz -C /tmp
+          cd "/tmp/openssl-${OPENSSL_VERSION}"
+          ./Configure linux-x86_64 --prefix=/opt/openssl --libdir=lib64 \
+            --openssldir=/etc/ssl shared no-tests
+          make -j "$(nproc)"
+          sudo make install_sw
+          /opt/openssl/bin/openssl version
+          cd "$GITHUB_WORKSPACE"
           wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-linux-x86_64.sh
           sudo sh /tmp/cmake.sh --skip-license --prefix=/usr/local
           cmake --version
@@ -61,6 +74,7 @@ jobs:
           -DLAKE_BUILD_TESTS=ON
           -DCMAKE_C_COMPILER=clang-19
           -DCMAKE_CXX_COMPILER=clang++-19
+          -DOPENSSL_ROOT_DIR=/opt/openssl
 
       - name: Build
         run: cmake --build build --parallel

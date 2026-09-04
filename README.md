@@ -6,10 +6,14 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (identity, tenants, repositories, organization administration and policy over the
-> Postgres control plane), the pages to explore them, the OpenAPI
+> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings and OAuth identity;
+> row-resolved sessions, devices and
+> scoped tokens; tenants, repositories, organization administration and policy over the Postgres
+> control plane), the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
-> Prometheus metrics and JSON request logs. The control surface and metrics are behind the admin bearer; probes are unauthenticated. The specification lives in
+> Prometheus metrics and JSON request logs. Protected operations accept the operator bearer or a
+> row-resolved user credential; probes and documented identity entry points are unauthenticated.
+> The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
 > The image `oramasearch/lake` (private) runs under the `Lake` CR on `orama-operator`; see
@@ -29,7 +33,7 @@ liquid is the tool. lake is where it collects.
 
 ## Build and run
 
-Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3
+Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3.6.3
 (`brew install openssl@3`). Clone with submodules — the HTTP stack is vendored.
 GitHub Actions repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5
 toolchain on every push and pull request; see [`docs/build/ci.md`](docs/build/ci.md).
@@ -50,22 +54,26 @@ ctest --test-dir build
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
+| `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
+| `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
+| `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 
 `lake version` prints the version. The default port is 4900 (`--listen HOST:PORT`);
 `--node NAME` names the node. `--control-db URI` (default `$LAKE_CONTROL_DB_URI`) selects the
 Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-token`
-(default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
+(default `$LAKE_ADMIN_TOKEN`) is the operator bearer. `LAKE_PUBLIC_HOST` supplies the WebAuthn RP
+ID and OAuth callback host; user sessions and API tokens are resolved from Postgres on each request.
 SIGINT/SIGTERM stop it cleanly.
 
 ## Container image
 
-`Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14
-and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++ + libpq) as UID/GID 10001,
+`Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14,
+OpenSSL 3.6.3 and CMake 3.31, then ships it on a minimal Ubuntu runtime as UID/GID 10001,
 `ENTRYPOINT lake`, `CMD --listen 0.0.0.0:4900`, port 4900 exposed. It is Zetta's headless-image
 recipe minus the GUI and Postgres deps. Images go to the **private** Docker Hub repo
 `oramasearch/lake` from the tagged [`image` workflow](.github/workflows/image.yml): an immutable

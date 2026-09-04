@@ -26,6 +26,8 @@ struct ServerOptions {
     unsigned short port = 4900; // 0 = pick an ephemeral port
     int worker_coroutines = 32;
     std::string node_name = "lake";
+    // Public hostname used in OAuth callbacks and as the WebAuthn RP ID.
+    std::string public_host;
     // The control-plane store the capabilities call; null = none configured
     // (capabilities answer store_unavailable). Owned by the caller for the
     // server's lifetime.

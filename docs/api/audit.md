@@ -25,6 +25,9 @@ All audit capabilities except `identity` require the normal lake bearer or sessi
 
 `rotate_identity` is an administrative action and produces one audit event through the registry.
 Identity history remains in `lake_identity`, so events signed before a rotation remain verifiable.
+Passkey registration uses that same identity history to sign a TAAP/1 `passkey_binding/1`
+attestation over the credential ID, pool and user's TAAP identity. `list_devices` returns the
+stored binding, and verification accepts its historical lake signing identity after rotation.
 
 ## Page
 

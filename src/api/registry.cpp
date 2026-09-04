@@ -1,5 +1,6 @@
 #include "lake/api/registry.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <exception>
 
@@ -28,7 +29,7 @@ std::string_view to_string(CapabilityKind kind) {
 
 namespace {
 
-bool matches_type(const nlohmann::json &value, const std::string &type) {
+bool matches_type(const nlohmann::json& value, const std::string& type) {
     if (type == "string")
         return value.is_string();
     if (type == "integer")
@@ -46,12 +47,12 @@ bool matches_type(const nlohmann::json &value, const std::string &type) {
 
 } // namespace
 
-ApiResult validate_input(const Capability &capability, const nlohmann::json &input) {
+ApiResult validate_input(const Capability& capability, const nlohmann::json& input) {
     if (!input.is_object())
         return ApiResult::failure("invalid_input", "input must be a JSON object");
     const nlohmann::json properties =
         capability.input_schema.value("properties", nlohmann::json::object());
-    for (const auto &required :
+    for (const auto& required :
          capability.input_schema.value("required", nlohmann::json::array())) {
         const std::string key = required.get<std::string>();
         if (!input.contains(key) || input[key].is_null()) {
@@ -60,15 +61,15 @@ ApiResult validate_input(const Capability &capability, const nlohmann::json &inp
     }
     for (auto it = input.begin(); it != input.end(); ++it) {
         if (!properties.contains(it.key())) {
-            return ApiResult::failure("invalid_input", "unexpected field " + it.key(),
-                                      "/" + it.key());
+            return ApiResult::failure(
+                "invalid_input", "unexpected field " + it.key(), "/" + it.key());
         }
         if (it.value().is_null())
             continue;
         const std::string type = properties[it.key()].value("type", "");
         if (!type.empty() && !matches_type(it.value(), type)) {
-            return ApiResult::failure("invalid_input", it.key() + " must be a " + type,
-                                      "/" + it.key());
+            return ApiResult::failure(
+                "invalid_input", it.key() + " must be a " + type, "/" + it.key());
         }
     }
     return ApiResult::success(nullptr);
@@ -81,8 +82,8 @@ bool Registry::add(Capability capability) {
     return true;
 }
 
-std::shared_ptr<const Capability> Registry::find(const std::string &name) const {
-    for (const auto &entry : entries_) {
+std::shared_ptr<const Capability> Registry::find(const std::string& name) const {
+    for (const auto& entry : entries_) {
         if (entry->name == name)
             return entry;
     }
@@ -93,8 +94,8 @@ std::vector<std::shared_ptr<const Capability>> Registry::list() const {
     return entries_;
 }
 
-ApiResult Registry::call(const std::string &name, const nlohmann::json &input,
-                         ApiContext &context) const {
+ApiResult
+Registry::call(const std::string& name, const nlohmann::json& input, ApiContext& context) const {
     if (context.request_id.empty()) {
         context.request_id = control::new_uuid_v4();
     }
@@ -104,10 +105,17 @@ ApiResult Registry::call(const std::string &name, const nlohmann::json &input,
     ApiResult result;
     bool proceed = true;
     if (capability->requires_auth && !context.authorized) {
-        result = ApiResult::failure("unauthorized", "a valid admin bearer token is required");
+        result = ApiResult::failure("unauthorized",
+                                    "a valid session or operator credential is required");
         proceed = false;
     } else if (ApiResult validation = validate_input(*capability, input); !validation.ok) {
         result = validation;
+        proceed = false;
+    } else if (capability->requires_auth && context.session_credential &&
+               std::ranges::find(context.scopes, "*") == context.scopes.end() &&
+               std::ranges::find(context.scopes, capability->name) == context.scopes.end()) {
+        result =
+            ApiResult::failure("unauthorized", "credential does not grant " + capability->name);
         proceed = false;
     } else if (capability->requires_auth && !capability->authorizes_candidates) {
         if (capability->object.empty() || capability->action.empty() ||
@@ -125,21 +133,22 @@ ApiResult Registry::call(const std::string &name, const nlohmann::json &input,
                 object_id = capability->resolve_object(input, context);
             }
             if (!object_id) {
-                result = ApiResult::failure(object_id.error().code, object_id.error().message,
-                                            object_id.error().path);
+                result = ApiResult::failure(
+                    object_id.error().code, object_id.error().message, object_id.error().path);
                 proceed = false;
             } else {
-                auto decision =
-                    control::authorize(*context.store, context.acting_identity, *object_id,
-                                       capability->action, context.authorization_cache);
+                auto decision = control::authorize(*context.store,
+                                                   context.acting_identity,
+                                                   *object_id,
+                                                   capability->action,
+                                                   context.authorization_cache);
                 if (!decision) {
                     result = ApiResult::failure(decision.error().code, decision.error().message);
                     proceed = false;
                 } else if (!decision->allowed) {
                     result = ApiResult::failure("unauthorized",
                                                 "principal is not allowed to " +
-                                                    capability->action + " " +
-                                                    capability->object);
+                                                    capability->action + " " + capability->object);
                     proceed = false;
                 }
             }
@@ -149,7 +158,7 @@ ApiResult Registry::call(const std::string &name, const nlohmann::json &input,
         const auto start = std::chrono::steady_clock::now();
         try {
             result = capability->handler(input, context);
-        } catch (const std::exception &error) {
+        } catch (const std::exception& error) {
             result = ApiResult::failure("store_error", error.what());
         }
         result.duration_ms =
