@@ -62,6 +62,10 @@ struct ApiContext {
     std::string pool_id = "lake";
     std::vector<std::string> scopes;
     control::AuthorizationCache authorization_cache;
+    std::string audit_customer_id;
+    std::string audit_kind;
+    std::string audit_object;
+    nlohmann::json audit_details = nlohmann::json::object();
 };
 
 using CapabilityHandler =
@@ -83,6 +87,9 @@ struct Capability {
     CapabilityObjectResolver resolve_object;
     // Candidate-returning capabilities apply control::authorize_batch internally.
     bool authorizes_candidates = false;
+    // Operators bypass policy decisions, but capabilities can still resolve their
+    // audit target before invoking the handler.
+    bool resolves_operator_audit_target = false;
     CapabilityHandler handler;
 };
 

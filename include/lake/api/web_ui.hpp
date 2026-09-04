@@ -46,6 +46,12 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
                                     const std::vector<control::EffectiveAccessEntry>& entries);
 std::string web_ui_search(std::string_view query, const std::vector<search::Hit>& hits);
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter);
+std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts);
+std::string web_ui_secrets(const control::SecretMount& mount,
+                           std::string_view name,
+                           const control::SecretMetadata* metadata);
+std::string web_ui_encryption_keys(const control::SecretMount& mount,
+                                   const std::vector<control::EncryptionKey>& keys);
 std::string web_ui_sign_up(std::string_view error);
 std::string web_ui_sign_in(std::string_view error);
 std::string web_ui_mfa(std::string_view error,

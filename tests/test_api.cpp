@@ -450,7 +450,7 @@ TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
     ApiContext context;
     context.store = store.get();
     context.node_name = "postgres-test";
-    context.instance_kek = "postgres-test-instance-kek";
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     context.authorized = true;
     context.acting_identity = "admin";
 
