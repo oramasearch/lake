@@ -4,8 +4,10 @@
 #include "lake/control/pki.hpp"
 #include "lake/control/store.hpp"
 
+#include <array>
 #include <charconv>
 #include <format>
+#include <tuple>
 
 namespace lake::api {
 namespace {
@@ -209,6 +211,48 @@ void register_pki_capabilities(Registry& registry) {
             return ApiResult::success(
                 {{"token", svid->token}, {"issuer", svid->issuer}, {"subject", svid->subject}});
         }});
+    for (const auto& [name, title, profile] :
+         std::array<std::tuple<std::string, std::string, std::string>, 3>{
+             {{"issue_client_certificate", "Issue client certificate", "client"},
+              {"issue_device_certificate", "Issue device certificate", "device"},
+              {"issue_acme_certificate", "Issue ACME certificate", "acme"}}}) {
+        registry.add(Capability{
+            .name = name,
+            .title = title,
+            .description = "Issue a short-lived " + profile + " certificate.",
+            .input_schema = {{"type", "object"},
+                             {"properties",
+                              {{"customer_id", {{"type", "string"}}},
+                               {"subject", {{"type", "string"}}},
+                               {"lifetime_seconds", {{"type", "integer"}}}}},
+                             {"required", json::array({"customer_id", "subject"})},
+                             {"additionalProperties", false}},
+            .output_schema = svid_schema(),
+            .kind = CapabilityKind::Action,
+            .object = "customer",
+            .action = "admin",
+            .resolve_object = customer_object,
+            .handler = [profile](const json& input, ApiContext& context) {
+                if (!context.pki || !context.store) {
+                    return no_pki();
+                }
+                auto certificate =
+                    context.pki->issue_x509_certificate(*context.store,
+                                                        input.at("customer_id").get<std::string>(),
+                                                        input.at("subject").get<std::string>(),
+                                                        context.instance_kek,
+                                                        input.value("lifetime_seconds", 3600));
+                if (!certificate) {
+                    return from_pki_error(certificate.error());
+                }
+                context.audit_customer_id = input.at("customer_id").get<std::string>();
+                context.audit_kind = "certificate";
+                context.audit_object = profile + "/" + input.at("subject").get<std::string>();
+                return ApiResult::success({{"certificate_pem", certificate->certificate_pem},
+                                           {"private_key_pem", certificate->private_key_pem},
+                                           {"chain_pem", certificate->chain_pem}});
+            }});
+    }
     registry.add(Capability{
         .name = "exchange_kubernetes_attestation",
         .title = "Exchange Kubernetes attestation",

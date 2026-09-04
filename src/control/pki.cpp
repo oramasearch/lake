@@ -475,6 +475,37 @@ issue_x509_svid(const Authority& authority, std::string_view spiffe_id, int life
                     authority.intermediate_certificate_pem + authority.root_certificate_pem};
 }
 
+Result<X509Svid>
+issue_x509_certificate(const Authority& authority, std::string_view subject, int lifetime_seconds) {
+    if (subject.empty() || lifetime_seconds <= 0 || lifetime_seconds > 3600) {
+        return std::unexpected(Error{
+            "invalid_input", "certificate subject and a lifetime up to one hour are required"});
+    }
+    auto intermediate_key = private_key_from_pem(authority.intermediate_private_key_pem);
+    auto intermediate_certificate = certificate_from_pem(authority.intermediate_certificate_pem);
+    auto leaf_key = new_p256_key();
+    if (!intermediate_key || !intermediate_certificate || !leaf_key) {
+        return std::unexpected(Error{"invalid_input", "authority material is invalid"});
+    }
+    auto leaf_certificate = make_certificate(leaf_key->get(),
+                                             intermediate_key->get(),
+                                             intermediate_certificate->get(),
+                                             subject,
+                                             lifetime_seconds,
+                                             false);
+    if (!leaf_certificate) {
+        return std::unexpected(leaf_certificate.error());
+    }
+    auto certificate_pem = pem_of_certificate(leaf_certificate->get());
+    auto private_key_pem = pem_of_private_key(leaf_key->get());
+    if (!certificate_pem || !private_key_pem) {
+        return std::unexpected(crypto_error("could not encode certificate"));
+    }
+    return X509Svid{*certificate_pem,
+                    *private_key_pem,
+                    authority.intermediate_certificate_pem + authority.root_certificate_pem};
+}
+
 Result<void> verify_x509_svid(const Authority& authority, const X509Svid& svid) {
     auto root = certificate_from_pem(authority.root_certificate_pem);
     auto intermediate = certificate_from_pem(authority.intermediate_certificate_pem);
@@ -740,6 +771,18 @@ Result<X509Svid> Service::issue_x509_svid(::lake::control::Store& store,
         return std::unexpected(authority.error());
     }
     return pki::issue_x509_svid(*authority, spiffe_id, lifetime_seconds);
+}
+
+Result<X509Svid> Service::issue_x509_certificate(::lake::control::Store& store,
+                                                 std::string_view customer_id,
+                                                 std::string_view subject,
+                                                 std::string_view instance_kek,
+                                                 int lifetime_seconds) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    return pki::issue_x509_certificate(*authority, subject, lifetime_seconds);
 }
 
 Result<JwtSvid> Service::issue_jwt_svid(std::string_view customer_id,

@@ -74,10 +74,20 @@ TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
                       {{"customer_id", customer->id}, {"spiffe_id", "spiffe://lake.test/api"}},
                       context);
     ASSERT_TRUE(svid.ok) << svid.error.message;
+    context.request_id.clear();
+    const auto client = registry.call("issue_client_certificate",
+                                      {{"customer_id", customer->id}, {"subject", "client-1"}},
+                                      context);
+    ASSERT_TRUE(client.ok) << client.error.message;
+    context.request_id.clear();
+    const auto device = registry.call("issue_device_certificate",
+                                      {{"customer_id", customer->id}, {"subject", "device-1"}},
+                                      context);
+    ASSERT_TRUE(device.ok) << device.error.message;
     const auto event = store.latest_audit_event();
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.kind, "certificate");
-    EXPECT_EQ(event->draft.action, "issue_x509_svid");
+    EXPECT_EQ(event->draft.action, "issue_device_certificate");
 
     context.request_id.clear();
     const auto ceremony =

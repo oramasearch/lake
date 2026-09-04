@@ -11,6 +11,10 @@ they do not create a second identity system.
 authorize against the customer object and record a `certificate` audit event. The X.509 response
 contains a newly generated workload private key; Lake does not persist that leaf key.
 
+`issue_client_certificate` and `issue_device_certificate` issue the same short-lived chain for a
+named client or device subject. `issue_acme_certificate` is the internal issuance profile used by
+the ACME transport; it does not replace ACME account or challenge validation.
+
 The API server owns the PKI service for its process and supplies it to every registry call. The
 service creates and loads customer authority records through the control-plane store; callers must
 not substitute an HTTP-local signer for that record.
