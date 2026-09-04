@@ -7,7 +7,7 @@ liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
 > capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth identity, and
-> organization SAML/OIDC provider, federation-policy and SCIM provisioning controls;
+> organization SAML/OIDC provider, federation-policy and SCIM 2.0 user/group provisioning;
 > row-resolved sessions, devices and
 > scoped tokens; tenants, repositories, organization administration and policy over the Postgres
 > control plane), the pages to explore them, the OpenAPI
@@ -62,6 +62,7 @@ ctest --test-dir build
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
+| `/scim/v2/Users`, `/scim/v2/Groups` and `/:id` | provider-bearer SCIM 2.0 filtered list, get, create, PATCH and delete resources |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 

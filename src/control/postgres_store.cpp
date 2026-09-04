@@ -1087,6 +1087,30 @@ constexpr const char* provisioning_log_columns =
     "id::text, provider_id::text, resource, operation, external_id, outcome, details::text, "
     "created_at::text";
 
+void remove_scim_user_access(pqxx::work& tx,
+                             const std::string& provider_id,
+                             const std::string& external_id,
+                             const std::string& user_id) {
+    tx.exec_params("UPDATE sessions SET revoked_at = now() WHERE user_id = $1::uuid "
+                   "AND revoked_at IS NULL",
+                   user_id);
+    tx.exec_params(
+        "DELETE FROM grants USING scim_group_members, memberships, objects WHERE "
+        "scim_group_members.membership_id = memberships.id AND objects.object_type = 'team' "
+        "AND objects.external_id = memberships.team_id::text AND grants.object_id = objects.id "
+        "AND grants.principal_taap_id = memberships.principal_taap_id "
+        "AND grants.attestation_digest = memberships.attestation_digest "
+        "AND scim_group_members.provider_id = $1::uuid "
+        "AND scim_group_members.user_external_id = $2",
+        provider_id,
+        external_id);
+    tx.exec_params("DELETE FROM memberships USING scim_group_members WHERE memberships.id = "
+                   "scim_group_members.membership_id AND scim_group_members.provider_id = $1::uuid "
+                   "AND scim_group_members.user_external_id = $2",
+                   provider_id,
+                   external_id);
+}
+
 class PostgresStore final : public Store {
 public:
     explicit PostgresStore(std::string uri) : uri_(std::move(uri)) {}
@@ -2817,18 +2841,17 @@ public:
         });
     }
 
-    Result<SsoProvider> authenticate_scim(const std::string& id,
-                                          const std::string& bearer_token) override {
+    Result<SsoProvider> authenticate_scim(const std::string& bearer_token) override {
         return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
-            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + sso_provider_columns +
-                                                         ", scim_token_hash FROM sso_providers "
-                                                         "WHERE id = $1::uuid AND enabled",
-                                                     id);
-            if (rows.empty() ||
-                !identity_crypto::verify_secret(rows[0][15].as<std::string>(), bearer_token)) {
-                return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+            const pqxx::result rows = tx.exec(std::string("SELECT ") + sso_provider_columns +
+                                              ", scim_token_hash FROM sso_providers "
+                                              "WHERE enabled ORDER BY created_at");
+            for (const pqxx::row& row : rows) {
+                if (identity_crypto::verify_secret(row[15].as<std::string>(), bearer_token)) {
+                    return sso_provider_of(row);
+                }
             }
-            return sso_provider_of(rows[0]);
+            return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
         });
     }
 
@@ -2972,6 +2995,38 @@ public:
         });
     }
 
+    Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
+                                                  int limit) override {
+        return with_tx<std::vector<ScimUser>>([&](pqxx::work& tx) -> Result<std::vector<ScimUser>> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + scim_user_columns +
+                    " FROM scim_users WHERE provider_id = $1::uuid ORDER BY created_at LIMIT $2",
+                provider_id,
+                limit);
+            std::vector<ScimUser> users;
+            for (const pqxx::row& row : rows) {
+                users.push_back(scim_user_of(row));
+            }
+            return users;
+        });
+    }
+
+    Result<ScimUser> get_scim_user(const std::string& provider_id,
+                                   const std::string& resource_id) override {
+        return with_tx<ScimUser>([&](pqxx::work& tx) -> Result<ScimUser> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + scim_user_columns +
+                                   " FROM scim_users WHERE provider_id = $1::uuid "
+                                   "AND (user_id::text = $2 OR external_id = $2)",
+                               provider_id,
+                               resource_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM user does not exist"});
+            }
+            return scim_user_of(rows[0]);
+        });
+    }
+
     Result<ScimUser> upsert_scim_user(const NewScimUser& input) override {
         if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
             return std::unexpected(StoreError{
@@ -3022,9 +3077,7 @@ public:
                                input.attributes.dump());
             }
             if (!input.active) {
-                tx.exec_params("UPDATE sessions SET revoked_at = now() WHERE user_id = $1::uuid "
-                               "AND revoked_at IS NULL",
-                               user_id);
+                remove_scim_user_access(tx, input.provider_id, input.external_id, user_id);
                 operation = "deactivate";
             }
             tx.exec_params(
@@ -3040,6 +3093,72 @@ public:
                                input.provider_id,
                                input.external_id);
             return scim_user_of(row[0]);
+        });
+    }
+
+    Result<ScimUser> delete_scim_user(const std::string& provider_id,
+                                      const std::string& resource_id) override {
+        return with_tx<ScimUser>([&](pqxx::work& tx) -> Result<ScimUser> {
+            const pqxx::result existing =
+                tx.exec_params(std::string("SELECT ") + scim_user_columns +
+                                   " FROM scim_users WHERE provider_id = $1::uuid "
+                                   "AND (user_id::text = $2 OR external_id = $2) FOR UPDATE",
+                               provider_id,
+                               resource_id);
+            if (existing.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM user does not exist"});
+            }
+            const ScimUser user = scim_user_of(existing[0]);
+            tx.exec_params("UPDATE scim_users SET active = false WHERE provider_id = $1::uuid "
+                           "AND external_id = $2",
+                           provider_id,
+                           user.external_id);
+            remove_scim_user_access(tx, provider_id, user.external_id, user.user_id);
+            tx.exec_params(
+                "INSERT INTO sso_provisioning_logs (provider_id, resource, operation, "
+                "external_id, outcome) VALUES ($1::uuid, 'user', 'deactivate', $2, 'success')",
+                provider_id,
+                user.external_id);
+            const pqxx::result updated = tx.exec_params(
+                std::string("SELECT ") + scim_user_columns +
+                    " FROM scim_users WHERE provider_id = $1::uuid AND external_id = $2",
+                provider_id,
+                user.external_id);
+            return scim_user_of(updated[0]);
+        });
+    }
+
+    Result<std::vector<ScimGroup>> list_scim_groups(const std::string& provider_id,
+                                                    int limit) override {
+        return with_tx<std::vector<ScimGroup>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ScimGroup>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + scim_group_columns +
+                                       " FROM scim_groups WHERE provider_id = $1::uuid "
+                                       "ORDER BY created_at LIMIT $2",
+                                   provider_id,
+                                   limit);
+                std::vector<ScimGroup> groups;
+                for (const pqxx::row& row : rows) {
+                    groups.push_back(scim_group_of(row));
+                }
+                return groups;
+            });
+    }
+
+    Result<ScimGroup> get_scim_group(const std::string& provider_id,
+                                     const std::string& resource_id) override {
+        return with_tx<ScimGroup>([&](pqxx::work& tx) -> Result<ScimGroup> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + scim_group_columns +
+                                   " FROM scim_groups WHERE provider_id = $1::uuid "
+                                   "AND (team_id::text = $2 OR external_id = $2)",
+                               provider_id,
+                               resource_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM group does not exist"});
+            }
+            return scim_group_of(rows[0]);
         });
     }
 
@@ -3062,6 +3181,7 @@ public:
                                                  "FOR UPDATE",
                                                  input.provider_id,
                                                  input.external_id);
+            const bool creating = groups.empty();
             std::string team_id;
             if (groups.empty()) {
                 const pqxx::result team =
@@ -3110,7 +3230,8 @@ public:
                 return std::unexpected(StoreError{"store_error", "team policy object is missing"});
             }
             const pqxx::result existing_members = tx.exec_params(
-                "SELECT scim_group_members.user_external_id, users.taap_id FROM "
+                "SELECT scim_group_members.user_external_id, users.taap_id, "
+                "scim_group_members.membership_id::text FROM "
                 "scim_group_members JOIN scim_users ON scim_users.provider_id = "
                 "scim_group_members.provider_id AND scim_users.external_id = "
                 "scim_group_members.user_external_id JOIN users ON users.id = scim_users.user_id "
@@ -3130,11 +3251,8 @@ public:
                                team_object[0][0].as<std::string>(),
                                member[1].as<std::string>(),
                                digest);
-                tx.exec_params("DELETE FROM scim_group_members WHERE provider_id = $1::uuid "
-                               "AND group_external_id = $2 AND user_external_id = $3",
-                               input.provider_id,
-                               input.external_id,
-                               external_id);
+                tx.exec_params("DELETE FROM memberships WHERE id = $1::uuid",
+                               member[2].as<std::string>());
             }
             for (const std::string& external_id : input.member_external_ids) {
                 const pqxx::result user = tx.exec_params(
@@ -3190,9 +3308,10 @@ public:
             }
             tx.exec_params(
                 "INSERT INTO sso_provisioning_logs (provider_id, resource, operation, external_id, "
-                "outcome) VALUES ($1::uuid, 'group', 'update', $2, 'success')",
+                "outcome) VALUES ($1::uuid, 'group', $3, $2, 'success')",
                 input.provider_id,
-                input.external_id);
+                input.external_id,
+                creating ? "create" : "update");
             const pqxx::result row =
                 tx.exec_params(std::string("SELECT ") + scim_group_columns +
                                    " FROM scim_groups WHERE provider_id = $1::uuid "
@@ -3200,6 +3319,31 @@ public:
                                input.provider_id,
                                input.external_id);
             return scim_group_of(row[0]);
+        });
+    }
+
+    Result<void> delete_scim_group(const std::string& provider_id,
+                                   const std::string& resource_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result existing = tx.exec_params(
+                "SELECT external_id, team_id::text FROM scim_groups WHERE provider_id = $1::uuid "
+                "AND (team_id::text = $2 OR external_id = $2) FOR UPDATE",
+                provider_id,
+                resource_id);
+            if (existing.empty()) {
+                return std::unexpected(StoreError{"not_found", "SCIM group does not exist"});
+            }
+            const std::string external_id = existing[0][0].as<std::string>();
+            const std::string team_id = existing[0][1].as<std::string>();
+            tx.exec_params("DELETE FROM objects WHERE object_type = 'team' AND external_id = $1",
+                           team_id);
+            tx.exec_params("DELETE FROM teams WHERE id = $1::uuid", team_id);
+            tx.exec_params(
+                "INSERT INTO sso_provisioning_logs (provider_id, resource, operation, "
+                "external_id, outcome) VALUES ($1::uuid, 'group', 'deactivate', $2, 'success')",
+                provider_id,
+                external_id);
+            return {};
         });
     }
 

@@ -1149,7 +1149,11 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
                                sso_scim_tokens_.end(),
                                [&](const auto& entry) { return entry.first == provider.id; }),
                 sso_scim_tokens_.end());
-            sso_scim_tokens_.emplace_back(provider.id, input.scim_token);
+            const std::string token_hash = identity_crypto::hash_secret(input.scim_token);
+            if (token_hash.empty()) {
+                return std::unexpected(StoreError{"store_error", "could not hash SCIM token"});
+            }
+            sso_scim_tokens_.emplace_back(provider.id, token_hash);
             sso_oidc_secrets_.erase(
                 std::remove_if(sso_oidc_secrets_.begin(),
                                sso_oidc_secrets_.end(),
@@ -1176,7 +1180,11 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
                          "",
                          now,
                          now};
-    sso_scim_tokens_.emplace_back(provider.id, input.scim_token);
+    const std::string token_hash = identity_crypto::hash_secret(input.scim_token);
+    if (token_hash.empty()) {
+        return std::unexpected(StoreError{"store_error", "could not hash SCIM token"});
+    }
+    sso_scim_tokens_.emplace_back(provider.id, token_hash);
     if (input.protocol == "oidc") {
         sso_oidc_secrets_.emplace_back(provider.id, input.client_secret);
     }
@@ -1230,21 +1238,20 @@ Result<OAuthProvider> InMemoryStore::get_sso_oidc_provider(const std::string& id
                          {"openid", "email", "profile"}};
 }
 
-Result<SsoProvider> InMemoryStore::authenticate_scim(const std::string& id,
-                                                     const std::string& bearer_token) {
+Result<SsoProvider> InMemoryStore::authenticate_scim(const std::string& bearer_token) {
     std::lock_guard lock(mutex_);
-    const auto provider =
-        std::find_if(sso_providers_.begin(), sso_providers_.end(), [&](const SsoProvider& item) {
-            return item.id == id && item.enabled;
+    for (const auto& [provider_id, token_hash] : sso_scim_tokens_) {
+        if (!identity_crypto::verify_secret(token_hash, bearer_token)) {
+            continue;
+        }
+        const auto provider = std::ranges::find_if(sso_providers_, [&](const SsoProvider& item) {
+            return item.id == provider_id && item.enabled;
         });
-    const auto token =
-        std::find_if(sso_scim_tokens_.begin(), sso_scim_tokens_.end(), [&](const auto& item) {
-            return item.first == id && identity_crypto::verify_secret(item.second, bearer_token);
-        });
-    if (provider == sso_providers_.end() || token == sso_scim_tokens_.end()) {
-        return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
+        if (provider != sso_providers_.end()) {
+            return *provider;
+        }
     }
-    return *provider;
+    return std::unexpected(StoreError{"unauthorized", "SCIM bearer token is invalid"});
 }
 
 Result<SsoProvider> InMemoryStore::test_sso_provider(const std::string& id) {
@@ -1364,6 +1371,85 @@ Result<IssuedSession> InMemoryStore::sign_in_sso(const SsoIdentity& input) {
         sessions_, user_id, provider->pool_id, device.id, "browser", "", {"*"}, "", 86400);
 }
 
+Result<std::vector<ScimUser>> InMemoryStore::list_scim_users(const std::string& provider_id,
+                                                             int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ScimUser> result;
+    for (const ScimUser& user : scim_users_) {
+        if (user.provider_id == provider_id) {
+            result.push_back(user);
+        }
+        if (limit > 0 && result.size() >= static_cast<std::size_t>(limit)) {
+            break;
+        }
+    }
+    return result;
+}
+
+Result<ScimUser> InMemoryStore::get_scim_user(const std::string& provider_id,
+                                              const std::string& resource_id) {
+    std::lock_guard lock(mutex_);
+    const auto user = std::ranges::find_if(scim_users_, [&](const ScimUser& item) {
+        return item.provider_id == provider_id &&
+               (item.user_id == resource_id || item.external_id == resource_id);
+    });
+    if (user == scim_users_.end()) {
+        return std::unexpected(StoreError{"not_found", "SCIM user does not exist"});
+    }
+    return *user;
+}
+
+void InMemoryStore::remove_scim_user_access(const ScimUser& user, const std::string& now) {
+    for (Session& session : sessions_) {
+        if (session.user_id == user.user_id && session.revoked_at.empty()) {
+            session.revoked_at = now;
+        }
+    }
+    std::vector<std::string> membership_ids;
+    for (const ScimGroupMember& member : scim_group_members_) {
+        if (member.provider_id == user.provider_id && member.user_external_id == user.external_id) {
+            membership_ids.push_back(member.membership_id);
+        }
+    }
+    for (const std::string& membership_id : membership_ids) {
+        const auto membership = std::ranges::find_if(
+            memberships_, [&](const Membership& item) { return item.id == membership_id; });
+        if (membership == memberships_.end()) {
+            continue;
+        }
+        const auto object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& item) {
+            return item.object_type == "team" && item.external_id == membership->team_id;
+        });
+        if (object != policy_objects_.end()) {
+            grants_.erase(std::remove_if(grants_.begin(),
+                                         grants_.end(),
+                                         [&](const Grant& grant) {
+                                             return grant.object_id == object->id &&
+                                                    grant.principal_taap_id ==
+                                                        membership->principal_taap_id &&
+                                                    grant.attestation_digest ==
+                                                        membership->attestation_digest;
+                                         }),
+                          grants_.end());
+        }
+        policy_objects_.erase(std::remove_if(policy_objects_.begin(),
+                                             policy_objects_.end(),
+                                             [&](const PolicyObject& item) {
+                                                 return item.object_type == "member" &&
+                                                        item.external_id == membership_id;
+                                             }),
+                              policy_objects_.end());
+        memberships_.erase(membership);
+    }
+    scim_group_members_.erase(std::remove_if(scim_group_members_.begin(),
+                                             scim_group_members_.end(),
+                                             [&](const ScimGroupMember& member) {
+                                                 return member.provider_id == user.provider_id &&
+                                                        member.user_external_id == user.external_id;
+                                             }),
+                              scim_group_members_.end());
+}
+
 Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
     if (input.provider_id.empty() || input.external_id.empty() || input.taap_id.empty()) {
         return std::unexpected(
@@ -1393,11 +1479,7 @@ Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
         record->attributes = input.attributes;
         record->updated_at = now;
         if (!input.active) {
-            for (Session& session : sessions_) {
-                if (session.user_id == record->user_id && session.revoked_at.empty()) {
-                    session.revoked_at = now;
-                }
-            }
+            remove_scim_user_access(*record, now);
         }
         provisioning_logs_.push_back(ProvisioningLog{new_uuid_v4(),
                                                      input.provider_id,
@@ -1429,6 +1511,53 @@ Result<ScimUser> InMemoryStore::upsert_scim_user(const NewScimUser& input) {
     return created;
 }
 
+Result<ScimUser> InMemoryStore::delete_scim_user(const std::string& provider_id,
+                                                 const std::string& resource_id) {
+    std::lock_guard lock(mutex_);
+    const auto user = std::ranges::find_if(scim_users_, [&](const ScimUser& item) {
+        return item.provider_id == provider_id &&
+               (item.user_id == resource_id || item.external_id == resource_id);
+    });
+    if (user == scim_users_.end()) {
+        return std::unexpected(StoreError{"not_found", "SCIM user does not exist"});
+    }
+    const std::string now = now_iso8601();
+    user->active = false;
+    user->updated_at = now;
+    remove_scim_user_access(*user, now);
+    provisioning_logs_.push_back(ProvisioningLog{
+        new_uuid_v4(), provider_id, "user", "deactivate", user->external_id, "success", {}, now});
+    return *user;
+}
+
+Result<std::vector<ScimGroup>> InMemoryStore::list_scim_groups(const std::string& provider_id,
+                                                               int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ScimGroup> result;
+    for (const ScimGroup& group : scim_groups_) {
+        if (group.provider_id == provider_id) {
+            result.push_back(group);
+        }
+        if (limit > 0 && result.size() >= static_cast<std::size_t>(limit)) {
+            break;
+        }
+    }
+    return result;
+}
+
+Result<ScimGroup> InMemoryStore::get_scim_group(const std::string& provider_id,
+                                                const std::string& resource_id) {
+    std::lock_guard lock(mutex_);
+    const auto group = std::ranges::find_if(scim_groups_, [&](const ScimGroup& item) {
+        return item.provider_id == provider_id &&
+               (item.team_id == resource_id || item.external_id == resource_id);
+    });
+    if (group == scim_groups_.end()) {
+        return std::unexpected(StoreError{"not_found", "SCIM group does not exist"});
+    }
+    return *group;
+}
+
 Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
     if (input.provider_id.empty() || input.external_id.empty() || input.team_name.empty()) {
         return std::unexpected(
@@ -1446,6 +1575,7 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
     auto group = std::find_if(scim_groups_.begin(), scim_groups_.end(), [&](const ScimGroup& item) {
         return item.provider_id == input.provider_id && item.external_id == input.external_id;
     });
+    const bool creating = group == scim_groups_.end();
     if (group == scim_groups_.end()) {
         if (!valid_handle(input.team_name)) {
             return std::unexpected(StoreError{"invalid_input", "team name is invalid"});
@@ -1514,6 +1644,14 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
                                                     membership->principal_taap_id;
                                      }),
                       grants_.end());
+        policy_objects_.erase(std::remove_if(policy_objects_.begin(),
+                                             policy_objects_.end(),
+                                             [&](const PolicyObject& item) {
+                                                 return item.object_type == "member" &&
+                                                        item.external_id == membership_id;
+                                             }),
+                              policy_objects_.end());
+        memberships_.erase(membership);
     }
     scim_group_members_.erase(std::remove_if(scim_group_members_.begin(),
                                              scim_group_members_.end(),
@@ -1576,12 +1714,84 @@ Result<ScimGroup> InMemoryStore::upsert_scim_group(const NewScimGroup& input) {
     provisioning_logs_.push_back(ProvisioningLog{new_uuid_v4(),
                                                  input.provider_id,
                                                  "group",
-                                                 "update",
+                                                 creating ? "create" : "update",
                                                  input.external_id,
                                                  "success",
                                                  {},
                                                  now});
     return *group;
+}
+
+Result<void> InMemoryStore::delete_scim_group(const std::string& provider_id,
+                                              const std::string& resource_id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(scim_groups_, [&](const ScimGroup& item) {
+        return item.provider_id == provider_id &&
+               (item.team_id == resource_id || item.external_id == resource_id);
+    });
+    if (found == scim_groups_.end()) {
+        return std::unexpected(StoreError{"not_found", "SCIM group does not exist"});
+    }
+    const ScimGroup group = *found;
+    const auto team_object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& item) {
+        return item.object_type == "team" && item.external_id == group.team_id;
+    });
+    if (team_object != policy_objects_.end()) {
+        const std::string object_id = team_object->id;
+        grants_.erase(std::remove_if(grants_.begin(),
+                                     grants_.end(),
+                                     [&](const Grant& grant) {
+                                         return grant.object_id == object_id &&
+                                                grant.attestation_digest ==
+                                                    "scim:" + provider_id + ":" + group.external_id;
+                                     }),
+                      grants_.end());
+        policy_objects_.erase(team_object);
+    }
+    std::vector<std::string> membership_ids;
+    for (const ScimGroupMember& member : scim_group_members_) {
+        if (member.provider_id == provider_id && member.group_external_id == group.external_id) {
+            membership_ids.push_back(member.membership_id);
+        }
+    }
+    policy_objects_.erase(std::remove_if(policy_objects_.begin(),
+                                         policy_objects_.end(),
+                                         [&](const PolicyObject& object) {
+                                             return object.object_type == "member" &&
+                                                    std::ranges::find(membership_ids,
+                                                                      object.external_id) !=
+                                                        membership_ids.end();
+                                         }),
+                          policy_objects_.end());
+    memberships_.erase(std::remove_if(memberships_.begin(),
+                                      memberships_.end(),
+                                      [&](const Membership& membership) {
+                                          return std::ranges::find(membership_ids, membership.id) !=
+                                                 membership_ids.end();
+                                      }),
+                       memberships_.end());
+    scim_group_members_.erase(std::remove_if(scim_group_members_.begin(),
+                                             scim_group_members_.end(),
+                                             [&](const ScimGroupMember& member) {
+                                                 return member.provider_id == provider_id &&
+                                                        member.group_external_id ==
+                                                            group.external_id;
+                                             }),
+                              scim_group_members_.end());
+    teams_.erase(std::remove_if(teams_.begin(),
+                                teams_.end(),
+                                [&](const Team& team) { return team.id == group.team_id; }),
+                 teams_.end());
+    scim_groups_.erase(found);
+    provisioning_logs_.push_back(ProvisioningLog{new_uuid_v4(),
+                                                 provider_id,
+                                                 "group",
+                                                 "deactivate",
+                                                 group.external_id,
+                                                 "success",
+                                                 {},
+                                                 now_iso8601()});
+    return {};
 }
 
 Result<std::vector<ProvisioningLog>>

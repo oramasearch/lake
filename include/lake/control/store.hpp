@@ -399,15 +399,26 @@ public:
     virtual Result<SsoProvider> get_sso_provider(const std::string& id) = 0;
     // Internal callback lookup. This is never rendered through an API response.
     virtual Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) = 0;
-    virtual Result<SsoProvider> authenticate_scim(const std::string& id,
-                                                  const std::string& bearer_token) = 0;
+    virtual Result<SsoProvider> authenticate_scim(const std::string& bearer_token) = 0;
     virtual Result<SsoProvider> test_sso_provider(const std::string& id) = 0;
     virtual Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) = 0;
     virtual Result<std::vector<FederationIssuer>>
     list_federation_issuers(const std::string& organization_id, int limit) = 0;
     virtual Result<IssuedSession> sign_in_sso(const SsoIdentity&) = 0;
+    virtual Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
+                                                          int limit) = 0;
+    virtual Result<ScimUser> get_scim_user(const std::string& provider_id,
+                                           const std::string& resource_id) = 0;
     virtual Result<ScimUser> upsert_scim_user(const NewScimUser&) = 0;
+    virtual Result<ScimUser> delete_scim_user(const std::string& provider_id,
+                                              const std::string& resource_id) = 0;
+    virtual Result<std::vector<ScimGroup>> list_scim_groups(const std::string& provider_id,
+                                                            int limit) = 0;
+    virtual Result<ScimGroup> get_scim_group(const std::string& provider_id,
+                                             const std::string& resource_id) = 0;
     virtual Result<ScimGroup> upsert_scim_group(const NewScimGroup&) = 0;
+    virtual Result<void> delete_scim_group(const std::string& provider_id,
+                                           const std::string& resource_id) = 0;
     virtual Result<std::vector<ProvisioningLog>>
     list_sso_provisioning_logs(const std::string& provider_id, int limit) = 0;
 };

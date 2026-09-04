@@ -111,15 +111,26 @@ public:
                                                         int limit) override;
     Result<SsoProvider> get_sso_provider(const std::string& id) override;
     Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) override;
-    Result<SsoProvider> authenticate_scim(const std::string& id,
-                                          const std::string& bearer_token) override;
+    Result<SsoProvider> authenticate_scim(const std::string& bearer_token) override;
     Result<SsoProvider> test_sso_provider(const std::string& id) override;
     Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) override;
     Result<std::vector<FederationIssuer>>
     list_federation_issuers(const std::string& organization_id, int limit) override;
     Result<IssuedSession> sign_in_sso(const SsoIdentity&) override;
+    Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
+                                                  int limit) override;
+    Result<ScimUser> get_scim_user(const std::string& provider_id,
+                                   const std::string& resource_id) override;
     Result<ScimUser> upsert_scim_user(const NewScimUser&) override;
+    Result<ScimUser> delete_scim_user(const std::string& provider_id,
+                                      const std::string& resource_id) override;
+    Result<std::vector<ScimGroup>> list_scim_groups(const std::string& provider_id,
+                                                    int limit) override;
+    Result<ScimGroup> get_scim_group(const std::string& provider_id,
+                                     const std::string& resource_id) override;
     Result<ScimGroup> upsert_scim_group(const NewScimGroup&) override;
+    Result<void> delete_scim_group(const std::string& provider_id,
+                                   const std::string& resource_id) override;
     Result<std::vector<ProvisioningLog>> list_sso_provisioning_logs(const std::string& provider_id,
                                                                     int limit) override;
 
@@ -188,6 +199,7 @@ private:
         std::string membership_id;
     };
     std::vector<ScimGroupMember> scim_group_members_;
+    void remove_scim_user_access(const ScimUser& user, const std::string& now);
     std::vector<ProvisioningLog> provisioning_logs_;
 };
 

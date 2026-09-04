@@ -27,11 +27,33 @@ the identity core's state, PKCE verifier, nonce, one-use callback, and cached JW
 The callback exchanges the code with the encrypted configured client secret, verifies the ID
 token, applies federation issuer policy, and then creates the browser session.
 
-`upsert_scim_user` implements SCIM user create, update, and deactivation. Deactivation revokes
-every active session for the mapped user. `upsert_scim_group` maps a SCIM group to an
-organization team and grants its active mapped users read access. A later group update removes
-SCIM-derived access for users omitted from the membership list. `list_sso_provisioning_logs`
-lists the durable outcome log for a provider.
+`upsert_scim_user` implements the administrative provisioning capability. The SCIM 2.0 HTTP
+surface is rooted at `/scim/v2`: `/Users` and `/Groups` support filtered list, get, create,
+PATCH, and delete. Every request authenticates its `Authorization: Bearer` value against the
+Argon2id hash stored for one enabled provider; the token identifies the provider and therefore
+the target organization. SCIM responses use `application/scim+json`, SCIM resource schemas,
+`ListResponse`, and the SCIM error schema.
+
+A user create requires `externalId` or `userName` and the person's TAAP identity. The identity is
+accepted as top-level `taapId` or as `taapId` in
+`urn:orama:params:scim:schemas:extension:taap:2.0:User`; it binds the provisioned credential to
+the durable identity instead of treating the SCIM bearer as that identity. `userName`, the first
+email value, `displayName`, and `active` map into the lake user. Setting `active` to false or
+deleting the resource revokes every active session and removes SCIM-managed team membership.
+
+A group create maps `externalId` to a stable team handle and `displayName` to the team display
+name. Member `value` fields may name the server user id returned by SCIM or the provider's
+external user id. PATCH replacement and removal update the source-managed memberships and grants;
+group deletion removes the mapped team and its SCIM-managed access. List filters support `eq` on
+the returned scalar fields, including `id`, `externalId`, `userName`, and `displayName`, with
+`startIndex` and `count` pagination. PATCH supports `add`, `replace`, and `remove`, whole-resource
+object values, member-array replacement/addition, and filtered member removal.
+
+The adapter routes call the `scim_list_*`, `scim_get_*`, `scim_upsert_*`, `scim_patch_*`, and
+`scim_delete_*` registry capabilities. The older administrative `upsert_scim_user` and
+`upsert_scim_group` capabilities remain available to organization administrators.
+`list_sso_provisioning_logs` lists the durable create, update, and deactivation outcome log for a
+provider.
 
 All configuration, federation policy, sign-in, and provisioning capabilities run through the
 registry. They therefore use `authorize` before protected work and append exactly one signed
@@ -46,8 +68,11 @@ ctest --test-dir build --output-on-failure -R 'Sso|Scim|Postgres'
 
 The in-memory SSO tests configure one SAML and one OIDC stub provider, cover both successful
 assertions, verify a refused unlisted issuer is audited, and exercise SCIM create, update, group
-membership replacement, and deactivation with immediate session rejection. The Postgres identity
-test repeats provider registration, federation policy, SCIM user/group writes, sign-in, and
+membership replacement, and deactivation with immediate session rejection.
+`ScimHttp.RecordedClientSessionProvisionsUsersGroupsAndRevokesAccess` replays the HTTP sequence:
+failed bearer authentication, two user creates, filtered list, user PATCH, group create, filtered
+member removal, user delete, group delete, and session/access revocation. The Postgres identity
+test repeats provider-token authentication and user/group list, get, write, delete, sign-in, and
 session revocation. Set `LAKE_TEST_DB_URI` to run its database-backed portion.
 
 ## How to change
@@ -58,3 +83,8 @@ Do not expose a provider secret or SCIM token through JSON. The migration is
 `0009_sso_federation`; its numbered guard table is part of the migration contract. The separate
 operator repository copies this schema once per wave in its own operator pull request, under the
 wave-level waiver; this change updates lake's `db/schema.sql` source of truth only.
+
+Keep SCIM protocol rendering in `src/api/http_server.cpp` and provisioning behavior in registry
+capabilities and the store interface. A new SCIM attribute may be preserved in the stored resource
+JSON without a migration; a field that changes lake identity or team mapping must be added to both
+store implementations and this page.

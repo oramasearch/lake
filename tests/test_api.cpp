@@ -92,7 +92,8 @@ std::string http_request(unsigned short port,
                          std::string_view path,
                          std::string_view body,
                          std::string_view content_type,
-                         std::string_view cookie = {}) {
+                         std::string_view cookie = {},
+                         std::string_view authorization = {}) {
     const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0)
         return {};
@@ -110,6 +111,8 @@ std::string http_request(unsigned short port,
     request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     if (!cookie.empty())
         request += "Cookie: " + std::string(cookie) + "\r\n";
+    if (!authorization.empty())
+        request += "Authorization: " + std::string(authorization) + "\r\n";
     request += "\r\n" + std::string(body);
     std::size_t sent = 0;
     while (sent < request.size()) {
@@ -140,6 +143,14 @@ std::string response_header(std::string_view response, std::string_view name) {
     const std::size_t value_start = start + prefix.size();
     const std::size_t end = response.find("\r\n", value_start);
     return std::string(response.substr(value_start, end - value_start));
+}
+
+json response_json(std::string_view response) {
+    const std::size_t separator = response.find("\r\n\r\n");
+    if (separator == std::string_view::npos) {
+        return json();
+    }
+    return json::parse(response.substr(separator + 4), nullptr, false);
 }
 
 } // namespace
@@ -294,6 +305,169 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
         "application/json");
     EXPECT_NE(rest_signup.find(" 200 "), std::string::npos) << rest_signup;
     EXPECT_NE(response_header(rest_signup, "Set-Cookie").find("HttpOnly"), std::string::npos);
+    server.stop();
+}
+
+TEST(ScimHttp, RecordedClientSessionProvisionsUsersGroupsAndRevokesAccess) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto organization = store->create_organization({"", "SCIM HTTP", ""});
+    ASSERT_TRUE(organization.has_value());
+    const std::string token = "recorded-scim-token";
+    const auto provider = store->register_sso_provider({organization->id,
+                                                        "lake",
+                                                        "recorded-client",
+                                                        "oidc",
+                                                        "https://identity.example.test",
+                                                        "",
+                                                        "",
+                                                        "recorded-client-id",
+                                                        "recorded-client-secret",
+                                                        token,
+                                                        json::object(),
+                                                        false});
+    ASSERT_TRUE(provider.has_value());
+
+    ServerOptions options;
+    options.port = 0;
+    options.store = store;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::string denied = http_get(server.port(), "/scim/v2/Users");
+    EXPECT_NE(denied.find(" 401 "), std::string::npos) << denied;
+    EXPECT_NE(denied.find("urn:ietf:params:scim:api:messages:2.0:Error"), std::string::npos);
+
+    const auto create_user = [&](std::string_view external_id,
+                                 std::string_view email,
+                                 std::string_view display_name,
+                                 std::string_view taap_id) {
+        const json body{
+            {"schemas", json::array({"urn:ietf:params:scim:schemas:core:2.0:User"})},
+            {"externalId", external_id},
+            {"userName", email},
+            {"displayName", display_name},
+            {"active", true},
+            {"urn:orama:params:scim:schemas:extension:taap:2.0:User", {{"taapId", taap_id}}}};
+        return http_request(server.port(),
+                            "POST",
+                            "/scim/v2/Users",
+                            body.dump(),
+                            "application/scim+json",
+                            "",
+                            "Bearer " + token);
+    };
+    const std::string first_response =
+        create_user("user-one", "one@example.test", "One", "taap:1:ed25519:user-one");
+    EXPECT_NE(first_response.find(" 201 "), std::string::npos) << first_response;
+    const json first = response_json(first_response);
+    ASSERT_TRUE(first.is_object());
+    const std::string first_id = first.at("id");
+    const std::string second_response =
+        create_user("user-two", "two@example.test", "Two", "taap:1:ed25519:user-two");
+    EXPECT_NE(second_response.find(" 201 "), std::string::npos) << second_response;
+    const json second = response_json(second_response);
+    ASSERT_TRUE(second.is_object());
+    const std::string second_id = second.at("id");
+
+    const std::string filtered =
+        http_get(server.port(),
+                 "/scim/v2/Users?filter=userName%20eq%20%22one%40example.test%22",
+                 "Bearer " + token);
+    EXPECT_NE(filtered.find(" 200 "), std::string::npos) << filtered;
+    const json filtered_body = response_json(filtered);
+    ASSERT_TRUE(filtered_body.is_object());
+    EXPECT_EQ(filtered_body.at("totalResults"), 1);
+    EXPECT_EQ(filtered_body.at("Resources").at(0).at("id"), first_id);
+
+    const json user_patch{
+        {"schemas", json::array({"urn:ietf:params:scim:api:messages:2.0:PatchOp"})},
+        {"Operations",
+         json::array({{{"op", "replace"}, {"path", "displayName"}, {"value", "One Updated"}}})}};
+    const std::string patched_user = http_request(server.port(),
+                                                  "PATCH",
+                                                  "/scim/v2/Users/" + first_id,
+                                                  user_patch.dump(),
+                                                  "application/scim+json",
+                                                  "",
+                                                  "Bearer " + token);
+    EXPECT_NE(patched_user.find(" 200 "), std::string::npos) << patched_user;
+    EXPECT_EQ(response_json(patched_user).at("displayName"), "One Updated");
+
+    const json group_body{
+        {"schemas", json::array({"urn:ietf:params:scim:schemas:core:2.0:Group"})},
+        {"externalId", "engineering"},
+        {"displayName", "Engineering"},
+        {"members", json::array({{{"value", first_id}}, {{"value", second_id}}})}};
+    const std::string group_response = http_request(server.port(),
+                                                    "POST",
+                                                    "/scim/v2/Groups",
+                                                    group_body.dump(),
+                                                    "application/scim+json",
+                                                    "",
+                                                    "Bearer " + token);
+    EXPECT_NE(group_response.find(" 201 "), std::string::npos) << group_response;
+    const json group = response_json(group_response);
+    ASSERT_TRUE(group.is_object());
+    const std::string group_id = group.at("id");
+    auto memberships = store->list_memberships(organization->id, group_id, 100);
+    ASSERT_TRUE(memberships.has_value());
+    EXPECT_EQ(memberships->size(), 2);
+
+    const json group_patch{
+        {"schemas", json::array({"urn:ietf:params:scim:api:messages:2.0:PatchOp"})},
+        {"Operations",
+         json::array({{{"op", "remove"}, {"path", "members[value eq \"" + first_id + "\"]"}}})}};
+    const std::string patched_group = http_request(server.port(),
+                                                   "PATCH",
+                                                   "/scim/v2/Groups/" + group_id,
+                                                   group_patch.dump(),
+                                                   "application/scim+json",
+                                                   "",
+                                                   "Bearer " + token);
+    EXPECT_NE(patched_group.find(" 200 "), std::string::npos) << patched_group;
+    memberships = store->list_memberships(organization->id, group_id, 100);
+    ASSERT_TRUE(memberships.has_value());
+    EXPECT_EQ(memberships->size(), 1);
+    EXPECT_EQ(memberships->at(0).principal_id, second.at("id").get<std::string>());
+
+    ASSERT_TRUE(
+        store->create_federation_issuer({organization->id, provider->issuer, "email"}).has_value());
+    const auto session = store->sign_in_sso({provider->id,
+                                             provider->issuer,
+                                             "user-two",
+                                             "two@example.test",
+                                             "Two",
+                                             "",
+                                             "recorded-client",
+                                             {{"email", "two@example.test"}}});
+    ASSERT_TRUE(session.has_value());
+    const std::string deleted_user = http_request(server.port(),
+                                                  "DELETE",
+                                                  "/scim/v2/Users/" + second_id,
+                                                  "",
+                                                  "application/scim+json",
+                                                  "",
+                                                  "Bearer " + token);
+    EXPECT_NE(deleted_user.find(" 204 "), std::string::npos) << deleted_user;
+    EXPECT_FALSE(store->context_for(session->secret).has_value());
+    memberships = store->list_memberships(organization->id, group_id, 100);
+    ASSERT_TRUE(memberships.has_value());
+    EXPECT_TRUE(memberships->empty());
+
+    const std::string deleted_group = http_request(server.port(),
+                                                   "DELETE",
+                                                   "/scim/v2/Groups/" + group_id,
+                                                   "",
+                                                   "application/scim+json",
+                                                   "",
+                                                   "Bearer " + token);
+    EXPECT_NE(deleted_group.find(" 204 "), std::string::npos) << deleted_group;
+    EXPECT_FALSE(store->get_team(group_id).has_value());
+    const auto events = store->list_audit_events({.limit = 1000});
+    ASSERT_TRUE(events.has_value());
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
+        return event.draft.action == "scim_delete_user" && event.draft.outcome == "success";
+    }));
     server.stop();
 }
 

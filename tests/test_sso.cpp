@@ -233,6 +233,7 @@ TEST(Sso, SignedSamlAssertionIsVerifiedBeforeSignIn) {
     ASSERT_TRUE(organization.ok) << organization.error.message;
     json input = provider_input(organization.value.at("id"), "signed-saml", "saml", issuer);
     input["signing_certificate"] = certificate(key);
+    input["jit_provisioning"] = true;
     const ApiResult provider = surface.call("register_sso_provider", input);
     ASSERT_TRUE(provider.ok) << provider.error.message;
     ASSERT_TRUE(surface
@@ -255,6 +256,8 @@ TEST(Sso, SignedSamlAssertionIsVerifiedBeforeSignIn) {
     const ApiResult rejected = surface.call(
         "sign_in_saml", {{"provider_id", provider.value.at("id")}, {"saml_response", tampered}});
     EXPECT_FALSE(rejected.ok);
+    surface.context.authorized = true;
+    surface.context.operator_credential = true;
     const ApiResult audit = surface.call("audit", {{"limit", 100}});
     ASSERT_TRUE(audit.ok) << audit.error.message;
     EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
