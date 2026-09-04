@@ -3,8 +3,8 @@
 ## What
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,
-and MCP tools. `sign_up_password`, `sign_in_password`, `verify_totp`, and
-`sign_in_passkey` are unauthenticated entry points. `enroll_totp`, `register_passkey`,
+and MCP tools. `sign_up_password`, `sign_in_password`, `verify_totp`, `sign_in_passkey`, and
+`start_oauth` are unauthenticated entry points. `enroll_totp`, `register_passkey`,
 `create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
 the same row-resolved session or operator credential as every other protected capability.
 
@@ -20,8 +20,24 @@ with a purpose-specific random data key; `keystore` stores that key wrapped unde
 envelope format.
 
 `register_oauth_provider` records the issuer, client id, encrypted client secret, and requested
-scopes for a provider in a user pool. The registration is audited. Provider registration is the
-configuration boundary used by the authorization-code callback.
+scopes for a provider in a user pool. `start_oauth` creates a five-minute, one-use state record,
+stores its RFC 7636 verifier encrypted, and returns the provider authorization URL with an S256
+challenge. The callback is `GET /v1/oauth/<provider>/callback`, as OAuth providers require a
+browser redirect rather than a JSON capability call.
+
+For a first OAuth sign-in, `start_oauth` also accepts the client-held TAAP/1 identity document and
+carries it through the short-lived flow. The Postgres store verifies and records that document
+before creating the user and OAuth credential. A returning linked identity does not need to send
+the document again.
+
+The callback consumes state before exchanging the code. OpenID Connect id tokens must use RS256
+and pass signature, issuer, audience, expiry, not-before, nonce, subject, and key-id checks. JWKS
+documents are fetched through Corosio with TLS peer and hostname verification, cached for one hour,
+and refreshed once when verification fails so key rotation is picked up. GitHub instead verifies
+the returned access token through `https://api.github.com/user`. Google and GitHub use their fixed
+public endpoints; another registered provider uses `<issuer>/authorize`, `<issuer>/token`, and
+`<issuer>/jwks`. Plain HTTP provider URLs are rejected except on loopback for integration tests.
+Provider registration and each successful OAuth sign-in create audit events.
 
 Password sign-up requires the client-held TAAP/1 document as `identity_document`. The document is
 JSON with a `payload` object (`id` and base64 Ed25519 `public_key`) and a base64 `signature` over
@@ -38,23 +54,31 @@ use those typed APIs for canonical-CBOR documents rather than maintain another T
 The random bearer secret is not the authority. Every request resolves its session and device row;
 revoking either one therefore takes effect on the next request. Browser sessions receive `*` for
 the user's own control-plane capabilities. API tokens receive only the scopes requested at issue.
+OAuth proves control of the provider account, while the verified TAAP document remains the user's
+durable identity.
 
 ## How to verify
 
 ```sh
 cmake --build build
-ctest --test-dir build --output-on-failure -R Identity
+ctest --test-dir build --output-on-failure -R 'Identity|OAuth'
 ```
 
 The `Identity.PasswordSessionsTokensAndRevocation` test covers Argon2id password sign-up, session
 resolution, narrowed token scope, static-token reason validation, and next-request revocation.
+`OAuth.AuthorizationCodePkceOidcAndCachedJwks` runs the browser redirects against a stub OpenID
+Connect provider, verifies PKCE at its token endpoint, signs an id token, serves JWKS, checks the
+session cookie, proves cache reuse, and rejects state replay.
+The Postgres identity test also reads back the encrypted provider secret and proves that persisted
+OAuth state returns its verifier once and only once.
 
 ## How to change
 
-Add a capability through `src/api/capabilities.cpp`, with its input and output schema, never as a
-bespoke route. Extend `Store` and both store implementations together. Keep new credential rows
-pool-scoped and add the capability to `docs/api/README.md` in the same change.
+Add a capability through `src/api/capabilities.cpp`, with its input and output schema. Extend
+`Store` and both store implementations together. Keep new credential rows pool-scoped and add the
+capability to `docs/api/README.md` in the same change. The OAuth callback is the documented
+exception because the provider invokes it as a browser redirect.
 
-OAuth registration, PKCE callback processing, JWKS verification, and persisted WebAuthn
-ceremonies use the `0003_identity_core` tables. Their browser and provider adapters remain to be
-completed before this API is exposed in production.
+OAuth registration, PKCE callback processing, and JWKS verification use the `0003_identity_core`
+tables. Persisted WebAuthn ceremonies remain to be completed before this API is exposed in
+production.

@@ -109,6 +109,10 @@ struct OAuthProvider {
   std::string pool_id, provider, issuer, client_id, client_secret;
   std::vector<std::string> scopes;
 };
+struct OAuthFlow {
+  std::string pool_id, provider, state, code_verifier, nonce, device_name,
+      identity_document;
+};
 
 nlohmann::json to_json(const User &);
 nlohmann::json to_json(const Organization &);

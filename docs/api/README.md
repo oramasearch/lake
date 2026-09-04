@@ -60,6 +60,10 @@ The sync row documents the reserved capability names and their published wire co
 registered until libliquid exposes the server-facing repository/store binding and codec described
 in [`sync.md`](sync.md).
 
+OAuth providers return the browser to `GET /v1/oauth/<provider>/callback`. This callback is the
+documented provider-facing route outside the registry; it consumes one-use state and issues the
+same `lake_session` cookie returned by the identity capabilities.
+
 ## Adding a capability
 
 1. A thin handler over the `Store` (`include/lake/control/store.hpp`): no business logic in the

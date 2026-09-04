@@ -67,7 +67,8 @@ identity-core issue keeps `pool_id` on its tables and in its capability inputs f
   scopes. The authorization-code flow uses PKCE and callback
   `https://<LAKE_PUBLIC_HOST>/v1/oauth/<provider>/callback`; Google id tokens are verified against
   cached issuer JWKS, while GitHub uses its authenticated user endpoint. The first providers are
-  GitHub and Google.
+  GitHub and Google. OAuth state and the encrypted PKCE verifier expire after five minutes and are
+  consumed once.
 - `LAKE_PUBLIC_HOST` is required for WebAuthn RP ID and OAuth callback construction. Each pool
   configures its allowed origins. Registration and assertion challenges live in
   `identity_webauthn_challenges`, expire after five minutes, and are consumed once. The accepted

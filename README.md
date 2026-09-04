@@ -48,6 +48,7 @@ ctest --test-dir build
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
+| `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 

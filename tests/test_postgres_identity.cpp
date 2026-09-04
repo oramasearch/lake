@@ -23,7 +23,7 @@ std::string base64(const unsigned char *bytes, std::size_t size) {
   return encoded;
 }
 
-std::string signed_identity_document() {
+std::string signed_identity_document(std::string_view label) {
   EVP_PKEY_CTX *key_context = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
   EXPECT_NE(key_context, nullptr);
   EXPECT_EQ(EVP_PKEY_keygen_init(key_context), 1);
@@ -36,7 +36,8 @@ std::string signed_identity_document() {
   EXPECT_EQ(
       EVP_PKEY_get_raw_public_key(key, public_key.data(), &public_key_size), 1);
   const nlohmann::json payload = {
-      {"id", "taap:1:ed25519:postgres-" + std::to_string(getpid())},
+      {"id", "taap:1:ed25519:postgres-" + std::to_string(getpid()) + "-" +
+                 std::string(label)},
       {"public_key", base64(public_key.data(), public_key_size)},
   };
   const std::string canonical_payload = payload.dump();
@@ -70,7 +71,7 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
       "postgres-identity-" + std::to_string(getpid()) + "@example.test";
   const auto sign_up = store->sign_up_password(
       {"lake", email, "correct horse battery staple", "Postgres identity",
-       "integration test", signed_identity_document()});
+       "integration test", signed_identity_document("password")});
   ASSERT_TRUE(sign_up) << sign_up.error().message;
 
   const auto context = store->context_for(sign_up->secret);
@@ -94,6 +95,38 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
       {"lake", email, "correct horse battery staple", "", "integration test"});
   ASSERT_FALSE(mfa_required);
   EXPECT_EQ(mfa_required.error().code, "mfa_required");
+
+  const std::string provider_name =
+      "stub-" + std::to_string(static_cast<long long>(getpid()));
+  const auto registered =
+      store->register_oauth_provider({"lake",
+                                      provider_name,
+                                      "https://issuer.example.test",
+                                      "lake-test",
+                                      "oauth-client-secret",
+                                      {"openid", "email"}});
+  ASSERT_TRUE(registered) << registered.error().message;
+  const auto provider = store->get_oauth_provider("lake", provider_name);
+  ASSERT_TRUE(provider) << provider.error().message;
+  EXPECT_EQ(provider->client_secret, "oauth-client-secret");
+  const std::string state = "state-" + std::to_string(getpid());
+  const auto started = store->begin_oauth(
+      {"lake", provider_name, state, "pkce-verifier", "oidc-nonce",
+       "integration browser", signed_identity_document("oauth")});
+  ASSERT_TRUE(started) << started.error().message;
+  const auto flow = store->consume_oauth(provider_name, state);
+  ASSERT_TRUE(flow) << flow.error().message;
+  EXPECT_EQ(flow->code_verifier, "pkce-verifier");
+  EXPECT_EQ(flow->nonce, "oidc-nonce");
+  EXPECT_FALSE(store->consume_oauth(provider_name, state));
+  const auto oauth = store->sign_in_oauth(
+      {"lake", provider_name, "provider-subject",
+       "postgres-oauth-" + std::to_string(getpid()) + "@example.test",
+       "Postgres OAuth", "integration browser", flow->identity_document});
+  ASSERT_TRUE(oauth) << oauth.error().message;
+  const auto oauth_user = store->get_user(oauth->session.user_id);
+  ASSERT_TRUE(oauth_user) << oauth_user.error().message;
+  EXPECT_FALSE(oauth_user->taap_id.empty());
 
   const auto revoke =
       store->revoke_device(context->user_id, context->device_id);

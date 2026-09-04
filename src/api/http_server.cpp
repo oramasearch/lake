@@ -13,6 +13,8 @@
 #include <condition_variable>
 #include <filesystem>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -25,11 +27,21 @@
 #include <vector>
 
 #include <boost/beast2/http_server.hpp>
+#include <boost/capy/buffers.hpp>
+#include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/io/push_to.hpp>
+#include <boost/capy/timeout.hpp>
 #include <boost/corosio/io_context.hpp>
+#include <boost/corosio/openssl_stream.hpp>
+#include <boost/corosio/resolver.hpp>
+#include <boost/corosio/timer.hpp>
+#include <boost/corosio/tls_context.hpp>
+#include <boost/corosio/tls_stream.hpp>
 #include <boost/http/field.hpp>
 #include <boost/http/json/json_sink.hpp>
+#include <boost/http/request.hpp>
 #include <boost/http/request_parser.hpp>
+#include <boost/http/response_parser.hpp>
 #include <boost/http/serializer.hpp>
 #include <boost/http/server/cors.hpp>
 #include <boost/http/server/router.hpp>
@@ -38,6 +50,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
+#include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/sync_store.hpp"
@@ -426,6 +439,12 @@ struct ApiServer::Impl {
   mutable LiquidCustomerStores sync_store;
   Registry registry;
   std::string openapi_body;
+  OutboundHttpClient outbound_http;
+  struct CachedJwks {
+    std::string document;
+    std::chrono::steady_clock::time_point fetched_at;
+  };
+  std::map<std::string, CachedJwks> jwks_cache;
   boost::corosio::io_context io_context;
   std::unique_ptr<boost::beast2::http_server> server;
   std::thread io_thread;
@@ -515,6 +534,9 @@ struct ApiServer::Impl {
       const std::string pattern = rest_path(*capability);
       if (path == pattern)
         return pattern;
+    }
+    if (path.starts_with("/v1/oauth/") && path.ends_with("/callback")) {
+      return "/v1/oauth/:provider/callback";
     }
     return "unmatched";
   }

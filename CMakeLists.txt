@@ -87,6 +87,7 @@ add_library(lake-core STATIC
   src/control/lake_identity.cpp
   src/version.cpp
   src/api/web_ui.cpp
+  src/api/oauth.cpp
   src/api/registry.cpp
   src/api/rest.cpp
   src/api/mcp.cpp
