@@ -110,6 +110,7 @@ public:
     Result<std::vector<SsoProvider>> list_sso_providers(const std::string& organization_id,
                                                         int limit) override;
     Result<SsoProvider> get_sso_provider(const std::string& id) override;
+    Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) override;
     Result<SsoProvider> test_sso_provider(const std::string& id) override;
     Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) override;
     Result<std::vector<FederationIssuer>>
@@ -168,6 +169,7 @@ private:
     std::vector<std::pair<std::string, std::string>> session_secrets_;
     std::vector<SsoProvider> sso_providers_;
     std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
+    std::vector<std::pair<std::string, std::string>> sso_oidc_secrets_;
     std::vector<FederationIssuer> federation_issuers_;
     struct SsoCredential {
         std::string provider_id;

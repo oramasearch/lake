@@ -1150,6 +1150,14 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
                                [&](const auto& entry) { return entry.first == provider.id; }),
                 sso_scim_tokens_.end());
             sso_scim_tokens_.emplace_back(provider.id, input.scim_token);
+            sso_oidc_secrets_.erase(
+                std::remove_if(sso_oidc_secrets_.begin(),
+                               sso_oidc_secrets_.end(),
+                               [&](const auto& entry) { return entry.first == provider.id; }),
+                sso_oidc_secrets_.end());
+            if (input.protocol == "oidc") {
+                sso_oidc_secrets_.emplace_back(provider.id, input.client_secret);
+            }
             return provider;
         }
     }
@@ -1169,6 +1177,9 @@ Result<SsoProvider> InMemoryStore::register_sso_provider(const NewSsoProvider& i
                          now,
                          now};
     sso_scim_tokens_.emplace_back(provider.id, input.scim_token);
+    if (input.protocol == "oidc") {
+        sso_oidc_secrets_.emplace_back(provider.id, input.client_secret);
+    }
     sso_providers_.push_back(provider);
     return provider;
 }
@@ -1197,6 +1208,26 @@ Result<SsoProvider> InMemoryStore::get_sso_provider(const std::string& id) {
         return std::unexpected(StoreError{"not_found", "SSO provider does not exist"});
     }
     return *provider;
+}
+
+Result<OAuthProvider> InMemoryStore::get_sso_oidc_provider(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto provider =
+        std::find_if(sso_providers_.begin(), sso_providers_.end(), [&](const SsoProvider& item) {
+            return item.id == id && item.protocol == "oidc" && item.enabled;
+        });
+    const auto secret = std::find_if(sso_oidc_secrets_.begin(),
+                                     sso_oidc_secrets_.end(),
+                                     [&](const auto& item) { return item.first == id; });
+    if (provider == sso_providers_.end() || secret == sso_oidc_secrets_.end()) {
+        return std::unexpected(StoreError{"not_found", "OIDC provider is unavailable"});
+    }
+    return OAuthProvider{provider->pool_id,
+                         "sso-" + provider->id,
+                         provider->issuer,
+                         provider->client_id,
+                         secret->second,
+                         {"openid", "email", "profile"}};
 }
 
 Result<SsoProvider> InMemoryStore::test_sso_provider(const std::string& id) {

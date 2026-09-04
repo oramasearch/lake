@@ -397,6 +397,8 @@ public:
     virtual Result<std::vector<SsoProvider>> list_sso_providers(const std::string& organization_id,
                                                                 int limit) = 0;
     virtual Result<SsoProvider> get_sso_provider(const std::string& id) = 0;
+    // Internal callback lookup. This is never rendered through an API response.
+    virtual Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) = 0;
     virtual Result<SsoProvider> test_sso_provider(const std::string& id) = 0;
     virtual Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) = 0;
     virtual Result<std::vector<FederationIssuer>>

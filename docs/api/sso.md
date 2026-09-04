@@ -22,6 +22,11 @@ signature and SHA-256 digest with the provider's configured PEM X.509 certificat
 uses the exclusive-canonicalization subset in Lake's assertion contract and rejects declarations,
 entities, and XML forms outside that subset.
 
+`start_sso_oidc` creates an authorization-code flow for an enterprise OIDC provider. It reuses
+the identity core's state, PKCE verifier, nonce, one-use callback, and cached JWKS verification.
+The callback exchanges the code with the encrypted configured client secret, verifies the ID
+token, applies federation issuer policy, and then creates the browser session.
+
 `upsert_scim_user` implements SCIM user create, update, and deactivation. Deactivation revokes
 every active session for the mapped user. `upsert_scim_group` maps a SCIM group to an
 organization team and grants its active mapped users read access. A later group update removes

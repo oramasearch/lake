@@ -453,6 +453,9 @@ public:
     control::Result<control::SsoProvider> get_sso_provider(const std::string& id) override {
         return call("get_sso_provider", [&] { return store_->get_sso_provider(id); });
     }
+    control::Result<control::OAuthProvider> get_sso_oidc_provider(const std::string& id) override {
+        return call("get_sso_oidc_provider", [&] { return store_->get_sso_oidc_provider(id); });
+    }
     control::Result<control::SsoProvider> test_sso_provider(const std::string& id) override {
         return call("test_sso_provider", [&] { return store_->test_sso_provider(id); });
     }

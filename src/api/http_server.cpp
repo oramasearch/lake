@@ -1789,7 +1789,12 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth state is invalid or expired");
         }
-        const auto provider = options.store->get_oauth_provider(flow->pool_id, provider_name);
+        const bool enterprise_provider = provider_name.starts_with("sso-");
+        const std::string provider_id =
+            enterprise_provider ? provider_name.substr(std::string("sso-").size()) : std::string();
+        const auto provider = enterprise_provider
+                                  ? options.store->get_sso_oidc_provider(provider_id)
+                                  : options.store->get_oauth_provider(flow->pool_id, provider_name);
         if (!provider) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth provider is not registered");
@@ -1870,7 +1875,19 @@ struct ApiServer::Impl {
             identity.email = claims->email;
             identity.display_name = claims->display_name;
         }
-        const auto issued = options.store->sign_in_oauth(identity);
+        control::Result<control::IssuedSession> issued =
+            enterprise_provider
+                ? options.store->sign_in_sso({provider_id,
+                                              provider->issuer,
+                                              identity.subject,
+                                              identity.email,
+                                              identity.display_name,
+                                              flow->identity_document,
+                                              flow->device_name,
+                                              identity.email.empty()
+                                                  ? nlohmann::json::object()
+                                                  : nlohmann::json{{"email", identity.email}}})
+                : options.store->sign_in_oauth(identity);
         if (!issued) {
             co_return co_await oauth_error(
                 route, http::status::forbidden, "OAuth identity could not sign in");
@@ -1882,15 +1899,16 @@ struct ApiServer::Impl {
             context.acting_user_id = principal->user_id;
             context.acting_identity = principal->taap_id;
         }
-        if (!record_direct_event(context,
-                                 audit::EventDraft{
-                                     .kind = "authentication",
-                                     .object = "oauth/" + provider_name,
-                                     .action = "sign_in",
-                                     .outcome = "success",
-                                     .method = "oauth",
-                                     .device = flow->device_name,
-                                 })) {
+        if (!record_direct_event(
+                context,
+                audit::EventDraft{
+                    .kind = "authentication",
+                    .object = (enterprise_provider ? "oidc/" : "oauth/") + provider_name,
+                    .action = "sign_in",
+                    .outcome = "success",
+                    .method = enterprise_provider ? "oidc" : "oauth",
+                    .device = flow->device_name,
+                })) {
             co_return co_await oauth_error(
                 route, http::status::service_unavailable, "OAuth audit recording failed");
         }

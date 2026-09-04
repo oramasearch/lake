@@ -987,6 +987,55 @@ void register_identity_capabilities(Registry& registry) {
                 {{"authorization_url",
                   oauth_authorization_url(*provider, flow, context.public_host)}});
         }});
+    registry.add(Capability{
+        .name = "start_sso_oidc",
+        .title = "Start enterprise OIDC sign-in",
+        .description = "Create a one-use enterprise OIDC authorization-code flow with PKCE.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"provider_id", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}}}},
+                         {"required", json::array({"provider_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            if (context.public_host.empty()) {
+                return ApiResult::failure("store_unavailable",
+                                          "LAKE_PUBLIC_HOST is required for OIDC sign-in");
+            }
+            const std::string provider_id = input.at("provider_id");
+            const auto provider = context.store->get_sso_oidc_provider(provider_id);
+            if (!provider)
+                return from_store_error(provider.error());
+            if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
+                return ApiResult::failure("invalid_input",
+                                          "OIDC endpoints must use HTTPS outside loopback tests");
+            }
+            control::OAuthFlow flow{provider->pool_id,
+                                    provider->provider,
+                                    control::identity_crypto::random_secret(),
+                                    control::identity_crypto::random_secret(),
+                                    control::identity_crypto::random_secret(),
+                                    input.value("device_name", "browser"),
+                                    input.value("taap_id", "")};
+            if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
+                return ApiResult::failure("store_error", "could not generate OIDC flow material");
+            }
+            const auto started = context.store->begin_oauth(flow);
+            if (!started)
+                return from_store_error(started.error());
+            return ApiResult::success(
+                {{"authorization_url",
+                  oauth_authorization_url(*provider, flow, context.public_host)}});
+        }});
     registry.add(Capability{.name = "create_token",
                             .title = "Create API token",
                             .description = "Issue a named, scoped API-token session. Static tokens "

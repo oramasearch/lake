@@ -486,3 +486,52 @@ TEST(OAuth, AuthorizationCodePkceOidcAndCachedJwks) {
     EXPECT_NE(insecure.find(" 400 "), std::string::npos) << insecure;
     server.stop();
 }
+
+TEST(OAuth, EnterpriseOidcAuthorizationCodeCallback) {
+    StubProvider provider;
+    const unsigned short lake_port = unused_port();
+    ASSERT_NE(lake_port, 0);
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto organization = store->create_organization({"", "Enterprise OIDC"});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto sso = store->register_sso_provider({organization->id,
+                                                   "lake",
+                                                   "stub-enterprise",
+                                                   "oidc",
+                                                   provider.issuer(),
+                                                   "",
+                                                   "",
+                                                   "lake-test",
+                                                   "stub-secret",
+                                                   "scim-stub-token",
+                                                   nlohmann::json::object(),
+                                                   true});
+    ASSERT_TRUE(sso) << sso.error().message;
+    ASSERT_TRUE(store->create_federation_issuer({organization->id, provider.issuer(), "email"}));
+    lake::api::ServerOptions options;
+    options.port = lake_port;
+    options.public_host = "127.0.0.1:" + std::to_string(lake_port);
+    options.store = store;
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string started = request(
+        lake_port,
+        "POST",
+        "/v1/start_sso_oidc",
+        nlohmann::json{{"provider_id", sso->id}, {"taap_id", "taap:1:ed25519:enterprise"}}.dump(),
+        "application/json");
+    ASSERT_NE(started.find(" 200 "), std::string::npos) << started;
+    const std::string authorization_url =
+        nlohmann::json::parse(response_body(started))["value"]["authorization_url"];
+    const std::string authorized =
+        request(static_cast<unsigned short>(
+                    std::stoi(provider.issuer().substr(provider.issuer().rfind(':') + 1))),
+                "GET",
+                callback_target(authorization_url));
+    ASSERT_NE(authorized.find(" 302 "), std::string::npos) << authorized;
+    const std::string callback =
+        request(lake_port, "GET", callback_target(response_header(authorized, "Location")));
+    EXPECT_NE(callback.find(" 302 "), std::string::npos) << callback;
+    EXPECT_TRUE(provider.pkce_verified());
+    server.stop();
+}

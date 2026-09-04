@@ -2791,6 +2791,32 @@ public:
         });
     }
 
+    Result<OAuthProvider> get_sso_oidc_provider(const std::string& id) override {
+        return with_tx<OAuthProvider>([&](pqxx::work& tx) -> Result<OAuthProvider> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT organization_id::text, name, pool_id, issuer, client_id, "
+                "encode(encrypted_client_secret, 'hex') FROM sso_providers WHERE id = $1::uuid "
+                "AND protocol = 'oidc' AND enabled",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "OIDC provider is unavailable"});
+            }
+            const Result<std::string> secret = decrypt_secret(
+                tx,
+                "sso.oidc." + rows[0][0].as<std::string>() + "." + rows[0][1].as<std::string>(),
+                rows[0][5].as<std::string>());
+            if (!secret) {
+                return std::unexpected(secret.error());
+            }
+            return OAuthProvider{rows[0][2].as<std::string>(),
+                                 "sso-" + id,
+                                 rows[0][3].as<std::string>(),
+                                 rows[0][4].as<std::string>(),
+                                 *secret,
+                                 {"openid", "email", "profile"}};
+        });
+    }
+
     Result<SsoProvider> test_sso_provider(const std::string& id) override {
         return with_tx<SsoProvider>([&](pqxx::work& tx) -> Result<SsoProvider> {
             const pqxx::result rows = tx.exec_params(
