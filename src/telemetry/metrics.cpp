@@ -18,8 +18,17 @@ namespace lake::telemetry {
 namespace {
 
 constexpr std::array<std::pair<double, std::string_view>, 11> latency_buckets = {
-    {{0.001, "0.001"}, {0.005, "0.005"}, {0.01, "0.01"}, {0.025, "0.025"}, {0.05, "0.05"},
-     {0.1, "0.1"}, {0.25, "0.25"}, {0.5, "0.5"}, {1.0, "1"}, {2.5, "2.5"}, {5.0, "5"}},
+    {{0.001, "0.001"},
+     {0.005, "0.005"},
+     {0.01, "0.01"},
+     {0.025, "0.025"},
+     {0.05, "0.05"},
+     {0.1, "0.1"},
+     {0.25, "0.25"},
+     {0.5, "0.5"},
+     {1.0, "1"},
+     {2.5, "2.5"},
+     {5.0, "5"}},
 };
 
 struct SeriesKey {
@@ -45,7 +54,8 @@ std::string escaped_label(std::string_view value) {
     std::string out;
     out.reserve(value.size());
     for (const char c : value) {
-        if (c == '\\' || c == '"') out += '\\';
+        if (c == '\\' || c == '"')
+            out += '\\';
         if (c == '\n') {
             out += "\\n";
         } else {
@@ -55,30 +65,35 @@ std::string escaped_label(std::string_view value) {
     return out;
 }
 
-std::string labels_text(const Labels& labels, std::string_view extra_name = {}, std::string_view extra_value = {}) {
-    if (labels.empty() && extra_name.empty()) return {};
+std::string labels_text(const Labels& labels,
+                        std::string_view extra_name = {},
+                        std::string_view extra_value = {}) {
+    if (labels.empty() && extra_name.empty())
+        return {};
     std::string out = "{";
     bool first = true;
     auto append = [&](std::string_view name, std::string_view value) {
-        if (!first) out += ',';
+        if (!first)
+            out += ',';
         first = false;
         out += name;
         out += "=\"";
         out += escaped_label(value);
         out += '"';
     };
-    for (const auto& [name, value] : labels) append(name, value);
-    if (!extra_name.empty()) append(extra_name, extra_value);
+    for (const auto& [name, value] : labels)
+        append(name, value);
+    if (!extra_name.empty())
+        append(extra_name, extra_value);
     out += '}';
     return out;
 }
 
-template <class Result>
-std::string result_label(const Result& result) {
+template <class Result> std::string result_label(const Result& result) {
     return result ? "ok" : result.error().code;
 }
 
-}  // namespace
+} // namespace
 
 struct Metrics::Impl {
     mutable std::mutex mutex;
@@ -104,7 +119,8 @@ void Metrics::observe_histogram(std::string name, Labels labels, double value) {
     std::lock_guard lock(impl_->mutex);
     Histogram& histogram = impl_->histograms[SeriesKey{std::move(name), std::move(labels)}];
     for (std::size_t i = 0; i < latency_buckets.size(); ++i) {
-        if (value <= latency_buckets[i].first) ++histogram.buckets[i];
+        if (value <= latency_buckets[i].first)
+            ++histogram.buckets[i];
     }
     ++histogram.count;
     histogram.sum += value;
@@ -134,13 +150,14 @@ std::string Metrics::prometheus_text() const {
             out += "# TYPE " + current_name + " histogram\n";
         }
         for (std::size_t i = 0; i < latency_buckets.size(); ++i) {
-            out += key.name + "_bucket" + labels_text(key.labels, "le", latency_buckets[i].second) + " " +
-                   std::to_string(histogram.buckets[i]) + "\n";
+            out += key.name + "_bucket" + labels_text(key.labels, "le", latency_buckets[i].second) +
+                   " " + std::to_string(histogram.buckets[i]) + "\n";
         }
         out += key.name + "_bucket" + labels_text(key.labels, "le", "+Inf") + " " +
                std::to_string(histogram.count) + "\n";
         out += key.name + "_sum" + labels_text(key.labels) + " " + number(histogram.sum) + "\n";
-        out += key.name + "_count" + labels_text(key.labels) + " " + std::to_string(histogram.count) + "\n";
+        out += key.name + "_count" + labels_text(key.labels) + " " +
+               std::to_string(histogram.count) + "\n";
     }
     return out;
 }
@@ -149,12 +166,14 @@ namespace {
 
 class InstrumentedStore final : public control::Store {
 private:
-    template <class Function>
-    auto call(std::string_view operation, Function&& function) {
+    template <class Function> auto call(std::string_view operation, Function&& function) {
         const auto start = std::chrono::steady_clock::now();
         auto result = function();
-        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        const Labels labels{{"store", kind_}, {"operation", std::string(operation)}, {"result", result_label(result)}};
+        const double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        const Labels labels{{"store", kind_},
+                            {"operation", std::string(operation)},
+                            {"result", result_label(result)}};
         metrics_.increment_counter("lake_store_calls_total", labels);
         metrics_.observe_histogram("lake_store_call_duration_seconds", labels, seconds);
         return result;
@@ -164,9 +183,13 @@ public:
     InstrumentedStore(std::shared_ptr<control::Store> store, Metrics& metrics)
         : store_(std::move(store)), metrics_(metrics), kind_(store_->kind()) {}
 
-    std::string kind() const override { return kind_; }
+    std::string kind() const override {
+        return kind_;
+    }
 
-    control::Result<void> ping() override { return call("ping", [&] { return store_->ping(); }); }
+    control::Result<void> ping() override {
+        return call("ping", [&] { return store_->ping(); });
+    }
 
     control::Result<control::User> create_user(const control::NewUser& value) override {
         return call("create_user", [&] { return store_->create_user(value); });
@@ -177,7 +200,8 @@ public:
     control::Result<control::User> get_user(const std::string& id) override {
         return call("get_user", [&] { return store_->get_user(id); });
     }
-    control::Result<control::Organization> create_organization(const control::NewOrganization& value) override {
+    control::Result<control::Organization>
+    create_organization(const control::NewOrganization& value) override {
         return call("create_organization", [&] { return store_->create_organization(value); });
     }
     control::Result<std::vector<control::Organization>> list_organizations(int limit) override {
@@ -195,15 +219,57 @@ public:
     control::Result<control::Customer> get_customer(const std::string& id) override {
         return call("get_customer", [&] { return store_->get_customer(id); });
     }
-    control::Result<control::Repository> create_repository(const control::NewRepository& value) override {
-        return call("create_repository", [&] { return store_->create_repository(value); });
+    control::Result<control::Repository> create_repository(const control::NewRepository& value,
+                                                           const std::string& actor) override {
+        return call("create_repository", [&] { return store_->create_repository(value, actor); });
     }
-    control::Result<std::vector<control::Repository>> list_repositories(const std::string& customer_id,
-                                                                        int limit) override {
-        return call("list_repositories", [&] { return store_->list_repositories(customer_id, limit); });
+    control::Result<std::vector<control::Repository>>
+    list_repositories(const std::string& customer_id, int limit) override {
+        return call("list_repositories",
+                    [&] { return store_->list_repositories(customer_id, limit); });
     }
     control::Result<control::Repository> get_repository(const std::string& id) override {
         return call("get_repository", [&] { return store_->get_repository(id); });
+    }
+    control::Result<control::Repository> rename_repository(const std::string& id,
+                                                           const std::string& name,
+                                                           const std::string& actor) override {
+        return call("rename_repository",
+                    [&] { return store_->rename_repository(id, name, actor); });
+    }
+    control::Result<control::Repository> transfer_repository(const std::string& id,
+                                                             const std::string& customer_id,
+                                                             const std::string& actor) override {
+        return call("transfer_repository",
+                    [&] { return store_->transfer_repository(id, customer_id, actor); });
+    }
+    control::Result<control::Repository> set_repository_visibility(
+        const std::string& id, const std::string& visibility, const std::string& actor) override {
+        return call("set_repository_visibility",
+                    [&] { return store_->set_repository_visibility(id, visibility, actor); });
+    }
+    control::Result<control::Repository>
+    delete_repository(const std::string& id,
+                      const control::RepositoryDeletion& deletion,
+                      const std::string& actor) override {
+        return call("delete_repository",
+                    [&] { return store_->delete_repository(id, deletion, actor); });
+    }
+    control::Result<std::vector<control::AuditEvent>>
+    list_repository_audit_events(const std::string& repository_id, int limit) override {
+        return call("list_repository_audit_events",
+                    [&] { return store_->list_repository_audit_events(repository_id, limit); });
+    }
+    control::Result<std::vector<control::RepositoryRef>>
+    list_repository_refs(const std::string& repository_id) override {
+        return call("list_repository_refs",
+                    [&] { return store_->list_repository_refs(repository_id); });
+    }
+    control::Result<control::RepositoryRef> set_repository_ref(const std::string& repository_id,
+                                                               const std::string& name,
+                                                               const std::string& head) override {
+        return call("set_repository_ref",
+                    [&] { return store_->set_repository_ref(repository_id, name, head); });
     }
 
 private:
@@ -212,11 +278,13 @@ private:
     std::string kind_;
 };
 
-}  // namespace
+} // namespace
 
-std::shared_ptr<control::Store> instrument_store(std::shared_ptr<control::Store> store, Metrics& metrics) {
-    if (!store) return {};
+std::shared_ptr<control::Store> instrument_store(std::shared_ptr<control::Store> store,
+                                                 Metrics& metrics) {
+    if (!store)
+        return {};
     return std::make_shared<InstrumentedStore>(std::move(store), metrics);
 }
 
-}  // namespace lake::telemetry
+} // namespace lake::telemetry

@@ -68,15 +68,15 @@ a gap is detectable. Exported as JSON lines and queryable through a capability a
 evidence (access reviews, change management) is a query over this stream plus the forge's
 change records; nothing is reconstructed after the fact.
 
-## The data plane: repositories on Zetta
+## The data plane: customer liquid stores
 
 The control plane (Postgres) knows *that* a repository exists, who may touch it and what its
-heads are. The content lives in Zetta (decision §6): lake keeps a liquid store per customer
-whose packs, index runs and manifest are Zetta objects under `customers/<id>/store/…`, written
-through Zetta's API from the lake pods, never through a shared filesystem. liquid's store code
-runs inside lake (lake links libliquid) with a Zetta-backed `store` backend behind the same
-interface the disk backend implements; the chunk index is liquid's own, as decided, held per
-customer store.
+heads are. The content lives in one liquid disk store per customer at
+`LAKE_STORE_ROOT/<customer id>/store`. `LAKE_STORE_ROOT` is a read-write PersistentVolume mounted
+by the operator (operator #132); lake does not provision or select that volume. liquid's store
+code runs inside lake as the library-only `liquid::liquid` target, and its pack files, index runs,
+manifest, and collector state remain libliquid-owned. The chunk index is liquid's own, held per
+customer store. Zetta remains lake’s serving-model reference, not this repository-data backend.
 
 **Push and pull (#12)** is liquid's own protocol over HTTP/1.1, not REAPI: a client `POST`s a
 sync request naming the repository, its heads and the drips it has since a cursor; lake answers
@@ -99,9 +99,13 @@ each an audit event.
 Indexed by blob once (content-addressed: a blob is indexed the first time any repository stores
 it), with oramacore-cpp's BM25F and positional trigram index as the engines, a hot index on branch
 tips and cold snapshots for releases and tags, publication atomic per change (a query sees a
-change entirely or not at all), and the policy engine filtering candidates at query time. Symbols
+change entirely or not at all), and the policy engine filtering candidates at query time. The
+shared framing is published in liquid `docs/library/sync.md` and mirrored here as
+`docs/api/sync.md`; liquid #160 supplies the library export/import and CLI client. Until that
+library pin advances, lake proves the server framing with an in-test client. Symbols
 from the compiler (liquid's build graph knows every translation unit) arrive when Phase 4's
-incremental engine lands. Index storage is Zetta objects beside the customer store.
+incremental engine lands. Search-index storage is specified by the search work; repository content
+and its liquid-owned metadata remain on the customer store volume.
 
 ## Secrets, encryption and PKI (decision §12)
 

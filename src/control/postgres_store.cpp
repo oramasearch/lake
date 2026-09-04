@@ -1,5 +1,6 @@
-// The one translation unit that names libpqxx. Each call opens (or reuses) one connection and runs
-// one transaction, inline on the caller's thread; SQL errors map to the store's error codes.
+// The one translation unit that names libpqxx. Each call opens (or reuses) one
+// connection and runs one transaction, inline on the caller's thread; SQL
+// errors map to the store's error codes.
 #include "lake/control/postgres_store.hpp"
 
 #include <memory>
@@ -12,43 +13,119 @@ namespace lake::control {
 namespace {
 
 std::optional<std::string> nullable(const std::string& s) {
-    if (s.empty()) return std::nullopt;
+    if (s.empty())
+        return std::nullopt;
     return s;
 }
 
 constexpr const char* user_columns =
-    "id::text, coalesce(taap_id,''), coalesce(email,''), display_name, created_at::text, updated_at::text";
-constexpr const char* organization_columns =
-    "id::text, coalesce(taap_id,''), display_name, created_at::text, updated_at::text";
-constexpr const char* customer_columns =
-    "id::text, customer_type, coalesce(user_id::text,''), coalesce(organization_id::text,''), name, "
+    "id::text, coalesce(taap_id,''), coalesce(email,''), display_name, "
     "created_at::text, updated_at::text";
+constexpr const char* organization_columns =
+    "id::text, coalesce(taap_id,''), display_name, created_at::text, "
+    "updated_at::text";
+constexpr const char* customer_columns = "id::text, customer_type, coalesce(user_id::text,''), "
+                                         "coalesce(organization_id::text,''), name, "
+                                         "created_at::text, updated_at::text";
 
 constexpr const char* repository_columns =
-    "id::text, customer_id::text, name, description, visibility, created_at::text, updated_at::text";
+    "id::text, customer_id::text, name, description, visibility, "
+    "coalesce(deleted_at::text,''), "
+    "coalesce(retention_until::text,''), created_at::text, updated_at::text";
 
 Repository repository_of(const pqxx::row& r) {
-    return Repository{r[0].as<std::string>(), r[1].as<std::string>(), r[2].as<std::string>(), r[3].as<std::string>(),
-                      r[4].as<std::string>(), r[5].as<std::string>(), r[6].as<std::string>()};
+    return Repository{r[0].as<std::string>(),
+                      r[1].as<std::string>(),
+                      r[2].as<std::string>(),
+                      r[3].as<std::string>(),
+                      r[4].as<std::string>(),
+                      r[5].as<std::string>(),
+                      r[6].as<std::string>(),
+                      r[7].as<std::string>(),
+                      r[8].as<std::string>()};
+}
+
+AuditEvent audit_event_of(const pqxx::row& r) {
+    return AuditEvent{r[0].as<std::string>(),
+                      r[1].as<std::string>(),
+                      r[2].as<std::string>(),
+                      r[3].as<std::string>(),
+                      r[4].as<std::string>(),
+                      r[5].as<std::string>(),
+                      r[6].as<std::string>()};
+}
+
+RepositoryRef repository_ref_of(const pqxx::row& r) {
+    return RepositoryRef{r[0].as<std::string>(),
+                         r[1].as<std::string>(),
+                         r[2].as<std::string>(),
+                         r[3].as<std::string>()};
+}
+
+void record_repository_lifecycle(pqxx::work& tx,
+                                 const Repository& repository,
+                                 const std::string& actor,
+                                 const std::string& action,
+                                 const std::string& detail) {
+    tx.exec_params("INSERT INTO repository_lifecycle_events (repository_id, "
+                   "actor, action, detail) "
+                   "VALUES ($1::uuid, $2, $3, $4)",
+                   repository.id,
+                   actor,
+                   action,
+                   detail);
+    tx.exec_params("INSERT INTO audit_events (actor, object_type, object_id, "
+                   "action, outcome, detail) "
+                   "VALUES ($1, 'repository', $2::uuid, $3, 'allowed', $4)",
+                   actor,
+                   repository.id,
+                   action,
+                   detail);
+}
+
+Result<void> require_live_repository(pqxx::work& tx, const std::string& repository_id) {
+    const pqxx::result rows = tx.exec_params(
+        "SELECT deleted_at FROM repositories WHERE id = $1::uuid FOR UPDATE", repository_id);
+    if (rows.empty()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + repository_id});
+    }
+    if (!rows[0][0].is_null()) {
+        return std::unexpected(StoreError{"conflict", "repository is tombstoned"});
+    }
+    return {};
 }
 
 User user_of(const pqxx::row& r) {
-    return User{r[0].as<std::string>(), r[1].as<std::string>(), r[2].as<std::string>(),
-                r[3].as<std::string>(), r[4].as<std::string>(), r[5].as<std::string>()};
+    return User{r[0].as<std::string>(),
+                r[1].as<std::string>(),
+                r[2].as<std::string>(),
+                r[3].as<std::string>(),
+                r[4].as<std::string>(),
+                r[5].as<std::string>()};
 }
 Organization organization_of(const pqxx::row& r) {
-    return Organization{r[0].as<std::string>(), r[1].as<std::string>(), r[2].as<std::string>(),
-                        r[3].as<std::string>(), r[4].as<std::string>()};
+    return Organization{r[0].as<std::string>(),
+                        r[1].as<std::string>(),
+                        r[2].as<std::string>(),
+                        r[3].as<std::string>(),
+                        r[4].as<std::string>()};
 }
 Customer customer_of(const pqxx::row& r) {
-    return Customer{r[0].as<std::string>(), r[1].as<std::string>(), r[2].as<std::string>(), r[3].as<std::string>(),
-                    r[4].as<std::string>(), r[5].as<std::string>(), r[6].as<std::string>()};
+    return Customer{r[0].as<std::string>(),
+                    r[1].as<std::string>(),
+                    r[2].as<std::string>(),
+                    r[3].as<std::string>(),
+                    r[4].as<std::string>(),
+                    r[5].as<std::string>(),
+                    r[6].as<std::string>()};
 }
 
 class PostgresStore final : public Store {
 public:
     explicit PostgresStore(std::string uri) : uri_(std::move(uri)) {}
-    std::string kind() const override { return "postgres"; }
+    std::string kind() const override {
+        return "postgres";
+    }
 
     Result<void> ping() override {
         Result<void> result = with_tx<void>([](pqxx::work& tx) -> Result<void> {
@@ -56,128 +133,300 @@ public:
             tx.exec("SELECT 1");
             return {};
         });
-        if (!result) return std::unexpected(StoreError{"store_unavailable", result.error().message});
+        if (!result)
+            return std::unexpected(StoreError{"store_unavailable", result.error().message});
         return {};
     }
 
     Result<User> create_user(const NewUser& in) override {
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
             const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO users (taap_id, email, display_name) VALUES ($1, $2, $3) RETURNING ") + user_columns,
-                nullable(in.taap_id), nullable(in.email), in.display_name);
+                std::string("INSERT INTO users (taap_id, email, display_name) VALUES "
+                            "($1, $2, $3) RETURNING ") +
+                    user_columns,
+                nullable(in.taap_id),
+                nullable(in.email),
+                in.display_name);
             return user_of(rows[0]);
         });
     }
     Result<std::vector<User>> list_users(int limit) override {
         return with_tx<std::vector<User>>([&](pqxx::work& tx) -> Result<std::vector<User>> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + user_columns + " FROM users ORDER BY created_at DESC LIMIT $1", limit);
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + user_columns +
+                                   " FROM users ORDER BY created_at DESC LIMIT $1",
+                               limit);
             std::vector<User> out;
-            for (const auto& r : rows) out.push_back(user_of(r));
+            for (const auto& r : rows)
+                out.push_back(user_of(r));
             return out;
         });
     }
     Result<User> get_user(const std::string& id) override {
         return with_tx<User>([&](pqxx::work& tx) -> Result<User> {
-            const pqxx::result rows =
-                tx.exec_params(std::string("SELECT ") + user_columns + " FROM users WHERE id = $1::uuid", id);
-            if (rows.empty()) return std::unexpected(StoreError{"not_found", "no user " + id});
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + user_columns + " FROM users WHERE id = $1::uuid", id);
+            if (rows.empty())
+                return std::unexpected(StoreError{"not_found", "no user " + id});
             return user_of(rows[0]);
         });
     }
 
     Result<Organization> create_organization(const NewOrganization& in) override {
         return with_tx<Organization>([&](pqxx::work& tx) -> Result<Organization> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO organizations (taap_id, display_name) VALUES ($1, $2) RETURNING ") + organization_columns,
-                nullable(in.taap_id), in.display_name);
+            const pqxx::result rows =
+                tx.exec_params(std::string("INSERT INTO organizations (taap_id, display_name) "
+                                           "VALUES ($1, $2) RETURNING ") +
+                                   organization_columns,
+                               nullable(in.taap_id),
+                               in.display_name);
             return organization_of(rows[0]);
         });
     }
     Result<std::vector<Organization>> list_organizations(int limit) override {
-        return with_tx<std::vector<Organization>>([&](pqxx::work& tx) -> Result<std::vector<Organization>> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + organization_columns + " FROM organizations ORDER BY created_at DESC LIMIT $1", limit);
-            std::vector<Organization> out;
-            for (const auto& r : rows) out.push_back(organization_of(r));
-            return out;
-        });
+        return with_tx<std::vector<Organization>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Organization>> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + organization_columns +
+                                       " FROM organizations ORDER BY created_at DESC LIMIT $1",
+                                   limit);
+                std::vector<Organization> out;
+                for (const auto& r : rows)
+                    out.push_back(organization_of(r));
+                return out;
+            });
     }
     Result<Organization> get_organization(const std::string& id) override {
         return with_tx<Organization>([&](pqxx::work& tx) -> Result<Organization> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + organization_columns + " FROM organizations WHERE id = $1::uuid", id);
-            if (rows.empty()) return std::unexpected(StoreError{"not_found", "no organization " + id});
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + organization_columns +
+                                                         " FROM organizations WHERE id = $1::uuid",
+                                                     id);
+            if (rows.empty())
+                return std::unexpected(StoreError{"not_found", "no organization " + id});
             return organization_of(rows[0]);
         });
     }
 
     Result<Customer> create_customer(const NewCustomer& in) override {
         return with_tx<Customer>([&](pqxx::work& tx) -> Result<Customer> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO customers (customer_type, user_id, organization_id, name) "
-                            "VALUES ($1, $2::uuid, $3::uuid, $4) RETURNING ") + customer_columns,
-                in.customer_type, nullable(in.user_id), nullable(in.organization_id), in.name);
+            const pqxx::result rows =
+                tx.exec_params(std::string("INSERT INTO customers (customer_type, user_id, "
+                                           "organization_id, name) "
+                                           "VALUES ($1, $2::uuid, $3::uuid, $4) RETURNING ") +
+                                   customer_columns,
+                               in.customer_type,
+                               nullable(in.user_id),
+                               nullable(in.organization_id),
+                               in.name);
             return customer_of(rows[0]);
         });
     }
     Result<std::vector<Customer>> list_customers(int limit) override {
         return with_tx<std::vector<Customer>>([&](pqxx::work& tx) -> Result<std::vector<Customer>> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + customer_columns + " FROM customers ORDER BY created_at DESC LIMIT $1", limit);
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + customer_columns +
+                                   " FROM customers ORDER BY created_at DESC LIMIT $1",
+                               limit);
             std::vector<Customer> out;
-            for (const auto& r : rows) out.push_back(customer_of(r));
+            for (const auto& r : rows)
+                out.push_back(customer_of(r));
             return out;
         });
     }
     Result<Customer> get_customer(const std::string& id) override {
         return with_tx<Customer>([&](pqxx::work& tx) -> Result<Customer> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + customer_columns + " FROM customers WHERE id = $1::uuid", id);
-            if (rows.empty()) return std::unexpected(StoreError{"not_found", "no customer " + id});
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + customer_columns +
+                                                         " FROM customers WHERE id = $1::uuid",
+                                                     id);
+            if (rows.empty())
+                return std::unexpected(StoreError{"not_found", "no customer " + id});
             return customer_of(rows[0]);
         });
     }
 
-    Result<Repository> create_repository(const NewRepository& in) override {
+    Result<Repository> create_repository(const NewRepository& in,
+                                         const std::string& actor) override {
         return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO repositories (customer_id, name, description, visibility) "
-                            "VALUES ($1::uuid, $2, $3, $4) RETURNING ") + repository_columns,
-                in.customer_id, in.name, in.description, in.visibility.empty() ? std::string("private") : in.visibility);
-            return repository_of(rows[0]);
+            const pqxx::result rows =
+                tx.exec_params(std::string("INSERT INTO repositories (customer_id, name, "
+                                           "description, visibility) "
+                                           "VALUES ($1::uuid, $2, $3, $4) RETURNING ") +
+                                   repository_columns,
+                               in.customer_id,
+                               in.name,
+                               in.description,
+                               in.visibility.empty() ? std::string("private") : in.visibility);
+            Repository repository = repository_of(rows[0]);
+            record_repository_lifecycle(tx, repository, actor, "repository.create", in.name);
+            return repository;
         });
     }
-    Result<std::vector<Repository>> list_repositories(const std::string& customer_id, int limit) override {
-        return with_tx<std::vector<Repository>>([&](pqxx::work& tx) -> Result<std::vector<Repository>> {
-            const pqxx::result rows = customer_id.empty()
-                ? tx.exec_params(std::string("SELECT ") + repository_columns + " FROM repositories ORDER BY created_at DESC LIMIT $1", limit)
-                : tx.exec_params(std::string("SELECT ") + repository_columns +
-                                     " FROM repositories WHERE customer_id = $1::uuid ORDER BY created_at DESC LIMIT $2",
-                                 customer_id, limit);
-            std::vector<Repository> out;
-            for (const auto& r : rows) out.push_back(repository_of(r));
-            return out;
-        });
+    Result<std::vector<Repository>> list_repositories(const std::string& customer_id,
+                                                      int limit) override {
+        return with_tx<std::vector<Repository>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Repository>> {
+                const pqxx::result rows =
+                    customer_id.empty()
+                        ? tx.exec_params(std::string("SELECT ") + repository_columns +
+                                             " FROM repositories ORDER BY created_at DESC LIMIT $1",
+                                         limit)
+                        : tx.exec_params(std::string("SELECT ") + repository_columns +
+                                             " FROM repositories WHERE customer_id = "
+                                             "$1::uuid ORDER BY created_at DESC LIMIT $2",
+                                         customer_id,
+                                         limit);
+                std::vector<Repository> out;
+                for (const auto& r : rows)
+                    out.push_back(repository_of(r));
+                return out;
+            });
     }
     Result<Repository> get_repository(const std::string& id) override {
         return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + repository_columns + " FROM repositories WHERE id = $1::uuid", id);
-            if (rows.empty()) return std::unexpected(StoreError{"not_found", "no repository " + id});
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + repository_columns +
+                                                         " FROM repositories WHERE id = $1::uuid",
+                                                     id);
+            if (rows.empty())
+                return std::unexpected(StoreError{"not_found", "no repository " + id});
             return repository_of(rows[0]);
+        });
+    }
+    Result<Repository> rename_repository(const std::string& id,
+                                         const std::string& name,
+                                         const std::string& actor) override {
+        return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
+            if (const auto live = require_live_repository(tx, id); !live) {
+                return std::unexpected(live.error());
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE repositories SET name = $2 WHERE id = $1::uuid RETURNING ") +
+                    repository_columns,
+                id,
+                name);
+            Repository repository = repository_of(rows[0]);
+            record_repository_lifecycle(tx, repository, actor, "repository.rename", name);
+            return repository;
+        });
+    }
+    Result<Repository> transfer_repository(const std::string& id,
+                                           const std::string& customer_id,
+                                           const std::string& actor) override {
+        return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
+            if (const auto live = require_live_repository(tx, id); !live) {
+                return std::unexpected(live.error());
+            }
+            const pqxx::result rows =
+                tx.exec_params(std::string("UPDATE repositories SET customer_id = $2::uuid WHERE "
+                                           "id = $1::uuid RETURNING ") +
+                                   repository_columns,
+                               id,
+                               customer_id);
+            Repository repository = repository_of(rows[0]);
+            record_repository_lifecycle(tx, repository, actor, "repository.transfer", customer_id);
+            return repository;
+        });
+    }
+    Result<Repository> set_repository_visibility(const std::string& id,
+                                                 const std::string& visibility,
+                                                 const std::string& actor) override {
+        return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
+            if (const auto live = require_live_repository(tx, id); !live) {
+                return std::unexpected(live.error());
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string(
+                    "UPDATE repositories SET visibility = $2 WHERE id = $1::uuid RETURNING ") +
+                    repository_columns,
+                id,
+                visibility);
+            Repository repository = repository_of(rows[0]);
+            record_repository_lifecycle(tx, repository, actor, "repository.visibility", visibility);
+            return repository;
+        });
+    }
+    Result<Repository> delete_repository(const std::string& id,
+                                         const RepositoryDeletion& deletion,
+                                         const std::string& actor) override {
+        return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
+            if (const auto live = require_live_repository(tx, id); !live) {
+                return std::unexpected(live.error());
+            }
+            const pqxx::result rows =
+                tx.exec_params(std::string("UPDATE repositories SET deleted_at = $2::timestamptz, "
+                                           "retention_until = $3::timestamptz "
+                                           "WHERE id = $1::uuid RETURNING ") +
+                                   repository_columns,
+                               id,
+                               deletion.deleted_at,
+                               deletion.retention_until);
+            Repository repository = repository_of(rows[0]);
+            record_repository_lifecycle(
+                tx, repository, actor, "repository.delete", deletion.retention_until);
+            return repository;
+        });
+    }
+    Result<std::vector<AuditEvent>> list_repository_audit_events(const std::string& repository_id,
+                                                                 int limit) override {
+        return with_tx<std::vector<AuditEvent>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AuditEvent>> {
+                const pqxx::result rows =
+                    tx.exec_params("SELECT id::text, object_id::text, actor, action, "
+                                   "outcome, detail, created_at::text "
+                                   "FROM audit_events WHERE object_type = "
+                                   "'repository' AND object_id = $1::uuid "
+                                   "ORDER BY created_at DESC LIMIT $2",
+                                   repository_id,
+                                   limit);
+                std::vector<AuditEvent> events;
+                for (const auto& row : rows) {
+                    events.push_back(audit_event_of(row));
+                }
+                return events;
+            });
+    }
+    Result<std::vector<RepositoryRef>>
+    list_repository_refs(const std::string& repository_id) override {
+        return with_tx<std::vector<RepositoryRef>>(
+            [&](pqxx::work& tx) -> Result<std::vector<RepositoryRef>> {
+                const pqxx::result rows =
+                    tx.exec_params("SELECT repository_id::text, name, head, "
+                                   "updated_at::text FROM repository_refs "
+                                   "WHERE repository_id = $1::uuid ORDER BY name",
+                                   repository_id);
+                std::vector<RepositoryRef> references;
+                for (const auto& row : rows) {
+                    references.push_back(repository_ref_of(row));
+                }
+                return references;
+            });
+    }
+    Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
+                                             const std::string& name,
+                                             const std::string& head) override {
+        return with_tx<RepositoryRef>([&](pqxx::work& tx) -> Result<RepositoryRef> {
+            const pqxx::result rows =
+                tx.exec_params("INSERT INTO repository_refs (repository_id, name, head) VALUES "
+                               "($1::uuid, $2, $3) "
+                               "ON CONFLICT (repository_id, name) DO UPDATE SET head = "
+                               "EXCLUDED.head, updated_at = now() "
+                               "RETURNING repository_id::text, name, head, updated_at::text",
+                               repository_id,
+                               name,
+                               head);
+            return repository_ref_of(rows[0]);
         });
     }
 
 private:
-    template <class T, class F>
-    Result<T> with_tx(F&& body) {
+    template <class T, class F> Result<T> with_tx(F&& body) {
         std::lock_guard lock(mutex_);
         try {
-            if (!connection_ || !connection_->is_open()) connection_ = std::make_unique<pqxx::connection>(uri_);
+            if (!connection_ || !connection_->is_open())
+                connection_ = std::make_unique<pqxx::connection>(uri_);
             pqxx::work tx(*connection_);
             Result<T> result = body(tx);
-            if (result) tx.commit();
+            if (result)
+                tx.commit();
             return result;
         } catch (const pqxx::broken_connection& error) {
             connection_.reset();
@@ -200,10 +449,10 @@ private:
     std::unique_ptr<pqxx::connection> connection_;
 };
 
-}  // namespace
+} // namespace
 
 std::unique_ptr<Store> make_postgres_store(std::string connection_uri) {
     return std::make_unique<PostgresStore>(std::move(connection_uri));
 }
 
-}  // namespace lake::control
+} // namespace lake::control

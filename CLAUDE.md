@@ -8,16 +8,16 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-**The control surface serves, in production.** `Lake/prod` on AKS (3 replicas, image
+**The control surface serves, in production. Repository lifecycle and customer liquid stores await deployment.** `Lake/prod` on AKS (3 replicas, image
 `oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
 (`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
 the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages
 (`/customers`, `/repositories`, `/repository?id=`) behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
 `server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
-is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
-identities in place of the single admin token (lake #4), repositories with content once liquid
-Phase 1 lands, incremental migrations (operator #126).
+is `oramasearch/liquid/docs/features/`. Repository lifecycle and customer liquid stores are present;
+the sync protocol waits for liquid #160, TAAP identities replace the single admin token in lake #4,
+and incremental migrations remain operator #126.
 
 ## Where to read Zetta
 
@@ -73,12 +73,13 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `Lake` (`spec.postgres`, on by default) and injects `LAKE_CONTROL_DB_URI` /
   `LAKE_CONTROL_DB_PASSWORD` into the pod (optional refs: the pod starts before the DB is
   bootstrapped, so treat an empty value as "not yet"), and `LAKE_ADMIN_TOKEN` from the
-  minted-once `lake-<name>-admin` Secret. **Data plane: Zetta.** Recorded in the
-  bridge `decisions.md` §6; "for now" is deliberate.
+  minted-once `lake-<name>-admin` Secret. **Repository data plane: libliquid stores on the
+  operator-provided `LAKE_STORE_ROOT` volume.** Each customer owns `<root>/<customer id>/store`;
+  operator #132 owns the mount and environment injection.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `repositories` today, versioned by content hash).
+  `repository_lifecycle_events` after migration `0006_repository_lifecycle`, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

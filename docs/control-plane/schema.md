@@ -39,6 +39,19 @@ CASCADE`):
 
 `updated_at` is maintained by a trigger (`set_updated_at()`) on every table.
 
+## Repository lifecycle (migration `0006_repository_lifecycle`)
+
+`repositories.deleted_at` and `repositories.retention_until` make deletion a tombstone. A
+repository is retained for 30 days before collection may reclaim data that no live root leases.
+`visibility` accepts `private`, `organization`, and `public`.
+
+`repository_refs(repository_id, name, head, updated_at)` holds the advertised liquid heads. The
+`repository_lifecycle_events` table records the lifecycle transition and is this migration’s
+operator guard table. `audit_events` is append-only and records the same administrative action
+with the shared Phase 6 event fields: actor, object type and id, action, outcome, detail, request
+id, optional signature, previous hash, and timestamp. lake #18 adds audit signing and chaining to
+this established row shape.
+
 This mirrors the Orama Cloud v1 tenant model (user and organization are identity, customer is
 the tenant, one handle namespace) and fixes its two known gotchas at the constraint level:
 case-sensitivity and unvalidated handle format.
@@ -49,7 +62,7 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`repositories` today), so a new migration means a new guard and the next Job re-runs the
+(`repository_lifecycle_events` after migration `0006`), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 

@@ -16,3 +16,6 @@
 [submodule "modules/libpqxx"]
 	path = modules/libpqxx
 	url = https://github.com/jtv/libpqxx.git
+[submodule "modules/liquid"]
+	path = modules/liquid
+	url = git@github.com:oramasearch/liquid.git

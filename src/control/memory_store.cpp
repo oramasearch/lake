@@ -14,12 +14,14 @@ std::string new_uuid_v4() {
     thread_local std::mt19937_64 rng{std::random_device{}()};
     std::uniform_int_distribution<unsigned> byte(0, 255);
     unsigned char bytes[16];
-    for (auto& b : bytes) b = static_cast<unsigned char>(byte(rng));
-    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40);  // version 4
-    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80);  // RFC 4122 variant
+    for (auto& b : bytes)
+        b = static_cast<unsigned char>(byte(rng));
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40); // version 4
+    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80); // RFC 4122 variant
     std::string out;
     for (int i = 0; i < 16; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) out += '-';
+        if (i == 4 || i == 6 || i == 8 || i == 10)
+            out += '-';
         out += std::format("{:02x}", bytes[i]);
     }
     return out;
@@ -33,21 +35,31 @@ std::string now_iso8601() {
 namespace {
 
 std::string lower(std::string s) {
-    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (auto& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
 }
 
-nlohmann::json nullable(const std::string& s) { return s.empty() ? nlohmann::json(nullptr) : nlohmann::json(s); }
+nlohmann::json nullable(const std::string& s) {
+    return s.empty() ? nlohmann::json(nullptr) : nlohmann::json(s);
+}
 
-}  // namespace
+} // namespace
 
 nlohmann::json to_json(const User& u) {
-    return {{"id", u.id},           {"taap_id", nullable(u.taap_id)}, {"email", nullable(u.email)},
-            {"display_name", u.display_name}, {"created_at", u.created_at}, {"updated_at", u.updated_at}};
+    return {{"id", u.id},
+            {"taap_id", nullable(u.taap_id)},
+            {"email", nullable(u.email)},
+            {"display_name", u.display_name},
+            {"created_at", u.created_at},
+            {"updated_at", u.updated_at}};
 }
 nlohmann::json to_json(const Organization& o) {
-    return {{"id", o.id}, {"taap_id", nullable(o.taap_id)}, {"display_name", o.display_name},
-            {"created_at", o.created_at}, {"updated_at", o.updated_at}};
+    return {{"id", o.id},
+            {"taap_id", nullable(o.taap_id)},
+            {"display_name", o.display_name},
+            {"created_at", o.created_at},
+            {"updated_at", o.updated_at}};
 }
 nlohmann::json to_json(const Customer& c) {
     return {{"id", c.id},
@@ -60,18 +72,45 @@ nlohmann::json to_json(const Customer& c) {
 }
 
 nlohmann::json to_json(const Repository& r) {
-    return {{"id", r.id},           {"customer_id", r.customer_id}, {"name", r.name},
-            {"description", r.description}, {"visibility", r.visibility}, {"created_at", r.created_at},
+    return {{"id", r.id},
+            {"customer_id", r.customer_id},
+            {"name", r.name},
+            {"description", r.description},
+            {"visibility", r.visibility},
+            {"deleted_at", nullable(r.deleted_at)},
+            {"retention_until", nullable(r.retention_until)},
+            {"created_at", r.created_at},
             {"updated_at", r.updated_at}};
 }
 
-Result<void> InMemoryStore::ping() { return {}; }
+nlohmann::json to_json(const AuditEvent& event) {
+    return {{"id", event.id},
+            {"repository_id", event.repository_id},
+            {"actor", event.actor},
+            {"action", event.action},
+            {"outcome", event.outcome},
+            {"detail", event.detail},
+            {"created_at", event.created_at}};
+}
+
+nlohmann::json to_json(const RepositoryRef& reference) {
+    return {{"repository_id", reference.repository_id},
+            {"name", reference.name},
+            {"head", reference.head},
+            {"updated_at", reference.updated_at}};
+}
+
+Result<void> InMemoryStore::ping() {
+    return {};
+}
 
 Result<User> InMemoryStore::create_user(const NewUser& in) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_) {
-        if (!in.taap_id.empty() && u.taap_id == in.taap_id) return std::unexpected(StoreError{"conflict", "taap_id already exists"});
-        if (!in.email.empty() && lower(u.email) == lower(in.email)) return std::unexpected(StoreError{"conflict", "email already exists"});
+        if (!in.taap_id.empty() && u.taap_id == in.taap_id)
+            return std::unexpected(StoreError{"conflict", "taap_id already exists"});
+        if (!in.email.empty() && lower(u.email) == lower(in.email))
+            return std::unexpected(StoreError{"conflict", "email already exists"});
     }
     const std::string now = now_iso8601();
     users_.push_back(User{new_uuid_v4(), in.taap_id, in.email, in.display_name, now, now});
@@ -81,20 +120,24 @@ Result<User> InMemoryStore::create_user(const NewUser& in) {
 Result<std::vector<User>> InMemoryStore::list_users(int limit) {
     std::lock_guard lock(mutex_);
     std::vector<User> out(users_.rbegin(), users_.rend());
-    if (limit > 0 && out.size() > static_cast<std::size_t>(limit)) out.resize(static_cast<std::size_t>(limit));
+    if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
+        out.resize(static_cast<std::size_t>(limit));
     return out;
 }
 
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
-    for (const auto& u : users_) if (u.id == id) return u;
+    for (const auto& u : users_)
+        if (u.id == id)
+            return u;
     return std::unexpected(StoreError{"not_found", "no user " + id});
 }
 
 Result<Organization> InMemoryStore::create_organization(const NewOrganization& in) {
     std::lock_guard lock(mutex_);
     for (const auto& o : organizations_) {
-        if (!in.taap_id.empty() && o.taap_id == in.taap_id) return std::unexpected(StoreError{"conflict", "taap_id already exists"});
+        if (!in.taap_id.empty() && o.taap_id == in.taap_id)
+            return std::unexpected(StoreError{"conflict", "taap_id already exists"});
     }
     const std::string now = now_iso8601();
     organizations_.push_back(Organization{new_uuid_v4(), in.taap_id, in.display_name, now, now});
@@ -104,13 +147,16 @@ Result<Organization> InMemoryStore::create_organization(const NewOrganization& i
 Result<std::vector<Organization>> InMemoryStore::list_organizations(int limit) {
     std::lock_guard lock(mutex_);
     std::vector<Organization> out(organizations_.rbegin(), organizations_.rend());
-    if (limit > 0 && out.size() > static_cast<std::size_t>(limit)) out.resize(static_cast<std::size_t>(limit));
+    if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
+        out.resize(static_cast<std::size_t>(limit));
     return out;
 }
 
 Result<Organization> InMemoryStore::get_organization(const std::string& id) {
     std::lock_guard lock(mutex_);
-    for (const auto& o : organizations_) if (o.id == id) return o;
+    for (const auto& o : organizations_)
+        if (o.id == id)
+            return o;
     return std::unexpected(StoreError{"not_found", "no organization " + id});
 }
 
@@ -118,79 +164,294 @@ Result<Customer> InMemoryStore::create_customer(const NewCustomer& in) {
     std::lock_guard lock(mutex_);
     const bool individual = in.customer_type == "individual";
     if (!individual && in.customer_type != "organization") {
-        return std::unexpected(StoreError{"invalid_input", "customer_type must be individual or organization"});
+        return std::unexpected(
+            StoreError{"invalid_input", "customer_type must be individual or organization"});
     }
-    if (individual ? (in.user_id.empty() || !in.organization_id.empty()) : (in.organization_id.empty() || !in.user_id.empty())) {
-        return std::unexpected(StoreError{"invalid_input", "an individual has exactly user_id, an organization exactly organization_id (customer_type_check)"});
+    if (individual ? (in.user_id.empty() || !in.organization_id.empty())
+                   : (in.organization_id.empty() || !in.user_id.empty())) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          "an individual has exactly user_id, an organization "
+                                          "exactly organization_id (customer_type_check)"});
     }
-    if (individual && std::none_of(users_.begin(), users_.end(), [&](const User& u) { return u.id == in.user_id; })) {
+    if (individual && std::none_of(users_.begin(), users_.end(), [&](const User& u) {
+            return u.id == in.user_id;
+        })) {
         return std::unexpected(StoreError{"invalid_input", "user_id does not reference a user"});
     }
-    if (!individual && std::none_of(organizations_.begin(), organizations_.end(), [&](const Organization& o) { return o.id == in.organization_id; })) {
-        return std::unexpected(StoreError{"invalid_input", "organization_id does not reference an organization"});
+    if (!individual &&
+        std::none_of(organizations_.begin(), organizations_.end(), [&](const Organization& o) {
+            return o.id == in.organization_id;
+        })) {
+        return std::unexpected(
+            StoreError{"invalid_input", "organization_id does not reference an organization"});
     }
-    if (!valid_handle(in.name)) return std::unexpected(StoreError{"invalid_input", "name must match customer_name_format"});
+    if (!valid_handle(in.name))
+        return std::unexpected(StoreError{"invalid_input", "name must match customer_name_format"});
     for (const auto& c : customers_) {
-        if (c.name == in.name) return std::unexpected(StoreError{"conflict", "name already taken (customer_name_unique)"});
-        if (individual && c.user_id == in.user_id) return std::unexpected(StoreError{"conflict", "this user already has a customer"});
-        if (!individual && c.organization_id == in.organization_id) return std::unexpected(StoreError{"conflict", "this organization already has a customer"});
+        if (c.name == in.name)
+            return std::unexpected(
+                StoreError{"conflict", "name already taken (customer_name_unique)"});
+        if (individual && c.user_id == in.user_id)
+            return std::unexpected(StoreError{"conflict", "this user already has a customer"});
+        if (!individual && c.organization_id == in.organization_id)
+            return std::unexpected(
+                StoreError{"conflict", "this organization already has a customer"});
     }
     const std::string now = now_iso8601();
-    customers_.push_back(Customer{new_uuid_v4(), in.customer_type, in.user_id, in.organization_id, in.name, now, now});
+    customers_.push_back(Customer{
+        new_uuid_v4(), in.customer_type, in.user_id, in.organization_id, in.name, now, now});
     return customers_.back();
 }
 
 Result<std::vector<Customer>> InMemoryStore::list_customers(int limit) {
     std::lock_guard lock(mutex_);
     std::vector<Customer> out(customers_.rbegin(), customers_.rend());
-    if (limit > 0 && out.size() > static_cast<std::size_t>(limit)) out.resize(static_cast<std::size_t>(limit));
+    if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
+        out.resize(static_cast<std::size_t>(limit));
     return out;
 }
 
 Result<Customer> InMemoryStore::get_customer(const std::string& id) {
     std::lock_guard lock(mutex_);
-    for (const auto& c : customers_) if (c.id == id) return c;
+    for (const auto& c : customers_)
+        if (c.id == id)
+            return c;
     return std::unexpected(StoreError{"not_found", "no customer " + id});
 }
 
-}  // namespace lake::control
+} // namespace lake::control
 
 namespace lake::control {
 
-Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
+namespace {
+
+void append_audit_event(std::vector<AuditEvent>& events,
+                        const Repository& repository,
+                        const std::string& actor,
+                        const std::string& action,
+                        const std::string& detail);
+
+} // namespace
+
+Result<Repository> InMemoryStore::create_repository(const NewRepository& in,
+                                                    const std::string& actor) {
     std::lock_guard lock(mutex_);
-    if (std::none_of(customers_.begin(), customers_.end(), [&](const Customer& c) { return c.id == in.customer_id; })) {
-        return std::unexpected(StoreError{"invalid_input", "customer_id does not reference a customer"});
+    if (std::none_of(customers_.begin(), customers_.end(), [&](const Customer& c) {
+            return c.id == in.customer_id;
+        })) {
+        return std::unexpected(
+            StoreError{"invalid_input", "customer_id does not reference a customer"});
     }
-    if (!valid_handle(in.name)) return std::unexpected(StoreError{"invalid_input", "name must match repository_name_format"});
+    if (!valid_handle(in.name))
+        return std::unexpected(
+            StoreError{"invalid_input", "name must match repository_name_format"});
     const std::string visibility = in.visibility.empty() ? "private" : in.visibility;
-    if (visibility != "private" && visibility != "public") {
-        return std::unexpected(StoreError{"invalid_input", "visibility must be private or public"});
+    if (visibility != "private" && visibility != "organization" && visibility != "public") {
+        return std::unexpected(
+            StoreError{"invalid_input", "visibility must be private, organization, or public"});
     }
     for (const auto& r : repositories_) {
         if (r.customer_id == in.customer_id && r.name == in.name) {
-            return std::unexpected(StoreError{"conflict", "this customer already has a repository named " + in.name});
+            return std::unexpected(
+                StoreError{"conflict", "this customer already has a repository named " + in.name});
         }
     }
     const std::string now = now_iso8601();
-    repositories_.push_back(Repository{new_uuid_v4(), in.customer_id, in.name, in.description, visibility, now, now});
+    repositories_.push_back(Repository{
+        new_uuid_v4(), in.customer_id, in.name, in.description, visibility, "", "", now, now});
+    append_audit_event(audit_events_, repositories_.back(), actor, "repository.create", in.name);
     return repositories_.back();
 }
 
-Result<std::vector<Repository>> InMemoryStore::list_repositories(const std::string& customer_id, int limit) {
+Result<std::vector<Repository>> InMemoryStore::list_repositories(const std::string& customer_id,
+                                                                 int limit) {
     std::lock_guard lock(mutex_);
     std::vector<Repository> out;
     for (auto it = repositories_.rbegin(); it != repositories_.rend(); ++it) {
-        if (customer_id.empty() || it->customer_id == customer_id) out.push_back(*it);
+        if (customer_id.empty() || it->customer_id == customer_id)
+            out.push_back(*it);
     }
-    if (limit > 0 && out.size() > static_cast<std::size_t>(limit)) out.resize(static_cast<std::size_t>(limit));
+    if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
+        out.resize(static_cast<std::size_t>(limit));
     return out;
 }
 
 Result<Repository> InMemoryStore::get_repository(const std::string& id) {
     std::lock_guard lock(mutex_);
-    for (const auto& r : repositories_) if (r.id == id) return r;
+    for (const auto& r : repositories_)
+        if (r.id == id)
+            return r;
     return std::unexpected(StoreError{"not_found", "no repository " + id});
 }
 
-}  // namespace lake::control
+namespace {
+
+std::vector<Repository>::iterator repository_by_id(std::vector<Repository>& repositories,
+                                                   const std::string& id) {
+    return std::find_if(repositories.begin(),
+                        repositories.end(),
+                        [&](const Repository& repository) { return repository.id == id; });
+}
+
+bool repository_name_taken(const std::vector<Repository>& repositories,
+                           const std::string& customer_id,
+                           const std::string& name,
+                           const std::string& except_id) {
+    return std::any_of(repositories.begin(), repositories.end(), [&](const Repository& repository) {
+        return repository.id != except_id && repository.customer_id == customer_id &&
+               repository.name == name;
+    });
+}
+
+void append_audit_event(std::vector<AuditEvent>& events,
+                        const Repository& repository,
+                        const std::string& actor,
+                        const std::string& action,
+                        const std::string& detail) {
+    events.push_back(
+        AuditEvent{new_uuid_v4(), repository.id, actor, action, "allowed", detail, now_iso8601()});
+}
+
+} // namespace
+
+Result<Repository> InMemoryStore::rename_repository(const std::string& id,
+                                                    const std::string& name,
+                                                    const std::string& actor) {
+    std::lock_guard lock(mutex_);
+    if (!valid_handle(name)) {
+        return std::unexpected(
+            StoreError{"invalid_input", "name must match repository_name_format"});
+    }
+    const auto repository = repository_by_id(repositories_, id);
+    if (repository == repositories_.end()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + id});
+    }
+    if (!repository->deleted_at.empty()) {
+        return std::unexpected(StoreError{"conflict", "repository is tombstoned"});
+    }
+    if (repository_name_taken(repositories_, repository->customer_id, name, id)) {
+        return std::unexpected(
+            StoreError{"conflict", "this customer already has a repository named " + name});
+    }
+    repository->name = name;
+    repository->updated_at = now_iso8601();
+    append_audit_event(audit_events_, *repository, actor, "repository.rename", name);
+    return *repository;
+}
+
+Result<Repository> InMemoryStore::transfer_repository(const std::string& id,
+                                                      const std::string& customer_id,
+                                                      const std::string& actor) {
+    std::lock_guard lock(mutex_);
+    if (std::none_of(customers_.begin(), customers_.end(), [&](const Customer& customer) {
+            return customer.id == customer_id;
+        })) {
+        return std::unexpected(
+            StoreError{"invalid_input", "customer_id does not reference a customer"});
+    }
+    const auto repository = repository_by_id(repositories_, id);
+    if (repository == repositories_.end()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + id});
+    }
+    if (!repository->deleted_at.empty()) {
+        return std::unexpected(StoreError{"conflict", "repository is tombstoned"});
+    }
+    if (repository_name_taken(repositories_, customer_id, repository->name, id)) {
+        return std::unexpected(
+            StoreError{"conflict", "destination customer already has that repository name"});
+    }
+    repository->customer_id = customer_id;
+    repository->updated_at = now_iso8601();
+    append_audit_event(audit_events_, *repository, actor, "repository.transfer", customer_id);
+    return *repository;
+}
+
+Result<Repository> InMemoryStore::set_repository_visibility(const std::string& id,
+                                                            const std::string& visibility,
+                                                            const std::string& actor) {
+    std::lock_guard lock(mutex_);
+    if (visibility != "private" && visibility != "organization" && visibility != "public") {
+        return std::unexpected(
+            StoreError{"invalid_input", "visibility must be private, organization, or public"});
+    }
+    const auto repository = repository_by_id(repositories_, id);
+    if (repository == repositories_.end()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + id});
+    }
+    if (!repository->deleted_at.empty()) {
+        return std::unexpected(StoreError{"conflict", "repository is tombstoned"});
+    }
+    repository->visibility = visibility;
+    repository->updated_at = now_iso8601();
+    append_audit_event(audit_events_, *repository, actor, "repository.visibility", visibility);
+    return *repository;
+}
+
+Result<Repository> InMemoryStore::delete_repository(const std::string& id,
+                                                    const RepositoryDeletion& deletion,
+                                                    const std::string& actor) {
+    std::lock_guard lock(mutex_);
+    const auto repository = repository_by_id(repositories_, id);
+    if (repository == repositories_.end()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + id});
+    }
+    if (!repository->deleted_at.empty()) {
+        return std::unexpected(StoreError{"conflict", "repository is already tombstoned"});
+    }
+    repository->deleted_at = deletion.deleted_at;
+    repository->retention_until = deletion.retention_until;
+    repository->updated_at = deletion.deleted_at;
+    append_audit_event(
+        audit_events_, *repository, actor, "repository.delete", deletion.retention_until);
+    return *repository;
+}
+
+Result<std::vector<AuditEvent>>
+InMemoryStore::list_repository_audit_events(const std::string& repository_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<AuditEvent> events;
+    for (auto event = audit_events_.rbegin(); event != audit_events_.rend(); ++event) {
+        if (event->repository_id == repository_id) {
+            events.push_back(*event);
+        }
+        if (limit > 0 && events.size() >= static_cast<std::size_t>(limit)) {
+            break;
+        }
+    }
+    return events;
+}
+
+Result<std::vector<RepositoryRef>>
+InMemoryStore::list_repository_refs(const std::string& repository_id) {
+    std::lock_guard lock(mutex_);
+    if (repository_by_id(repositories_, repository_id) == repositories_.end()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + repository_id});
+    }
+    std::vector<RepositoryRef> references;
+    for (const auto& reference : repository_refs_) {
+        if (reference.repository_id == repository_id) {
+            references.push_back(reference);
+        }
+    }
+    return references;
+}
+
+Result<RepositoryRef> InMemoryStore::set_repository_ref(const std::string& repository_id,
+                                                        const std::string& name,
+                                                        const std::string& head) {
+    std::lock_guard lock(mutex_);
+    if (repository_by_id(repositories_, repository_id) == repositories_.end()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + repository_id});
+    }
+    for (auto& reference : repository_refs_) {
+        if (reference.repository_id == repository_id && reference.name == name) {
+            reference.head = head;
+            reference.updated_at = now_iso8601();
+            return reference;
+        }
+    }
+    repository_refs_.push_back(RepositoryRef{repository_id, name, head, now_iso8601()});
+    return repository_refs_.back();
+}
+
+} // namespace lake::control

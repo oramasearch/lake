@@ -6,12 +6,12 @@ the same change (bridge `CLAUDE.md`, *Documentation is part of every change*). `
 
 | Topic | Files |
 |---|---|
-| [`design/`](design/) | [`phase-6.md`](design/phase-6.md) — the Phase 6 design: identity on TAAP with user pools, one policy engine over one object graph, the audit stream, repositories on Zetta with liquid's push and pull, search, secrets and PKI, the waves |
+| [`design/`](design/) | [`phase-6.md`](design/phase-6.md) — the Phase 6 design: identity on TAAP with user pools, one policy engine over one object graph, the audit stream, repositories in customer liquid stores with push and pull, search, secrets and PKI, the waves |
 | [`serving/`](serving/) | [`http.md`](serving/http.md) — the HTTP server: Beast2 on Capy/Corosio, routes, the trailing-404 rule, header stamping, log noise; [`telemetry.md`](serving/telemetry.md) — Prometheus metrics, health and readiness, request logs |
-| [`control-plane/`](control-plane/) | [`postgres.md`](control-plane/postgres.md) — the Postgres the operator provisions per Lake; [`schema.md`](control-plane/schema.md) — tables, the tenant model, how the schema is applied and changed |
-| [`deployment/`](deployment/) | [`aks.md`](deployment/aks.md) — `Lake/prod` on AKS: what exists, how it was built, how to roll, how to verify, what is not production-grade yet |
+| [`control-plane/`](control-plane/) | [`postgres.md`](control-plane/postgres.md) — the Postgres the operator provisions per Lake; [`schema.md`](control-plane/schema.md) — tables, the tenant model, repository lifecycle, audit rows, and how the schema is applied and changed |
+| [`deployment/`](deployment/) | [`aks.md`](deployment/aks.md) — `Lake/prod` on AKS: what exists, how it was built, how to roll, how to verify, what is not production-grade yet; [`store-volume.md`](deployment/store-volume.md) — operator-provided storage for customer liquid stores |
 | [`build/`](build/) | [`ci.md`](build/ci.md) — pull-request builds, dependency cache, tagged image publishing and required credentials; [`container-image.md`](build/container-image.md) — the Linux/amd64 image and CI-built deployment tags |
-| [`api/`](api/) | [`README.md`](api/README.md) — the registry, REST + OpenAPI + MCP, the envelope, adding a capability; [`auth.md`](api/auth.md) — the admin bearer; [`customers.md`](api/customers.md) — users, organizations, customers; [`mcp.md`](api/mcp.md) — JSON-RPC methods; [`repositories.md`](api/repositories.md) — the repository model |
+| [`api/`](api/) | [`README.md`](api/README.md) — the registry, REST + OpenAPI + MCP, the envelope, adding a capability; [`auth.md`](api/auth.md) — the admin bearer; [`customers.md`](api/customers.md) — users, organizations, customers; [`mcp.md`](api/mcp.md) — JSON-RPC methods; [`repositories.md`](api/repositories.md) — the repository model and lifecycle; [`sync.md`](api/sync.md) — the liquid push/pull wire contract |
 | [`ui/`](ui/) | [`README.md`](ui/README.md) — the server-rendered pages, navigation, the session cookie |
 
 The product specification is in `oramasearch/liquid` `docs/features/18-lake-service.md`; the

@@ -7,12 +7,27 @@ images. The Dockerfile remains the canonical Linux toolchain recipe; CI installs
 ## Build and test workflow
 
 [`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It checks out all
-submodules recursively, configures Release with `LAKE_BUILD_TESTS=ON`, builds with clang-19, then
-runs:
+submodules recursively, starts Postgres 16, applies `db/schema.sql`, configures Release with
+`LAKE_BUILD_TESTS=ON`, builds with clang-19, then runs:
 
 ```sh
 ctest --test-dir build --output-on-failure
 ```
+
+The Postgres lifecycle integration test reads `LAKE_TEST_DATABASE_URI`. Reproduce it locally with:
+
+```sh
+docker run --name lake-test-postgres -d --rm -p 5432:5432 \
+  -e POSTGRES_DB=lake -e POSTGRES_USER=lake -e POSTGRES_PASSWORD=lake postgres:16
+until PGPASSWORD=lake psql -h 127.0.0.1 -U lake -d lake -c 'select 1' >/dev/null; do sleep 1; done
+PGPASSWORD=lake psql -h 127.0.0.1 -U lake -d lake -f db/schema.sql
+LAKE_TEST_DATABASE_URI=postgresql://lake:lake@127.0.0.1:5432/lake \
+  ctest --test-dir build --output-on-failure
+docker stop lake-test-postgres
+```
+
+The Linux build toolchain installs `pkg-config` and `libfuse3-dev` because libliquid uses the
+`fuse3` package during CMake configuration.
 
 The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost,
 nlohmann/json and GoogleTest. Its key includes the hash of `CMakeLists.txt`; a missing cache is

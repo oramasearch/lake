@@ -37,9 +37,19 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
+| `rename_repository` | action | `id`, `name` | repository | [repositories.md](repositories.md) |
+| `transfer_repository` | action | `id`, `customer_id` | repository | [repositories.md](repositories.md) |
+| `set_repository_visibility` | action | `id`, `visibility` | repository | [repositories.md](repositories.md) |
+| `delete_repository` | action | `id` | tombstoned repository | [repositories.md](repositories.md) |
+| `list_repository_audit_events` | read | `repository_id`, `limit?` | `{items: [audit_event]}` | [repositories.md](repositories.md) |
+| `refs` | read | `repository_id` | `{items: [ref]}` | [sync.md](sync.md) |
+| `find_missing` | action | `repository_id`, `digests` | `{digests: [digest]}` | [sync.md](sync.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
+
+`push` and `pull` are not registered until liquid #160 publishes the shared framing and public
+import/export API. Their contract and the required follow-up are recorded in [`sync.md`](sync.md).
 
 ## Adding a capability
 
