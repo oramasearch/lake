@@ -37,6 +37,7 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
+| `search` | read | `query`, `customer?`, `repository?`, `ref?`, `limit?` | `{items: [hit]}` | [search.md](search.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

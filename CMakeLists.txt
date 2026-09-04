@@ -46,7 +46,6 @@ include(FetchContent)
 set(BOOST_CAPY_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BOOST_CAPY_BUILD_BENCH    OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/capy EXCLUDE_FROM_ALL)
 
 if(APPLE)
   list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/openssl@3)
@@ -55,7 +54,13 @@ find_package(OpenSSL REQUIRED)
 set(BOOST_COROSIO_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_COROSIO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BOOST_COROSIO_BUILD_PERF     OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/corosio EXCLUDE_FROM_ALL)
+
+# libliquid owns the same pinned Capy and Corosio targets, so add it before
+# lake's HTTP stack and reuse those targets rather than defining them twice.
+set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LIQUID_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
 
 # http/beast2 expect the Boost:: targets to already exist (they do not self-resolve
 # Boost as subdirectories), so the official boost-cmake release comes first.
@@ -75,14 +80,7 @@ set(BOOST_BEAST2_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_BEAST2_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/beast2 EXCLUDE_FROM_ALL)
 
-# -----------------------------------------------------------------------------
-# nlohmann/json — the document type of the API layer (registry, REST envelope, OpenAPI, MCP),
-# as in Zetta. Header-only.
-FetchContent_Declare(nlohmann_json
-  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-set(JSON_BuildTests OFF CACHE INTERNAL "")
-FetchContent_MakeAvailable(nlohmann_json)
+# nlohmann/json is supplied by libliquid's pinned automerge-cpp dependency.
 
 # libpqxx — the Postgres client for the control plane, a submodule at Zetta's pin (jtv/libpqxx
 # 7.10.7) on libpq. Only lake-control-postgres names it, so lake-core links no libpq.
@@ -96,6 +94,12 @@ endif()
 set(SKIP_BUILD_TEST ON CACHE BOOL "" FORCE)
 add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 
+# Search is built from libliquid's repository API and oramacore-cpp's in-memory
+# BM25F engine. Lake owns segment persistence and trigram postings.
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ORAMACORE_CPP_CAPY OFF CACHE BOOL "" FORCE)
+add_subdirectory(modules/oramacore-cpp EXCLUDE_FROM_ALL)
+
 # lake-core: HTTP-free. Version, the pure web_ui renderers, the capability registry and its
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
@@ -107,11 +111,13 @@ add_library(lake-core STATIC
   src/api/capabilities.cpp
   src/control/handles.cpp
   src/control/memory_store.cpp
+  src/policy/authorize.cpp
+  src/search/index.cpp
   src/telemetry/metrics.cpp
 )
 target_include_directories(lake-core PUBLIC include)
 target_compile_features(lake-core PUBLIC cxx_std_26)
-target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp)
 
 # lake-control-postgres: the one library that names libpqxx.
 add_library(lake-control-postgres STATIC src/control/postgres_store.cpp)

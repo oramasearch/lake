@@ -20,8 +20,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # clang picks the newest libstdc++ installed. OpenSSL 3 is required by corosio's TLS layer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg lsb-release software-properties-common \
-      build-essential ninja-build git \
-      libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev \
+      build-essential ninja-build git pkg-config \
+      libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev libfuse3-dev \
  && wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 19 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -31,7 +31,8 @@ RUN wget -qO /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/download/v
  && sh /tmp/cmake.sh --skip-license --prefix=/usr/local && rm -f /tmp/cmake.sh && cmake --version
 
 WORKDIR /src
-# Submodules (capy, corosio, http, beast2) are already checked out locally — no git/SSH in the build.
+# Submodules (liquid, oramacore-cpp, capy, corosio, http, beast2) are already checked out locally
+# — no git/SSH in the build.
 COPY . /src
 
 # Tests off (skips the GoogleTest fetch and the test targets). FetchContent pulls Boost 1.91 into

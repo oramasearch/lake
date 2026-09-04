@@ -11,13 +11,14 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 **The control surface serves, in production.** `Lake/prod` on AKS (3 replicas, image
 `oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
 (`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
-the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages
-(`/customers`, `/repositories`, `/repository?id=`) behind the admin sign-in; liveness, readiness,
+the Postgres control plane (schema `0001` + `0002` applied), plus hot repository search over
+customer stores; server-rendered pages (`/customers`, `/repositories`, `/repository?id=`,
+`/search`) behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
 `server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
 is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
-identities in place of the single admin token (lake #4), repositories with content once liquid
-Phase 1 lands, incremental migrations (operator #126).
+identities in place of the single admin token (lake #4), push/pull of repositories, persistent
+policy and audit implementations, incremental migrations (operator #126).
 
 ## Where to read Zetta
 

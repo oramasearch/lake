@@ -10,6 +10,9 @@
 namespace lake::control {
 class Store;
 }
+namespace lake::search {
+class Service;
+}
 
 // The capability registry — lake's control surface in Zetta's shape: one registry, rendered as
 // REST (/v1/<name>), OpenAPI (/v1/openapi.json) and MCP tools (POST /mcp), zero drift.
@@ -36,6 +39,7 @@ std::string_view to_string(CapabilityKind kind);
 
 struct ApiContext {
     control::Store* store = nullptr;  // null = no control-plane store configured
+    search::Service* search = nullptr;
     std::string node_name;
     std::string acting_identity;  // "admin" for the bearer, empty otherwise
     bool authorized = false;

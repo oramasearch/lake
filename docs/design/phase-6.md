@@ -96,12 +96,14 @@ each an audit event.
 
 ## Search (#6, #41, #40)
 
-Indexed by blob once (content-addressed: a blob is indexed the first time any repository stores
-it), with oramacore-cpp's BM25F and positional trigram index as the engines, a hot index on branch
-tips and cold snapshots for releases and tags, publication atomic per change (a query sees a
-change entirely or not at all), and the policy engine filtering candidates at query time. Symbols
-from the compiler (liquid's build graph knows every translation unit) arrive when Phase 4's
-incremental engine lands. Index storage is Zetta objects beside the customer store.
+**Status: hot branch-tip search is implemented in lake #6.** Indexed by blob once
+(content-addressed: a blob is indexed the first time any repository stores it), with
+oramacore-cpp's BM25F adapter and lake's positional trigram postings, a hot index on branch tips,
+publication atomic per change (a query sees a change entirely or not at all), and a batched policy
+interface filtering candidates at query time. The manifest and segments are files beside the
+customer's liquid store under `LAKE_STORE_ROOT/<customer>/index/`; Zetta object storage follows in
+#53. Symbols from the compiler (liquid's build graph knows every translation unit), cold release
+and tag snapshots, and artifact extraction arrive in their respective later issues.
 
 ## Secrets, encryption and PKI (decision §12)
 

@@ -3,6 +3,10 @@
 #include <memory>
 #include <string>
 
+namespace lake::search {
+class Service;
+}
+
 namespace lake::control {
 class Store;
 }
@@ -24,6 +28,9 @@ struct ServerOptions {
     // The control-plane store the capabilities call; null = none configured (capabilities answer
     // store_unavailable). Owned by the caller for the server's lifetime.
     std::shared_ptr<control::Store> store;
+    // Search index service backed by LAKE_STORE_ROOT. Null keeps the search
+    // capability unavailable, which is useful for a control-plane-only node.
+    std::shared_ptr<search::Service> search;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except server_info
     // refuses with unauthorized.
     std::string admin_token;

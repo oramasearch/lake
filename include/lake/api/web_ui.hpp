@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "lake/control/store.hpp"
+#include "lake/search/index.hpp"
 
 // Pure renderers: data in, HTML out. No HTTP type, no I/O. Pages are server-rendered,
 // self-contained (one stylesheet at /style.css, no script) and unit-tested here.
@@ -25,5 +26,6 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers);
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners);
 std::string web_ui_repository(const control::Repository& repository, const control::Customer* owner);
+std::string web_ui_search(std::string_view query, const std::vector<search::Hit>& hits);
 
 }  // namespace lake::api
