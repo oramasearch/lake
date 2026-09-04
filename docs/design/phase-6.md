@@ -17,6 +17,12 @@ else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
 
+Identity-core status on this branch: verified TAAP documents, password plus TOTP, persisted
+WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
+hosted identity pages are not yet included. The instance-signed passkey binding remains owned by
+#18, the temporary TAAP decoder remains tracked by liquid #162, and application user pools remain
+owned by #51.
+
 ## Identity: one substrate, three principals
 
 Every principal is a TAAP identity (liquid `docs/library/identity.md`: Ed25519 keys, SHA-512/256

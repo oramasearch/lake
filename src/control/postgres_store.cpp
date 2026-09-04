@@ -7,9 +7,12 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>

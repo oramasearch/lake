@@ -3,8 +3,9 @@
 ## What
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,
-and MCP tools. `sign_up_password`, `sign_in_password`, `verify_totp`, `sign_in_passkey`, and
-`start_oauth` are unauthenticated entry points. `enroll_totp`, `register_passkey`,
+and MCP tools. `sign_up_password`, `sign_in_password`, `verify_totp`,
+`begin_passkey_sign_in`, `sign_in_passkey`, and `start_oauth` are unauthenticated entry points.
+`enroll_totp`, `begin_passkey_registration`, `register_passkey`,
 `create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
 the same row-resolved session or operator credential as every other protected capability.
 
@@ -39,6 +40,21 @@ public endpoints; another registered provider uses `<issuer>/authorize`, `<issue
 `<issuer>/jwks`. Plain HTTP provider URLs are rejected except on loopback for integration tests.
 Provider registration and each successful OAuth sign-in create audit events.
 
+Passkeys use a two-capability WebAuthn ceremony. `begin_passkey_registration` binds a random
+challenge to the authenticated user and pool, then `register_passkey` accepts only attestation
+format `none`, verifies `clientDataJSON` type, challenge and origin, verifies the RP ID hash and
+user-presence flag in authenticator data, and stores the ES256 public key and initial sign count.
+`begin_passkey_sign_in` creates an assertion challenge without revealing whether a credential
+exists. `sign_in_passkey` verifies the same pool-specific origin and RP ID, the ES256 assertion
+over authenticator data plus the client-data hash, and advancement of a nonzero sign count before
+issuing a session. Registration and assertion challenges persist for five minutes and are
+consumed on their first completion attempt.
+
+`LAKE_PUBLIC_HOST` is the RP ID. The current `lake` pool allows
+`https://<LAKE_PUBLIC_HOST>`; each persisted challenge records that origin together with its pool,
+so an assertion cannot cross pool or origin. Additional pool-origin configuration belongs to the
+user-pools work in #51.
+
 Password sign-up requires the client-held TAAP/1 document as `identity_document`. The document is
 JSON with a `payload` object (`id` and base64 Ed25519 `public_key`) and a base64 `signature` over
 the canonical JSON encoding of `payload`. lake verifies that self-signature, hashes the complete
@@ -61,7 +77,7 @@ durable identity.
 
 ```sh
 cmake --build build
-ctest --test-dir build --output-on-failure -R 'Identity|OAuth'
+ctest --test-dir build --output-on-failure -R 'Identity|OAuth|WebAuthn'
 ```
 
 The `Identity.PasswordSessionsTokensAndRevocation` test covers Argon2id password sign-up, session
@@ -71,6 +87,11 @@ Connect provider, verifies PKCE at its token endpoint, signs an id token, serves
 session cookie, proves cache reuse, and rejects state replay.
 The Postgres identity test also reads back the encrypted provider secret and proves that persisted
 OAuth state returns its verifier once and only once.
+`WebAuthn.PersistedRegistrationAssertionAndSignCount` uses a software ES256 authenticator to
+produce `clientDataJSON`, authenticator data, a CBOR attestation object and signed assertions. It
+proves origin binding, first-attempt challenge consumption, session issue and sign-count replay
+rejection. The Postgres identity test repeats a successful registration and assertion against the
+persisted challenge and credential rows.
 
 ## How to change
 
@@ -79,6 +100,6 @@ Add a capability through `src/api/capabilities.cpp`, with its input and output s
 capability to `docs/api/README.md` in the same change. The OAuth callback is the documented
 exception because the provider invokes it as a browser redirect.
 
-OAuth registration, PKCE callback processing, and JWKS verification use the `0003_identity_core`
-tables. Persisted WebAuthn ceremonies remain to be completed before this API is exposed in
-production.
+OAuth registration, PKCE callback processing, JWKS verification and WebAuthn ceremonies use the
+`0003_identity_core` tables. Keep the passkey browser adapter limited to the one documented inline
+script that calls `navigator.credentials`.

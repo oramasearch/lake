@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/control/postgres_store.hpp"
+#include "webauthn_test_support.hpp"
 
 namespace {
 
@@ -127,6 +128,38 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
   const auto oauth_user = store->get_user(oauth->session.user_id);
   ASSERT_TRUE(oauth_user) << oauth_user.error().message;
   EXPECT_FALSE(oauth_user->taap_id.empty());
+
+  lake::test::SoftwareAuthenticator authenticator;
+  const auto registration = store->begin_passkey_registration(
+      context->user_id, "lake", "lake.example", "https://lake.example");
+  ASSERT_TRUE(registration) << registration.error().message;
+  const auto attestation = authenticator.registration(
+      registration->challenge, registration->rp_id, registration->origin);
+  const auto passkey = store->register_passkey(
+      {context->user_id, "lake", registration->challenge,
+       attestation.client_data_json, attestation.authenticator_data,
+       "integration passkey"});
+  ASSERT_TRUE(passkey) << passkey.error().message;
+  EXPECT_FALSE(store->register_passkey(
+      {context->user_id, "lake", registration->challenge,
+       attestation.client_data_json, attestation.authenticator_data,
+       "integration passkey"}));
+
+  const auto assertion = store->begin_passkey_sign_in("lake", "lake.example",
+                                                      "https://lake.example");
+  ASSERT_TRUE(assertion) << assertion.error().message;
+  const auto signed_assertion = authenticator.assertion(
+      assertion->challenge, assertion->rp_id, assertion->origin, 1);
+  const auto passkey_session = store->sign_in_passkey(
+      {"lake", assertion->challenge, signed_assertion.credential_id,
+       signed_assertion.client_data_json, signed_assertion.authenticator_data,
+       signed_assertion.signature, "integration authenticator"});
+  ASSERT_TRUE(passkey_session) << passkey_session.error().message;
+  EXPECT_TRUE(store->context_for(passkey_session->secret));
+  EXPECT_FALSE(store->sign_in_passkey(
+      {"lake", assertion->challenge, signed_assertion.credential_id,
+       signed_assertion.client_data_json, signed_assertion.authenticator_data,
+       signed_assertion.signature, "integration authenticator"}));
 
   const auto revoke =
       store->revoke_device(context->user_id, context->device_id);
