@@ -6,11 +6,11 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth identity, and
-> organization SAML/OIDC provider, federation-policy and SCIM 2.0 user/group provisioning;
-> row-resolved sessions, devices and
-> scoped tokens; tenants, repositories, organization administration and policy over the Postgres
-> control plane), the pages to explore them, the OpenAPI
+> capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth
+> identity, organization SAML/OIDC providers, federation policy and SCIM 2.0 user/group
+> provisioning; row-resolved sessions, devices and scoped tokens; tenants, repositories,
+> organization administration and policy over the Postgres control plane), public repository
+> reading through libliquid, the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
 > Prometheus metrics and JSON request logs. Protected operations accept the operator bearer or a
 > row-resolved user credential; probes and documented identity entry points are unauthenticated.
@@ -30,11 +30,15 @@ liquid is the tool. lake is where it collects.
 > the `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
 > `LAKE_STORE_ROOT/<customer>/index/`, publishes a change through atomic manifest replacement,
 > filters candidates with the batched policy engine, and records the signed query outcome through
-> the registry.
+> the registry. Migration `0009_secrets` adds customer-namespaced organization mounts, versioned
+> static secrets with delete/restore/destroy history, and named encryption keys with rotation,
+> encrypt/decrypt/rewrap, Ed25519 signatures, HMAC, derivation and customer-KEK rotation. The
+> registry records every operation, including mount-grant denials, and the secrets pages expose
+> metadata without rendering protected values or key material.
 
 ## Build and run
 
-Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3.6.3
+Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3
 (`brew install openssl@3`). Clone with submodules — the HTTP stack is vendored.
 GitHub Actions repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5
 toolchain on every push and pull request; see [`docs/build/ci.md`](docs/build/ci.md).
@@ -57,8 +61,9 @@ ctest --test-dir build
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
-| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
+| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and artifact records await liquid #166. |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
@@ -69,14 +74,13 @@ ctest --test-dir build
 `lake version` prints the version. The default port is 4900 (`--listen HOST:PORT`);
 `--node NAME` names the node. `--control-db URI` (default `$LAKE_CONTROL_DB_URI`) selects the
 Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-token`
-(default `$LAKE_ADMIN_TOKEN`) is the operator bearer. `LAKE_PUBLIC_HOST` supplies the WebAuthn RP
-ID and OAuth callback host; user sessions and API tokens are resolved from Postgres on each request.
+(default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
 SIGINT/SIGTERM stop it cleanly.
 
 ## Container image
 
-`Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14,
-OpenSSL 3.6.3 and CMake 3.31, then ships it on a minimal Ubuntu runtime as UID/GID 10001,
+`Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14
+and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++ + libpq) as UID/GID 10001,
 `ENTRYPOINT lake`, `CMD --listen 0.0.0.0:4900`, port 4900 exposed. It is Zetta's headless-image
 recipe minus the GUI and Postgres deps. Images go to the **private** Docker Hub repo
 `oramasearch/lake` from the tagged [`image` workflow](.github/workflows/image.yml): an immutable
@@ -102,7 +106,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/api/server.hpp` | `ApiServer` / `ServerOptions` in Zetta's shape — no HTTP type appears here |
 | `src/api/http_server.cpp` | the **one** translation unit that knows Beast2, `boost::http` and Boost.JSON; serves the registry as REST, OpenAPI and MCP |
 | `include/lake/api/registry.hpp`, `rest.hpp`, `mcp.hpp`, `capabilities.hpp` | the capability registry and its three renderings (HTTP-free) |
-| `include/lake/control/`, `src/control/` | the control-plane store and policy engine: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
+| `include/lake/control/`, `src/control/` | the control-plane store, policy engine, static-secret lifecycle and encryption service: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
@@ -110,7 +114,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, SSO federation, the authorization object graph, the lake identity and the signed audit stream. The operator copies it once per wave through its own operator pull request. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 

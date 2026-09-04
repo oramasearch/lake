@@ -9,14 +9,21 @@
 > `15-consumer-sync-and-web.md`. This page is written before the issues and corrected by them.
 
 lake today is the control surface: one capability registry rendered as REST `/v1`, OpenAPI and
-MCP; users, organizations, customers and repositories in Postgres; server-rendered pages behind
-the admin sign-in; telemetry; CI. Organization administration and the authorization object graph
+MCP; users, organizations, customers and repositories in Postgres; server-rendered pages,
+including anonymous reads of public repository data; telemetry; CI. Organization administration and the authorization object graph
 described below are implemented by lake issues #16 and #19 in migration
 `0004_organizations_policy`; identity core is implemented in migration `0007_identity_core`.
 Everything
 else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
+
+**Web UI status: repository browsing is implemented in lake #9.** Repository lists, refs,
+trees, files, change logs, conflict values, organization and team access views render without
+client-side code. Every returned repository candidate passes batched policy authorization, and
+anonymous requests can read only public repositories. Structural change diffs and artifact
+records/attestations are intentionally deferred to liquid #166, which supplies the missing public
+library APIs.
 
 Identity-core status on this branch: verified TAAP documents, password plus TOTP with one-use
 recovery codes and fresh-verification disablement, persisted
@@ -28,7 +35,7 @@ lake-signed TAAP binding beside the credential. Application user pools remain ow
 **SSO federation status (#15, #21).** Organization SAML and OIDC provider records, encrypted
 OIDC client secrets, hashed SCIM tokens, federation issuer-claim policy, JIT user mapping,
 SCIM user/group provisioning, session revocation on SCIM deactivation, and provisioning logs are
-implemented in `0009_sso_federation`. Provider configuration, testing, federation policy,
+implemented in `0010_sso_federation`. Provider configuration, testing, federation policy,
 provisioning, and SSO sign-in are registry capabilities and append signed audit events. Their
 contract is documented in [`../api/sso.md`](../api/sso.md).
 
@@ -212,6 +219,13 @@ instance identity; #27), and break-glass with a Shamir-recovered root key and a 
 today, an HSM-backed store when the operator provides one), the same envelope model liquid uses
 for its store. Every operation is an audit event.
 
+**Implemented status.** Issues #24 and #25 provide migration `0009_secrets`, organization mounts,
+versioned static-secret lifecycle, named key rotation, encrypt/decrypt/rewrap, Ed25519 sign/verify,
+HMAC-SHA-256, stored child-key derivation and customer-KEK rotation. The API, authorization,
+signed audit fields and pages are documented in [`../api/secrets.md`](../api/secrets.md) and
+[`../api/encryption.md`](../api/encryption.md). Certificate profiles, caller federation and
+break-glass remain in #26–#28.
+
 ## The forge, the drive, models, metering, migration
 
 Change review attaches to liquid's change identity, comments anchor to cursors that survive
@@ -251,5 +265,5 @@ and pushes a liquid repository to it.
 
 ## How to change
 
-This page precedes its implementation. An issue that finds it wrong changes it in the same commit
-as the code and says why in the commit body.
+This page is the implementation contract. An issue that finds it wrong changes it in the same
+commit as the code and says why in the commit body.

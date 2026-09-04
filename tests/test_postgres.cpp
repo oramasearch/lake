@@ -83,7 +83,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     context.authorized = true;
     context.acting_identity = "admin";
     context.request_id = "postgres-integration";
-    context.instance_kek = "postgres-test-instance-kek";
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     auto call = [&](const std::string& name, json input = json::object()) {
         return registry.call(name, input, context);
     };
@@ -272,6 +272,137 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     ASSERT_TRUE(hits) << hits.error().message;
     ASSERT_EQ(hits->size(), 1U);
     EXPECT_EQ(hits->front().repository, allowed_repository);
+}
+
+TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+
+    auto store = lake::control::make_postgres_store(uri);
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    ApiContext context;
+    context.store = store.get();
+    context.authorized = true;
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    auto call = [&](const std::string& name, json input = json::object()) {
+        context.request_id.clear();
+        return registry.call(name, input, context);
+    };
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+
+    const ApiResult organization =
+        call("create_organization", {{"display_name", "Secrets integration " + suffix}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const ApiResult customer = call("create_customer",
+                                    {{"customer_type", "organization"},
+                                     {"organization_id", organization.value.at("id")},
+                                     {"name", "secrets-" + suffix}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult mount = call("create_secret_mount",
+                                 {{"customer_id", customer.value.at("id")},
+                                  {"organization_id", organization.value.at("id")},
+                                  {"name", "mount-" + suffix}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value.at("id");
+    ASSERT_TRUE(call("get_secret_mount", {{"mount_id", mount_id}}).ok);
+    ASSERT_TRUE(call("list_secret_mounts", {{"customer_id", customer.value.at("id")}}).ok);
+
+    const ApiResult first =
+        call("put_secret",
+             {{"mount_id", mount_id}, {"name", "database"}, {"value", {{"password", "one"}}}});
+    ASSERT_TRUE(first.ok) << first.error.message;
+    const ApiResult second = call("put_secret",
+                                  {{"mount_id", mount_id},
+                                   {"name", "database"},
+                                   {"value", {{"password", "two"}}},
+                                   {"check_and_set", 1}});
+    ASSERT_TRUE(second.ok) << second.error.message;
+    const ApiResult metadata =
+        call("secret_metadata", {{"mount_id", mount_id}, {"name", "database"}});
+    ASSERT_TRUE(metadata.ok) << metadata.error.message;
+    EXPECT_EQ(metadata.value.at("versions").size(), 2);
+    ASSERT_TRUE(call("delete_secret_versions",
+                     {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})
+                    .ok);
+    EXPECT_FALSE(
+        call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 1}}).ok);
+    ASSERT_TRUE(call("undelete_secret_versions",
+                     {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})
+                    .ok);
+    ASSERT_TRUE(
+        call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 1}}).ok);
+    ASSERT_TRUE(call("destroy_secret_versions",
+                     {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})
+                    .ok);
+    EXPECT_FALSE(
+        call("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 1}}).ok);
+
+    const ApiResult key =
+        call("create_encryption_key", {{"mount_id", mount_id}, {"name", "transit"}});
+    ASSERT_TRUE(key.ok) << key.error.message;
+    ASSERT_TRUE(call("get_encryption_key", {{"mount_id", mount_id}, {"name", "transit"}}).ok);
+    ASSERT_TRUE(call("list_encryption_keys", {{"mount_id", mount_id}}).ok);
+    const std::string payload = "cG9zdGdyZXM";
+    const ApiResult encrypted =
+        call("encrypt", {{"mount_id", mount_id}, {"name", "transit"}, {"plaintext", payload}});
+    ASSERT_TRUE(encrypted.ok) << encrypted.error.message;
+    ASSERT_TRUE(call("rotate_encryption_key", {{"mount_id", mount_id}, {"name", "transit"}}).ok);
+    const ApiResult decrypted = call(
+        "decrypt",
+        {{"mount_id", mount_id}, {"name", "transit"}, {"ciphertext", encrypted.value.at("value")}});
+    ASSERT_TRUE(decrypted.ok) << decrypted.error.message;
+    EXPECT_EQ(decrypted.value.at("value"), payload);
+    const ApiResult rewrapped = call(
+        "rewrap",
+        {{"mount_id", mount_id}, {"name", "transit"}, {"ciphertext", encrypted.value.at("value")}});
+    ASSERT_TRUE(rewrapped.ok) << rewrapped.error.message;
+    EXPECT_EQ(rewrapped.value.at("key_version"), 2);
+    const ApiResult signature =
+        call("sign", {{"mount_id", mount_id}, {"name", "transit"}, {"message", payload}});
+    ASSERT_TRUE(signature.ok) << signature.error.message;
+    const ApiResult verified = call("verify",
+                                    {{"mount_id", mount_id},
+                                     {"name", "transit"},
+                                     {"message", payload},
+                                     {"signature", signature.value.at("value")}});
+    ASSERT_TRUE(verified.ok) << verified.error.message;
+    EXPECT_TRUE(verified.value.at("valid"));
+    ASSERT_TRUE(
+        call("hmac", {{"mount_id", mount_id}, {"name", "transit"}, {"message", payload}}).ok);
+    ASSERT_TRUE(call("derive_encryption_key",
+                     {{"mount_id", mount_id},
+                      {"parent_name", "transit"},
+                      {"name", "derived"},
+                      {"context", "Y29udGV4dA"}})
+                    .ok);
+
+    const ApiResult kek = call("rotate_customer_kek", {{"customer_id", customer.value.at("id")}});
+    ASSERT_TRUE(kek.ok) << kek.error.message;
+    EXPECT_GE(kek.value.at("data_keys_rewrapped"), 4);
+    const ApiResult after = call("read_secret", {{"mount_id", mount_id}, {"name", "database"}});
+    ASSERT_TRUE(after.ok) << after.error.message;
+    EXPECT_EQ(after.value.at("value").at("password"), "two");
+    ASSERT_TRUE(call("decrypt",
+                     {{"mount_id", mount_id},
+                      {"name", "transit"},
+                      {"ciphertext", rewrapped.value.at("value")}})
+                    .ok);
+
+    context.operator_credential = false;
+    context.acting_identity = "taap:1:ed25519:no-mount-grant-" + suffix;
+    const ApiResult denied = call("read_secret", {{"mount_id", mount_id}, {"name", "database"}});
+    EXPECT_FALSE(denied.ok);
+    EXPECT_EQ(denied.error.code, "unauthorized");
+    const auto event = store->latest_audit_event();
+    ASSERT_TRUE(event) << event.error().message;
+    EXPECT_EQ(event->draft.outcome, "denied");
+    EXPECT_EQ(event->draft.details.at("mount_id"), mount_id);
 }
 
 } // namespace

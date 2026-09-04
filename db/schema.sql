@@ -464,7 +464,103 @@ CREATE TABLE IF NOT EXISTS identity_mfa_guard (
 
 INSERT INTO schema_migrations (version) VALUES ('0008_mfa_recovery') ON CONFLICT DO NOTHING;
 
--- SSO and federation (migration 0009): enterprise identity providers, SCIM resources, and the
+-- ---------------------------------------------------------------------------------------------
+-- Secrets and encryption (migration 0009): organization mounts in a customer namespace,
+-- versioned static values, and named encryption keys. The existing keystore gains one row per
+-- customer KEK; that KEK wraps every mount and transit data key in secrets_data_keys. Rotating a
+-- customer KEK updates only wrapped data keys, never stored secret ciphertext.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE keystore ADD COLUMN IF NOT EXISTS customer_id uuid REFERENCES customers(id) ON DELETE CASCADE;
+CREATE UNIQUE INDEX IF NOT EXISTS keystore_customer_id_unique
+    ON keystore (customer_id) WHERE customer_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS secrets_mounts (
+    id              uuid         PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id     uuid         NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    organization_id uuid         NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name            varchar(256) NOT NULL,
+    description     text         NOT NULL DEFAULT '',
+    created_at      timestamptz  NOT NULL DEFAULT now(),
+    updated_at      timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT secrets_mounts_name_format
+        CHECK (name ~ '^[a-z0-9]([a-z0-9-]{0,254}[a-z0-9])?$'),
+    CONSTRAINT secrets_mounts_scope_name_unique UNIQUE (customer_id, organization_id, name)
+);
+CREATE INDEX IF NOT EXISTS secrets_mounts_organization_id_idx
+    ON secrets_mounts (organization_id, created_at DESC);
+DROP TRIGGER IF EXISTS secrets_mounts_set_updated_at ON secrets_mounts;
+CREATE TRIGGER secrets_mounts_set_updated_at BEFORE UPDATE ON secrets_mounts
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS secrets_entries (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    mount_id        uuid        NOT NULL REFERENCES secrets_mounts(id) ON DELETE CASCADE,
+    name            text        NOT NULL,
+    current_version bigint      NOT NULL DEFAULT 0,
+    custom_metadata jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT secrets_entries_name_check CHECK (length(name) BETWEEN 1 AND 1024),
+    CONSTRAINT secrets_entries_mount_name_unique UNIQUE (mount_id, name)
+);
+CREATE INDEX IF NOT EXISTS secrets_entries_mount_id_idx
+    ON secrets_entries (mount_id, created_at DESC);
+DROP TRIGGER IF EXISTS secrets_entries_set_updated_at ON secrets_entries;
+CREATE TRIGGER secrets_entries_set_updated_at BEFORE UPDATE ON secrets_entries
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS secrets_versions (
+    entry_id     uuid        NOT NULL REFERENCES secrets_entries(id) ON DELETE CASCADE,
+    version      bigint      NOT NULL,
+    ciphertext   text,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    deleted_at   timestamptz,
+    destroyed_at timestamptz,
+    PRIMARY KEY (entry_id, version),
+    CONSTRAINT secrets_versions_number_check CHECK (version > 0),
+    CONSTRAINT secrets_versions_destroyed_check
+        CHECK (destroyed_at IS NULL OR (ciphertext IS NULL AND deleted_at IS NOT NULL))
+);
+
+CREATE TABLE IF NOT EXISTS secrets_encryption_keys (
+    id              uuid         PRIMARY KEY DEFAULT gen_random_uuid(),
+    mount_id        uuid         NOT NULL REFERENCES secrets_mounts(id) ON DELETE CASCADE,
+    name            varchar(256) NOT NULL,
+    derived_from_id uuid         REFERENCES secrets_encryption_keys(id) ON DELETE RESTRICT,
+    current_version bigint       NOT NULL DEFAULT 1,
+    created_at      timestamptz  NOT NULL DEFAULT now(),
+    updated_at      timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT secrets_encryption_keys_name_format
+        CHECK (name ~ '^[a-z0-9]([a-z0-9-]{0,254}[a-z0-9])?$'),
+    CONSTRAINT secrets_encryption_keys_version_check CHECK (current_version > 0),
+    CONSTRAINT secrets_encryption_keys_mount_name_unique UNIQUE (mount_id, name)
+);
+CREATE INDEX IF NOT EXISTS secrets_encryption_keys_mount_id_idx
+    ON secrets_encryption_keys (mount_id, created_at DESC);
+DROP TRIGGER IF EXISTS secrets_encryption_keys_set_updated_at ON secrets_encryption_keys;
+CREATE TRIGGER secrets_encryption_keys_set_updated_at BEFORE UPDATE ON secrets_encryption_keys
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS secrets_data_keys (
+    customer_id uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    owner_kind  text        NOT NULL,
+    owner_id    uuid        NOT NULL,
+    key_version bigint      NOT NULL,
+    wrapped_key text        NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (owner_kind, owner_id, key_version),
+    CONSTRAINT secrets_data_keys_owner_kind_check CHECK (owner_kind IN ('mount', 'encryption')),
+    CONSTRAINT secrets_data_keys_version_check CHECK (key_version > 0)
+);
+CREATE INDEX IF NOT EXISTS secrets_data_keys_customer_id_idx ON secrets_data_keys (customer_id);
+
+CREATE TABLE IF NOT EXISTS secrets_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0009_secrets') ON CONFLICT DO NOTHING;
+
+-- SSO and federation (migration 0010): enterprise identity providers, SCIM resources, and the
 -- organization policy that names which issuer may assert each claim. The provider records only
 -- encrypted client secrets and SCIM bearer-token hashes. Deactivating a SCIM user revokes every
 -- one of that user's sessions in the same transaction.
@@ -576,4 +672,4 @@ CREATE TABLE IF NOT EXISTS sso_federation_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 
-INSERT INTO schema_migrations (version) VALUES ('0009_sso_federation') ON CONFLICT DO NOTHING;
+INSERT INTO schema_migrations (version) VALUES ('0010_sso_federation') ON CONFLICT DO NOTHING;

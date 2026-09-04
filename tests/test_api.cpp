@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
+#include <filesystem>
 #include <sstream>
 
 #include <arpa/inet.h>
@@ -11,11 +13,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <liquid/liquid.hpp>
+
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/sync_store.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/memory_store.hpp"
@@ -45,6 +50,80 @@ struct Surface {
         return registry.call(name, input, ctx);
     }
 };
+
+struct RepositoryFixtureStore final : SyncStore {
+    SyncStoreResult<std::vector<std::string>>
+    find_missing(const std::string&, const std::vector<std::string>&) override {
+        return std::vector<std::string>{};
+    }
+
+    SyncStoreResult<void>
+    write(const std::string&, const std::string&, std::vector<std::byte>) override {
+        return {};
+    }
+
+    SyncStoreResult<std::vector<std::byte>> read(const std::string&, const std::string&) override {
+        return std::vector<std::byte>{};
+    }
+
+    SyncStoreResult<std::vector<RepositoryContentRef>>
+    repository_refs(const std::string&, const std::string&) override {
+        return std::vector<RepositoryContentRef>{{"main", "change-1"}};
+    }
+
+    SyncStoreResult<std::vector<RepositoryTreeEntry>>
+    repository_tree(const std::string&, const std::string&, const std::string&) override {
+        return std::vector<RepositoryTreeEntry>{{"readme.md", "blob", "blob-1", 0644}};
+    }
+
+    SyncStoreResult<RepositoryFile> repository_file(const std::string&,
+                                                    const std::string&,
+                                                    const std::string&,
+                                                    const std::string&) override {
+        return RepositoryFile{"readme.md", "blob-1", "hello", 5};
+    }
+
+    SyncStoreResult<std::vector<RepositoryChange>> repository_log(const std::string&,
+                                                                  const std::string&) override {
+        return std::vector<RepositoryChange>{
+            {"change-1", {}, "taap:1:ed25519:author", "initial", "2026-09-04T00:00:00Z"}};
+    }
+
+    SyncStoreResult<std::vector<RepositoryConflict>>
+    repository_conflicts(const std::string&, const std::string&) override {
+        return std::vector<RepositoryConflict>{{"readme.md", {"blob-1", "blob-2"}}};
+    }
+};
+
+class TemporaryRepositoryRoot {
+public:
+    TemporaryRepositoryRoot() {
+        static std::atomic<unsigned long> next{0};
+        path_ = std::filesystem::temp_directory_path() / ("lake-web-ui-" + std::to_string(++next));
+        std::filesystem::create_directories(path_);
+    }
+
+    ~TemporaryRepositoryRoot() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    const std::filesystem::path& path() const {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+std::vector<std::byte> bytes(const std::string& value) {
+    std::vector<std::byte> output;
+    output.reserve(value.size());
+    for (const char character : value) {
+        output.push_back(static_cast<std::byte>(character));
+    }
+    return output;
+}
 
 std::string
 http_get(unsigned short port, std::string_view path, std::string_view authorization = {}) {
@@ -624,7 +703,7 @@ TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
     ApiContext context;
     context.store = store.get();
     context.node_name = "postgres-test";
-    context.instance_kek = "postgres-test-instance-kek";
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     context.authorized = true;
     context.acting_identity = "admin";
 
@@ -815,6 +894,139 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
     EXPECT_EQ(none.value["items"].size(), 0u);
     EXPECT_EQ(s.call("get_repository", {{"id", repo.value["id"]}}).value["name"], "liquid");
     EXPECT_EQ(s.call("get_repository", {{"id", "missing"}}).error.code, "not_found");
+}
+
+TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
+    Surface s;
+    const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const ApiResult customer =
+        s.call("create_customer",
+               {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok);
+    const ApiResult private_repository =
+        s.call("create_repository",
+               {{"customer_id", customer.value["id"]}, {"name", "private-repository"}});
+    const ApiResult public_repository = s.call("create_repository",
+                                               {{"customer_id", customer.value["id"]},
+                                                {"name", "public-repository"},
+                                                {"visibility", "public"}});
+    ASSERT_TRUE(private_repository.ok);
+    ASSERT_TRUE(public_repository.ok);
+
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    const ApiResult listed = s.call("list_repositories");
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 1u);
+    EXPECT_EQ(listed.value["items"][0]["id"], public_repository.value["id"]);
+    EXPECT_TRUE(s.call("get_repository", {{"id", public_repository.value["id"]}}).ok);
+    const ApiResult hidden = s.call("get_repository", {{"id", private_repository.value["id"]}});
+    EXPECT_EQ(hidden.error.code, "unauthorized");
+
+    for (const auto& capability : s.registry.list()) {
+        if (capability->name.starts_with("list_")) {
+            EXPECT_TRUE(capability->authorizes_candidates) << capability->name;
+        }
+    }
+}
+
+TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
+    Surface s;
+    RepositoryFixtureStore repository_store;
+    s.ctx.sync_store = &repository_store;
+    const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok);
+    const ApiResult customer =
+        s.call("create_customer",
+               {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok);
+    const ApiResult repository = s.call("create_repository",
+                                        {{"customer_id", customer.value["id"]},
+                                         {"name", "public-repository"},
+                                         {"visibility", "public"}});
+    ASSERT_TRUE(repository.ok);
+    const std::string repository_id = repository.value["id"];
+
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    EXPECT_EQ(s.call("repository_refs", {{"id", repository_id}}).value["items"][0]["name"], "main");
+    EXPECT_EQ(s.call("repository_tree", {{"id", repository_id}, {"ref", "main"}})
+                  .value["items"][0]["path"],
+              "readme.md");
+    EXPECT_EQ(
+        s.call("repository_file", {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}})
+            .value["contents"],
+        "hello");
+    EXPECT_EQ(s.call("list_changes", {{"id", repository_id}}).value["items"].size(), 1u);
+    EXPECT_EQ(
+        s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}}).value["message"],
+        "initial");
+    EXPECT_EQ(s.call("list_conflicts", {{"id", repository_id}}).value["items"][0]["blobs"].size(),
+              2u);
+    EXPECT_EQ(
+        s.call("get_artifact", {{"id", repository_id}, {"result_id", "result-1"}}).value["status"],
+        "waiting for liquid #166");
+}
+
+TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
+    TemporaryRepositoryRoot root;
+    const auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user({"", "", "Ada"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "ada"});
+    ASSERT_TRUE(customer);
+    const auto public_repository =
+        store->create_repository({customer->id, "public-repository", "visible", "public"});
+    const auto private_repository =
+        store->create_repository({customer->id, "private-repository", "hidden", "private"});
+    ASSERT_TRUE(public_repository);
+    ASSERT_TRUE(private_repository);
+
+    const std::filesystem::path repository_path =
+        root.path() / customer->id / "repositories" / public_repository->id;
+    auto opened = liquid::runtime::block_on(liquid::repository::create(repository_path));
+    ASSERT_TRUE(opened) << opened.error().message;
+    auto repository = std::move(*opened);
+    ASSERT_TRUE(liquid::runtime::block_on(repository.write("readme.md", bytes("public content"))));
+    const auto change = liquid::runtime::block_on(repository.cut("initial public content"));
+    ASSERT_TRUE(change) << change.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "test-node";
+    options.admin_token = "test-token";
+    options.store = store;
+    options.store_root = root.path().string();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::string listed = http_get(server.port(), "/repositories");
+    EXPECT_NE(listed.find(" 200 "), std::string::npos);
+    EXPECT_NE(listed.find("public-repository"), std::string::npos);
+    EXPECT_EQ(listed.find("private-repository"), std::string::npos);
+
+    const std::string public_page =
+        http_get(server.port(), "/repository?id=" + public_repository->id);
+    EXPECT_NE(public_page.find(" 200 "), std::string::npos);
+    EXPECT_NE(public_page.find("public-repository"), std::string::npos);
+    const std::string tree_page =
+        http_get(server.port(), "/repository/tree?id=" + public_repository->id + "&ref=main");
+    EXPECT_NE(tree_page.find(" 200 "), std::string::npos);
+    EXPECT_NE(tree_page.find("readme.md"), std::string::npos);
+    const std::string file_page = http_get(
+        server.port(), "/file?repository_id=" + public_repository->id + "&ref=main&path=readme.md");
+    EXPECT_NE(file_page.find(" 200 "), std::string::npos);
+    EXPECT_NE(file_page.find("public content"), std::string::npos);
+
+    const std::string private_page =
+        http_get(server.port(), "/repository?id=" + private_repository->id);
+    EXPECT_NE(private_page.find(" 302 "), std::string::npos);
+    EXPECT_NE(private_page.find("Location: /login"), std::string::npos);
+    const std::string private_api =
+        http_get(server.port(), "/v1/get_repository?id=" + private_repository->id);
+    EXPECT_NE(private_api.find(" 403 "), std::string::npos);
+    server.stop();
 }
 
 TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {

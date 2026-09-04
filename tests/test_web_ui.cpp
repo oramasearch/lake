@@ -40,7 +40,13 @@ TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
     const std::string organizations = lake::api::web_ui_organizations({organization});
     EXPECT_NE(organizations.find("&lt;Orama&gt;"), std::string::npos);
     EXPECT_NE(organizations.find("/teams?organization_id=o1"), std::string::npos);
+    EXPECT_NE(organizations.find("/organization/access?id=o1"), std::string::npos);
     EXPECT_EQ(organizations.find("<script"), std::string::npos);
+
+    const lake::control::Team team{
+        "t1", "o1", "reviewers", "Reviewers", "2026-09-04T00:00:00Z", "2026-09-04T00:00:00Z"};
+    const std::string teams = lake::api::web_ui_teams("o1", {team});
+    EXPECT_NE(teams.find("/team/access?id=t1"), std::string::npos);
 
     const lake::control::PolicyObject object{"p1", "team", "t1", "", "created", "updated", true};
     const lake::control::EffectiveAccessEntry entry{
@@ -185,6 +191,42 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
 }
 
+TEST(WebUi, RepositoryContentAndDeferredPagesRenderSafely) {
+    const lake::control::Repository repository{
+        "r1", "c1", "liquid", "", "public", "", "", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"};
+    const lake::api::RepositoryTreeEntry tree_entry{"<readme>.md", "blob", "blob-1", 0644};
+    const std::string tree =
+        lake::api::web_ui_repository_tree(repository, "main", {tree_entry}, false);
+    EXPECT_NE(tree.find("&lt;readme&gt;.md"), std::string::npos);
+    EXPECT_NE(tree.find("href=\"/file?repository_id=r1"), std::string::npos);
+    EXPECT_EQ(tree.find("<script"), std::string::npos);
+
+    const lake::api::RepositoryFile file{"<readme>.md", "blob-1", "<source>", 8};
+    const std::string contents = lake::api::web_ui_repository_file(repository, file, false);
+    EXPECT_NE(contents.find("&lt;source&gt;"), std::string::npos);
+    EXPECT_EQ(contents.find("<source>"), std::string::npos);
+
+    const lake::api::RepositoryChange change{
+        "change-1", {"parent-1"}, "taap:1:ed25519:author", "<message>", "2026-09-04T00:00:00Z"};
+    const std::string log = lake::api::web_ui_repository_log(repository, {change}, false);
+    EXPECT_NE(log.find("href=\"/change?repository_id=r1&amp;id=change-1\""), std::string::npos);
+    EXPECT_NE(log.find("&lt;message&gt;"), std::string::npos);
+
+    const std::string deferred_change = lake::api::web_ui_change(repository, change, false);
+    EXPECT_NE(deferred_change.find("liquid #166"), std::string::npos);
+    EXPECT_NE(deferred_change.find("&lt;message&gt;"), std::string::npos);
+
+    const lake::api::RepositoryConflict conflict{"<config>", {"left", "right"}};
+    const std::string conflicts =
+        lake::api::web_ui_repository_conflicts(repository, {conflict}, false);
+    EXPECT_NE(conflicts.find("&lt;config&gt;"), std::string::npos);
+
+    const std::string artifact = lake::api::web_ui_artifact("r1", "result-1", false);
+    EXPECT_NE(artifact.find("result-1"), std::string::npos);
+    EXPECT_NE(artifact.find("liquid #166"), std::string::npos);
+    EXPECT_EQ(artifact.find("<script"), std::string::npos);
+}
+
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     lake::audit::Event event{
         .id = "event-1",
@@ -204,4 +246,44 @@ TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     EXPECT_EQ(page.find("<admin>"), std::string::npos);
     EXPECT_NE(page.find("capability/list_users"), std::string::npos);
     EXPECT_NE(page.find("GET /v1/verify_audit"), std::string::npos);
+}
+
+TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
+    const lake::control::SecretMount mount{"mount-1",
+                                           "customer-1",
+                                           "organization-1",
+                                           "production<&",
+                                           "credentials<&",
+                                           "created",
+                                           "updated"};
+    const std::string mounts = lake::api::web_ui_secret_mounts({mount});
+    EXPECT_NE(mounts.find("production&lt;&amp;"), std::string::npos);
+    EXPECT_NE(mounts.find("credentials&lt;&amp;"), std::string::npos);
+    EXPECT_NE(mounts.find("/secrets?mount_id=mount-1"), std::string::npos);
+    EXPECT_NE(mounts.find("/encryption-keys?mount_id=mount-1"), std::string::npos);
+    EXPECT_EQ(mounts.find("<script"), std::string::npos);
+
+    lake::control::SecretMetadata metadata{
+        "mount-1",
+        "database<&",
+        2,
+        {{"owner", "payments<&"}},
+        {{1, "created-1", "deleted<&", ""}, {2, "created-2", "", ""}},
+        "created",
+        "updated"};
+    const std::string secrets = lake::api::web_ui_secrets(mount, "database<&", &metadata);
+    EXPECT_NE(secrets.find("database&lt;&amp;"), std::string::npos);
+    EXPECT_NE(secrets.find("payments&lt;&amp;"), std::string::npos);
+    EXPECT_NE(secrets.find("deleted&lt;&amp;"), std::string::npos);
+    EXPECT_NE(secrets.find("Inspect version metadata"), std::string::npos);
+    EXPECT_EQ(secrets.find("secret-value"), std::string::npos);
+    EXPECT_EQ(secrets.find("<script"), std::string::npos);
+
+    const lake::control::EncryptionKey key{
+        "key-1", "mount-1", "orders<&", "parent<&", 3, "created", "updated"};
+    const std::string keys = lake::api::web_ui_encryption_keys(mount, {key});
+    EXPECT_NE(keys.find("orders&lt;&amp;"), std::string::npos);
+    EXPECT_NE(keys.find("parent&lt;&amp;"), std::string::npos);
+    EXPECT_NE(keys.find("Key material is never returned"), std::string::npos);
+    EXPECT_EQ(keys.find("<script"), std::string::npos);
 }

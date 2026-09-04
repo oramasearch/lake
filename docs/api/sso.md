@@ -24,6 +24,8 @@ entities, and XML forms outside that subset.
 
 `start_sso_oidc` creates an authorization-code flow for an enterprise OIDC provider. It reuses
 the identity core's state, PKCE verifier, nonce, one-use callback, and cached JWKS verification.
+Flow creation validates the synthetic `sso-<provider-id>` callback name against that enabled OIDC
+provider before persisting the state.
 The callback exchanges the code with the encrypted configured client secret, verifies the ID
 token, applies federation issuer policy, and then creates the browser session.
 
@@ -80,7 +82,7 @@ session revocation. Set `LAKE_TEST_DB_URI` to run its database-backed portion.
 Keep SSO configuration in `sso_*` tables and federation policy in
 `federation_issuers`; extend both `Store` implementations and the capability registry together.
 Do not expose a provider secret or SCIM token through JSON. The migration is
-`0009_sso_federation`; its numbered guard table is part of the migration contract. The separate
+`0010_sso_federation`; its numbered guard table is part of the migration contract. The separate
 operator repository copies this schema once per wave in its own operator pull request, under the
 wave-level waiver; this change updates lake's `db/schema.sql` source of truth only.
 

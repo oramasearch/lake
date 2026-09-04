@@ -99,12 +99,17 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     if (context.request_id.empty()) {
         context.request_id = control::new_uuid_v4();
     }
+    context.audit_customer_id.clear();
+    context.audit_kind.clear();
+    context.audit_object.clear();
+    context.audit_details = nlohmann::json::object();
     const auto capability = find(name);
     if (!capability)
         return ApiResult::failure("unknown_capability", "no capability named " + name);
     ApiResult result;
     bool proceed = true;
-    if (capability->requires_auth && !context.authorized) {
+    if (capability->requires_auth && !context.authorized &&
+        !capability->allows_anonymous_public_read) {
         result = ApiResult::failure("unauthorized",
                                     "a valid session or operator credential is required");
         proceed = false;
@@ -117,7 +122,8 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         result =
             ApiResult::failure("unauthorized", "credential does not grant " + capability->name);
         proceed = false;
-    } else if (capability->requires_auth && !capability->authorizes_candidates) {
+    } else if (capability->requires_auth && context.authorized &&
+               !capability->authorizes_candidates) {
         if (capability->object.empty() || capability->action.empty() ||
             !capability->resolve_object) {
             result = ApiResult::failure("store_error",
@@ -129,14 +135,14 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
             proceed = false;
         } else {
             std::expected<std::string, ApiError> object_id = std::string{};
-            if (context.acting_identity != "admin") {
+            if (context.acting_identity != "admin" || capability->resolves_operator_audit_target) {
                 object_id = capability->resolve_object(input, context);
             }
             if (!object_id) {
                 result = ApiResult::failure(
                     object_id.error().code, object_id.error().message, object_id.error().path);
                 proceed = false;
-            } else {
+            } else if (context.acting_identity != "admin") {
                 auto decision = control::authorize(*context.store,
                                                    context.acting_identity,
                                                    *object_id,
@@ -169,18 +175,23 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         return result;
     }
     // One audit event per call, whatever the outcome; a denial is an outcome, not an exception.
-    const std::string kind = name == "set_audit_retention" ? "retention" : "capability";
+    const std::string kind = !context.audit_kind.empty()
+                                 ? context.audit_kind
+                                 : (name == "set_audit_retention" ? "retention" : "capability");
+    nlohmann::json details = context.audit_details;
+    details["error_code"] = result.ok ? "" : result.error.code;
     const audit::EventDraft event{
+        .customer_id = context.audit_customer_id,
         .kind = kind,
         .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
-        .object = "capability/" + name,
+        .object = context.audit_object.empty() ? "capability/" + name : context.audit_object,
         .action = name,
         .outcome =
             result.ok ? "success" : (result.error.code == "unauthorized" ? "denied" : "failure"),
         .request_id = context.request_id,
         .method = context.authentication_method,
         .device = context.device,
-        .details = {{"error_code", result.ok ? "" : result.error.code}},
+        .details = std::move(details),
     };
     const audit::IdentityOptions options{
         .configured_seed = context.identity_seed,

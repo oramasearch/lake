@@ -16,6 +16,8 @@ envelope as `structuredContent` (and as text), with `isError` set.
 
 **Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
 the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
+Repository reads are the deliberate public-read exception: anonymous calls return only a public
+repository and its content; all other repository visibility levels remain protected.
 
 ## Operational routes
 
@@ -40,6 +42,9 @@ the lake `identity`, and the identity sign-up/sign-in entry capabilities documen
 | `create_customer` | action | `customer_type`, `user_id?`, `organization_id?`, `name?` | customer | [customers.md](customers.md) |
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
+| `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
+| `list_changes`, `get_change`, `list_conflicts` | read | repository id plus change id where required | change metadata or conflict values | [repositories.md](repositories.md) |
+| `get_artifact` | read | repository id, result id | result identity and liquid #166 deferred-data status | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
 | `refs`, `find_missing`, `push`, `pull` | read/action, reserved | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
@@ -49,6 +54,7 @@ the lake `identity`, and the identity sign-up/sign-in entry capabilities documen
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role, TAAP evidence | grant(s) | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
+| `entity_effective_access` | read | `object_type` (`repository`, `organization`, or `team`), `id` | `{object, items: [effective access]}` | [policy.md](policy.md) |
 | `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
 | `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
 | `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?` | `{items: [audit event]}` | [audit.md](audit.md) |
@@ -69,6 +75,12 @@ the lake `identity`, and the identity sign-up/sign-in entry capabilities documen
 | `upsert_scim_user`, `upsert_scim_group`, `list_sso_provisioning_logs` | action/read | SCIM resource mapping or provider id | SCIM mapping or provisioning outcomes | [sso.md](sso.md) |
 | `scim_list_*`, `scim_get_*`, `scim_upsert_*`, `scim_patch_*`, `scim_delete_*` | action, provider entry | provider bearer plus filter, resource, PATCH operations, or resource id | SCIM user/group resource, list response, or deletion confirmation | [sso.md](sso.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `limit?` | `{items: [ranked hit]}` | [search.md](search.md) |
+| `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, organization, mount fields | mount metadata | [secrets.md](secrets.md) |
+| `put_secret`, `read_secret`, `secret_metadata` | action/read | mount, name, value/version/metadata fields | versioned value or history | [secrets.md](secrets.md) |
+| `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions` | action | mount, name, `versions[]` | updated history | [secrets.md](secrets.md) |
+| `create_encryption_key`, `list_encryption_keys`, `get_encryption_key`, `rotate_encryption_key` | action/read | mount and key name | named-key metadata only | [encryption.md](encryption.md) |
+| `encrypt`, `decrypt`, `rewrap`, `sign`, `verify`, `hmac`, `derive_encryption_key` | action | mount, key and base64url payload fields | protected result and key version | [encryption.md](encryption.md) |
+| `rotate_customer_kek` | action | `customer_id` | KEK version and rewrapped-key count | [encryption.md](encryption.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

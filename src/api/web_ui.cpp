@@ -1,5 +1,6 @@
 #include "lake/api/web_ui.hpp"
 
+#include <cctype>
 #include <format>
 
 namespace lake::api {
@@ -47,6 +48,7 @@ tr:last-child td{border-bottom:0}td a{color:var(--accent);text-decoration:none}.
 form.login input,.filters input,form.search input{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px}form.search input{flex:1}form.login button,form.inline button,.filters button,form.search button{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
 form.inline{display:inline}form.inline button{background:transparent;color:var(--accent);padding:0}.error{color:#a12a2a;margin:0 0 .5rem}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}dt{color:var(--muted)}dd{margin:0}
 .filters{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:0 0 1.5rem}.filters label{display:grid;gap:.2rem;color:var(--muted);font-size:.8rem}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef1f4;padding:1rem;border-radius:6px}
 form.stack{display:grid;gap:.75rem;max-width:36rem}form.stack label{display:grid;gap:.25rem;color:var(--muted)}
 form.stack input,form.stack textarea,form.stack select{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
 form.stack textarea{min-height:8rem}button.primary{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer;width:max-content}
@@ -60,7 +62,8 @@ std::string nav(bool signed_in) {
     std::string out = "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
                       "href=\"/organizations\">Organizations</a><a "
                       "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
-                      "<a href=\"/audit\">Audit</a><a href=\"/sso\">SSO</a>";
+                      "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>"
+                      "<a href=\"/sso\">SSO</a>";
     if (signed_in) {
         out += "<a href=\"/sessions\">Sessions</a><a "
                "href=\"/passkeys\">Passkeys</a><a href=\"/tokens\">Tokens</a>";
@@ -79,6 +82,22 @@ std::string nav(bool signed_in) {
 
 std::string row_link(std::string_view href, std::string_view text) {
     return std::format("<a href=\"{}\">{}</a>", web_ui_escape(href), web_ui_escape(text));
+}
+
+std::string url_component(std::string_view value) {
+    std::string encoded;
+    for (const unsigned char byte : value) {
+        if (std::isalnum(byte) || byte == '-' || byte == '_' || byte == '.') {
+            encoded += static_cast<char>(byte);
+        } else {
+            encoded += std::format("%{:02X}", byte);
+        }
+    }
+    return encoded;
+}
+
+std::string repository_name(const control::Repository& repository) {
+    return repository.name.empty() ? repository.id : repository.name;
 }
 
 std::string error_markup(std::string_view error) {
@@ -168,7 +187,8 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers) {
 }
 
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
-                                const std::map<std::string, control::Customer>& owners) {
+                                const std::map<std::string, control::Customer>& owners,
+                                bool signed_in) {
     std::string content = "<p class=\"eyebrow\">control "
                           "plane</p><h1>Repositories</h1><p class=\"sub\">Every "
                           "repository, newest first, addressed as "
@@ -194,12 +214,16 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell(
-        "lake — repositories", std::format("{} repositories", repositories.size()), content, true);
+    return web_ui_shell("lake — repositories",
+                        std::format("{} repositories", repositories.size()),
+                        content,
+                        signed_in);
 }
 
 std::string web_ui_repository(const control::Repository& repository,
-                              const control::Customer* owner) {
+                              const control::Customer* owner,
+                              const std::vector<RepositoryContentRef>& refs,
+                              bool signed_in) {
     const std::string owner_name = owner ? owner->name : repository.customer_id;
     std::string content = std::format(
         "<p class=\"eyebrow\">repository</p><h1>{}/{}</h1><p "
@@ -227,10 +251,166 @@ std::string web_ui_repository(const control::Repository& repository,
                                web_ui_escape(repository.deleted_at),
                                web_ui_escape(repository.retention_until));
     }
+    content += "<div class=\"panel\"><h2>Repository data</h2><p>"
+               "Browse the content stored by libliquid.</p>";
+    if (refs.empty()) {
+        content += "<p>No refs are published.</p>";
+    } else {
+        content += "<ul>";
+        for (const RepositoryContentRef& ref : refs) {
+            content += std::format(
+                "<li>{} <code>{}</code></li>",
+                row_link("/repository/tree?id=" + repository.id + "&ref=" + url_component(ref.name),
+                         ref.name),
+                web_ui_escape(ref.change));
+        }
+        content += "</ul>";
+    }
+    content += std::format("<p>{} · {} · {}</p></div>",
+                           row_link("/changes?repository_id=" + repository.id, "Change log"),
+                           row_link("/conflicts?repository_id=" + repository.id, "Conflicts"),
+                           row_link("/repository/access?id=" + repository.id, "Effective access"));
     return web_ui_shell("lake — " + owner_name + "/" + repository.name,
                         owner_name + "/" + repository.name,
                         content,
-                        true);
+                        signed_in);
+}
+
+std::string web_ui_repository_tree(const control::Repository& repository,
+                                   std::string_view ref,
+                                   const std::vector<RepositoryTreeEntry>& entries,
+                                   bool signed_in) {
+    std::string content = std::format("<p class=\"eyebrow\">repository tree</p><h1>{}</h1>"
+                                      "<p class=\"sub\">Ref <code>{}</code>.</p>",
+                                      web_ui_escape(repository_name(repository)),
+                                      web_ui_escape(ref));
+    if (entries.empty()) {
+        content += "<div class=\"panel empty\">This tree has no files.</div>";
+    } else {
+        content += "<table><thead><tr><th>Path</th><th>Kind</th><th>Blob</th><th>Mode</th>"
+                   "</tr></thead><tbody>";
+        for (const RepositoryTreeEntry& entry : entries) {
+            const std::string path = "/file?repository_id=" + repository.id +
+                                     "&ref=" + url_component(ref) +
+                                     "&path=" + url_component(entry.path);
+            const std::string displayed =
+                entry.kind == "blob" ? row_link(path, entry.path) : web_ui_escape(entry.path);
+            content += std::format("<tr><td>{}</td><td>{}</td><td><code>{}</code></td>"
+                                   "<td><code>{:o}</code></td></tr>",
+                                   displayed,
+                                   web_ui_escape(entry.kind),
+                                   web_ui_escape(entry.blob),
+                                   entry.mode);
+        }
+        content += "</tbody></table>";
+    }
+    content +=
+        std::format("<p>{}</p>", row_link("/repository?id=" + repository.id, "Back to repository"));
+    return web_ui_shell("lake — tree", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_repository_file(const control::Repository& repository,
+                                   const RepositoryFile& file,
+                                   bool signed_in) {
+    const std::string content =
+        std::format("<p class=\"eyebrow\">file</p><h1>{}</h1><p class=\"sub\">{}</p>"
+                    "<div class=\"panel\"><dl><dt>blob</dt><dd><code>{}</code></dd><dt>size</dt>"
+                    "<dd>{} bytes</dd></dl></div><pre>{}</pre><p>{}</p>",
+                    web_ui_escape(file.path),
+                    web_ui_escape(repository_name(repository)),
+                    web_ui_escape(file.blob),
+                    file.size,
+                    web_ui_escape(file.contents),
+                    row_link("/repository?id=" + repository.id, "Back to repository"));
+    return web_ui_shell("lake — file", file.path, content, signed_in);
+}
+
+std::string web_ui_repository_log(const control::Repository& repository,
+                                  const std::vector<RepositoryChange>& changes,
+                                  bool signed_in) {
+    std::string content = std::format("<p class=\"eyebrow\">repository history</p><h1>Change "
+                                      "log</h1><p class=\"sub\">{}</p>",
+                                      web_ui_escape(repository_name(repository)));
+    if (changes.empty()) {
+        content += "<div class=\"panel empty\">No changes have been cut.</div>";
+    } else {
+        content += "<table><thead><tr><th>Change</th><th>Message</th><th>Author</th><th>When</th>"
+                   "</tr></thead><tbody>";
+        for (const RepositoryChange& change : changes) {
+            content +=
+                std::format("<tr><td>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+                            row_link("/change?repository_id=" + repository.id +
+                                         "&id=" + url_component(change.id),
+                                     change.id),
+                            web_ui_escape(change.message),
+                            web_ui_escape(change.author),
+                            web_ui_escape(change.occurred_at));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell("lake — changes", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_change(const control::Repository& repository,
+                          const RepositoryChange& change,
+                          bool signed_in) {
+    std::string parents;
+    for (const std::string& parent : change.parents) {
+        if (!parents.empty()) {
+            parents += ", ";
+        }
+        parents += parent;
+    }
+    const std::string content = std::format(
+        "<p class=\"eyebrow\">change</p><h1>{}</h1><p class=\"sub\">{}</p>"
+        "<div class=\"panel\"><dl><dt>author</dt><dd><code>{}</code></dd><dt>created</dt>"
+        "<dd>{}</dd><dt>parents</dt><dd><code>{}</code></dd></dl></div>"
+        "<div class=\"panel\"><h2>Structural diff</h2><p>Structural diff rendering arrives "
+        "with liquid #166.</p></div>",
+        web_ui_escape(change.id),
+        web_ui_escape(change.message),
+        web_ui_escape(change.author),
+        web_ui_escape(change.occurred_at),
+        web_ui_escape(parents));
+    return web_ui_shell("lake — change", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_repository_conflicts(const control::Repository& repository,
+                                        const std::vector<RepositoryConflict>& conflicts,
+                                        bool signed_in) {
+    std::string content = std::format("<p class=\"eyebrow\">repository conflicts</p><h1>"
+                                      "Conflicts</h1><p class=\"sub\">{}</p>",
+                                      web_ui_escape(repository_name(repository)));
+    if (conflicts.empty()) {
+        content += "<div class=\"panel empty\">No unresolved conflict values.</div>";
+    } else {
+        content += "<table><thead><tr><th>Path</th><th>Conflicting blobs</th></tr></thead><tbody>";
+        for (const RepositoryConflict& conflict : conflicts) {
+            std::string blobs;
+            for (const std::string& blob : conflict.blobs) {
+                if (!blobs.empty()) {
+                    blobs += ", ";
+                }
+                blobs += blob;
+            }
+            content += std::format("<tr><td><code>{}</code></td><td><code>{}</code></td></tr>",
+                                   web_ui_escape(conflict.path),
+                                   web_ui_escape(blobs));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell("lake — conflicts", repository_name(repository), content, signed_in);
+}
+
+std::string
+web_ui_artifact(std::string_view repository_id, std::string_view result_id, bool signed_in) {
+    const std::string content = std::format(
+        "<p class=\"eyebrow\">artifact</p><h1>{}</h1><p class=\"sub\">Repository "
+        "<code>{}</code>.</p><div class=\"panel\"><h2>Attestations</h2><p>Artifact result, "
+        "provenance, reproducibility, and SBOM rendering arrive with liquid #166.</p></div>",
+        web_ui_escape(result_id),
+        web_ui_escape(repository_id));
+    return web_ui_shell("lake — artifact", repository_id, content, signed_in);
 }
 
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations) {
@@ -247,13 +427,14 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
             const std::string organization_query = "organization_id=" + organization.id;
             content += std::format(
                 "<tr><td>{}</td><td><code>{}</code></td><td>{} · {} · "
-                "{} · {}</td><td>{}</td></tr>",
+                "{} · {}</td><td>{}</td><td>{}</td></tr>",
                 web_ui_escape(organization.display_name.empty() ? organization.id
                                                                 : organization.display_name),
                 web_ui_escape(organization.taap_id.empty() ? "not assigned" : organization.taap_id),
                 row_link("/teams?" + organization_query, "teams"),
                 row_link("/members?" + organization_query, "members"),
                 row_link("/invitations?" + organization_query, "invitations"),
+                row_link("/organization/access?id=" + organization.id, "effective access"),
                 row_link("/sso?" + organization_query, "SSO"),
                 web_ui_escape(organization.created_at));
         }
@@ -343,11 +524,12 @@ std::string web_ui_teams(std::string_view organization_id,
                    "</tr></thead><tbody>";
         for (const auto& team : teams) {
             content += std::format(
-                "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td><code>{}</code></td><td>{} · {}</td><td>{}</td></tr>",
                 web_ui_escape(team.display_name.empty() ? team.name : team.display_name),
                 web_ui_escape(team.name),
                 row_link("/members?organization_id=" + team.organization_id + "&team_id=" + team.id,
                          "members"),
+                row_link("/team/access?id=" + team.id, "effective access"),
                 web_ui_escape(team.created_at));
         }
         content += "</tbody></table>";
@@ -550,6 +732,107 @@ std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::F
                "/v1/export_audit</code>, "
                "and <code>GET /v1/verify_audit</code>.</p>";
     return web_ui_shell("lake — audit", std::format("{} events", events.size()), content, true);
+}
+
+std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts) {
+    std::string content =
+        "<p class=\"eyebrow\">control plane</p><h1>Secret mounts</h1>"
+        "<p class=\"sub\">Organization-scoped static secrets and named encryption keys. "
+        "Key material remains inside lake.</p>";
+    if (mounts.empty()) {
+        content += "<div class=\"panel empty\">No readable mounts. <code>POST "
+                   "/v1/create_secret_mount</code> creates one.</div>";
+    } else {
+        content += "<table><thead><tr><th>Name</th><th>Organization</th><th>Customer</th>"
+                   "<th>Description</th><th>Created</th><th></th></tr></thead><tbody>";
+        for (const control::SecretMount& mount : mounts) {
+            const std::string query = "mount_id=" + mount.id;
+            content += std::format("<tr><td>{}</td><td><code>{}</code></td>"
+                                   "<td><code>{}</code></td><td>{}</td><td>{}</td><td>{} · "
+                                   "{}</td></tr>",
+                                   web_ui_escape(mount.name),
+                                   web_ui_escape(mount.organization_id),
+                                   web_ui_escape(mount.customer_id),
+                                   web_ui_escape(mount.description),
+                                   web_ui_escape(mount.created_at),
+                                   row_link("/secrets?" + query, "secrets"),
+                                   row_link("/encryption-keys?" + query, "keys"));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell(
+        "lake — secret mounts", std::format("{} mounts", mounts.size()), content, true);
+}
+
+std::string web_ui_secrets(const control::SecretMount& mount,
+                           std::string_view name,
+                           const control::SecretMetadata* metadata) {
+    std::string content =
+        "<p class=\"eyebrow\">static secrets</p><h1>" + web_ui_escape(mount.name) +
+        "</h1><p class=\"sub\">Inspect version metadata without rendering secret values. "
+        "Writes, reads, deletion and destruction use the capability API.</p>"
+        "<form class=\"filters\" method=\"get\" action=\"/secrets\">"
+        "<input type=\"hidden\" name=\"mount_id\" value=\"" +
+        web_ui_escape(mount.id) + "\"><label>Secret name<input name=\"name\" value=\"" +
+        web_ui_escape(name) +
+        "\" required></label><button type=\"submit\">Inspect history</button></form>";
+    if (name.empty()) {
+        content += "<div class=\"panel empty\">Enter a secret name to inspect its metadata.</div>";
+    } else if (metadata == nullptr) {
+        content += "<div class=\"panel empty\">No metadata is available.</div>";
+    } else {
+        content += std::format("<div class=\"panel\"><dl><dt>Name</dt><dd><code>{}</code></dd>"
+                               "<dt>Current version</dt><dd>{}</dd><dt>Custom metadata</dt>"
+                               "<dd><code>{}</code></dd></dl></div>",
+                               web_ui_escape(metadata->name),
+                               metadata->current_version,
+                               web_ui_escape(metadata->custom_metadata.dump()));
+        content += "<h2>Version history</h2><table><thead><tr><th>Version</th><th>Created</th>"
+                   "<th>Deleted</th><th>Destroyed</th></tr></thead><tbody>";
+        for (const control::SecretVersionMetadata& version : metadata->versions) {
+            content += std::format(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                version.version,
+                web_ui_escape(version.created_at),
+                web_ui_escape(version.deleted_at.empty() ? "—" : version.deleted_at),
+                web_ui_escape(version.destroyed_at.empty() ? "—" : version.destroyed_at));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<p class=\"sub\"><a href=\"/encryption-keys?mount_id=" + web_ui_escape(mount.id) +
+               "\">Named encryption keys</a> · API: <code>POST /v1/put_secret</code>, "
+               "<code>GET /v1/read_secret</code>, <code>GET /v1/secret_metadata</code>.</p>";
+    return web_ui_shell("lake — secrets", mount.name, content, true);
+}
+
+std::string web_ui_encryption_keys(const control::SecretMount& mount,
+                                   const std::vector<control::EncryptionKey>& keys) {
+    std::string content = "<p class=\"eyebrow\">encryption service</p><h1>" +
+                          web_ui_escape(mount.name) +
+                          " keys</h1><p class=\"sub\">Named, versioned keys for encryption, "
+                          "signing, HMAC and derivation. Key material is never returned.</p>";
+    if (keys.empty()) {
+        content += "<div class=\"panel empty\">No keys yet. <code>POST "
+                   "/v1/create_encryption_key</code> creates one.</div>";
+    } else {
+        content += "<table><thead><tr><th>Name</th><th>Current version</th><th>Derived from</th>"
+                   "<th>Created</th><th>Updated</th></tr></thead><tbody>";
+        for (const control::EncryptionKey& key : keys) {
+            content += std::format("<tr><td><code>{}</code></td><td>{}</td><td><code>{}</code>"
+                                   "</td><td>{}</td><td>{}</td></tr>",
+                                   web_ui_escape(key.name),
+                                   key.current_version,
+                                   web_ui_escape(key.derived_from.empty() ? "—" : key.derived_from),
+                                   web_ui_escape(key.created_at),
+                                   web_ui_escape(key.updated_at));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<p class=\"sub\"><a href=\"/secrets?mount_id=" + web_ui_escape(mount.id) +
+               "\">Static secrets</a> · API: <code>POST /v1/encrypt</code>, "
+               "<code>POST /v1/decrypt</code>, <code>POST /v1/rewrap</code>.</p>";
+    return web_ui_shell(
+        "lake — encryption keys", std::format("{} keys", keys.size()), content, true);
 }
 
 std::string web_ui_sign_up(std::string_view error) {
