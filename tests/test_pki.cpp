@@ -428,6 +428,10 @@ TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
                       {{"customer_id", customer->id}, {"threshold", 2}, {"share_count", 3}},
                       context);
     ASSERT_TRUE(ceremony.ok) << ceremony.error.message;
+    const auto pending_ceremony = store.get_pki_recovery_ceremony(
+        customer->id, ceremony.value.at("ceremony_id").get<std::string>());
+    ASSERT_TRUE(pending_ceremony) << pending_ceremony.error().message;
+    EXPECT_FALSE(pending_ceremony->recovered_at);
     const auto recovery = registry.call(
         "complete_root_recovery",
         {{"customer_id", customer->id},
@@ -440,6 +444,10 @@ TEST(Pki, RegistryIssuesSvidAndRecordsAuditEvent) {
     ASSERT_TRUE(recovery_event) << recovery_event.error().message;
     EXPECT_EQ(recovery_event->draft.kind, "recovery");
     EXPECT_EQ(recovery_event->draft.action, "complete_root_recovery");
+    const auto completed_ceremony = store.get_pki_recovery_ceremony(
+        customer->id, ceremony.value.at("ceremony_id").get<std::string>());
+    ASSERT_TRUE(completed_ceremony) << completed_ceremony.error().message;
+    EXPECT_TRUE(completed_ceremony->recovered_at);
 }
 
 TEST(Pki, PersistsAuthorityKeysThroughTheCustomerKeystore) {
@@ -654,6 +662,20 @@ TEST(PostgresPki, PersistsAndRewrapsCustomerAuthority) {
     ASSERT_TRUE(store->rotate_customer_kek(customer->id, instance_kek));
     EXPECT_TRUE(after_restart.issue_jwt_svid(
         *store, customer->id, "spiffe://lake.test/postgres", "lake", instance_kek));
+
+    auto ceremony = after_restart.begin_recovery(*store, customer->id, instance_kek, 2, 3);
+    ASSERT_TRUE(ceremony) << ceremony.error().message;
+    const auto pending = store->get_pki_recovery_ceremony(customer->id, ceremony->id);
+    ASSERT_TRUE(pending) << pending.error().message;
+    EXPECT_FALSE(pending->recovered_at);
+    const std::vector<lake::control::pki::ShamirShare> quorum{ceremony->shares.at(0),
+                                                              ceremony->shares.at(2)};
+    lake::control::pki::Service completing_process;
+    ASSERT_TRUE(
+        completing_process.recover_root(*store, customer->id, instance_kek, *ceremony, quorum));
+    const auto completed = store->get_pki_recovery_ceremony(customer->id, ceremony->id);
+    ASSERT_TRUE(completed) << completed.error().message;
+    EXPECT_TRUE(completed->recovered_at);
 }
 
 } // namespace

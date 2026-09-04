@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/callers.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/postgres_store.hpp"
 
 namespace {
 
@@ -123,6 +126,58 @@ TEST(Callers, RegistryRecordsFederatedAndCloudExchanges) {
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.kind, "authentication");
     EXPECT_EQ(event->draft.action, "exchange_cloud_attestation");
+    const auto records = store.list_pki_callers(customer->id, 10);
+    ASSERT_TRUE(records) << records.error().message;
+    ASSERT_EQ(records->size(), 2);
+    EXPECT_EQ(records->front().id, aws.value.at("caller_id").get<std::string>());
+    EXPECT_EQ(records->front().attestation_type, "aws");
+    EXPECT_EQ(records->front().subject, "instance-123");
+    EXPECT_FALSE(records->front().attributes.contains("credential"));
+}
+
+TEST(PostgresCallers, PersistsKubernetesCredentialMetadata) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    StubTokenReviewer reviewer;
+    StubJwtVerifier jwt;
+    StubCloudVerifier cloud;
+    lake::control::callers::InMemoryFederationIssuerPolicy policy;
+    lake::control::callers::Service callers(&reviewer, &jwt, &cloud, &policy);
+    auto store = lake::control::make_postgres_store(uri);
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto organization =
+        store->create_organization({"taap:1:ed25519:caller-pg-" + suffix, "Caller PostgreSQL", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto customer =
+        store->create_customer({"organization", "", organization->id, "caller-pg-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.callers = &callers;
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    const auto exchange = registry.call("exchange_kubernetes_attestation",
+                                        {{"customer_id", customer->id},
+                                         {"organization_id", organization->id},
+                                         {"token", "projected-token"},
+                                         {"workload_taap_id", "taap:1:ed25519:workload"},
+                                         {"audiences", {"lake"}}},
+                                        context);
+    ASSERT_TRUE(exchange.ok) << exchange.error.message;
+    const auto records = store->list_pki_callers(customer->id, 10);
+    ASSERT_TRUE(records) << records.error().message;
+    ASSERT_EQ(records->size(), 1);
+    EXPECT_EQ(records->front().id, exchange.value.at("caller_id").get<std::string>());
+    EXPECT_EQ(records->front().issuer, "kubernetes");
+    EXPECT_EQ(records->front().attributes.at("namespace"), "payments");
+    EXPECT_EQ(
+        records->front().attributes.dump().find(exchange.value.at("credential").get<std::string>()),
+        std::string::npos);
 }
 
 } // namespace

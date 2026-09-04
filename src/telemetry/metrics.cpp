@@ -383,6 +383,34 @@ public:
         return call("get_pki_authority",
                     [&] { return store_->get_pki_authority(customer_id, instance_kek); });
     }
+    control::Result<control::PkiCallerRecord>
+    create_pki_caller(const control::NewPkiCallerRecord& value) override {
+        return call("create_pki_caller", [&] { return store_->create_pki_caller(value); });
+    }
+    control::Result<std::vector<control::PkiCallerRecord>>
+    list_pki_callers(const std::string& customer_id, int limit) override {
+        return call("list_pki_callers",
+                    [&] { return store_->list_pki_callers(customer_id, limit); });
+    }
+    control::Result<control::PkiRecoveryCeremonyRecord>
+    create_pki_recovery_ceremony(const control::NewPkiRecoveryCeremonyRecord& value) override {
+        return call("create_pki_recovery_ceremony",
+                    [&] { return store_->create_pki_recovery_ceremony(value); });
+    }
+    control::Result<control::PkiRecoveryCeremonyRecord>
+    get_pki_recovery_ceremony(const std::string& customer_id,
+                              const std::string& ceremony_id) override {
+        return call("get_pki_recovery_ceremony",
+                    [&] { return store_->get_pki_recovery_ceremony(customer_id, ceremony_id); });
+    }
+    control::Result<control::PkiRecoveryCeremonyRecord> complete_pki_recovery_ceremony(
+        const std::string& customer_id,
+        const std::string& ceremony_id,
+        const std::vector<control::PkiRecoveryShareEvidence>& evidence) override {
+        return call("complete_pki_recovery_ceremony", [&] {
+            return store_->complete_pki_recovery_ceremony(customer_id, ceremony_id, evidence);
+        });
+    }
     control::Result<control::SecretMount>
     create_secret_mount(const control::NewSecretMount& value,
                         const std::string& instance_kek) override {

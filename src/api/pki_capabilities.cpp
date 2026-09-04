@@ -44,6 +44,28 @@ ApiResult no_callers() {
     return ApiResult::failure("store_unavailable", "caller attestation service is not configured");
 }
 
+ApiResult caller_credential_result(const json& input,
+                                   const control::callers::Credential& credential,
+                                   ApiContext& context) {
+    context.audit_customer_id = input.at("customer_id").get<std::string>();
+    context.audit_kind = "authentication";
+    context.audit_object = "workload/" + credential.workload_taap_id;
+    auto record =
+        context.store->create_pki_caller(control::NewPkiCallerRecord{context.audit_customer_id,
+                                                                     credential.workload_taap_id,
+                                                                     credential.attestation_type,
+                                                                     credential.issuer,
+                                                                     credential.subject,
+                                                                     credential.attributes,
+                                                                     credential.expires_at});
+    if (!record) {
+        return ApiResult::failure(record.error().code, record.error().message);
+    }
+    return ApiResult::success({{"caller_id", record->id},
+                               {"credential", credential.value},
+                               {"expires_at", credential.expires_at}});
+}
+
 json authority_schema() {
     return {{"type", "object"},
             {"properties",
@@ -585,12 +607,13 @@ void register_pki_capabilities(Registry& registry) {
              {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",
-                           {{"credential", {{"type", "string"}}},
+                           {{"caller_id", {{"type", "string"}}},
+                            {"credential", {{"type", "string"}}},
                             {"expires_at", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
         .handler = [](const json& input, ApiContext& context) {
-            if (!context.callers) {
+            if (!context.callers || !context.store) {
                 return no_callers();
             }
             std::vector<std::string> audiences =
@@ -603,11 +626,7 @@ void register_pki_capabilities(Registry& registry) {
             if (!credential) {
                 return from_caller_error(credential.error());
             }
-            context.audit_customer_id = input.at("customer_id").get<std::string>();
-            context.audit_kind = "authentication";
-            context.audit_object = "workload/" + credential->workload_taap_id;
-            return ApiResult::success(
-                {{"credential", credential->value}, {"expires_at", credential->expires_at}});
+            return caller_credential_result(input, *credential, context);
         }});
     registry.add(Capability{
         .name = "exchange_jwt_attestation",
@@ -625,12 +644,13 @@ void register_pki_capabilities(Registry& registry) {
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",
-                           {{"credential", {{"type", "string"}}},
+                           {{"caller_id", {{"type", "string"}}},
+                            {"credential", {{"type", "string"}}},
                             {"expires_at", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
         .handler = [](const json& input, ApiContext& context) {
-            if (!context.callers) {
+            if (!context.callers || !context.store) {
                 return no_callers();
             }
             auto credential =
@@ -640,11 +660,7 @@ void register_pki_capabilities(Registry& registry) {
             if (!credential) {
                 return from_caller_error(credential.error());
             }
-            context.audit_customer_id = input.at("customer_id").get<std::string>();
-            context.audit_kind = "authentication";
-            context.audit_object = "workload/" + credential->workload_taap_id;
-            return ApiResult::success(
-                {{"credential", credential->value}, {"expires_at", credential->expires_at}});
+            return caller_credential_result(input, *credential, context);
         }});
     registry.add(Capability{
         .name = "exchange_cloud_attestation",
@@ -661,12 +677,13 @@ void register_pki_capabilities(Registry& registry) {
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",
-                           {{"credential", {{"type", "string"}}},
+                           {{"caller_id", {{"type", "string"}}},
+                            {"credential", {{"type", "string"}}},
                             {"expires_at", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
         .handler = [](const json& input, ApiContext& context) {
-            if (!context.callers) {
+            if (!context.callers || !context.store) {
                 return no_callers();
             }
             auto credential =
@@ -676,11 +693,7 @@ void register_pki_capabilities(Registry& registry) {
             if (!credential) {
                 return from_caller_error(credential.error());
             }
-            context.audit_customer_id = input.at("customer_id").get<std::string>();
-            context.audit_kind = "authentication";
-            context.audit_object = "workload/" + credential->workload_taap_id;
-            return ApiResult::success(
-                {{"credential", credential->value}, {"expires_at", credential->expires_at}});
+            return caller_credential_result(input, *credential, context);
         }});
     registry.add(Capability{
         .name = "begin_root_recovery",

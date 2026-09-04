@@ -182,6 +182,11 @@ comments. `forge_records` is the area prefix for parallel Phase 6 schema work.
 | `pki_recovery_ceremonies`, `pki_recovery_shares` | Configured Shamir quorum, recovery evidence digests, expiry, and completed-rehearsal state. Shares are never retained. |
 | `pki_guard` | Guard table for this migration. |
 
+Caller rows retain verified identity metadata and expiry, never the returned bearer credential.
+Recovery rows retain ceremony configuration, completion state, and SHA-256 evidence digests,
+never share values or reconstructed root material. Both writes complete before their registry
+capability succeeds and therefore correlate with the capability's signed audit event.
+
 The migration follows forge/export/import migration `0012`.
 
 ## How it is applied

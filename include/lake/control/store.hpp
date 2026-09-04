@@ -300,6 +300,52 @@ struct PkiAuthorityMaterial {
     std::string intermediate_private_key_pem;
 };
 
+struct PkiCallerRecord {
+    std::string id;
+    std::string customer_id;
+    std::string workload_taap_id;
+    std::string attestation_type;
+    std::string issuer;
+    std::string subject;
+    nlohmann::json attributes = nlohmann::json::object();
+    std::string expires_at;
+    std::string issued_at;
+};
+
+struct NewPkiCallerRecord {
+    std::string customer_id;
+    std::string workload_taap_id;
+    std::string attestation_type;
+    std::string issuer;
+    std::string subject;
+    nlohmann::json attributes = nlohmann::json::object();
+    std::string expires_at;
+};
+
+struct PkiRecoveryCeremonyRecord {
+    std::string id;
+    std::string customer_id;
+    std::string authority_id;
+    int threshold = 0;
+    int share_count = 0;
+    std::optional<std::string> recovered_at;
+    std::string expires_at;
+    std::string created_at;
+};
+
+struct NewPkiRecoveryCeremonyRecord {
+    std::string id;
+    std::string customer_id;
+    int threshold = 0;
+    int share_count = 0;
+    std::string expires_at;
+};
+
+struct PkiRecoveryShareEvidence {
+    int index = 0;
+    std::string digest;
+};
+
 nlohmann::json to_json(const User&);
 nlohmann::json to_json(const Organization&);
 nlohmann::json to_json(const Customer&);
@@ -409,6 +455,17 @@ public:
                                                             const std::string& instance_kek) = 0;
     virtual Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
                                                            const std::string& instance_kek) = 0;
+    virtual Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& value) = 0;
+    virtual Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
+                                                                  int limit) = 0;
+    virtual Result<PkiRecoveryCeremonyRecord>
+    create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& value) = 0;
+    virtual Result<PkiRecoveryCeremonyRecord>
+    get_pki_recovery_ceremony(const std::string& customer_id, const std::string& ceremony_id) = 0;
+    virtual Result<PkiRecoveryCeremonyRecord>
+    complete_pki_recovery_ceremony(const std::string& customer_id,
+                                   const std::string& ceremony_id,
+                                   const std::vector<PkiRecoveryShareEvidence>& evidence) = 0;
 
     virtual Result<SecretMount> create_secret_mount(const NewSecretMount& value,
                                                     const std::string& instance_kek) = 0;

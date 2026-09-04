@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -3954,6 +3955,185 @@ public:
                                         rows[0][1].as<std::string>(),
                                         std::move(*root),
                                         std::move(*intermediate)};
+        });
+    }
+
+    Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& input) override {
+        if (input.customer_id.empty() || input.workload_taap_id.empty() ||
+            input.attestation_type.empty() || input.subject.empty() ||
+            !input.attributes.is_object() || input.expires_at.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "caller record is invalid"});
+        }
+        return with_tx<PkiCallerRecord>([&](pqxx::work& tx) -> Result<PkiCallerRecord> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO pki_callers "
+                "(customer_id, workload_taap_id, attestation_type, issuer, subject, attributes, "
+                "expires_at) VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::timestamptz) "
+                "RETURNING id::text, customer_id::text, workload_taap_id, attestation_type, "
+                "issuer, subject, attributes::text, expires_at::text, issued_at::text",
+                input.customer_id,
+                input.workload_taap_id,
+                input.attestation_type,
+                input.issuer,
+                input.subject,
+                input.attributes.dump(),
+                input.expires_at);
+            return PkiCallerRecord{rows[0][0].as<std::string>(),
+                                   rows[0][1].as<std::string>(),
+                                   rows[0][2].as<std::string>(),
+                                   rows[0][3].as<std::string>(),
+                                   rows[0][4].as<std::string>(),
+                                   rows[0][5].as<std::string>(),
+                                   nlohmann::json::parse(rows[0][6].as<std::string>()),
+                                   rows[0][7].as<std::string>(),
+                                   rows[0][8].as<std::string>()};
+        });
+    }
+
+    Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
+                                                          int limit) override {
+        if (limit < 1 || limit > 100) {
+            return std::unexpected(StoreError{"invalid_input", "limit must be between 1 and 100"});
+        }
+        return with_tx<std::vector<PkiCallerRecord>>(
+            [&](pqxx::work& tx) -> Result<std::vector<PkiCallerRecord>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text, customer_id::text, workload_taap_id, attestation_type, "
+                    "issuer, subject, attributes::text, expires_at::text, issued_at::text "
+                    "FROM pki_callers WHERE customer_id = $1::uuid "
+                    "ORDER BY issued_at DESC, id DESC LIMIT $2",
+                    customer_id,
+                    limit);
+                std::vector<PkiCallerRecord> output;
+                output.reserve(rows.size());
+                for (const pqxx::row& row : rows) {
+                    output.push_back(
+                        PkiCallerRecord{row[0].as<std::string>(),
+                                        row[1].as<std::string>(),
+                                        row[2].as<std::string>(),
+                                        row[3].as<std::string>(),
+                                        row[4].as<std::string>(),
+                                        row[5].as<std::string>(),
+                                        nlohmann::json::parse(row[6].as<std::string>()),
+                                        row[7].as<std::string>(),
+                                        row[8].as<std::string>()});
+                }
+                return output;
+            });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& input) override {
+        if (input.id.empty() || input.customer_id.empty() || input.threshold < 2 ||
+            input.share_count < input.threshold || input.share_count > 255 ||
+            input.expires_at.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "recovery ceremony is invalid"});
+        }
+        return with_tx<PkiRecoveryCeremonyRecord>(
+            [&](pqxx::work& tx) -> Result<PkiRecoveryCeremonyRecord> {
+                const pqxx::result rows = tx.exec_params(
+                    "INSERT INTO pki_recovery_ceremonies "
+                    "(id, customer_id, authority_id, threshold, share_count, expires_at) "
+                    "SELECT $1::uuid, $2::uuid, id, $3, $4, $5::timestamptz "
+                    "FROM pki_authorities WHERE customer_id = $2::uuid "
+                    "RETURNING id::text, customer_id::text, authority_id::text, threshold, "
+                    "share_count, recovered_at::text, expires_at::text, created_at::text",
+                    input.id,
+                    input.customer_id,
+                    input.threshold,
+                    input.share_count,
+                    input.expires_at);
+                if (rows.empty()) {
+                    return std::unexpected(
+                        StoreError{"not_found", "customer authority does not exist"});
+                }
+                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
+                                                 rows[0][1].as<std::string>(),
+                                                 rows[0][2].as<std::string>(),
+                                                 rows[0][3].as<int>(),
+                                                 rows[0][4].as<int>(),
+                                                 std::nullopt,
+                                                 rows[0][6].as<std::string>(),
+                                                 rows[0][7].as<std::string>()};
+            });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    get_pki_recovery_ceremony(const std::string& customer_id,
+                              const std::string& ceremony_id) override {
+        return with_tx<PkiRecoveryCeremonyRecord>(
+            [&](pqxx::work& tx) -> Result<PkiRecoveryCeremonyRecord> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text, customer_id::text, authority_id::text, threshold, "
+                    "share_count, recovered_at::text, expires_at::text, created_at::text "
+                    "FROM pki_recovery_ceremonies WHERE customer_id = $1::uuid AND id = $2::uuid",
+                    customer_id,
+                    ceremony_id);
+                if (rows.empty()) {
+                    return std::unexpected(
+                        StoreError{"not_found", "recovery ceremony does not exist"});
+                }
+                const std::optional<std::string> recovered =
+                    rows[0][5].is_null() ? std::nullopt
+                                         : std::optional<std::string>(rows[0][5].as<std::string>());
+                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
+                                                 rows[0][1].as<std::string>(),
+                                                 rows[0][2].as<std::string>(),
+                                                 rows[0][3].as<int>(),
+                                                 rows[0][4].as<int>(),
+                                                 recovered,
+                                                 rows[0][6].as<std::string>(),
+                                                 rows[0][7].as<std::string>()};
+            });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    complete_pki_recovery_ceremony(const std::string& customer_id,
+                                   const std::string& ceremony_id,
+                                   const std::vector<PkiRecoveryShareEvidence>& evidence) override {
+        return with_tx<PkiRecoveryCeremonyRecord>([&](pqxx::work& tx)
+                                                      -> Result<PkiRecoveryCeremonyRecord> {
+            const pqxx::result active = tx.exec_params(
+                "SELECT threshold FROM pki_recovery_ceremonies "
+                "WHERE customer_id = $1::uuid AND id = $2::uuid AND recovered_at IS NULL "
+                "AND expires_at > now() FOR UPDATE",
+                customer_id,
+                ceremony_id);
+            if (active.empty()) {
+                return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
+            }
+            if (static_cast<int>(evidence.size()) < active[0][0].as<int>()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "recovery quorum is not present"});
+            }
+            std::set<int> indices;
+            for (const PkiRecoveryShareEvidence& share : evidence) {
+                if (share.index < 1 || share.digest.empty() ||
+                    !indices.insert(share.index).second) {
+                    return std::unexpected(
+                        StoreError{"invalid_input", "recovery evidence is invalid"});
+                }
+                tx.exec_params("INSERT INTO pki_recovery_shares "
+                               "(ceremony_id, share_index, share_digest) "
+                               "VALUES ($1::uuid, $2, $3)",
+                               ceremony_id,
+                               share.index,
+                               share.digest);
+            }
+            const pqxx::result rows =
+                tx.exec_params("UPDATE pki_recovery_ceremonies SET recovered_at = now() "
+                               "WHERE id = $1::uuid RETURNING id::text, customer_id::text, "
+                               "authority_id::text, threshold, share_count, recovered_at::text, "
+                               "expires_at::text, created_at::text",
+                               ceremony_id);
+            return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
+                                             rows[0][1].as<std::string>(),
+                                             rows[0][2].as<std::string>(),
+                                             rows[0][3].as<int>(),
+                                             rows[0][4].as<int>(),
+                                             rows[0][5].as<std::string>(),
+                                             rows[0][6].as<std::string>(),
+                                             rows[0][7].as<std::string>()};
         });
     }
 

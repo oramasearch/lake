@@ -67,6 +67,10 @@ client, device, OpenSSH user and OpenSSH host certificates, and a customer-scope
 HTTP-01 flow. ACME consumes
 one-use nonces, verifies ES256 account JWS and the final CSR, and runs every resource operation
 through its registry transport for signed audit.
+Caller exchanges persist verified non-secret identity metadata before returning a bearer
+credential. Root-recovery ceremonies persist quorum, expiry, completion, and one-way share
+evidence while keeping shares and reconstructed root material out of storage. Both use the signed
+registry audit path.
 
 ## Where to read Zetta
 

@@ -247,8 +247,8 @@ HMAC-SHA-256, stored child-key derivation and customer-KEK rotation. The API, au
 signed audit fields and pages are documented in [`../api/secrets.md`](../api/secrets.md) and
 [`../api/encryption.md`](../api/encryption.md). PKI authority custody, SPIFFE X.509 and JWT SVIDs,
 client and device profiles, OpenSSH user and host certificates, and the customer-scoped RFC 8555
-ACME HTTP-01 flow are implemented on the #26 branch. Durable caller records, federation
-integration, and durable recovery ceremonies remain in #26–#28.
+ACME HTTP-01 flow, durable caller metadata, and durable recovery-ceremony evidence are implemented
+on the #26 branch. Federation integration remains in #27.
 
 ## The forge, the drive, models, metering, migration
 

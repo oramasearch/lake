@@ -93,7 +93,14 @@ Result<Credential> Service::exchange_kubernetes(std::string_view organization_id
     }
     const std::string subject =
         "system:serviceaccount:" + review->namespace_name + ":" + review->service_account;
-    return issue(workload_taap_id, "kubernetes", subject, lifetime_seconds);
+    return issue(workload_taap_id,
+                 "kubernetes",
+                 "kubernetes",
+                 subject,
+                 {{"namespace", review->namespace_name},
+                  {"service_account", review->service_account},
+                  {"audiences", review->audiences}},
+                 lifetime_seconds);
 }
 
 Result<Credential> Service::exchange_jwt(std::string_view organization_id,
@@ -125,7 +132,12 @@ Result<Credential> Service::exchange_jwt(std::string_view organization_id,
                 Error{"unauthorized", "issuer may not assert claim " + it.key()});
         }
     }
-    return issue(workload_taap_id, "jwt", assertion->subject, lifetime_seconds);
+    return issue(workload_taap_id,
+                 "jwt",
+                 assertion->issuer,
+                 assertion->subject,
+                 assertion->claims,
+                 lifetime_seconds);
 }
 
 Result<Credential> Service::exchange_cloud(std::string_view provider,
@@ -147,13 +159,27 @@ Result<Credential> Service::exchange_cloud(std::string_view provider,
     if (identity->provider != provider || identity->subject.empty()) {
         return std::unexpected(Error{"unauthorized", "cloud identity evidence is invalid"});
     }
-    return issue(workload_taap_id, provider, identity->subject, lifetime_seconds);
+    return issue(workload_taap_id,
+                 provider,
+                 provider,
+                 identity->subject,
+                 identity->attributes,
+                 lifetime_seconds);
 }
 
 Result<Credential> Service::issue(std::string_view workload_taap_id,
                                   std::string_view attestation_type,
+                                  std::string_view issuer,
                                   std::string_view subject,
+                                  nlohmann::json attributes,
                                   int lifetime_seconds) {
+    if (attributes.is_null()) {
+        attributes = nlohmann::json::object();
+    }
+    if (!attributes.is_object()) {
+        return std::unexpected(
+            Error{"invalid_input", "verified caller attributes must be an object"});
+    }
     std::array<unsigned char, 32> bytes{};
     if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
         return std::unexpected(Error{"crypto_error", "could not create workload credential"});
@@ -168,7 +194,9 @@ Result<Credential> Service::issue(std::string_view workload_taap_id,
         *value,
         std::string(workload_taap_id),
         std::string(attestation_type),
+        std::string(issuer),
         std::string(subject),
+        std::move(attributes),
         std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires_at))};
 }
 

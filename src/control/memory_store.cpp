@@ -2744,6 +2744,122 @@ Result<PkiAuthorityMaterial> InMemoryStore::get_pki_authority(const std::string&
                                 std::move(*intermediate)};
 }
 
+Result<PkiCallerRecord> InMemoryStore::create_pki_caller(const NewPkiCallerRecord& input) {
+    std::lock_guard lock(mutex_);
+    const auto customer = std::ranges::find_if(
+        customers_, [&](const Customer& value) { return value.id == input.customer_id; });
+    static const std::set<std::string> attestation_types{
+        "kubernetes", "oidc", "jwt", "aws", "azure"};
+    if (customer == customers_.end()) {
+        return std::unexpected(StoreError{"not_found", "customer does not exist"});
+    }
+    if (input.workload_taap_id.empty() || !attestation_types.contains(input.attestation_type) ||
+        input.subject.empty() || !input.attributes.is_object() ||
+        input.expires_at <= now_iso8601()) {
+        return std::unexpected(StoreError{"invalid_input", "caller record is invalid"});
+    }
+    PkiCallerRecord record{new_uuid_v4(),
+                           input.customer_id,
+                           input.workload_taap_id,
+                           input.attestation_type,
+                           input.issuer,
+                           input.subject,
+                           input.attributes,
+                           input.expires_at,
+                           now_iso8601()};
+    pki_callers_.push_back(record);
+    return record;
+}
+
+Result<std::vector<PkiCallerRecord>> InMemoryStore::list_pki_callers(const std::string& customer_id,
+                                                                     int limit) {
+    if (limit < 1 || limit > 100) {
+        return std::unexpected(StoreError{"invalid_input", "limit must be between 1 and 100"});
+    }
+    std::lock_guard lock(mutex_);
+    std::vector<PkiCallerRecord> output;
+    for (auto record = pki_callers_.rbegin();
+         record != pki_callers_.rend() && output.size() < limit;
+         ++record) {
+        if (record->customer_id == customer_id) {
+            output.push_back(*record);
+        }
+    }
+    return output;
+}
+
+Result<PkiRecoveryCeremonyRecord>
+InMemoryStore::create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& input) {
+    std::lock_guard lock(mutex_);
+    const auto authority =
+        std::ranges::find_if(pki_authorities_, [&](const PkiAuthorityRecord& value) {
+            return value.customer_id == input.customer_id;
+        });
+    if (authority == pki_authorities_.end()) {
+        return std::unexpected(StoreError{"not_found", "customer authority does not exist"});
+    }
+    if (input.id.empty() || input.threshold < 2 || input.share_count < input.threshold ||
+        input.share_count > 255 || input.expires_at <= now_iso8601()) {
+        return std::unexpected(StoreError{"invalid_input", "recovery ceremony is invalid"});
+    }
+    if (std::ranges::any_of(pki_recovery_ceremonies_,
+                            [&](const auto& value) { return value.id == input.id; })) {
+        return std::unexpected(StoreError{"conflict", "recovery ceremony already exists"});
+    }
+    PkiRecoveryCeremonyRecord record{input.id,
+                                     input.customer_id,
+                                     authority->id,
+                                     input.threshold,
+                                     input.share_count,
+                                     std::nullopt,
+                                     input.expires_at,
+                                     now_iso8601()};
+    pki_recovery_ceremonies_.push_back(record);
+    return record;
+}
+
+Result<PkiRecoveryCeremonyRecord>
+InMemoryStore::get_pki_recovery_ceremony(const std::string& customer_id,
+                                         const std::string& ceremony_id) {
+    std::lock_guard lock(mutex_);
+    const auto ceremony = std::ranges::find_if(pki_recovery_ceremonies_, [&](const auto& value) {
+        return value.id == ceremony_id && value.customer_id == customer_id;
+    });
+    if (ceremony == pki_recovery_ceremonies_.end()) {
+        return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+    }
+    return *ceremony;
+}
+
+Result<PkiRecoveryCeremonyRecord> InMemoryStore::complete_pki_recovery_ceremony(
+    const std::string& customer_id,
+    const std::string& ceremony_id,
+    const std::vector<PkiRecoveryShareEvidence>& evidence) {
+    std::lock_guard lock(mutex_);
+    auto ceremony = std::ranges::find_if(pki_recovery_ceremonies_, [&](const auto& value) {
+        return value.id == ceremony_id && value.customer_id == customer_id;
+    });
+    if (ceremony == pki_recovery_ceremonies_.end()) {
+        return std::unexpected(StoreError{"not_found", "recovery ceremony does not exist"});
+    }
+    const std::string now = now_iso8601();
+    if (ceremony->recovered_at || ceremony->expires_at <= now) {
+        return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
+    }
+    std::set<int> indices;
+    for (const PkiRecoveryShareEvidence& share : evidence) {
+        if (share.index < 1 || share.digest.empty() || !indices.insert(share.index).second) {
+            return std::unexpected(StoreError{"invalid_input", "recovery evidence is invalid"});
+        }
+    }
+    if (static_cast<int>(evidence.size()) < ceremony->threshold) {
+        return std::unexpected(StoreError{"invalid_input", "recovery quorum is not present"});
+    }
+    ceremony->recovered_at = now;
+    pki_recovery_evidence_[ceremony_id] = evidence;
+    return *ceremony;
+}
+
 Result<void> InMemoryStore::store_data_key_locked(const std::string& customer_id,
                                                   const std::string& owner_id,
                                                   std::uint64_t version,

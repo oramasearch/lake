@@ -19,12 +19,18 @@ credential. This keeps trust-graph policy distinct from transport-specific verif
 `ServerOptions` receives those configured dependencies and supplies one caller-attestation service
 to the registry. `exchange_kubernetes_attestation`, `exchange_jwt_attestation`, and
 `exchange_cloud_attestation` are public-entry capabilities; successful exchanges are audit events.
+Before returning the bearer credential, each exchange writes a `pki_callers` row containing its
+customer, workload identity, attestation type, verified issuer and subject, non-secret verified
+attributes, and expiry. The credential value is never persisted. The response includes the caller
+record ID so an operator can correlate the exchange with its signed audit event.
 
 ## How to verify
 
 The caller suite exchanges a Kubernetes token against a TokenReview double, rejects an
 unregistered issuer claim, accepts a configured federation claim, and verifies the minted
 credential expires. Every result is present in the signed audit stream.
+The Postgres-backed test repeats the Kubernetes exchange and reads its durable caller metadata
+through a new store instance.
 
 ## How to change
 

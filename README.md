@@ -46,6 +46,8 @@ liquid is the tool. lake is where it collects.
 > client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555
 > ACME HTTP-01 order flow. ACME
 > requests use one-use nonces and ES256 account JWS, and finalization signs the submitted CSR key.
+> Caller exchanges persist verified non-secret metadata, while root-recovery ceremonies persist
+> quorum, expiry, completion, and one-way share evidence. Both remain on the signed audit path.
 
 ## Build and run
 

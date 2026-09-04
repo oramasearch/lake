@@ -40,7 +40,9 @@ struct Credential {
     std::string value;
     std::string workload_taap_id;
     std::string attestation_type;
+    std::string issuer;
     std::string subject;
+    nlohmann::json attributes = nlohmann::json::object();
     std::string expires_at;
 };
 
@@ -108,7 +110,9 @@ public:
 private:
     Result<Credential> issue(std::string_view workload_taap_id,
                              std::string_view attestation_type,
+                             std::string_view issuer,
                              std::string_view subject,
+                             nlohmann::json attributes,
                              int lifetime_seconds);
 
     TokenReviewer* token_reviewer_;

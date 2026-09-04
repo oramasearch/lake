@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <format>
 #include <memory>
 #include <string>
 #include <utility>
@@ -1042,6 +1043,27 @@ Result<void> verify_recovered_root(const Authority& authority,
     return {};
 }
 
+Result<PkiRecoveryShareEvidence> recovery_evidence(const ShamirShare& share) {
+    std::vector<unsigned char> input;
+    append_u32(input, static_cast<std::uint32_t>(share.index));
+    for (const std::byte value : share.value) {
+        input.push_back(std::to_integer<unsigned char>(value));
+    }
+    std::array<unsigned char, 32> digest{};
+    unsigned int digest_size = 0;
+    if (EVP_Digest(
+            input.data(), input.size(), digest.data(), &digest_size, EVP_sha256(), nullptr) != 1 ||
+        digest_size != digest.size()) {
+        return std::unexpected(crypto_error("could not digest recovery evidence"));
+    }
+    std::string encoded;
+    encoded.reserve(digest.size() * 2);
+    for (const unsigned char value : digest) {
+        encoded += std::format("{:02x}", value);
+    }
+    return PkiRecoveryShareEvidence{share.index, std::move(encoded)};
+}
+
 Result<AuthorityPublic> Service::create_authority(std::string_view customer_id) {
     std::lock_guard lock(mutex_);
     if (authorities_.contains(std::string(customer_id))) {
@@ -1186,7 +1208,21 @@ Result<RecoveryCeremony> Service::begin_recovery(::lake::control::Store& store,
     if (!authority) {
         return std::unexpected(authority.error());
     }
-    return recovery_ceremony_for(*authority, threshold, share_count);
+    auto ceremony = recovery_ceremony_for(*authority, threshold, share_count);
+    if (!ceremony) {
+        return std::unexpected(ceremony.error());
+    }
+    const auto expires_at = std::chrono::system_clock::now() + std::chrono::minutes(15);
+    auto record = store.create_pki_recovery_ceremony(NewPkiRecoveryCeremonyRecord{
+        ceremony->id,
+        std::string(customer_id),
+        threshold,
+        share_count,
+        std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires_at))});
+    if (!record) {
+        return std::unexpected(Error{record.error().code, record.error().message});
+    }
+    return ceremony;
 }
 
 Result<void> Service::recover_root(std::string_view customer_id,
@@ -1205,11 +1241,38 @@ Result<void> Service::recover_root(::lake::control::Store& store,
                                    std::string_view instance_kek,
                                    const RecoveryCeremony& ceremony,
                                    const std::vector<ShamirShare>& shares) {
+    auto record = store.get_pki_recovery_ceremony(std::string(customer_id), ceremony.id);
+    if (!record) {
+        return std::unexpected(Error{record.error().code, record.error().message});
+    }
+    if (record->threshold != ceremony.threshold) {
+        return std::unexpected(
+            Error{"invalid_input", "recovery threshold does not match ceremony"});
+    }
     auto authority = load_authority(store, customer_id, instance_kek);
     if (!authority) {
         return std::unexpected(authority.error());
     }
-    return verify_recovered_root(*authority, ceremony, shares);
+    RecoveryCeremony persisted{record->id, record->threshold, {}};
+    auto verified = verify_recovered_root(*authority, persisted, shares);
+    if (!verified) {
+        return std::unexpected(verified.error());
+    }
+    std::vector<PkiRecoveryShareEvidence> evidence;
+    evidence.reserve(shares.size());
+    for (const ShamirShare& share : shares) {
+        auto digest = recovery_evidence(share);
+        if (!digest) {
+            return std::unexpected(digest.error());
+        }
+        evidence.push_back(std::move(*digest));
+    }
+    auto completed =
+        store.complete_pki_recovery_ceremony(std::string(customer_id), ceremony.id, evidence);
+    if (!completed) {
+        return std::unexpected(Error{completed.error().code, completed.error().message});
+    }
+    return {};
 }
 
 Result<std::string> Service::new_acme_nonce() {
