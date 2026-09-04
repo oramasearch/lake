@@ -74,13 +74,21 @@ and digest chain make a missing or reordered row detectable to `verify_audit`. T
 `audit_events` shape that migration `0004` carried is gone: the store methods no longer write
 their own rows, because `Registry::call` records every outcome.
 
+## Repository lifecycle (migration `0006_repository_lifecycle`)
+
+`repositories` gains nullable `deleted_at` and `retention_until` timestamps. Its visibility
+constraint also accepts `organization`, between private and public. `repository_refs` holds the
+current repository heads and is the newest migration's guard table. Lifecycle operations update
+the repository and its policy-object parent in one store transaction; the registry records each
+attempt in the signed audit stream.
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`audit_events` today), so a new migration means a new guard and the next Job re-runs the
+(`repository_refs` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -95,7 +103,7 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    before `CREATE TRIGGER`), append a new `INSERT INTO schema_migrations`.
 2. Copy to the operator's `assets/lake-schema.sql`; the version hash changes automatically. During
    the Phase 6 waves this copy and the `GuardTable` update land once per wave in a separate operator
-   pull request (orama-operator #133 carries migration `0004`; `0005` follows with this wave), never
+   pull request (orama-operator #134 carries migration `0006`), never
    a partial schema between waves.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema

@@ -19,7 +19,9 @@
 namespace {
 
 std::atomic<bool> stop_requested{false};
-void on_signal(int) { stop_requested.store(true); }
+void on_signal(int) {
+    stop_requested.store(true);
+}
 
 std::string env_or(const char* name, std::string fallback) {
     const char* value = std::getenv(name);
@@ -28,28 +30,34 @@ std::string env_or(const char* name, std::string fallback) {
 
 int usage() {
     std::println("lake {}", lake::version_string());
-    std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] [--store-root PATH] [--admin-token TOKEN]");
-    std::println("       [--identity-seed BASE64] [--instance-kek VALUE] [--memory-store]");
+    std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] "
+                 "[--store-root PATH]");
+    std::println("       [--admin-token TOKEN] [--identity-seed BASE64] "
+                 "[--instance-kek VALUE] [--memory-store]");
     std::println("  lake version");
     std::println("");
-    std::println("  --control-db   Postgres URI of the control plane (default $LAKE_CONTROL_DB_URI)");
-    std::println("  --store-root   liquid customer stores and search indexes (default $LAKE_STORE_ROOT)");
-    std::println("  --admin-token  bearer for /v1 capabilities and MCP tools (default $LAKE_ADMIN_TOKEN)");
-    std::println("  --identity-seed base64 Ed25519 seed for lake's TAAP identity (default $LAKE_IDENTITY_SEED)");
-    std::println("  --instance-kek key-encryption key for a generated identity (default $LAKE_INSTANCE_KEK)");
+    std::println("  --control-db   Postgres URI of the control plane (default "
+                 "$LAKE_CONTROL_DB_URI)");
+    std::println("  --store-root   customer liquid-store root (default $LAKE_STORE_ROOT)");
+    std::println("  --admin-token  bearer for /v1 capabilities and MCP tools "
+                 "(default $LAKE_ADMIN_TOKEN)");
+    std::println("  --identity-seed base64 Ed25519 seed for lake's TAAP identity "
+                 "(default $LAKE_IDENTITY_SEED)");
+    std::println("  --instance-kek key-encryption key for a generated identity "
+                 "(default $LAKE_INSTANCE_KEK)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     lake::api::ServerOptions opts;
     std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
-    std::string store_root = env_or("LAKE_STORE_ROOT", "");
     opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
+    opts.store_root = env_or("LAKE_STORE_ROOT", "");
     bool memory_store = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -65,7 +73,8 @@ int main(int argc, char** argv) {
             std::println("lake {}", lake::version_string());
             return 0;
         }
-        if (arg == "--help" || arg == "-h") return usage() == 2 ? 0 : 0;
+        if (arg == "--help" || arg == "-h")
+            return usage() == 2 ? 0 : 0;
         if (arg == "--listen") {
             const std::string spec = value("--listen");
             const auto colon = spec.rfind(':');
@@ -77,13 +86,34 @@ int main(int argc, char** argv) {
             opts.port = static_cast<unsigned short>(std::atoi(spec.c_str() + colon + 1));
             continue;
         }
-        if (arg == "--node") { opts.node_name = value("--node"); continue; }
-        if (arg == "--control-db") { control_db = value("--control-db"); continue; }
-        if (arg == "--store-root") { store_root = value("--store-root"); continue; }
-        if (arg == "--admin-token") { opts.admin_token = value("--admin-token"); continue; }
-        if (arg == "--identity-seed") { opts.identity_seed = value("--identity-seed"); continue; }
-        if (arg == "--instance-kek") { opts.instance_kek = value("--instance-kek"); continue; }
-        if (arg == "--memory-store") { memory_store = true; continue; }
+        if (arg == "--node") {
+            opts.node_name = value("--node");
+            continue;
+        }
+        if (arg == "--control-db") {
+            control_db = value("--control-db");
+            continue;
+        }
+        if (arg == "--store-root") {
+            opts.store_root = value("--store-root");
+            continue;
+        }
+        if (arg == "--admin-token") {
+            opts.admin_token = value("--admin-token");
+            continue;
+        }
+        if (arg == "--identity-seed") {
+            opts.identity_seed = value("--identity-seed");
+            continue;
+        }
+        if (arg == "--instance-kek") {
+            opts.instance_kek = value("--instance-kek");
+            continue;
+        }
+        if (arg == "--memory-store") {
+            memory_store = true;
+            continue;
+        }
         std::println(stderr, "lake: unknown argument {}", arg);
         return usage();
     }
@@ -96,8 +126,8 @@ int main(int argc, char** argv) {
         opts.store = lake::control::make_postgres_store(control_db);
         store_kind = "postgres";
     }
-    if (!store_root.empty()) {
-        opts.search = std::make_shared<lake::search::Service>(store_root);
+    if (!opts.store_root.empty()) {
+        opts.search = std::make_shared<lake::search::Service>(opts.store_root);
     }
 
     std::signal(SIGINT, on_signal);
@@ -108,16 +138,19 @@ int main(int argc, char** argv) {
         std::println(stderr, "lake: cannot start: {}", server.reason());
         return 1;
     }
-    std::println("{}", nlohmann::json{{"event", "startup"},
-                                     {"version", lake::version_string()},
-                                     {"listen", "http://" + opts.listen_address + ":" + std::to_string(server.port())},
-                                     {"node", opts.node_name},
-                                     {"store", store_kind},
-                                     {"search_store_root_set", store_root.empty() ? "no" : "yes"},
-                                     {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
-                                     {"api", "/v1/openapi.json"},
-                                     {"mcp", "POST /mcp"}}
-                           .dump());
+    std::println(
+        "{}",
+        nlohmann::json{
+            {"event", "startup"},
+            {"version", lake::version_string()},
+            {"listen", "http://" + opts.listen_address + ":" + std::to_string(server.port())},
+            {"node", opts.node_name},
+            {"store", store_kind},
+            {"store_root_configured", opts.store_root.empty() ? "no" : "yes"},
+            {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
+            {"api", "/v1/openapi.json"},
+            {"mcp", "POST /mcp"}}
+            .dump());
     while (!stop_requested.load()) {
         server.wait_for_work(std::chrono::milliseconds(100));
         server.drain();

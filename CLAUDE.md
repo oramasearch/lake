@@ -11,8 +11,8 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 **The control surface serves, in production.** `Lake/prod` on AKS (3 replicas, image
 `oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
 (`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
-the Postgres control plane (schema `0001` + `0002` applied), plus hot repository search over
-customer stores; server-rendered pages for customers, repositories, and search behind the admin sign-in; liveness, readiness,
+the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages for customers
+and repositories behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
 `server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
 is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
@@ -24,7 +24,17 @@ production state above. It also includes the signed, hash-linked audit stream (o
 capability call, sign-in and session event, recorded by `Registry::call` and the session routes),
 the lake TAAP identity with rotation, audit verification and export, the 400-day retention
 floor, migration `0005`, and the `/audit` page; `LAKE_INSTANCE_KEK` is required wherever a
-Postgres store runs.
+Postgres store runs. Repository lifecycle adds migration `0006_repository_lifecycle`, repository
+rename, transfer, visibility and tombstone capabilities, and lifecycle state on the repository
+page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
+Lake links libliquid as a library-only submodule and opens one customer store at
+`LAKE_STORE_ROOT/<customer id>/store`; liquid #160's contract is pinned, while push and pull await
+the public repository/store binding and protocol codec required by lake's server.
+Hot branch-tip search follows that repository-store work: it persists blob-deduplicated BM25F and
+positional-trigram segments at `LAKE_STORE_ROOT/<customer>/index/`, atomically publishes each
+change through its manifest, filters candidates with batched policy authorization, and records the
+signed query outcome through `Registry::call`. REST, OpenAPI, MCP, and the `/search` page expose
+the same capability.
 
 ## Where to read Zetta
 
@@ -85,7 +95,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `invitations` today, versioned by content hash).
+  `repository_refs` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
@@ -106,12 +116,10 @@ that licence boundary.
 - **Port 4900** (decided; Zetta is 4800). The `Lake` CR's `spec.port` defaults to it.
 - **C++26**, CMake ≥ 3.28 + Ninja, Clang 17+ auto-selected as Zetta's `CMakeLists.txt`
   does, OpenSSL 3 and libpq from Homebrew. GoogleTest v1.17.0 via FetchContent (as Zetta), not Catch2.
-- **Boost.Capy** coroutines, **Corosio** networking, **Boost.HTTP** router, **Beast2**
-  HTTP/1 server — vendored under `modules/` at **Zetta's exact pins**, from the same
-  remotes Zetta uses: `capy` (cppalliance `develop`), `corosio` (`oramasearch/corosio`
-  `orama-main`), `http` (`oramasearch/http` `zetta-patches`), `beast2` (cppalliance),
-  `libpqxx` (jtv, 7.10.7 at `853bc0a4`, on libpq). nlohmann/json 3.11.3 via FetchContent.
-  Bump a pin only to a commit Zetta has moved to; never take `cppalliance` corosio or http.
+- **libliquid** as a library-only submodule supplies Capy, Corosio and nlohmann/json;
+  **Boost.HTTP** and **Beast2** provide the HTTP/1 server. `http`, `beast2` and `libpqxx`
+  remain vendored under `modules/`. Bump liquid only to its current `main`; never edit it
+  through lake's copy.
 - `std::expected` at every public boundary; no exceptions across public APIs.
 - Deployed as a `Lake` CR on `oramasearch/orama-operator` (the Zetta operator, extended);
   runs on `oramasearch/k0s`, and on our AKS cluster for now.
@@ -157,3 +165,10 @@ that licence boundary.
 3. Does this file's **Status** and **Open decisions** still hold?
 4. `cmake --build build && ctest --test-dir build` green, and the binary smoke-tested by hand.
 5. Commit means push.
+
+## Formatting
+
+`.clang-format` at the root is the formatter configuration (LLVM base, 100 columns, 4-space indents,
+one statement per line). Format only the lines you change (`git clang-format`) before each commit;
+existing code is not reformatted wholesale. On macOS the Homebrew binary is
+`/opt/homebrew/opt/llvm/bin/clang-format`; on Linux install `clang-format-19`.

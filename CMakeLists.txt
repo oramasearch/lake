@@ -38,30 +38,15 @@ option(LAKE_BUILD_TESTS "Build the test suite" ON)
 include(FetchContent)
 
 # -----------------------------------------------------------------------------
-# Vendored modules — the SAME stack, at the SAME pins, as Zetta (modules/).
-# Capy: coroutine foundation. Corosio: networking (private oramasearch carrier).
-# http + beast2: sans-I/O HTTP + router, and the coroutine-native HTTP/1 server.
-# Order matters: capy → OpenSSL → corosio → Boost core libs → http → beast2.
+# Vendored modules — libliquid is library-only and provides Capy, Corosio and
+# HTTP to its consumers. Beast2 remains lake's Zetta-shaped serving stack.
+# Order matters: OpenSSL → Boost core libs → liquid → beast2. liquid owns the
+# one HTTP target shared by its sync client and lake's server.
 # -----------------------------------------------------------------------------
-set(BOOST_CAPY_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(BOOST_CAPY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BOOST_CAPY_BUILD_BENCH    OFF CACHE BOOL "" FORCE)
-
 if(APPLE)
   list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/openssl@3)
 endif()
 find_package(OpenSSL REQUIRED)
-set(BOOST_COROSIO_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(BOOST_COROSIO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BOOST_COROSIO_BUILD_PERF     OFF CACHE BOOL "" FORCE)
-
-# libliquid owns the same pinned Capy and Corosio targets, so add it before
-# lake's HTTP stack and reuse those targets rather than defining them twice.
-set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
-set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(LIQUID_BUILD_BENCH OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
-
 # http/beast2 expect the Boost:: targets to already exist (they do not self-resolve
 # Boost as subdirectories), so the official boost-cmake release comes first.
 set(BOOST_INCLUDE_LIBRARIES json url assert config core describe endian mp11 static_assert system throw_exception type_traits variant2 winapi)
@@ -73,14 +58,21 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(boost_core_libs)
-set(BOOST_HTTP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(BOOST_HTTP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/http EXCLUDE_FROM_ALL)
+set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
+# Search uses oramacore-cpp's in-memory BM25F engine. Lake owns persistence
+# and the positional trigram postings in src/search/index.cpp.
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ORAMACORE_CPP_CAPY OFF CACHE BOOL "" FORCE)
+add_subdirectory(modules/oramacore-cpp EXCLUDE_FROM_ALL)
 set(BOOST_BEAST2_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_BEAST2_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/beast2 EXCLUDE_FROM_ALL)
 
-# nlohmann/json is supplied by libliquid's pinned automerge-cpp dependency.
+# -----------------------------------------------------------------------------
+# nlohmann/json — the document type of the API layer (registry, REST envelope,
+# OpenAPI, MCP). libliquid's automerge dependency provides the same CMake target.
 
 # libpqxx — the Postgres client for the control plane, a submodule at Zetta's pin (jtv/libpqxx
 # 7.10.7) on libpq. Only lake-control-postgres names it, so lake-core links no libpq.
@@ -93,12 +85,6 @@ if(APPLE)
 endif()
 set(SKIP_BUILD_TEST ON CACHE BOOL "" FORCE)
 add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
-
-# Search is built from libliquid's repository API and oramacore-cpp's in-memory
-# BM25F engine. Lake owns segment persistence and trigram postings.
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(ORAMACORE_CPP_CAPY OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/oramacore-cpp EXCLUDE_FROM_ALL)
 
 # lake-core: HTTP-free. Version, the pure web_ui renderers, the capability registry and its
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
@@ -133,7 +119,7 @@ target_link_libraries(lake-api PUBLIC lake-core)
 target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boost::corosio Boost::corosio_openssl)
 
 add_executable(lake src/main.cpp)
-target_link_libraries(lake PRIVATE lake-api lake-control-postgres)
+target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
 
 if(LAKE_BUILD_TESTS)
   FetchContent_Declare(googletest

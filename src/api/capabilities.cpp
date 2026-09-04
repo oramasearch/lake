@@ -1,5 +1,8 @@
 #include "lake/api/capabilities.hpp"
 
+#include <chrono>
+#include <ctime>
+
 #include "lake/audit/audit.hpp"
 
 #include "lake/control/handles.hpp"
@@ -11,7 +14,7 @@ namespace {
 
 using nlohmann::json;
 
-ApiResult from_store_error(const control::StoreError &error) {
+ApiResult from_store_error(const control::StoreError& error) {
     return ApiResult::failure(error.code, error.message);
 }
 
@@ -41,7 +44,7 @@ ApiResult search_result(search::Result<std::vector<search::Hit>> hits) {
         return ApiResult::failure(hits.error().code, hits.error().message);
     }
     json values = json::array();
-    for (const search::Hit &hit : *hits) {
+    for (const search::Hit& hit : *hits) {
         values.push_back({{"customer", hit.customer},
                           {"repository", hit.repository},
                           {"path", hit.path},
@@ -52,13 +55,13 @@ ApiResult search_result(search::Result<std::vector<search::Hit>> hits) {
     return ApiResult::success({{"items", std::move(values)}});
 }
 
-std::expected<std::string, ApiError> global_object(const json &, ApiContext &) {
+std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
     return std::string{};
 }
 
 CapabilityObjectResolver entity_object(std::string object_type, std::string input_field) {
     return [object_type = std::move(object_type), input_field = std::move(input_field)](
-               const json &input, ApiContext &context) -> std::expected<std::string, ApiError> {
+               const json& input, ApiContext& context) -> std::expected<std::string, ApiError> {
         auto object = context.store->find_policy_object(object_type, input.at(input_field));
         if (!object) {
             return std::unexpected(
@@ -70,7 +73,7 @@ CapabilityObjectResolver entity_object(std::string object_type, std::string inpu
 
 CapabilityObjectResolver optional_entity_object(std::string object_type, std::string input_field) {
     return [object_type = std::move(object_type), input_field = std::move(input_field)](
-               const json &input, ApiContext &context) -> std::expected<std::string, ApiError> {
+               const json& input, ApiContext& context) -> std::expected<std::string, ApiError> {
         const std::string external_id = input.value(input_field, "");
         if (external_id.empty()) {
             return std::string{};
@@ -86,24 +89,25 @@ CapabilityObjectResolver optional_entity_object(std::string object_type, std::st
 
 CapabilityObjectResolver direct_object(std::string input_field) {
     return [input_field = std::move(input_field)](
-               const json &input, ApiContext &) -> std::expected<std::string, ApiError> {
+               const json& input, ApiContext&) -> std::expected<std::string, ApiError> {
         return input.at(input_field).get<std::string>();
     };
 }
 
-std::expected<std::string, ApiError> scope_object(const json &input, ApiContext &context) {
+std::expected<std::string, ApiError> scope_object(const json& input, ApiContext& context) {
     const std::string team_id = input.value("team_id", "");
     const std::string type = team_id.empty() ? "organization" : "team";
     const std::string external_id = team_id.empty() ? input.value("organization_id", "") : team_id;
     auto object = context.store->find_policy_object(type, external_id);
     if (!object) {
-        return std::unexpected(ApiError{object.error().code, object.error().message,
+        return std::unexpected(ApiError{object.error().code,
+                                        object.error().message,
                                         team_id.empty() ? "/organization_id" : "/team_id"});
     }
     return object->id;
 }
 
-std::expected<std::string, ApiError> invitation_object(const json &input, ApiContext &context) {
+std::expected<std::string, ApiError> invitation_object(const json& input, ApiContext& context) {
     auto invitation = context.store->get_invitation(input.at("invitation_id"));
     if (!invitation) {
         return std::unexpected(
@@ -170,9 +174,21 @@ json repository_schema() {
               {"customer_id", {{"type", "string"}}},
               {"name", {{"type", "string"}}},
               {"description", {{"type", "string"}}},
-              {"visibility", {{"type", "string"}, {"enum", json::array({"private", "public"})}}},
+              {"visibility",
+               {{"type", "string"}, {"enum", json::array({"private", "organization", "public"})}}},
+              {"deleted_at", {{"type", json::array({"string", "null"})}}},
+              {"retention_until", {{"type", json::array({"string", "null"})}}},
               {"created_at", {{"type", "string"}}},
               {"updated_at", {{"type", "string"}}}}}};
+}
+
+std::string timestamp_after(std::chrono::seconds offset) {
+    const std::time_t value = std::time(nullptr) + offset.count();
+    std::tm timestamp{};
+    gmtime_r(&value, &timestamp);
+    char result[sizeof "1970-01-01T00:00:00Z"];
+    std::strftime(result, sizeof result, "%FT%TZ", &timestamp);
+    return result;
 }
 json team_schema() {
     return {{"type", "object"},
@@ -243,7 +259,7 @@ json list_schema(json item) {
             {"properties", {{"items", {{"type", "array"}, {"items", std::move(item)}}}}}};
 }
 
-int limit_of(const json &input) {
+int limit_of(const json& input) {
     const int limit = input.value("limit", 100);
     return limit <= 0 ? 100 : (limit > 1000 ? 1000 : limit);
 }
@@ -264,7 +280,7 @@ json audit_filter_input() {
             {"additionalProperties", false}};
 }
 
-audit::Filter audit_filter_of(const json &input) {
+audit::Filter audit_filter_of(const json& input) {
     return audit::Filter{
         .principal = input.value("principal", ""),
         .object = input.value("object", ""),
@@ -275,7 +291,7 @@ audit::Filter audit_filter_of(const json &input) {
     };
 }
 
-audit::IdentityOptions identity_options(const ApiContext &context) {
+audit::IdentityOptions identity_options(const ApiContext& context) {
     return audit::IdentityOptions{
         .configured_seed = context.identity_seed,
         .instance_kek = context.instance_kek,
@@ -286,7 +302,7 @@ template <class T> ApiResult list_result(control::Result<std::vector<T>> rows) {
     if (!rows)
         return from_store_error(rows.error());
     json items = json::array();
-    for (const auto &row : *rows)
+    for (const auto& row : *rows)
         items.push_back(control::to_json(row));
     return ApiResult::success({{"items", std::move(items)}});
 }
@@ -298,22 +314,22 @@ template <class T> ApiResult one_result(control::Result<T> row) {
 }
 
 ApiResult authorized_object_list_result(control::Result<std::vector<control::PolicyObject>> rows,
-                                        ApiContext &context) {
+                                        ApiContext& context) {
     if (!rows) {
         return from_store_error(rows.error());
     }
     std::vector<std::string> object_ids;
     object_ids.reserve(rows->size());
-    for (const auto &row : *rows) {
+    for (const auto& row : *rows) {
         object_ids.push_back(row.id);
     }
-    auto decisions = control::authorize_batch(*context.store, context.acting_identity, object_ids,
-                                              "read", context.authorization_cache);
+    auto decisions = control::authorize_batch(
+        *context.store, context.acting_identity, object_ids, "read", context.authorization_cache);
     if (!decisions) {
         return from_store_error(decisions.error());
     }
     json items = json::array();
-    for (const auto &row : *rows) {
+    for (const auto& row : *rows) {
         if (decisions->at(row.id).allowed) {
             items.push_back(control::to_json(row));
         }
@@ -325,7 +341,7 @@ ApiResult authorized_object_list_result(control::Result<std::vector<control::Pol
 
 namespace {
 
-void register_server_info(Registry &registry, std::string_view version) {
+void register_server_info(Registry& registry, std::string_view version) {
     const std::string version_string(version);
     registry.add(Capability{
         .name = "server_info",
@@ -346,7 +362,7 @@ void register_server_info(Registry &registry, std::string_view version) {
         .object = "server",
         .action = "read",
         .resolve_object = global_object,
-        .handler = [version_string](const json &, ApiContext &ctx) {
+        .handler = [version_string](const json&, ApiContext& ctx) {
             return ApiResult::success({{"name", "lake"},
                                        {"node", ctx.node_name},
                                        {"version", version_string},
@@ -355,7 +371,7 @@ void register_server_info(Registry &registry, std::string_view version) {
         }});
 }
 
-void register_identity_capabilities(Registry &registry) {
+void register_identity_capabilities(Registry& registry) {
     // ---- users ----
     registry.add(Capability{.name = "list_users",
                             .title = "List users",
@@ -366,7 +382,7 @@ void register_identity_capabilities(Registry &registry) {
                             .object = "user collection",
                             .action = "read",
                             .resolve_object = global_object,
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store ? list_result(ctx.store->list_users(limit_of(in)))
                                                  : no_store();
                             }});
@@ -379,32 +395,32 @@ void register_identity_capabilities(Registry &registry) {
                             .object = "user",
                             .action = "read",
                             .resolve_object = global_object,
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store ? one_result(ctx.store->get_user(in["id"]))
                                                  : no_store();
                             }});
-    registry.add(Capability{.name = "create_user",
-                            .title = "Create user",
-                            .description = "Create a user (identity, owns nothing). "
-                                           "taap_id and email are optional and unique.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties",
-                                              {{"taap_id", {{"type", "string"}}},
-                                               {"email", {{"type", "string"}}},
-                                               {"display_name", {{"type", "string"}}}}},
-                                             {"additionalProperties", false}},
-                            .output_schema = user_schema(),
-                            .kind = CapabilityKind::Action,
-                            .object = "user collection",
-                            .action = "admin",
-                            .resolve_object = global_object,
-                            .handler = [](const json &in, ApiContext &ctx) {
-                                if (!ctx.store)
-                                    return no_store();
-                                return one_result(ctx.store->create_user(
-                                    control::NewUser{in.value("taap_id", ""), in.value("email", ""),
-                                                     in.value("display_name", "")}));
-                            }});
+    registry.add(Capability{
+        .name = "create_user",
+        .title = "Create user",
+        .description = "Create a user (identity, owns nothing). "
+                       "taap_id and email are optional and unique.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"taap_id", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = user_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "user collection",
+        .action = "admin",
+        .resolve_object = global_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            if (!ctx.store)
+                return no_store();
+            return one_result(ctx.store->create_user(control::NewUser{
+                in.value("taap_id", ""), in.value("email", ""), in.value("display_name", "")}));
+        }});
 
     // ---- organizations ----
     registry.add(Capability{.name = "list_organizations",
@@ -416,7 +432,7 @@ void register_identity_capabilities(Registry &registry) {
                             .object = "organization collection",
                             .action = "read",
                             .resolve_object = global_object,
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store ? list_result(
                                                        ctx.store->list_organizations(limit_of(in)))
                                                  : no_store();
@@ -430,33 +446,34 @@ void register_identity_capabilities(Registry &registry) {
                             .object = "organization",
                             .action = "read",
                             .resolve_object = entity_object("organization", "id"),
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store ? one_result(ctx.store->get_organization(in["id"]))
                                                  : no_store();
                             }});
-    registry.add(
-        Capability{.name = "create_organization",
-                   .title = "Create organization",
-                   .description = "Create an organization (identity, owns nothing). taap_id "
-                                  "is optional and unique.",
-                   .input_schema = {{"type", "object"},
-                                    {"properties",
-                                     {{"taap_id", {{"type", "string"}}},
-                                      {"display_name", {{"type", "string"}}},
-                                      {"customer_id", {{"type", "string"}}}}},
-                                    {"additionalProperties", false}},
-                   .output_schema = organization_schema(),
-                   .kind = CapabilityKind::Action,
-                   .object = "customer",
-                   .action = "admin",
-                   .resolve_object = optional_entity_object("customer", "customer_id"),
-                   .handler = [](const json &in, ApiContext &ctx) {
-                       if (!ctx.store)
-                           return no_store();
-                       return one_result(ctx.store->create_organization(control::NewOrganization{
-                           in.value("taap_id", ""), in.value("display_name", ""),
-                           in.value("customer_id", "")}));
-                   }});
+    registry.add(Capability{.name = "create_organization",
+                            .title = "Create organization",
+                            .description =
+                                "Create an organization (identity, owns nothing). taap_id "
+                                "is optional and unique.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties",
+                                              {{"taap_id", {{"type", "string"}}},
+                                               {"display_name", {{"type", "string"}}},
+                                               {"customer_id", {{"type", "string"}}}}},
+                                             {"additionalProperties", false}},
+                            .output_schema = organization_schema(),
+                            .kind = CapabilityKind::Action,
+                            .object = "customer",
+                            .action = "admin",
+                            .resolve_object = optional_entity_object("customer", "customer_id"),
+                            .handler = [](const json& in, ApiContext& ctx) {
+                                if (!ctx.store)
+                                    return no_store();
+                                return one_result(ctx.store->create_organization(
+                                    control::NewOrganization{in.value("taap_id", ""),
+                                                             in.value("display_name", ""),
+                                                             in.value("customer_id", "")}));
+                            }});
 
     // ---- customers ----
     registry.add(Capability{.name = "list_customers",
@@ -468,7 +485,7 @@ void register_identity_capabilities(Registry &registry) {
                             .object = "customer collection",
                             .action = "read",
                             .resolve_object = global_object,
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store
                                            ? list_result(ctx.store->list_customers(limit_of(in)))
                                            : no_store();
@@ -482,7 +499,7 @@ void register_identity_capabilities(Registry &registry) {
                             .object = "customer",
                             .action = "read",
                             .resolve_object = entity_object("customer", "id"),
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store ? one_result(ctx.store->get_customer(in["id"]))
                                                  : no_store();
                             }});
@@ -510,11 +527,13 @@ void register_identity_capabilities(Registry &registry) {
         .object = "customer collection",
         .action = "admin",
         .resolve_object = global_object,
-        .handler = [](const json &in, ApiContext &ctx) {
+        .handler = [](const json& in, ApiContext& ctx) {
             if (!ctx.store)
                 return no_store();
-            control::NewCustomer draft{in.value("customer_type", ""), in.value("user_id", ""),
-                                       in.value("organization_id", ""), in.value("name", "")};
+            control::NewCustomer draft{in.value("customer_type", ""),
+                                       in.value("user_id", ""),
+                                       in.value("organization_id", ""),
+                                       in.value("name", "")};
             if (!draft.name.empty())
                 return one_result(ctx.store->create_customer(draft));
             // Generated handle: retry on a collision, then give up honestly.
@@ -531,7 +550,7 @@ void register_identity_capabilities(Registry &registry) {
         }});
 }
 
-void register_repository_capabilities(Registry &registry) {
+void register_repository_capabilities(Registry& registry) {
     // ---- repositories ----
     registry.add(Capability{.name = "list_repositories",
                             .title = "List repositories",
@@ -548,7 +567,7 @@ void register_repository_capabilities(Registry &registry) {
                             .object = "repository collection",
                             .action = "read",
                             .resolve_object = optional_entity_object("customer", "customer_id"),
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store ? list_result(ctx.store->list_repositories(
                                                        in.value("customer_id", ""), limit_of(in)))
                                                  : no_store();
@@ -562,7 +581,7 @@ void register_repository_capabilities(Registry &registry) {
                             .object = "repository",
                             .action = "read",
                             .resolve_object = entity_object("repository", "id"),
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return ctx.store ? one_result(ctx.store->get_repository(in["id"]))
                                                  : no_store();
                             }});
@@ -572,14 +591,15 @@ void register_repository_capabilities(Registry &registry) {
         .description = "Create a repository owned by a customer: name is a slug "
                        "unique within that customer "
                        "(the address is <customer handle>/<name>); visibility "
-                       "private (default) or public.",
+                       "private (default), organization, or public.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},
                            {"name", {{"type", "string"}}},
                            {"description", {{"type", "string"}}},
                            {"visibility",
-                            {{"type", "string"}, {"enum", json::array({"private", "public"})}}}}},
+                            {{"type", "string"},
+                             {"enum", json::array({"private", "organization", "public"})}}}}},
                          {"required", json::array({"customer_id", "name"})},
                          {"additionalProperties", false}},
         .output_schema = repository_schema(),
@@ -587,16 +607,97 @@ void register_repository_capabilities(Registry &registry) {
         .object = "customer",
         .action = "write",
         .resolve_object = entity_object("customer", "customer_id"),
-        .handler = [](const json &in, ApiContext &ctx) {
+        .handler = [](const json& in, ApiContext& ctx) {
             if (!ctx.store)
                 return no_store();
-            return one_result(ctx.store->create_repository(
-                control::NewRepository{in.value("customer_id", ""), in.value("name", ""),
-                                       in.value("description", ""), in.value("visibility", "")}));
+            return one_result(
+                ctx.store->create_repository(control::NewRepository{in.value("customer_id", ""),
+                                                                    in.value("name", ""),
+                                                                    in.value("description", ""),
+                                                                    in.value("visibility", "")}));
         }});
+    registry.add(Capability{
+        .name = "rename_repository",
+        .title = "Rename repository",
+        .description = "Rename a live repository within its customer.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}}, {"name", {{"type", "string"}}}}},
+                         {"required", json::array({"id", "name"})},
+                         {"additionalProperties", false}},
+        .output_schema = repository_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = entity_object("repository", "id"),
+        .handler = [](const json& in, ApiContext& ctx) {
+            return ctx.store ? one_result(ctx.store->rename_repository(in.at("id"), in.at("name")))
+                             : no_store();
+        }});
+    registry.add(Capability{
+        .name = "transfer_repository",
+        .title = "Transfer repository",
+        .description = "Transfer a live repository to another customer.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}}, {"customer_id", {{"type", "string"}}}}},
+                         {"required", json::array({"id", "customer_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = repository_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = entity_object("repository", "id"),
+        .handler = [](const json& in, ApiContext& ctx) {
+            return ctx.store ? one_result(ctx.store->transfer_repository(in.at("id"),
+                                                                         in.at("customer_id")))
+                             : no_store();
+        }});
+    registry.add(Capability{
+        .name = "set_repository_visibility",
+        .title = "Set repository visibility",
+        .description = "Set a live repository to private, organization, or public.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}},
+                           {"visibility",
+                            {{"type", "string"},
+                             {"enum", json::array({"private", "organization", "public"})}}}}},
+                         {"required", json::array({"id", "visibility"})},
+                         {"additionalProperties", false}},
+        .output_schema = repository_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = entity_object("repository", "id"),
+        .handler = [](const json& in, ApiContext& ctx) {
+            return ctx.store ? one_result(ctx.store->set_repository_visibility(in.at("id"),
+                                                                               in.at("visibility")))
+                             : no_store();
+        }});
+    registry.add(Capability{.name = "delete_repository",
+                            .title = "Delete repository",
+                            .description = "Tombstone a repository for 30 days before collection.",
+                            .input_schema = id_input(),
+                            .output_schema = repository_schema(),
+                            .kind = CapabilityKind::Action,
+                            .object = "repository",
+                            .action = "write",
+                            .resolve_object = entity_object("repository", "id"),
+                            .handler = [](const json& in, ApiContext& ctx) {
+                                if (!ctx.store) {
+                                    return no_store();
+                                }
+                                const control::RepositoryDeletion deletion{
+                                    .deleted_at = timestamp_after(std::chrono::seconds::zero()),
+                                    .retention_until = timestamp_after(std::chrono::days{30}),
+                                };
+                                return one_result(
+                                    ctx.store->delete_repository(in.at("id"), deletion));
+                            }});
 }
 
-void register_organization_capabilities(Registry &registry) {
+void register_organization_capabilities(Registry& registry) {
     // ---- teams and membership ----
     registry.add(Capability{.name = "list_teams",
                             .title = "List teams",
@@ -612,7 +713,7 @@ void register_organization_capabilities(Registry &registry) {
                             .object = "organization",
                             .action = "read",
                             .resolve_object = entity_object("organization", "organization_id"),
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return list_result(
                                     ctx.store->list_teams(in.at("organization_id"), limit_of(in)));
                             }});
@@ -625,31 +726,33 @@ void register_organization_capabilities(Registry &registry) {
                             .object = "team",
                             .action = "read",
                             .resolve_object = entity_object("team", "id"),
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return one_result(ctx.store->get_team(in.at("id")));
                             }});
-    registry.add(
-        Capability{.name = "create_team",
-                   .title = "Create team",
-                   .description = "Create a team under an organization. Organization admins "
-                                  "may delegate it.",
-                   .input_schema = {{"type", "object"},
-                                    {"properties",
-                                     {{"organization_id", {{"type", "string"}}},
-                                      {"name", {{"type", "string"}}},
-                                      {"display_name", {{"type", "string"}}}}},
-                                    {"required", json::array({"organization_id", "name"})},
-                                    {"additionalProperties", false}},
-                   .output_schema = team_schema(),
-                   .kind = CapabilityKind::Action,
-                   .object = "organization",
-                   .action = "admin",
-                   .resolve_object = entity_object("organization", "organization_id"),
-                   .handler = [](const json &in, ApiContext &ctx) {
-                       return one_result(ctx.store->create_team(control::NewTeam{
-                           in.at("organization_id"), in.at("name"), in.value("display_name", ""),
-                           ctx.acting_identity, ctx.request_id}));
-                   }});
+    registry.add(Capability{
+        .name = "create_team",
+        .title = "Create team",
+        .description = "Create a team under an organization. Organization admins "
+                       "may delegate it.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"organization_id", {{"type", "string"}}},
+                           {"name", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}}}},
+                         {"required", json::array({"organization_id", "name"})},
+                         {"additionalProperties", false}},
+        .output_schema = team_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "organization",
+        .action = "admin",
+        .resolve_object = entity_object("organization", "organization_id"),
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(ctx.store->create_team(control::NewTeam{in.at("organization_id"),
+                                                                      in.at("name"),
+                                                                      in.value("display_name", ""),
+                                                                      ctx.acting_identity,
+                                                                      ctx.request_id}));
+        }});
     registry.add(
         Capability{.name = "list_memberships",
                    .title = "List memberships",
@@ -667,7 +770,7 @@ void register_organization_capabilities(Registry &registry) {
                    .object = "organization or team",
                    .action = "read",
                    .resolve_object = scope_object,
-                   .handler = [](const json &in, ApiContext &ctx) {
+                   .handler = [](const json& in, ApiContext& ctx) {
                        return list_result(ctx.store->list_memberships(
                            in.at("organization_id"), in.value("team_id", ""), limit_of(in)));
                    }});
@@ -687,19 +790,30 @@ void register_organization_capabilities(Registry &registry) {
                {"principal_taap_id", {{"type", "string"}}},
                {"role", {{"type", "string"}, {"enum", json::array({"owner", "admin", "member"})}}},
                {"attestation_digest", {{"type", "string"}}}}},
-             {"required", json::array({"organization_id", "principal_type", "principal_id",
-                                       "principal_taap_id", "role", "attestation_digest"})},
+             {"required",
+              json::array({"organization_id",
+                           "principal_type",
+                           "principal_id",
+                           "principal_taap_id",
+                           "role",
+                           "attestation_digest"})},
              {"additionalProperties", false}},
         .output_schema = membership_schema(),
         .kind = CapabilityKind::Action,
         .object = "organization or team",
         .action = "admin",
         .resolve_object = scope_object,
-        .handler = [](const json &in, ApiContext &ctx) {
-            return one_result(ctx.store->create_membership(control::NewMembership{
-                in.at("organization_id"), in.value("team_id", ""), in.at("principal_type"),
-                in.at("principal_id"), in.at("principal_taap_id"), in.at("role"),
-                in.at("attestation_digest"), ctx.acting_identity, ctx.request_id}));
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(
+                ctx.store->create_membership(control::NewMembership{in.at("organization_id"),
+                                                                    in.value("team_id", ""),
+                                                                    in.at("principal_type"),
+                                                                    in.at("principal_id"),
+                                                                    in.at("principal_taap_id"),
+                                                                    in.at("role"),
+                                                                    in.at("attestation_digest"),
+                                                                    ctx.acting_identity,
+                                                                    ctx.request_id}));
         }});
 
     // ---- invitations ----
@@ -720,7 +834,7 @@ void register_organization_capabilities(Registry &registry) {
                    .object = "organization or team",
                    .action = "admin",
                    .resolve_object = scope_object,
-                   .handler = [](const json &in, ApiContext &ctx) {
+                   .handler = [](const json& in, ApiContext& ctx) {
                        return list_result(ctx.store->list_invitations(
                            in.at("organization_id"), in.value("team_id", ""), limit_of(in)));
                    }});
@@ -745,11 +859,16 @@ void register_organization_capabilities(Registry &registry) {
         .object = "organization or team",
         .action = "admin",
         .resolve_object = scope_object,
-        .handler = [](const json &in, ApiContext &ctx) {
-            return one_result(ctx.store->create_invitation(
-                control::NewInvitation{in.at("organization_id"), in.value("team_id", ""),
-                                       in.at("invitee_type"), in.at("invitee"), in.at("role"),
-                                       in.at("expires_at"), ctx.acting_identity, ctx.request_id}));
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(
+                ctx.store->create_invitation(control::NewInvitation{in.at("organization_id"),
+                                                                    in.value("team_id", ""),
+                                                                    in.at("invitee_type"),
+                                                                    in.at("invitee"),
+                                                                    in.at("role"),
+                                                                    in.at("expires_at"),
+                                                                    ctx.acting_identity,
+                                                                    ctx.request_id}));
         }});
     registry.add(Capability{
         .name = "accept_invitation",
@@ -764,23 +883,30 @@ void register_organization_capabilities(Registry &registry) {
                            {"principal_taap_id", {{"type", "string"}}},
                            {"attestation_digest", {{"type", "string"}}}}},
                          {"required",
-                          json::array({"invitation_id", "principal_type", "principal_id",
-                                       "principal_taap_id", "attestation_digest"})},
+                          json::array({"invitation_id",
+                                       "principal_type",
+                                       "principal_id",
+                                       "principal_taap_id",
+                                       "attestation_digest"})},
                          {"additionalProperties", false}},
         .output_schema = membership_schema(),
         .kind = CapabilityKind::Action,
         .object = "invitation scope",
         .action = "admin",
         .resolve_object = invitation_object,
-        .handler = [](const json &in, ApiContext &ctx) {
-            return one_result(ctx.store->accept_invitation(control::AcceptInvitation{
-                in.at("invitation_id"), in.at("principal_type"), in.at("principal_id"),
-                in.at("principal_taap_id"), in.at("attestation_digest"), ctx.acting_identity,
-                ctx.request_id}));
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(
+                ctx.store->accept_invitation(control::AcceptInvitation{in.at("invitation_id"),
+                                                                       in.at("principal_type"),
+                                                                       in.at("principal_id"),
+                                                                       in.at("principal_taap_id"),
+                                                                       in.at("attestation_digest"),
+                                                                       ctx.acting_identity,
+                                                                       ctx.request_id}));
         }});
 }
 
-void register_policy_capabilities(Registry &registry) {
+void register_policy_capabilities(Registry& registry) {
     // ---- object graph and grants ----
     registry.add(Capability{
         .name = "list_objects",
@@ -796,14 +922,14 @@ void register_policy_capabilities(Registry &registry) {
         .kind = CapabilityKind::Read,
         .object = "policy object collection",
         .action = "read",
-        .resolve_object = [](const json &in, ApiContext &) -> std::expected<std::string, ApiError> {
+        .resolve_object = [](const json& in, ApiContext&) -> std::expected<std::string, ApiError> {
             return in.value("parent_id", "");
         },
         .handler =
-            [](const json &in, ApiContext &ctx) {
+            [](const json& in, ApiContext& ctx) {
                 return authorized_object_list_result(
-                    ctx.store->list_policy_objects(in.value("parent_id", ""),
-                                                   in.value("object_type", ""), limit_of(in)),
+                    ctx.store->list_policy_objects(
+                        in.value("parent_id", ""), in.value("object_type", ""), limit_of(in)),
                     ctx);
             }});
     registry.add(Capability{.name = "get_object",
@@ -815,7 +941,7 @@ void register_policy_capabilities(Registry &registry) {
                             .object = "policy object",
                             .action = "read",
                             .resolve_object = direct_object("id"),
-                            .handler = [](const json &in, ApiContext &ctx) {
+                            .handler = [](const json& in, ApiContext& ctx) {
                                 return one_result(ctx.store->get_policy_object(in.at("id")));
                             }});
     registry.add(Capability{
@@ -836,10 +962,14 @@ void register_policy_capabilities(Registry &registry) {
         .object = "policy object",
         .action = "admin",
         .resolve_object = direct_object("parent_id"),
-        .handler = [](const json &in, ApiContext &ctx) {
-            return one_result(ctx.store->create_policy_object(control::NewPolicyObject{
-                in.at("object_type"), in.at("external_id"), in.at("parent_id"), ctx.acting_identity,
-                ctx.request_id, in.value("inherit", true)}));
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(ctx.store->create_policy_object(
+                control::NewPolicyObject{in.at("object_type"),
+                                         in.at("external_id"),
+                                         in.at("parent_id"),
+                                         ctx.acting_identity,
+                                         ctx.request_id,
+                                         in.value("inherit", true)}));
         }});
     registry.add(Capability{
         .name = "list_grants",
@@ -855,9 +985,9 @@ void register_policy_capabilities(Registry &registry) {
         .object = "policy object grants",
         .action = "admin",
         .resolve_object = direct_object("object_id"),
-        .handler = [](const json &in, ApiContext &ctx) {
-            return list_result(ctx.store->list_grants({in.at("object_id").get<std::string>()},
-                                                      std::nullopt, limit_of(in)));
+        .handler = [](const json& in, ApiContext& ctx) {
+            return list_result(ctx.store->list_grants(
+                {in.at("object_id").get<std::string>()}, std::nullopt, limit_of(in)));
         }});
     registry.add(Capability{
         .name = "create_grant",
@@ -880,10 +1010,13 @@ void register_policy_capabilities(Registry &registry) {
         .object = "policy object",
         .action = "admin",
         .resolve_object = direct_object("object_id"),
-        .handler = [](const json &in, ApiContext &ctx) {
-            return one_result(ctx.store->create_grant(control::NewGrant{
-                in.at("principal_taap_id"), in.at("object_id"), in.at("role"),
-                in.at("attestation_digest"), ctx.acting_identity, ctx.request_id}));
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(ctx.store->create_grant(control::NewGrant{in.at("principal_taap_id"),
+                                                                        in.at("object_id"),
+                                                                        in.at("role"),
+                                                                        in.at("attestation_digest"),
+                                                                        ctx.acting_identity,
+                                                                        ctx.request_id}));
         }});
     registry.add(Capability{
         .name = "effective_access",
@@ -899,90 +1032,91 @@ void register_policy_capabilities(Registry &registry) {
         .object = "effective access",
         .action = "share",
         .resolve_object = direct_object("object_id"),
-        .handler = [](const json &in, ApiContext &ctx) {
+        .handler = [](const json& in, ApiContext& ctx) {
             auto entries =
                 control::effective_access(*ctx.store, in.at("object_id"), ctx.authorization_cache);
             if (!entries) {
                 return from_store_error(entries.error());
             }
             json items = json::array();
-            for (const auto &entry : *entries) {
+            for (const auto& entry : *entries) {
                 items.push_back(control::to_json(entry));
             }
             return ApiResult::success({{"items", std::move(items)}});
         }});
 }
 
-void register_search_capability(Registry &registry) {
-    registry.add(Capability{
-        .name = "search",
-        .title = "Search repositories",
-        .description = "Ranked BM25F search; quoted text is a substring query and /expression/ is a regex query.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"query", {{"type", "string"}}},
-                           {"customer", {{"type", "string"}}},
-                           {"repository", {{"type", "string"}}},
-                           {"ref", {{"type", "string"}}},
-                           {"limit", {{"type", "integer"}}}}},
-                         {"required", json::array({"query"})},
-                         {"additionalProperties", false}},
-        .output_schema = list_schema(search_schema()),
-        .kind = CapabilityKind::Read,
-        .object = "repository search results",
-        .action = "read",
-        .resolve_object = global_object,
-        .authorizes_candidates = true,
-        .handler = [](const json &input, ApiContext &context) {
-            if (!context.search) {
-                return no_search();
-            }
-            if (!context.store) {
-                return no_store();
-            }
-            return search_result(context.search->query(
-                search::Query{input.at("query").get<std::string>(),
-                              input.value("customer", ""),
-                              input.value("repository", ""),
-                              input.value("ref", ""),
-                              limit_of(input)},
-                context.acting_identity,
-                *context.store));
-        }});
+void register_search_capability(Registry& registry) {
+    registry.add(
+        Capability{.name = "search",
+                   .title = "Search repositories",
+                   .description = "Ranked BM25F search; quoted text is a substring query and "
+                                  "/expression/ is a regex query.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"query", {{"type", "string"}}},
+                                      {"customer", {{"type", "string"}}},
+                                      {"repository", {{"type", "string"}}},
+                                      {"ref", {{"type", "string"}}},
+                                      {"limit", {{"type", "integer"}}}}},
+                                    {"required", json::array({"query"})},
+                                    {"additionalProperties", false}},
+                   .output_schema = list_schema(search_schema()),
+                   .kind = CapabilityKind::Read,
+                   .object = "repository search results",
+                   .action = "read",
+                   .resolve_object = global_object,
+                   .authorizes_candidates = true,
+                   .handler = [](const json& input, ApiContext& context) {
+                       if (!context.search) {
+                           return no_search();
+                       }
+                       if (!context.store) {
+                           return no_store();
+                       }
+                       return search_result(
+                           context.search->query(search::Query{input.at("query").get<std::string>(),
+                                                               input.value("customer", ""),
+                                                               input.value("repository", ""),
+                                                               input.value("ref", ""),
+                                                               limit_of(input)},
+                                                 context.acting_identity,
+                                                 *context.store));
+                   }});
 }
 
 } // namespace
 
 // ---- instance identity and audit ----
-void register_audit_capabilities(Registry &registry) {
-    registry.add(Capability{
-        .name = "identity",
-        .title = "Lake identity",
-        .description = "The public TAAP/1 identity document for this lake instance.",
-        .input_schema = {{"type", "object"},
-                         {"properties", json::object()},
-                         {"additionalProperties", false}},
-        .output_schema = {{"type", "object"}},
-        .kind = CapabilityKind::Read,
-        .requires_auth = false,
-        .object = "server",
-        .action = "read",
-        .resolve_object = global_object,
-        .handler = [](const json &, ApiContext &context) {
-            if (!context.store) {
-                return no_store();
-            }
-            auto value = audit::identity(*context.store, identity_options(context));
-            if (!value) {
-                return ApiResult::failure(value.error().code, value.error().message);
-            }
-            return ApiResult::success(audit::identity_document(*value));
-        }});
+void register_audit_capabilities(Registry& registry) {
+    registry.add(
+        Capability{.name = "identity",
+                   .title = "Lake identity",
+                   .description = "The public TAAP/1 identity document for this lake instance.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties", json::object()},
+                                    {"additionalProperties", false}},
+                   .output_schema = {{"type", "object"}},
+                   .kind = CapabilityKind::Read,
+                   .requires_auth = false,
+                   .object = "server",
+                   .action = "read",
+                   .resolve_object = global_object,
+                   .handler = [](const json&, ApiContext& context) {
+                       if (!context.store) {
+                           return no_store();
+                       }
+                       auto value = audit::identity(*context.store, identity_options(context));
+                       if (!value) {
+                           return ApiResult::failure(value.error().code, value.error().message);
+                       }
+                       return ApiResult::success(audit::identity_document(*value));
+                   }});
     registry.add(Capability{
         .name = "rotate_identity",
         .title = "Rotate lake identity",
-        .description =
-            "Rotate the lake TAAP/1 Ed25519 identity with a dual-signed rotation document.",
+        .description = "Rotate the lake TAAP/1 Ed25519 identity with a "
+                       "dual-signed rotation document.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
@@ -991,7 +1125,7 @@ void register_audit_capabilities(Registry &registry) {
         .object = "server",
         .action = "admin",
         .resolve_object = global_object,
-        .handler = [](const json &, ApiContext &context) {
+        .handler = [](const json&, ApiContext& context) {
             if (!context.store) {
                 return no_store();
             }
@@ -1011,7 +1145,7 @@ void register_audit_capabilities(Registry &registry) {
         .object = "audit log",
         .action = "read",
         .resolve_object = global_object,
-        .handler = [](const json &input, ApiContext &context) {
+        .handler = [](const json& input, ApiContext& context) {
             if (!context.store) {
                 return no_store();
             }
@@ -1020,7 +1154,7 @@ void register_audit_capabilities(Registry &registry) {
                 return from_store_error(events.error());
             }
             json items = json::array();
-            for (const audit::Event &event : *events) {
+            for (const audit::Event& event : *events) {
                 items.push_back(audit::to_json(event));
             }
             return ApiResult::success({{"items", std::move(items)}});
@@ -1035,7 +1169,7 @@ void register_audit_capabilities(Registry &registry) {
         .object = "audit log",
         .action = "read",
         .resolve_object = global_object,
-        .handler = [](const json &input, ApiContext &context) {
+        .handler = [](const json& input, ApiContext& context) {
             if (!context.store) {
                 return no_store();
             }
@@ -1058,7 +1192,7 @@ void register_audit_capabilities(Registry &registry) {
         .object = "audit log",
         .action = "read",
         .resolve_object = global_object,
-        .handler = [](const json &, ApiContext &context) {
+        .handler = [](const json&, ApiContext& context) {
             if (!context.store) {
                 return no_store();
             }
@@ -1083,12 +1217,13 @@ void register_audit_capabilities(Registry &registry) {
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
                           {"properties",
-                           {{"customer_id", {{"type", "string"}}}, {"days", {{"type", "integer"}}}}}},
+                           {{"customer_id", {{"type", "string"}}},
+                            {"days", {{"type", "integer"}}}}}},
         .kind = CapabilityKind::Action,
         .object = "customer",
         .action = "admin",
         .resolve_object = entity_object("customer", "customer_id"),
-        .handler = [](const json &input, ApiContext &context) {
+        .handler = [](const json& input, ApiContext& context) {
             if (!context.store) {
                 return no_store();
             }
@@ -1105,7 +1240,7 @@ void register_audit_capabilities(Registry &registry) {
         }});
 }
 
-void register_core_capabilities(Registry &registry, std::string_view version) {
+void register_core_capabilities(Registry& registry, std::string_view version) {
     register_server_info(registry, version);
     register_identity_capabilities(registry);
     register_repository_capabilities(registry);

@@ -70,8 +70,8 @@ identity-core credential resolution will supply user and workload TAAP principal
 
 ## Audit (decision §13)
 
-**Status: the signed audit event stream is implemented in lake #56.** The implementation creates
-the append-only `audit_events` stream and all wave-one branches write this shape through
+**Status: the audit event contract is published for #18.** The implementation creates the
+append-only `audit_events` stream and all wave-one branches write this shape through
 `audit::record`; a later wave may add event kinds but may not reinterpret an existing field.
 
 One append-only `audit_events` stream records authentication (success and failure, method,
@@ -118,26 +118,21 @@ an attempted deletion below the floor is refused and recorded as a `retention` e
 evidence (access reviews, change management) is a query over this stream plus the forge's change
 records; nothing is reconstructed after the fact.
 
-## The data plane: repositories on Zetta
+## The data plane: customer liquid stores
 
 The control plane (Postgres) knows *that* a repository exists, who may touch it and what its
-heads are. The content lives in Zetta (decision §6): lake keeps a liquid store per customer
-whose packs, index runs and manifest are Zetta objects under `customers/<id>/store/…`, written
-through Zetta's API from the lake pods, never through a shared filesystem. liquid's store code
-runs inside lake (lake links libliquid) with a Zetta-backed `store` backend behind the same
-interface the disk backend implements; the chunk index is liquid's own, as decided, held per
-customer store.
+heads are. The content lives in one liquid disk store per customer at
+`LAKE_STORE_ROOT/<customer id>/store`. `LAKE_STORE_ROOT` is a read-write PersistentVolume mounted
+by the operator (operator #132); lake does not provision or select that volume. liquid's store
+code runs inside lake as the library-only `liquid::liquid` target, and its pack files, index runs,
+manifest, and collector state remain libliquid-owned. The chunk index is liquid's own, held per
+customer store. Zetta remains lake’s serving-model reference, not this repository-data backend.
 
-**Push and pull (#12)** is liquid's own protocol over HTTP/1.1, not REAPI: a client `POST`s a
-sync request naming the repository, its heads and the drips it has since a cursor; lake answers
-with the drips it lacks and the chunk digests it needs (`find_missing` over the customer store);
-chunks travel in the existing pack framing in both directions; the CRDT sync framing from
-liquid's `src/crdt` carries the per-directory documents; every drip and change is verified
-against the TAAP signature of its author before it is stored, and a push is authorised at the
-change (decision: checked at commit, not at open). The client side is liquid's
-`remote_blob_source` plus a `sync_endpoint` implemented over `oramasearch/http`; the server side
-is capabilities in the registry (`push`, `pull`, `find_missing`, `refs`) rendered as REST like
-everything else, with streaming bodies through the one adapter TU.
+**Push and pull (#12)** uses liquid #160's published `docs/library/sync.md` and public sync API.
+Lake has the customer-store adapter and the library-only liquid dependency, but does not register
+`refs`, `find_missing`, `push`, or `pull` until libliquid publicly binds repository metadata to the
+required customer store and exposes the documented codec at the server boundary. That preserves
+the contract without inventing framing or creating a repository-local store.
 
 **Repository lifecycle (#13)** stays in the control plane: create, rename, transfer between
 customers, delete (tombstone first, content collected by the customer store's collector after
@@ -146,16 +141,16 @@ each an audit event.
 
 ## Search (#6, #41, #40)
 
-**Status: hot branch-tip search is implemented in lake #6.** Indexed by blob once
-(content-addressed: a blob is indexed the first time any repository stores it), with
-oramacore-cpp's BM25F adapter and lake's positional trigram postings, a hot index on branch tips,
-publication atomic per change (a query sees a change entirely or not at all), and the shared
-batched policy engine filtering candidates at query time. Anonymous search, including search of
-public repositories, is rejected before query execution. The manifest and segments are files beside
-the customer's liquid store under `LAKE_STORE_ROOT/<customer>/index/`; Zetta object storage follows in
-#53. Symbols from the compiler (liquid's build graph knows every translation unit), cold release
-and tag snapshots, and artifact extraction arrive in their respective later issues.
-Search calls through REST, MCP, and the page produce the registry's signed query-outcome event.
+Indexed by blob once (content-addressed: a blob is indexed the first time any repository stores
+it), with oramacore-cpp's BM25F and positional trigram index as the engines, a hot index on branch
+tips and cold snapshots for releases and tags, publication atomic per change (a query sees a
+change entirely or not at all), and the policy engine filtering candidates at query time. The
+shared framing will be published in liquid `docs/library/sync.md` and mirrored here as
+`docs/api/sync.md`; liquid #160 supplies the library export/import and CLI client. Until that
+library pin advances, lake does not implement or test a guessed server framing. Symbols
+from the compiler (liquid's build graph knows every translation unit) arrive when Phase 4's
+incremental engine lands. Search-index storage is specified by the search work; repository content
+and its liquid-owned metadata remain on the customer store volume.
 
 ## Secrets, encryption and PKI (decision §12)
 
@@ -188,7 +183,8 @@ waves that do not collide:
 1. **Identity core** (#14 with #17), **authorisation** (#16 with #19), **audit** (#18),
    **push and pull with lifecycle** (#12 with #13), **search** (#6).
 2. **SSO and federation** (#15, #21), **offline authorisation and recovery** (#22, #23),
-   **secrets, encryption, certificates, callers, break-glass** (#24 to #28), **web UI** (#9).
+   **secrets, encryption, certificates, callers, break-glass** (#24 to #28), **web UI** (#9),
+   **query-time filtering** (#40).
 3. **Transparency log** (#34 to #39), **forge, export, import** (#30 to #32), **drive and models**
    (#7, #8, #43 to #45), **search over history and inside artifacts** (#41, #42), **metering**
    (#33), **auth as a service** (#51).

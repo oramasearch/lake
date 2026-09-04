@@ -22,6 +22,8 @@ class Service;
 // tools (POST /mcp), zero drift.
 namespace lake::api {
 
+class SyncStore;
+
 struct ApiError {
     std::string code;    // invalid_input | unauthorized | not_found | conflict |
                          // unknown_capability | store_unavailable | store_error
@@ -42,8 +44,7 @@ enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
 struct ApiContext {
-    control::Store *store = nullptr; // null = no control-plane store configured
-    search::Service *search = nullptr;
+    control::Store* store = nullptr; // null = no control-plane store configured
     std::string node_name;
     std::string acting_identity; // "admin" for the bearer, empty otherwise
     std::string request_id;
@@ -51,14 +52,16 @@ struct ApiContext {
     std::string device;
     std::string identity_seed;
     std::string instance_kek;
+    SyncStore* sync_store = nullptr;
+    search::Service* search = nullptr;
     bool authorized = false;
     control::AuthorizationCache authorization_cache;
 };
 
 using CapabilityHandler =
-    std::function<ApiResult(const nlohmann::json &input, ApiContext &context)>;
+    std::function<ApiResult(const nlohmann::json& input, ApiContext& context)>;
 using CapabilityObjectResolver = std::function<std::expected<std::string, ApiError>(
-    const nlohmann::json &input, ApiContext &context)>;
+    const nlohmann::json& input, ApiContext& context)>;
 
 struct Capability {
     std::string name; // snake_case: verb-first actions, noun reads
@@ -80,17 +83,18 @@ struct Capability {
 // Boundary validation against the schema subset lake declares: required keys,
 // declared keys only, declared JSON types. Returns ok on success, invalid_input
 // (path-qualified) otherwise.
-ApiResult validate_input(const Capability &capability, const nlohmann::json &input);
+ApiResult validate_input(const Capability& capability, const nlohmann::json& input);
 
 class Registry {
-  public:
+public:
     bool add(Capability capability);
-    std::shared_ptr<const Capability> find(const std::string &name) const;
+    std::shared_ptr<const Capability> find(const std::string& name) const;
     std::vector<std::shared_ptr<const Capability>> list() const;
-    // Authorize (requires_auth vs context.authorized), validate, run, time and audit once.
-    ApiResult call(const std::string &name, const nlohmann::json &input, ApiContext &context) const;
+    // Authorize (requires_auth vs context.authorized), validate, run, time and
+    // audit once.
+    ApiResult call(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
 
-  private:
+private:
     std::vector<std::shared_ptr<const Capability>> entries_;
 };
 

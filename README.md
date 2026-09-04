@@ -7,14 +7,25 @@ liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
 > capabilities (identity, tenants, repositories, organization administration and policy over the
-> Postgres control plane), hot branch-tip search over liquid stores, the pages to explore them, the OpenAPI
+> Postgres control plane), the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
 > Prometheus metrics and JSON request logs. The control surface and metrics are behind the admin bearer; probes are unauthenticated. The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
 > The image `oramasearch/lake` (private) runs under the `Lake` CR on `orama-operator`; see
 > **Container image** below. GitHub Actions defines matching pull-request builds and tagged image
-> publishing; it becomes active once its required credentials are configured.
+> publishing; it becomes active once its required credentials are configured. Repository lifecycle
+> capabilities now create, rename, transfer, set `private` / `organization` / `public` visibility,
+> and tombstone repositories in migration `0006_repository_lifecycle`; every outcome is recorded
+> through the signed audit registry. Lake links libliquid as a library-only submodule and opens one
+> customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160's sync contract and
+> client API are pinned; lake's push and pull endpoints await libliquid's public repository/store
+> binding and protocol codec required to preserve the one-customer-store design. Hot branch-tip
+> search is available over those stores through the registry, including REST, OpenAPI, MCP, and
+> the `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
+> `LAKE_STORE_ROOT/<customer>/index/`, publishes a change through atomic manifest replacement,
+> filters candidates with the batched policy engine, and records the signed query outcome through
+> the registry.
 
 ## Build and run
 
@@ -40,7 +51,7 @@ ctest --test-dir build
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
@@ -83,11 +94,10 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/control/`, `src/control/` | the control-plane store and policy engine: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
-| `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification |
-| `include/lake/search/`, `src/search/` | persisted branch-tip BM25F and positional-trigram search over liquid repositories |
+| `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
-| `modules/` | `capy`, `corosio`, `http`, `beast2`, `libpqxx`, `liquid`, `oramacore-cpp` — vendored at their pinned revisions |
+| `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
 | `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, the authorization object graph, the lake identity and the signed audit stream. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
