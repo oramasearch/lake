@@ -69,6 +69,12 @@ repository and its content; all other repository visibility levels remain protec
 | `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | token/session data | [identity.md](identity.md) |
 | `list_devices`, `revoke_device` | read/action | device id for revocation | device data, including passkey credential IDs and signed bindings | [identity.md](identity.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `limit?` | `{items: [ranked hit]}` | [search.md](search.md) |
+| `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, organization, mount fields | mount metadata | [secrets.md](secrets.md) |
+| `put_secret`, `read_secret`, `secret_metadata` | action/read | mount, name, value/version/metadata fields | versioned value or history | [secrets.md](secrets.md) |
+| `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions` | action | mount, name, `versions[]` | updated history | [secrets.md](secrets.md) |
+| `create_encryption_key`, `list_encryption_keys`, `get_encryption_key`, `rotate_encryption_key` | action/read | mount and key name | named-key metadata only | [encryption.md](encryption.md) |
+| `encrypt`, `decrypt`, `rewrap`, `sign`, `verify`, `hmac`, `derive_encryption_key` | action | mount, key and base64url payload fields | protected result and key version | [encryption.md](encryption.md) |
+| `rotate_customer_kek` | action | `customer_id` | KEK version and rewrapped-key count | [encryption.md](encryption.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

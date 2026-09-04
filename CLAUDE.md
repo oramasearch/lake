@@ -42,6 +42,12 @@ Hot branch-tip search persists blob-deduplicated BM25F and positional-trigram se
 `LAKE_STORE_ROOT/<customer>/index/`, atomically publishes each change through its manifest,
 filters candidates with batched policy authorization, and records the signed query outcome
 through `Registry::call`. REST, OpenAPI, MCP, and the `/search` page expose the same capability.
+Static secrets and encryption add migration `0009_secrets`: customer-namespaced organization
+mounts; immutable JSON versions with soft delete, restore and destroy; named keys with rotation,
+encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivation; and customer-KEK
+rotation that rewraps data keys without rewriting secret ciphertext. The mount, secret and key
+pages render metadata only. Every operation uses policy authorization and the signed registry
+audit path, including denials.
 
 ## Where to read Zetta
 
@@ -82,7 +88,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`
   uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
-- **One registry.** Every capability is a `Capability` in `src/api/capabilities.cpp`; REST,
+- **One registry.** Every capability is registered from `src/api/capabilities.cpp` or its
+  area-specific registration file; REST,
   OpenAPI and MCP are renderings of it and never special-case an entry. `Registry::call` is the
   only path that authorizes and validates. Recipe: `docs/api/README.md`.
 - **Two TUs name third parties:** `src/api/http_server.cpp` (Beast2, boost::http, Boost.JSON)
@@ -103,7 +110,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `identity_mfa_guard` today, versioned by content hash).
+  `secrets_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
@@ -155,8 +162,8 @@ that licence boundary.
   pool, as Zetta does, when latency shows; not before.
 - **Copy the pattern vs link `zetta-api`.** Today lake copies Zetta's serving shape and has
   no source dependency on Zetta. Linking Zetta as a library (control plane, state, auth,
-  Clerk issuer) means adding Zetta as a module of lake — decide how lake obtains Zetta
-  before Phase 6 work starts.
+  Clerk issuer) means adding Zetta as a module of lake — decide how lake obtains Zetta before a
+  capability requires that source dependency.
 
 ## Never
 

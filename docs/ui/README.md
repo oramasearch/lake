@@ -3,7 +3,7 @@
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on the two passkey
 pages that call `navigator.credentials`, unit-tested as strings. The navigation is on every page:
-Home, Customers, Organizations, Repositories, Search, Audit, API
+Home, Customers, Organizations, Repositories, Search, Secrets, Audit, API
 (`/v1/openapi.json`), and Sign in / Sign out.
 
 | Page | Route | Shows |
@@ -27,6 +27,9 @@ Home, Customers, Organizations, Repositories, Search, Audit, API
 | Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | result identity; attestations await liquid #166 |
 | Search | `GET /search?query=<text>` | ranked text, quoted substring, or regex results that the signed-in caller may read |
+| Secret mounts | `GET /secret-mounts[?customer_id=<uuid>&organization_id=<uuid>]` | mounts the caller may read, with links to static secrets and named keys |
+| Static secrets | `GET /secrets?mount_id=<uuid>[&name=<name>]` | custom metadata and version lifecycle; never secret values |
+| Encryption keys | `GET /encryption-keys?mount_id=<uuid>` | key names, current versions and derivation parent; never key material |
 
 **Session.** `POST /session` compares the form token with the operator token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the
@@ -48,6 +51,10 @@ Lifecycle mutations remain capability-only; the page has no mutation form.
 
 Repository-page details and the liquid #166 deferrals are recorded in
 [`repositories.md`](repositories.md).
+
+Secret mutations and cryptographic operations are also capability-only. The secrets page renders
+metadata and lifecycle timestamps, while the encryption page renders key metadata. Neither page
+puts protected input or output into HTML.
 
 **Verify.** `./build/lake --listen 127.0.0.1:4902 --memory-store --admin-token t`, then with a
 cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (200, the table),

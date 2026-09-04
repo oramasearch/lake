@@ -28,7 +28,11 @@ liquid is the tool. lake is where it collects.
 > the `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
 > `LAKE_STORE_ROOT/<customer>/index/`, publishes a change through atomic manifest replacement,
 > filters candidates with the batched policy engine, and records the signed query outcome through
-> the registry.
+> the registry. Migration `0009_secrets` adds customer-namespaced organization mounts, versioned
+> static secrets with delete/restore/destroy history, and named encryption keys with rotation,
+> encrypt/decrypt/rewrap, Ed25519 signatures, HMAC, derivation and customer-KEK rotation. The
+> registry records every operation, including mount-grant denials, and the secrets pages expose
+> metadata without rendering protected values or key material.
 
 ## Build and run
 
@@ -55,9 +59,9 @@ ctest --test-dir build
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
-| `GET /customers`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
-| `GET /repositories`, `/repository?id=`, `/repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and artifact records await liquid #166. |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
+| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and artifact records await liquid #166. |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
@@ -98,7 +102,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/api/server.hpp` | `ApiServer` / `ServerOptions` in Zetta's shape — no HTTP type appears here |
 | `src/api/http_server.cpp` | the **one** translation unit that knows Beast2, `boost::http` and Boost.JSON; serves the registry as REST, OpenAPI and MCP |
 | `include/lake/api/registry.hpp`, `rest.hpp`, `mcp.hpp`, `capabilities.hpp` | the capability registry and its three renderings (HTTP-free) |
-| `include/lake/control/`, `src/control/` | the control-plane store and policy engine: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
+| `include/lake/control/`, `src/control/` | the control-plane store, policy engine, static-secret lifecycle and encryption service: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
@@ -106,7 +110,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, the authorization object graph, the lake identity and the signed audit stream. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 

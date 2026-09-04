@@ -212,6 +212,13 @@ instance identity; #27), and break-glass with a Shamir-recovered root key and a 
 today, an HSM-backed store when the operator provides one), the same envelope model liquid uses
 for its store. Every operation is an audit event.
 
+**Implemented status.** Issues #24 and #25 provide migration `0009_secrets`, organization mounts,
+versioned static-secret lifecycle, named key rotation, encrypt/decrypt/rewrap, Ed25519 sign/verify,
+HMAC-SHA-256, stored child-key derivation and customer-KEK rotation. The API, authorization,
+signed audit fields and pages are documented in [`../api/secrets.md`](../api/secrets.md) and
+[`../api/encryption.md`](../api/encryption.md). Certificate profiles, caller federation and
+break-glass remain in #26–#28.
+
 ## The forge, the drive, models, metering, migration
 
 Change review attaches to liquid's change identity, comments anchor to cursors that survive
@@ -251,5 +258,5 @@ and pushes a liquid repository to it.
 
 ## How to change
 
-This page precedes its implementation. An issue that finds it wrong changes it in the same commit
-as the code and says why in the commit body.
+This page is the implementation contract. An issue that finds it wrong changes it in the same
+commit as the code and says why in the commit body.

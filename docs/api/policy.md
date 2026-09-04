@@ -71,6 +71,11 @@ mount; secret mount → secret. Existing customers, organizations, and repositor
 by migration `0004_organizations_policy`, and their create operations add the matching object in
 the same transaction.
 
+Creating a secret mount adds a stable organization child environment named
+`secrets/<customer-id>/<organization-id>` and the mount below it. A first put adds the named secret
+below the mount. Mount capabilities authorize against the mount object; mount lists batch-filter
+their candidates. See [`secrets.md`](secrets.md).
+
 ## Verify and change
 
 `Policy.InheritsDownTheGraphAndStopsAtACut`,

@@ -27,6 +27,12 @@ std::string web_ui_shell(std::string_view title,
 std::string
 web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in = false);
 std::string web_ui_login(std::string_view error);
+std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts);
+std::string web_ui_secrets(const control::SecretMount& mount,
+                           std::string_view name,
+                           const control::SecretMetadata* metadata);
+std::string web_ui_encryption_keys(const control::SecretMount& mount,
+                                   const std::vector<control::EncryptionKey>& keys);
 std::string web_ui_sign_up(std::string_view error);
 std::string web_ui_sign_in(std::string_view error);
 std::string web_ui_mfa(std::string_view error,
