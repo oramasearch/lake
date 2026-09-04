@@ -57,6 +57,35 @@ std::optional<std::vector<unsigned char>> decode_hex(std::string_view value) {
   return result;
 }
 
+std::optional<std::vector<unsigned char>>
+decode_base64(std::string_view value) {
+  if (value.empty() || value.size() % 4 != 0) {
+    return std::nullopt;
+  }
+  std::vector<unsigned char> result((value.size() / 4) * 3);
+  const int count = EVP_DecodeBlock(
+      result.data(), reinterpret_cast<const unsigned char *>(value.data()),
+      static_cast<int>(value.size()));
+  if (count < 0) {
+    return std::nullopt;
+  }
+  std::size_t padding = 0;
+  if (value.ends_with('=')) {
+    ++padding;
+  }
+  if (value.size() > 1 && value[value.size() - 2] == '=') {
+    ++padding;
+  }
+  result.resize(static_cast<std::size_t>(count) - padding);
+  return result;
+}
+
+struct VerifiedIdentityDocument {
+  std::string identifier;
+  std::string document;
+  std::string hash;
+};
+
 constexpr const char *user_columns =
     "id::text, coalesce(taap_id,''), coalesce(email,''), display_name, "
     "created_at::text, updated_at::text";
