@@ -76,6 +76,68 @@ public:
     Result<audit::Event> latest_audit_event() override;
     Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) override;
     Result<void> set_audit_retention_days(const std::string& customer_id, int days) override;
+    Result<SecretMount> create_secret_mount(const NewSecretMount& value,
+                                            const std::string& instance_kek) override;
+    Result<std::vector<SecretMount>> list_secret_mounts(const std::string& customer_id,
+                                                        const std::string& organization_id,
+                                                        int limit) override;
+    Result<SecretMount> get_secret_mount(const std::string& id) override;
+    Result<SecretVersion> put_secret(const PutSecret& value,
+                                     const std::string& instance_kek) override;
+    Result<SecretVersion> read_secret(const std::string& mount_id,
+                                      const std::string& name,
+                                      std::uint64_t version,
+                                      const std::string& instance_kek) override;
+    Result<SecretMetadata> secret_metadata(const std::string& mount_id,
+                                           const std::string& name) override;
+    Result<SecretMetadata> change_secret_versions(const std::string& mount_id,
+                                                  const std::string& name,
+                                                  const std::vector<std::uint64_t>& versions,
+                                                  SecretVersionAction action) override;
+    Result<EncryptionKey> create_encryption_key(const NewEncryptionKey& value,
+                                                const std::string& instance_kek) override;
+    Result<std::vector<EncryptionKey>> list_encryption_keys(const std::string& mount_id,
+                                                            int limit) override;
+    Result<EncryptionKey> get_encryption_key(const std::string& mount_id,
+                                             const std::string& name) override;
+    Result<EncryptionKey> rotate_encryption_key(const std::string& mount_id,
+                                                const std::string& name,
+                                                const std::string& instance_kek) override;
+    Result<TransitValue> encrypt(const std::string& mount_id,
+                                 const std::string& name,
+                                 const std::string& plaintext,
+                                 const std::string& instance_kek) override;
+    Result<TransitValue> decrypt(const std::string& mount_id,
+                                 const std::string& name,
+                                 const std::string& ciphertext,
+                                 const std::string& instance_kek) override;
+    Result<TransitValue> rewrap(const std::string& mount_id,
+                                const std::string& name,
+                                const std::string& ciphertext,
+                                const std::string& instance_kek) override;
+    Result<TransitValue> sign(const std::string& mount_id,
+                              const std::string& name,
+                              const std::string& message,
+                              std::uint64_t version,
+                              const std::string& instance_kek) override;
+    Result<TransitVerification> verify(const std::string& mount_id,
+                                       const std::string& name,
+                                       const std::string& message,
+                                       const std::string& signature,
+                                       std::uint64_t version,
+                                       const std::string& instance_kek) override;
+    Result<TransitValue> hmac(const std::string& mount_id,
+                              const std::string& name,
+                              const std::string& message,
+                              std::uint64_t version,
+                              const std::string& instance_kek) override;
+    Result<DerivedEncryptionKey> derive_encryption_key(const std::string& mount_id,
+                                                       const std::string& parent_name,
+                                                       const std::string& name,
+                                                       const std::string& context,
+                                                       const std::string& instance_kek) override;
+    Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
+                                                    const std::string& instance_kek) override;
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
@@ -108,6 +170,14 @@ public:
     Result<Principal> context_for(const std::string& secret) override;
 
 private:
+    Result<std::string> customer_kek_locked(const std::string& customer_id, bool create);
+    Result<std::string> data_key_locked(const std::string& customer_id,
+                                        const std::string& owner_id,
+                                        std::uint64_t version);
+    Result<void> store_data_key_locked(const std::string& customer_id,
+                                       const std::string& owner_id,
+                                       std::uint64_t version,
+                                       const std::string& key);
     std::mutex mutex_;
     std::vector<User> users_;
     std::vector<Organization> organizations_;
@@ -122,6 +192,30 @@ private:
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
+    struct CustomerKekRecord {
+        std::string customer_id;
+        std::string key;
+        std::uint64_t version = 1;
+    };
+    struct DataKeyRecord {
+        std::string customer_id;
+        std::string owner_id;
+        std::uint64_t version = 1;
+        std::string wrapped_key;
+    };
+    struct SecretVersionRecord {
+        SecretVersion version;
+        std::string ciphertext;
+    };
+    struct SecretEntryRecord {
+        SecretMetadata metadata;
+        std::vector<SecretVersionRecord> versions;
+    };
+    std::vector<CustomerKekRecord> customer_keks_;
+    std::vector<DataKeyRecord> data_keys_;
+    std::vector<SecretMount> secret_mounts_;
+    std::vector<SecretEntryRecord> secret_entries_;
+    std::vector<EncryptionKey> encryption_keys_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
         std::vector<std::string> recovery_hashes;

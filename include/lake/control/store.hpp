@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/audit/audit.hpp"
+#include "lake/control/secrets.hpp"
 
 // The control-plane store: users and organizations (identity), customers (the
 // tenant that owns everything). One interface, two implementations — Postgres
@@ -253,6 +254,71 @@ public:
     virtual Result<audit::Event> latest_audit_event() = 0;
     virtual Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) = 0;
     virtual Result<void> set_audit_retention_days(const std::string& customer_id, int days) = 0;
+
+    virtual Result<SecretMount> create_secret_mount(const NewSecretMount& value,
+                                                    const std::string& instance_kek) = 0;
+    virtual Result<std::vector<SecretMount>> list_secret_mounts(const std::string& customer_id,
+                                                                const std::string& organization_id,
+                                                                int limit) = 0;
+    virtual Result<SecretMount> get_secret_mount(const std::string& id) = 0;
+    virtual Result<SecretVersion> put_secret(const PutSecret& value,
+                                             const std::string& instance_kek) = 0;
+    virtual Result<SecretVersion> read_secret(const std::string& mount_id,
+                                              const std::string& name,
+                                              std::uint64_t version,
+                                              const std::string& instance_kek) = 0;
+    virtual Result<SecretMetadata> secret_metadata(const std::string& mount_id,
+                                                   const std::string& name) = 0;
+    virtual Result<SecretMetadata>
+    change_secret_versions(const std::string& mount_id,
+                           const std::string& name,
+                           const std::vector<std::uint64_t>& versions,
+                           SecretVersionAction action) = 0;
+
+    virtual Result<EncryptionKey> create_encryption_key(const NewEncryptionKey& value,
+                                                        const std::string& instance_kek) = 0;
+    virtual Result<std::vector<EncryptionKey>> list_encryption_keys(const std::string& mount_id,
+                                                                    int limit) = 0;
+    virtual Result<EncryptionKey> get_encryption_key(const std::string& mount_id,
+                                                     const std::string& name) = 0;
+    virtual Result<EncryptionKey> rotate_encryption_key(const std::string& mount_id,
+                                                        const std::string& name,
+                                                        const std::string& instance_kek) = 0;
+    virtual Result<TransitValue> encrypt(const std::string& mount_id,
+                                         const std::string& name,
+                                         const std::string& plaintext,
+                                         const std::string& instance_kek) = 0;
+    virtual Result<TransitValue> decrypt(const std::string& mount_id,
+                                         const std::string& name,
+                                         const std::string& ciphertext,
+                                         const std::string& instance_kek) = 0;
+    virtual Result<TransitValue> rewrap(const std::string& mount_id,
+                                        const std::string& name,
+                                        const std::string& ciphertext,
+                                        const std::string& instance_kek) = 0;
+    virtual Result<TransitValue> sign(const std::string& mount_id,
+                                      const std::string& name,
+                                      const std::string& message,
+                                      std::uint64_t version,
+                                      const std::string& instance_kek) = 0;
+    virtual Result<TransitVerification> verify(const std::string& mount_id,
+                                               const std::string& name,
+                                               const std::string& message,
+                                               const std::string& signature,
+                                               std::uint64_t version,
+                                               const std::string& instance_kek) = 0;
+    virtual Result<TransitValue> hmac(const std::string& mount_id,
+                                      const std::string& name,
+                                      const std::string& message,
+                                      std::uint64_t version,
+                                      const std::string& instance_kek) = 0;
+    virtual Result<DerivedEncryptionKey> derive_encryption_key(const std::string& mount_id,
+                                                               const std::string& parent_name,
+                                                               const std::string& name,
+                                                               const std::string& context,
+                                                               const std::string& instance_kek) = 0;
+    virtual Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
+                                                            const std::string& instance_kek) = 0;
 
     // Identity core. All bearer and cookie values are resolved here on every
     // request so a revoked session or device is rejected immediately.

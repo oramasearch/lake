@@ -162,7 +162,8 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
          attestation.client_data_json,
          attestation.authenticator_data,
          "integration passkey",
-         lake::audit::IdentityOptions{.instance_kek = "postgres-test-instance-kek"}});
+         lake::audit::IdentityOptions{
+             .instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"}});
     ASSERT_TRUE(passkey) << passkey.error().message;
     EXPECT_FALSE(store->register_passkey({context->user_id,
                                           "lake",

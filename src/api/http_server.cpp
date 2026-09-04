@@ -372,6 +372,43 @@ control::EffectiveAccessEntry access_from_json(const nlohmann::json& value) {
             value.value("inherited", false)};
 }
 
+control::SecretMount secret_mount_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "customer_id"),
+            json_string(value, "organization_id"),
+            json_string(value, "name"),
+            json_string(value, "description"),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
+control::SecretMetadata secret_metadata_from_json(const nlohmann::json& value) {
+    std::vector<control::SecretVersionMetadata> versions;
+    for (const nlohmann::json& version : value.at("versions")) {
+        versions.push_back({version.at("version").get<std::uint64_t>(),
+                            json_string(version, "created_at"),
+                            json_string(version, "deleted_at"),
+                            json_string(version, "destroyed_at")});
+    }
+    return {json_string(value, "mount_id"),
+            json_string(value, "name"),
+            value.at("current_version").get<std::uint64_t>(),
+            value.value("custom_metadata", nlohmann::json::object()),
+            std::move(versions),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
+control::EncryptionKey encryption_key_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "mount_id"),
+            json_string(value, "name"),
+            json_string(value, "derived_from"),
+            value.at("current_version").get<std::uint64_t>(),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
 class LiquidCustomerStores final : public SyncStore {
 public:
     explicit LiquidCustomerStores(std::string root) : root_(std::move(root)) {}
@@ -880,6 +917,9 @@ struct ApiServer::Impl {
             "/repositories",
             "/repository",
             "/search",
+            "/secret-mounts",
+            "/secrets",
+            "/encryption-keys",
             "/audit",
             "/sign-up",
             "/sign-in",
@@ -1939,6 +1979,98 @@ struct ApiServer::Impl {
                          "text/html; charset=utf-8",
                          "no-store");
     }
+
+    boost::http::route_task serve_secret_mounts_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        nlohmann::json input{{"limit", 500}};
+        const std::string customer_id = query_value(route, "customer_id");
+        const std::string organization_id = query_value(route, "organization_id");
+        if (!customer_id.empty()) {
+            input["customer_id"] = customer_id;
+        }
+        if (!organization_id.empty()) {
+            input["organization_id"] = organization_id;
+        }
+        const ApiResult result = registry.call("list_secret_mounts", input, context);
+        if (!result.ok) {
+            return serve_page_error(route, result);
+        }
+        std::vector<control::SecretMount> mounts;
+        for (const nlohmann::json& item : result.value.at("items")) {
+            mounts.push_back(secret_mount_from_json(item));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_secret_mounts(mounts),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_secrets_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string mount_id = query_value(route, "mount_id");
+        if (mount_id.empty()) {
+            return redirect(route, "/secret-mounts");
+        }
+        const ApiResult mount_result =
+            registry.call("get_secret_mount", {{"mount_id", mount_id}}, context);
+        if (!mount_result.ok) {
+            return serve_page_error(route, mount_result);
+        }
+        const control::SecretMount mount = secret_mount_from_json(mount_result.value);
+        const std::string name = query_value(route, "name");
+        std::optional<control::SecretMetadata> metadata;
+        if (!name.empty()) {
+            const ApiResult metadata_result =
+                registry.call("secret_metadata", {{"mount_id", mount_id}, {"name", name}}, context);
+            if (!metadata_result.ok) {
+                return serve_page_error(route, metadata_result);
+            }
+            metadata = secret_metadata_from_json(metadata_result.value);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_secrets(mount, name, metadata ? &*metadata : nullptr),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_encryption_keys_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string mount_id = query_value(route, "mount_id");
+        if (mount_id.empty()) {
+            return redirect(route, "/secret-mounts");
+        }
+        const ApiResult mount_result =
+            registry.call("get_secret_mount", {{"mount_id", mount_id}}, context);
+        if (!mount_result.ok) {
+            return serve_page_error(route, mount_result);
+        }
+        const ApiResult keys_result = registry.call(
+            "list_encryption_keys", {{"mount_id", mount_id}, {"limit", 500}}, context);
+        if (!keys_result.ok) {
+            return serve_page_error(route, keys_result);
+        }
+        std::vector<control::EncryptionKey> keys;
+        for (const nlohmann::json& item : keys_result.value.at("items")) {
+            keys.push_back(encryption_key_from_json(item));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_encryption_keys(secret_mount_from_json(mount_result.value), keys),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
     boost::http::route_task serve_style(boost::http::route_params& route) {
         static const std::string css = web_ui_stylesheet();
         return send_text(route,
@@ -2301,6 +2433,22 @@ bool ApiServer::start() {
     router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/audit", impl.serve_audit_page(route));
     });
+    router.add(http::method::get,
+               "/secret-mounts",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/secret-mounts", impl.serve_secret_mounts_page(route));
+               });
+    router.add(
+        http::method::get, "/secrets", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/secrets", impl.serve_secrets_page(route));
+        });
+    router.add(http::method::get,
+               "/encryption-keys",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/encryption-keys", impl.serve_encryption_keys_page(route));
+               });
     router.add(http::method::get,
                "/v1/oauth/:provider/callback",
                [&impl](http::route_params& route) -> http::route_task {

@@ -178,3 +178,43 @@ TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     EXPECT_NE(page.find("capability/list_users"), std::string::npos);
     EXPECT_NE(page.find("GET /v1/verify_audit"), std::string::npos);
 }
+
+TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
+    const lake::control::SecretMount mount{"mount-1",
+                                           "customer-1",
+                                           "organization-1",
+                                           "production<&",
+                                           "credentials<&",
+                                           "created",
+                                           "updated"};
+    const std::string mounts = lake::api::web_ui_secret_mounts({mount});
+    EXPECT_NE(mounts.find("production&lt;&amp;"), std::string::npos);
+    EXPECT_NE(mounts.find("credentials&lt;&amp;"), std::string::npos);
+    EXPECT_NE(mounts.find("/secrets?mount_id=mount-1"), std::string::npos);
+    EXPECT_NE(mounts.find("/encryption-keys?mount_id=mount-1"), std::string::npos);
+    EXPECT_EQ(mounts.find("<script"), std::string::npos);
+
+    lake::control::SecretMetadata metadata{
+        "mount-1",
+        "database<&",
+        2,
+        {{"owner", "payments<&"}},
+        {{1, "created-1", "deleted<&", ""}, {2, "created-2", "", ""}},
+        "created",
+        "updated"};
+    const std::string secrets = lake::api::web_ui_secrets(mount, "database<&", &metadata);
+    EXPECT_NE(secrets.find("database&lt;&amp;"), std::string::npos);
+    EXPECT_NE(secrets.find("payments&lt;&amp;"), std::string::npos);
+    EXPECT_NE(secrets.find("deleted&lt;&amp;"), std::string::npos);
+    EXPECT_NE(secrets.find("Inspect version metadata"), std::string::npos);
+    EXPECT_EQ(secrets.find("secret-value"), std::string::npos);
+    EXPECT_EQ(secrets.find("<script"), std::string::npos);
+
+    const lake::control::EncryptionKey key{
+        "key-1", "mount-1", "orders<&", "parent<&", 3, "created", "updated"};
+    const std::string keys = lake::api::web_ui_encryption_keys(mount, {key});
+    EXPECT_NE(keys.find("orders&lt;&amp;"), std::string::npos);
+    EXPECT_NE(keys.find("parent&lt;&amp;"), std::string::npos);
+    EXPECT_NE(keys.find("Key material is never returned"), std::string::npos);
+    EXPECT_EQ(keys.find("<script"), std::string::npos);
+}

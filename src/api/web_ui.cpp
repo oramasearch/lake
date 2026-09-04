@@ -60,7 +60,7 @@ std::string nav(bool signed_in) {
     std::string out = "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
                       "href=\"/organizations\">Organizations</a><a "
                       "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
-                      "<a href=\"/audit\">Audit</a>";
+                      "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>";
     if (signed_in) {
         out += "<a href=\"/sessions\">Sessions</a><a "
                "href=\"/passkeys\">Passkeys</a><a href=\"/tokens\">Tokens</a>";
@@ -486,6 +486,107 @@ std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::F
                "/v1/export_audit</code>, "
                "and <code>GET /v1/verify_audit</code>.</p>";
     return web_ui_shell("lake — audit", std::format("{} events", events.size()), content, true);
+}
+
+std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts) {
+    std::string content =
+        "<p class=\"eyebrow\">control plane</p><h1>Secret mounts</h1>"
+        "<p class=\"sub\">Organization-scoped static secrets and named encryption keys. "
+        "Key material remains inside lake.</p>";
+    if (mounts.empty()) {
+        content += "<div class=\"panel empty\">No readable mounts. <code>POST "
+                   "/v1/create_secret_mount</code> creates one.</div>";
+    } else {
+        content += "<table><thead><tr><th>Name</th><th>Organization</th><th>Customer</th>"
+                   "<th>Description</th><th>Created</th><th></th></tr></thead><tbody>";
+        for (const control::SecretMount& mount : mounts) {
+            const std::string query = "mount_id=" + mount.id;
+            content += std::format("<tr><td>{}</td><td><code>{}</code></td>"
+                                   "<td><code>{}</code></td><td>{}</td><td>{}</td><td>{} · "
+                                   "{}</td></tr>",
+                                   web_ui_escape(mount.name),
+                                   web_ui_escape(mount.organization_id),
+                                   web_ui_escape(mount.customer_id),
+                                   web_ui_escape(mount.description),
+                                   web_ui_escape(mount.created_at),
+                                   row_link("/secrets?" + query, "secrets"),
+                                   row_link("/encryption-keys?" + query, "keys"));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell(
+        "lake — secret mounts", std::format("{} mounts", mounts.size()), content, true);
+}
+
+std::string web_ui_secrets(const control::SecretMount& mount,
+                           std::string_view name,
+                           const control::SecretMetadata* metadata) {
+    std::string content =
+        "<p class=\"eyebrow\">static secrets</p><h1>" + web_ui_escape(mount.name) +
+        "</h1><p class=\"sub\">Inspect version metadata without rendering secret values. "
+        "Writes, reads, deletion and destruction use the capability API.</p>"
+        "<form class=\"filters\" method=\"get\" action=\"/secrets\">"
+        "<input type=\"hidden\" name=\"mount_id\" value=\"" +
+        web_ui_escape(mount.id) + "\"><label>Secret name<input name=\"name\" value=\"" +
+        web_ui_escape(name) +
+        "\" required></label><button type=\"submit\">Inspect history</button></form>";
+    if (name.empty()) {
+        content += "<div class=\"panel empty\">Enter a secret name to inspect its metadata.</div>";
+    } else if (metadata == nullptr) {
+        content += "<div class=\"panel empty\">No metadata is available.</div>";
+    } else {
+        content += std::format("<div class=\"panel\"><dl><dt>Name</dt><dd><code>{}</code></dd>"
+                               "<dt>Current version</dt><dd>{}</dd><dt>Custom metadata</dt>"
+                               "<dd><code>{}</code></dd></dl></div>",
+                               web_ui_escape(metadata->name),
+                               metadata->current_version,
+                               web_ui_escape(metadata->custom_metadata.dump()));
+        content += "<h2>Version history</h2><table><thead><tr><th>Version</th><th>Created</th>"
+                   "<th>Deleted</th><th>Destroyed</th></tr></thead><tbody>";
+        for (const control::SecretVersionMetadata& version : metadata->versions) {
+            content += std::format(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                version.version,
+                web_ui_escape(version.created_at),
+                web_ui_escape(version.deleted_at.empty() ? "—" : version.deleted_at),
+                web_ui_escape(version.destroyed_at.empty() ? "—" : version.destroyed_at));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<p class=\"sub\"><a href=\"/encryption-keys?mount_id=" + web_ui_escape(mount.id) +
+               "\">Named encryption keys</a> · API: <code>POST /v1/put_secret</code>, "
+               "<code>GET /v1/read_secret</code>, <code>GET /v1/secret_metadata</code>.</p>";
+    return web_ui_shell("lake — secrets", mount.name, content, true);
+}
+
+std::string web_ui_encryption_keys(const control::SecretMount& mount,
+                                   const std::vector<control::EncryptionKey>& keys) {
+    std::string content = "<p class=\"eyebrow\">encryption service</p><h1>" +
+                          web_ui_escape(mount.name) +
+                          " keys</h1><p class=\"sub\">Named, versioned keys for encryption, "
+                          "signing, HMAC and derivation. Key material is never returned.</p>";
+    if (keys.empty()) {
+        content += "<div class=\"panel empty\">No keys yet. <code>POST "
+                   "/v1/create_encryption_key</code> creates one.</div>";
+    } else {
+        content += "<table><thead><tr><th>Name</th><th>Current version</th><th>Derived from</th>"
+                   "<th>Created</th><th>Updated</th></tr></thead><tbody>";
+        for (const control::EncryptionKey& key : keys) {
+            content += std::format("<tr><td><code>{}</code></td><td>{}</td><td><code>{}</code>"
+                                   "</td><td>{}</td><td>{}</td></tr>",
+                                   web_ui_escape(key.name),
+                                   key.current_version,
+                                   web_ui_escape(key.derived_from.empty() ? "—" : key.derived_from),
+                                   web_ui_escape(key.created_at),
+                                   web_ui_escape(key.updated_at));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<p class=\"sub\"><a href=\"/secrets?mount_id=" + web_ui_escape(mount.id) +
+               "\">Static secrets</a> · API: <code>POST /v1/encrypt</code>, "
+               "<code>POST /v1/decrypt</code>, <code>POST /v1/rewrap</code>.</p>";
+    return web_ui_shell(
+        "lake — encryption keys", std::format("{} keys", keys.size()), content, true);
 }
 
 std::string web_ui_sign_up(std::string_view error) {
