@@ -19,6 +19,8 @@ credential. This keeps trust-graph policy distinct from transport-specific verif
 `ServerOptions` receives those configured dependencies and supplies one caller-attestation service
 to the registry. `exchange_kubernetes_attestation`, `exchange_jwt_attestation`, and
 `exchange_cloud_attestation` are public-entry capabilities; successful exchanges are audit events.
+Each public entry still declares the customer object and policy action required by the registry
+contract; attestation verification supplies authentication instead of a pre-existing bearer.
 Before returning the bearer credential, each exchange writes a `pki_callers` row containing its
 customer, workload identity, attestation type, verified issuer and subject, non-secret verified
 attributes, and expiry. The credential value is never persisted. The response includes the caller

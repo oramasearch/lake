@@ -26,7 +26,8 @@ Each customer has an RFC 8555 directory at `GET /acme/<customer-id>/directory`. 
 `newNonce`, `newAccount`, and `newOrder`. Account and order requests use flattened JWS JSON with
 ES256, a one-use `Replay-Nonce`, and either the account P-256 JWK or the account URL in `kid`.
 The ACME registry transport is not rendered as generic `/v1` routes or MCP tools, so those paths
-cannot bypass JWS verification.
+cannot bypass JWS verification. Its public JWS entry points still declare their customer object
+and policy action in registry metadata; HTTP-01 token reads declare the challenge object.
 
 Lake implements the order flow used by cert-manager's HTTP-01 solver: new account, one DNS
 identifier per order, authorization lookup by POST-as-GET, an `http-01` challenge, finalize with a

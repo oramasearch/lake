@@ -36,6 +36,10 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
     return object->id;
 }
 
+std::expected<std::string, ApiError> acme_challenge_object(const json& input, ApiContext&) {
+    return "acme-http-01/" + input.at("token").get<std::string>();
+}
+
 ApiResult no_pki() {
     return ApiResult::failure("store_unavailable", "PKI service is not configured");
 }
@@ -351,6 +355,9 @@ void register_pki_capabilities(Registry& registry) {
                    .kind = CapabilityKind::Action,
                    .transport = CapabilityTransport::Acme,
                    .requires_auth = false,
+                   .object = "customer",
+                   .action = "admin",
+                   .resolve_object = customer_object,
                    .handler = [](const json& input, ApiContext& context) {
                        if (!context.pki) {
                            return no_pki();
@@ -381,6 +388,9 @@ void register_pki_capabilities(Registry& registry) {
         .kind = CapabilityKind::Action,
         .transport = CapabilityTransport::Acme,
         .requires_auth = false,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.pki || !context.store) {
                 return no_pki();
@@ -426,6 +436,9 @@ void register_pki_capabilities(Registry& registry) {
             .kind = CapabilityKind::Read,
             .transport = CapabilityTransport::Acme,
             .requires_auth = false,
+            .object = "customer",
+            .action = "read",
+            .resolve_object = customer_object,
             .handler = [authorization_lookup](const json& input, ApiContext& context) {
                 if (!context.pki) {
                     return no_pki();
@@ -477,6 +490,9 @@ void register_pki_capabilities(Registry& registry) {
         .kind = CapabilityKind::Action,
         .transport = CapabilityTransport::Acme,
         .requires_auth = false,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.pki) {
                 return no_pki();
@@ -511,6 +527,9 @@ void register_pki_capabilities(Registry& registry) {
         .kind = CapabilityKind::Action,
         .transport = CapabilityTransport::Acme,
         .requires_auth = false,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.pki || !context.store) {
                 return no_pki();
@@ -546,6 +565,9 @@ void register_pki_capabilities(Registry& registry) {
         .kind = CapabilityKind::Read,
         .transport = CapabilityTransport::Acme,
         .requires_auth = false,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.pki) {
                 return no_pki();
@@ -577,6 +599,9 @@ void register_pki_capabilities(Registry& registry) {
         .kind = CapabilityKind::Read,
         .transport = CapabilityTransport::Acme,
         .requires_auth = false,
+        .object = "certificate",
+        .action = "read",
+        .resolve_object = acme_challenge_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.pki) {
                 return no_pki();
@@ -612,6 +637,9 @@ void register_pki_capabilities(Registry& registry) {
                             {"expires_at", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.callers || !context.store) {
                 return no_callers();
@@ -649,6 +677,9 @@ void register_pki_capabilities(Registry& registry) {
                             {"expires_at", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.callers || !context.store) {
                 return no_callers();
@@ -682,6 +713,9 @@ void register_pki_capabilities(Registry& registry) {
                             {"expires_at", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
             if (!context.callers || !context.store) {
                 return no_callers();
