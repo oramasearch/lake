@@ -159,3 +159,10 @@ that licence boundary.
 3. Does this file's **Status** and **Open decisions** still hold?
 4. `cmake --build build && ctest --test-dir build` green, and the binary smoke-tested by hand.
 5. Commit means push.
+
+## Formatting
+
+`.clang-format` at the root is the formatter configuration (LLVM base, 100 columns, 4-space indents,
+one statement per line). Format only the lines you change (`git clang-format`) before each commit;
+existing code is not reformatted wholesale. On macOS the Homebrew binary is
+`/opt/homebrew/opt/llvm/bin/clang-format`; on Linux install `clang-format-19`.
