@@ -1354,6 +1354,30 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
 }
 
+TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "releases"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+
+    const ApiResult release = surface.call("create_release",
+                                           {{"repository_id", repository.value["id"]},
+                                            {"tag", "v1.0.0"},
+                                            {"change_id", "change-1"},
+                                            {"artifact_ids", json::array({"result-1"})}});
+    ASSERT_TRUE(release.ok) << release.error.message;
+    EXPECT_EQ(release.value["value"]["artifacts"][0]["id"], "result-1");
+    EXPECT_EQ(release.value["value"]["artifacts"][0]["attestations"][0]["id"], "attestation-1");
+}
+
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
     Surface s;
     const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});

@@ -194,6 +194,52 @@ ApiResult create_review_comment(const json& input, ApiContext& context) {
                          context);
 }
 
+ApiResult create_release(const json& input, ApiContext& context) {
+    if (!context.store) {
+        return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+    }
+    if (!context.sync_store) {
+        return ApiResult::failure("store_unavailable", "no repository store is configured");
+    }
+    const std::string repository_id = input.at("repository_id").get<std::string>();
+    const auto repository = context.store->get_repository(repository_id);
+    if (!repository) {
+        return from_store_error(repository.error());
+    }
+    json artifacts = json::array();
+    for (const json& artifact_id : input.at("artifact_ids")) {
+        const auto artifact = context.sync_store->repository_artifact(
+            repository->customer_id, repository_id, artifact_id.get<std::string>());
+        if (!artifact) {
+            return ApiResult::failure(artifact.error().code, artifact.error().message);
+        }
+        json attestations = json::array();
+        for (const RepositoryArtifactAttestation& attestation : artifact->attestations) {
+            if (!attestation.verified) {
+                continue;
+            }
+            attestations.push_back({{"id", attestation.id},
+                                    {"profile", attestation.profile},
+                                    {"subject", attestation.subject},
+                                    {"issuer", attestation.issuer}});
+        }
+        if (attestations.empty()) {
+            return ApiResult::failure(
+                "conflict", "release artifact has no verified attestation", "/artifact_ids");
+        }
+        artifacts.push_back({{"id", artifact->id},
+                             {"action", artifact->action},
+                             {"outputs", artifact->outputs.size()},
+                             {"attestations", std::move(attestations)}});
+    }
+    json value = input;
+    value.erase("repository_id");
+    value.erase("artifact_ids");
+    value["artifacts"] = std::move(artifacts);
+    return create_record(
+        "release", {{"repository_id", repository_id}, {"value", std::move(value)}}, context);
+}
+
 std::string webhook_signature(std::string_view secret, std::string_view payload) {
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int size = 0;
@@ -419,14 +465,20 @@ void register_forge_capabilities(Registry& registry) {
             return ApiResult::success({{"items", std::move(items)}});
         }});
 
-    add_create(registry,
-               "create_release",
-               "Create release",
-               "release",
-               {{"tag", {{"type", "string"}}},
-                {"change_id", {{"type", "string"}}},
-                {"artifact_ids", {{"type", "array"}}}},
-               json::array({"tag", "change_id", "artifact_ids"}));
+    registry.add(Capability{.name = "create_release",
+                            .title = "Create release",
+                            .description = "Create a tag release with verified build artifacts.",
+                            .input_schema =
+                                repository_input({{"tag", {{"type", "string"}}},
+                                                  {"change_id", {{"type", "string"}}},
+                                                  {"artifact_ids", {{"type", "array"}}}},
+                                                 json::array({"tag", "change_id", "artifact_ids"})),
+                            .output_schema = record_schema(),
+                            .kind = CapabilityKind::Action,
+                            .object = "repository",
+                            .action = "write",
+                            .resolve_object = repository_object,
+                            .handler = create_release});
     add_list(registry, "list_releases", "List releases", "release");
     add_create(registry,
                "create_webhook",

@@ -38,6 +38,14 @@ target change, path, and the text hunks between them. It updates only matching c
 reports `same`, `shifted`, `approximate`, or `deleted`. Once liquid provides
 `repository::map_anchor`, the adapter will call it without changing persisted comments.
 
+## Releases
+
+`create_release` binds a tag and change identity to selected build-result IDs. Lake reads every
+result from the repository store and refuses a release unless each result has at least one verified
+attestation. The release record copies each selected result's ID, action, output count, and verified
+attestation identifiers and subjects. This creates a durable release-to-evidence link even when
+build records are later queried independently.
+
 ## Verify
 
 ```sh
