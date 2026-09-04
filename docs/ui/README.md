@@ -1,8 +1,9 @@
 # The web UI
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
-`src/api/web_ui.cpp`): one stylesheet at `/style.css`, no script, unit-tested as strings. The
-navigation is on every page: Home, Customers, Organizations, Repositories, API
+`src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on the two passkey
+pages that call `navigator.credentials`, unit-tested as strings. The navigation is on every page:
+Home, Customers, Organizations, Repositories, API
 (`/v1/openapi.json`), and Sign in / Sign out.
 
 | Page | Route | Shows |
@@ -40,5 +41,4 @@ Lifecycle mutations remain capability-only; the page has no mutation form.
 cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (200, the table),
 `curl -b j -X POST /logout` (302), `curl -b j /repositories` (302 to `/login`).
 
-**Next.** Mutation forms (today the create operations are `/v1` actions), a customer page, and
-TAAP sign-in when credential resolution lands (lake issue #4).
+**Next.** Mutation forms for the remaining control-plane actions and a customer detail page.

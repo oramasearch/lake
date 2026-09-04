@@ -11,18 +11,6 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-24.04
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: lake_test
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-        options: >-
-          --health-cmd "pg_isready -U postgres -d lake_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DEBIAN_FRONTEND: noninteractive
       LAKE_INSTANCE_KEK: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
@@ -33,6 +21,7 @@ jobs:
         env:
           POSTGRES_DB: lake_test
           POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-

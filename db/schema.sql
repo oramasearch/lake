@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `repository_refs` table, versioned by content hash).
+-- PostgresSchema (one transaction, guarded on the `identity_core_guard` table, versioned by content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
 -- Postgres 18. Applied with `psql --single-transaction`: no BEGIN/COMMIT here. Idempotent.
@@ -101,8 +101,8 @@ INSERT INTO schema_migrations (version) VALUES ('0002_repositories') ON CONFLICT
 
 -- ---------------------------------------------------------------------------------------------
 -- Organizations and policy (migration 0004): teams and attested membership, invitations, and
--- one object graph whose attestation-backed grants are evaluated by the policy engine. The
--- missing 0003 is reserved for the identity-core migration developed in parallel.
+-- one object graph whose attestation-backed grants are evaluated by the policy engine. Migration
+-- numbering reflects parallel delivery; identity core follows repository lifecycle as 0007.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS objects (
     id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -321,3 +321,133 @@ CREATE TABLE IF NOT EXISTS repository_refs (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0006_repository_lifecycle') ON CONFLICT DO NOTHING;
+-- Identity core (migration 0007): credentials prove control of a user's durable TAAP identity;
+-- sessions are row-resolved bearer credentials, so revocation is effective on the next request.
+-- `identity_core_guard` is intentionally the final table: the operator uses it as the guard for
+-- this wave until its incremental migration work (orama-operator #126) lands.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS identity_documents (
+    user_id       uuid        PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    document      jsonb       NOT NULL,
+    document_hash text        NOT NULL UNIQUE,
+    verified_at   timestamptz NOT NULL DEFAULT now(),
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS identity_documents_set_updated_at ON identity_documents;
+CREATE TRIGGER identity_documents_set_updated_at BEFORE UPDATE ON identity_documents FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS devices (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         text        NOT NULL,
+    revoked_at   timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS devices_user_id_idx ON devices (user_id, created_at DESC);
+DROP TRIGGER IF EXISTS devices_set_updated_at ON devices;
+CREATE TRIGGER devices_set_updated_at BEFORE UPDATE ON devices FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS credentials (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pool_id      text        NOT NULL DEFAULT 'lake',
+    kind         text        NOT NULL,
+    subject      text        NOT NULL,
+    secret_hash  text,
+    public_data  jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    revoked_at   timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT credentials_kind_check CHECK (kind IN ('password', 'totp', 'passkey', 'oauth', 'admin')),
+    CONSTRAINT credentials_subject_unique UNIQUE (pool_id, kind, subject)
+);
+CREATE INDEX IF NOT EXISTS credentials_user_id_idx ON credentials (user_id, created_at DESC);
+DROP TRIGGER IF EXISTS credentials_set_updated_at ON credentials;
+CREATE TRIGGER credentials_set_updated_at BEFORE UPDATE ON credentials FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      uuid        REFERENCES users(id) ON DELETE CASCADE,
+    device_id    uuid        REFERENCES devices(id) ON DELETE SET NULL,
+    pool_id      text        NOT NULL DEFAULT 'lake',
+    kind         text        NOT NULL DEFAULT 'browser',
+    name         text        NOT NULL DEFAULT '',
+    secret_hash  text        NOT NULL UNIQUE,
+    scopes       text[]      NOT NULL DEFAULT ARRAY[]::text[],
+    reason       text        NOT NULL DEFAULT '',
+    expires_at   timestamptz,
+    revoked_at   timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    last_used_at timestamptz,
+    CONSTRAINT sessions_kind_check CHECK (kind IN ('browser', 'api_token', 'static', 'admin')),
+    CONSTRAINT static_session_reason_check CHECK (kind <> 'static' OR length(reason) > 0)
+);
+CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS sessions_device_id_idx ON sessions (device_id) WHERE device_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS keystore (
+    purpose     text        PRIMARY KEY,
+    wrapped_key bytea       NOT NULL,
+    version     integer     NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+DROP TRIGGER IF EXISTS keystore_set_updated_at ON keystore;
+CREATE TRIGGER keystore_set_updated_at BEFORE UPDATE ON keystore FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS oauth_providers (
+    pool_id               text        NOT NULL,
+    provider              text        NOT NULL,
+    issuer                text        NOT NULL,
+    client_id             text        NOT NULL,
+    encrypted_client_secret bytea     NOT NULL,
+    scopes                text[]      NOT NULL,
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    updated_at            timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (pool_id, provider)
+);
+DROP TRIGGER IF EXISTS oauth_providers_set_updated_at ON oauth_providers;
+CREATE TRIGGER oauth_providers_set_updated_at BEFORE UPDATE ON oauth_providers FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS identity_oauth_flows (
+    id                      uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    pool_id                 text        NOT NULL,
+    provider                text        NOT NULL,
+    state_hash              text        NOT NULL UNIQUE,
+    encrypted_code_verifier bytea       NOT NULL,
+    nonce                   text        NOT NULL,
+    device_name             text        NOT NULL,
+    identity_document       text        NOT NULL DEFAULT '',
+    expires_at              timestamptz NOT NULL,
+    used_at                 timestamptz,
+    created_at              timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (pool_id, provider) REFERENCES oauth_providers(pool_id, provider) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS identity_oauth_flows_lookup_idx ON identity_oauth_flows (state_hash, expires_at) WHERE used_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS identity_webauthn_challenges (
+    id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     uuid        REFERENCES users(id) ON DELETE CASCADE,
+    pool_id     text        NOT NULL,
+    ceremony    text        NOT NULL,
+    challenge   text        NOT NULL UNIQUE,
+    rp_id       text        NOT NULL,
+    origin      text        NOT NULL,
+    expires_at  timestamptz NOT NULL,
+    used_at     timestamptz,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT identity_webauthn_challenges_ceremony_check CHECK (ceremony IN ('registration', 'assertion'))
+);
+ALTER TABLE identity_webauthn_challenges ADD COLUMN IF NOT EXISTS rp_id text NOT NULL DEFAULT '';
+ALTER TABLE identity_webauthn_challenges ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT '';
+ALTER TABLE identity_webauthn_challenges ALTER COLUMN rp_id DROP DEFAULT;
+ALTER TABLE identity_webauthn_challenges ALTER COLUMN origin DROP DEFAULT;
+CREATE INDEX IF NOT EXISTS identity_webauthn_challenges_lookup_idx ON identity_webauthn_challenges (challenge, expires_at) WHERE used_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS identity_core_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0007_identity_core') ON CONFLICT DO NOTHING;

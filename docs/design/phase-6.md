@@ -12,7 +12,8 @@ lake today is the control surface: one capability registry rendered as REST `/v1
 MCP; users, organizations, customers and repositories in Postgres; server-rendered pages behind
 the admin sign-in; telemetry; CI. Organization administration and the authorization object graph
 described below are implemented by lake issues #16 and #19 in migration
-`0004_organizations_policy`; TAAP credential resolution remains identity-core work. Everything
+`0004_organizations_policy`; identity core is implemented in migration `0007_identity_core`.
+Everything
 else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
@@ -20,8 +21,9 @@ the API cannot).
 Identity-core status on this branch: verified TAAP documents, password plus TOTP, persisted
 WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
 hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use those capabilities.
-The instance-signed passkey binding remains owned by #18, the temporary TAAP decoder remains
-tracked by liquid #162, and application user pools remain owned by #51.
+The signed audit substrate from #18 is integrated. A distinct signed passkey-binding attestation
+is deferred, the temporary TAAP decoder remains tracked by liquid #162, and application user pools
+remain owned by #51.
 
 ## Identity: one substrate, three principals
 
@@ -55,15 +57,16 @@ identity-core issue keeps `pool_id` on its tables and in its capability inputs f
 
 - A person's TAAP private key never reaches lake. The client holds it. lake stores identity
   documents and rotation chains and verifies their signatures. A WebAuthn credential is the
-  browser device key; lake records lake's signed binding from credential id to the user's TAAP
-  identity after an attestation-less registration, then issues a session only after a successful
-  assertion. lake #18 owns lake's instance identity: it is generated on first start, its seed is
-  wrapped by the instance KEK (or provided as `LAKE_IDENTITY_SEED`), and its public document is
-  exposed at `GET /v1/identity`. Until #18 lands, identity core has a fail-closed `LakeIdentity`
-  stub and the `lake_identity` storage contract; it cannot produce an unsigned binding.
+  browser device key; lake stores its credential-id and public-key binding to the user's TAAP
+  identity after an attestation-less registration, records the registration in the signed audit
+  stream, then issues a session only after a successful assertion. A distinct signed binding
+  attestation remains deferred. lake #18 supplies lake's instance identity: it is generated on
+  first start, its seed is wrapped by the instance KEK (or provided as `LAKE_IDENTITY_SEED`), and
+  its public document is exposed at `GET /v1/identity`. Identity capabilities and the OAuth
+  callback write through its signed audit stream.
   The temporary TAAP document decoder in lake is replaced with liquid's public identity-document
   codec when liquid #162 lands; lake then verifies only through libliquid.
-- TOTP seeds, OAuth client secrets, and recovery codes are encrypted with AES-256-GCM under a
+- TOTP seeds and OAuth client secrets are encrypted with AES-256-GCM under a
   purpose-specific data key. `keystore(purpose, wrapped_key, version)` holds those keys wrapped
   by the instance KEK; #24/#25 generalise the table and its lifecycle.
 - Passwords use OpenSSL 3.2+ `EVP_KDF` `ARGON2ID`; lake's current build uses OpenSSL 3.6.3 with
@@ -101,12 +104,14 @@ are control-plane tables. Membership and grant rows retain the TAAP attestation 
 granting administrator identity. `Registry::call` invokes `authorize` before protected handlers;
 the server-rendered pages call those same capabilities. `authorize_batch` shares cached ancestor
 and grant loads across candidates, and `effective_access` exposes direct and inherited access.
-The current operator-admin principal is handled as a break-glass principal by the same function;
-identity-core credential resolution will supply user and workload TAAP principals.
+The current operator-admin principal is handled as a break-glass principal by the same function.
+Identity-core credential resolution supplies user TAAP principals; self-management resolves
+`principal/<taap_id>`, and scoped API tokens are narrowed before policy evaluation. Workload TAAP
+principals remain part of the workload-identity follow-up.
 
 ## Audit (decision §13)
 
-**Status: the audit event contract is published for #18.** The implementation creates the
+**Implemented status (#18).** The implementation creates the
 append-only `audit_events` stream and all wave-one branches write this shape through
 `audit::record`; a later wave may add event kinds but may not reinterpret an existing field.
 

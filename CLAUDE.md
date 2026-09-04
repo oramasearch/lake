@@ -29,7 +29,10 @@ rename, transfer, visibility and tombstone capabilities, and lifecycle state on 
 page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
 Lake links libliquid as a library-only submodule and opens one customer store at
 `LAKE_STORE_ROOT/<customer id>/store`; liquid #160's contract is pinned, while push and pull await
-the public repository/store binding and protocol codec required by lake's server.
+the public repository/store binding and protocol codec required by lake's server. Identity core
+adds migration `0007_identity_core`, verified TAAP documents, password plus TOTP, persisted
+WebAuthn, OAuth, row-resolved sessions, scoped tokens, device revocation, and the hosted identity
+pages. The temporary TAAP document codec is tracked by liquid #162.
 
 ## Where to read Zetta
 
@@ -62,9 +65,10 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `io_thread` runs `io_context.run()`; `stop()` = `server->stop()`, `io_context.stop()`,
   join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
   placeholders until lake has a node to marshal onto.
-- Pages are **server-rendered, self-contained, no script**; renderers in `web_ui.cpp`
-  are pure functions and are the unit-tested surface. Data pages call capabilities through
-  `Registry::call` and can never do what the API cannot.
+- Pages are **server-rendered and self-contained**; renderers in `web_ui.cpp` are pure functions
+  and are the unit-tested surface. The two passkey pages contain the documented single inline
+  script required to call `navigator.credentials`; every other page has no script. Data pages call
+  capabilities through `Registry::call` and can never do what the API cannot.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`
@@ -90,7 +94,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `repository_refs` today, versioned by content hash).
+  `identity_core_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

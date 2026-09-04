@@ -27,7 +27,8 @@ For the same proof locally:
 docker run --name lake-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lake_test \
   -p 55416:5432 -d postgres:16
 PGPASSWORD=postgres psql -h 127.0.0.1 -p 55416 -U postgres -d lake_test -f db/schema.sql
-LAKE_TEST_DB_URI='postgresql://postgres:postgres@127.0.0.1:55416/lake_test' \
+LAKE_INSTANCE_KEK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff \
+  LAKE_TEST_DB_URI='postgresql://postgres:postgres@127.0.0.1:55416/lake_test' \
   ctest --test-dir build --output-on-failure
 docker rm -f lake-postgres
 ```

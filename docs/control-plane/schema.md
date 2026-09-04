@@ -41,8 +41,6 @@ CASCADE`):
 
 ## Organizations and authorization (migration `0004_organizations_policy`)
 
-Migration `0003` is reserved for the identity-core work developed in parallel.
-
 | Table | Purpose |
 |---|---|
 | `objects` | the authorization graph: type, stable external id, optional parent and `inherit` cut flag |
@@ -78,9 +76,27 @@ their own rows, because `Registry::call` records every outcome.
 
 `repositories` gains nullable `deleted_at` and `retention_until` timestamps. Its visibility
 constraint also accepts `organization`, between private and public. `repository_refs` holds the
-current repository heads and is the newest migration's guard table. Lifecycle operations update
+current repository heads. Lifecycle operations update
 the repository and its policy-object parent in one store transaction; the registry records each
 attempt in the signed audit stream.
+
+## Identity core (migration `0007_identity_core`)
+
+| Table | Purpose |
+|---|---|
+| `identity_documents` | Verified TAAP/1 document and SHA-512/256 digest for each user. |
+| `credentials` | Pool-scoped password, TOTP, passkey, OAuth, or admin proof; secrets are hashed or encrypted. |
+| `sessions` | Browser, API-token, static, or admin bearer hash; scopes, expiry, revocation, and last use. |
+| `devices` | Named user device and revocation state. |
+| `keystore` | Purpose-specific data key wrapped by the instance KEK. |
+| `oauth_providers` | Pool-scoped provider configuration and encrypted client secret. |
+| `identity_oauth_flows` | Five-minute, one-use OAuth state, encrypted PKCE verifier, nonce, and initiating device. |
+| `identity_webauthn_challenges` | Five-minute, one-use registration/assertion challenge with pool, RP ID, and origin. |
+| `identity_core_guard` | Final guard table for operator schema application. |
+
+Migration numbers `0004`–`0006` landed first from parallel branches, so identity core follows as
+`0007`. It uses the signed `audit_events` and `lake_identity` tables from migration `0005`; it does
+not recreate the provisional audit shape from the earlier identity checkpoint.
 
 ## How it is applied
 
@@ -88,7 +104,7 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`repository_refs` today), so a new migration means a new guard and the next Job re-runs the
+(`identity_core_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -103,7 +119,8 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    before `CREATE TRIGGER`), append a new `INSERT INTO schema_migrations`.
 2. Copy to the operator's `assets/lake-schema.sql`; the version hash changes automatically. During
    the Phase 6 waves this copy and the `GuardTable` update land once per wave in a separate operator
-   pull request (orama-operator #134 carries migration `0006`), never
+   pull request (orama-operator #134 carries migration `0006`; identity core still needs its
+   operator copy), never
    a partial schema between waves.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
@@ -117,5 +134,5 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version='0004_organizations_policy'"
+  -c "SELECT version FROM schema_migrations WHERE version='0007_identity_core'"
 ```

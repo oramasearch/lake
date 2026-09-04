@@ -6,10 +6,13 @@ identity, secrets, PKI, artifact registry and search — over one content-addres
 liquid is the tool. lake is where it collects.
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
-> capabilities (identity, tenants, repositories, organization administration and policy over the
-> Postgres control plane), the pages to explore them, the OpenAPI
+> capabilities (password, TOTP, passkey and OAuth identity; row-resolved sessions, devices and
+> scoped tokens; tenants, repositories, organization administration and policy over the Postgres
+> control plane), the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
-> Prometheus metrics and JSON request logs. The control surface and metrics are behind the admin bearer; probes are unauthenticated. The specification lives in
+> Prometheus metrics and JSON request logs. Protected operations accept the operator bearer or a
+> row-resolved user credential; probes and documented identity entry points are unauthenticated.
+> The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
 > The image `oramasearch/lake` (private) runs under the `Lake` CR on `orama-operator`; see
@@ -45,6 +48,8 @@ ctest --test-dir build
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
+| `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
+| `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
@@ -55,7 +60,8 @@ ctest --test-dir build
 `lake version` prints the version. The default port is 4900 (`--listen HOST:PORT`);
 `--node NAME` names the node. `--control-db URI` (default `$LAKE_CONTROL_DB_URI`) selects the
 Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-token`
-(default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
+(default `$LAKE_ADMIN_TOKEN`) is the operator bearer. `LAKE_PUBLIC_HOST` supplies the WebAuthn RP
+ID and OAuth callback host; user sessions and API tokens are resolved from Postgres on each request.
 SIGINT/SIGTERM stop it cleanly.
 
 ## Container image

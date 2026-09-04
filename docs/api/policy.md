@@ -18,6 +18,12 @@ loads paths and grants for a candidate set in batches. `list_objects` filters ev
 with it, including children that cut inheritance; search and future lists use the same form
 without creating another permission system.
 
+Row-resolved browser and API-token credentials carry the user's TAAP ID into this same function.
+Identity-management capabilities resolve the synthetic object `principal/<taap_id>`; only that
+principal receives its `admin` action, so one user cannot manage another user's sessions, devices,
+passkeys, or tokens. API-token capability names are checked as scopes before policy evaluation;
+the operator bearer remains the explicit break-glass principal.
+
 ## Objects and grants
 
 | Capability | Authorization | Result |
@@ -64,7 +70,8 @@ the same transaction.
 
 `Policy.InheritsDownTheGraphAndStopsAtACut`,
 `Policy.DelegatedAdministratorCannotLeaveItsObjectScope`, and
-`Policy.EffectiveAccessMatchesAuthorization` are the executable contract. The registry test also
+`Policy.EffectiveAccessMatchesAuthorization`, the identity scope test, and the WebAuthn test are
+the executable contract. The registry test also
 enumerates every capability and requires object/action metadata. Run the Postgres fixture from
 [`../build/ci.md`](../build/ci.md) to exercise the recursive query used in production.
 

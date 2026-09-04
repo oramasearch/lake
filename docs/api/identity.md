@@ -12,13 +12,12 @@ the same row-resolved session or operator credential as every other protected ca
 `sign_up_password` and `sign_in_password` issue browser sessions. Passwords use OpenSSL 3.6.3
 `EVP_KDF` `ARGON2ID` with 64 MiB memory, three iterations, one lane, and a unique 128-bit salt.
 A user with an enrolled TOTP factor receives `mfa_required` from password sign-in and must use
-`verify_totp`. Tokens are named sessions with explicit capability-name scopes; a static token
-requires a non-empty reason.
+`verify_totp`. Tokens are named sessions with explicit capability-name scopes. Ordinary tokens
+default to a 30-day expiry; a non-expiring static token requires a non-empty reason.
 
 TOTP seeds are never stored in credential JSON as plaintext. OpenSSL AES-256-GCM seals each value
 with a purpose-specific random data key; `keystore` stores that key wrapped under the required
-32-byte hexadecimal `LAKE_INSTANCE_KEK`. OAuth client secrets and recovery codes use the same
-envelope format.
+32-byte hexadecimal `LAKE_INSTANCE_KEK`. OAuth client secrets use the same envelope format.
 
 `register_oauth_provider` records the issuer, client id, encrypted client secret, and requested
 scopes for a provider in a user pool. `start_oauth` creates a five-minute, one-use state record,
@@ -38,7 +37,7 @@ and refreshed once when verification fails so key rotation is picked up. GitHub 
 the returned access token through `https://api.github.com/user`. Google and GitHub use their fixed
 public endpoints; another registered provider uses `<issuer>/authorize`, `<issuer>/token`, and
 `<issuer>/jwks`. Plain HTTP provider URLs are rejected except on loopback for integration tests.
-Provider registration and each successful OAuth sign-in create audit events.
+Provider registration and each OAuth callback create one signed registry-compatible audit event.
 
 Passkeys use a two-capability WebAuthn ceremony. `begin_passkey_registration` binds a random
 challenge to the authenticated user and pool, then `register_passkey` accepts only attestation
@@ -61,9 +60,9 @@ the canonical JSON encoding of `payload`. lake verifies that self-signature, has
 document with SHA-512/256, writes `identity_documents`, and binds the resulting `taap_id` to the
 new user. lake never receives a person's private key.
 
-`modules/liquid` is pinned to liquid `origin/main` (`7fe008e`) as the identity-library source.
-Its public `include/liquid/identity.hpp` provides `verify_document` and `verify_chain`; lake will
-use those typed APIs for canonical-CBOR documents rather than maintain another TAAP parser.
+The TAAP decoder and verifier are a temporary local copy of liquid's identity rules. It is limited
+to this boundary and will be replaced with liquid's public typed document codec when liquid #162
+lands; Zetta source is not used or copied.
 
 ## Why
 
@@ -101,5 +100,5 @@ capability to `docs/api/README.md` in the same change. The OAuth callback is the
 exception because the provider invokes it as a browser redirect.
 
 OAuth registration, PKCE callback processing, JWKS verification and WebAuthn ceremonies use the
-`0003_identity_core` tables. Keep the passkey browser adapter limited to the one documented inline
+`0007_identity_core` tables. Keep the passkey browser adapter limited to the one documented inline
 script that calls `navigator.credentials`.

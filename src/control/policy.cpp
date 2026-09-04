@@ -9,13 +9,18 @@ namespace lake::control {
 namespace {
 
 constexpr std::array<std::string_view, 6> actions = {
-    "read", "write", "admin", "deploy", "review", "share",
+    "read",
+    "write",
+    "admin",
+    "deploy",
+    "review",
+    "share",
 };
 
-Result<void> load_paths(Store &store, const std::vector<std::string> &object_ids,
-                        AuthorizationCache &cache) {
+Result<void>
+load_paths(Store& store, const std::vector<std::string>& object_ids, AuthorizationCache& cache) {
     std::vector<std::string> missing;
-    for (const auto &object_id : object_ids) {
+    for (const auto& object_id : object_ids) {
         if (!cache.paths.contains(object_id)) {
             missing.push_back(object_id);
         }
@@ -28,13 +33,13 @@ Result<void> load_paths(Store &store, const std::vector<std::string> &object_ids
     if (!loaded) {
         return std::unexpected(loaded.error());
     }
-    for (const auto &object_id : missing) {
+    for (const auto& object_id : missing) {
         cache.paths.emplace(object_id, std::vector<ObjectPathEntry>{});
     }
-    for (auto &entry : *loaded) {
+    for (auto& entry : *loaded) {
         cache.paths[entry.requested_object_id].push_back(std::move(entry));
     }
-    for (const auto &object_id : missing) {
+    for (const auto& object_id : missing) {
         if (cache.paths[object_id].empty()) {
             return std::unexpected(StoreError{"not_found", "no policy object " + object_id});
         }
@@ -42,11 +47,13 @@ Result<void> load_paths(Store &store, const std::vector<std::string> &object_ids
     return {};
 }
 
-Result<void> load_grants(Store &store, const std::string &principal_taap_id,
-                         const std::vector<std::string> &object_ids, AuthorizationCache &cache) {
+Result<void> load_grants(Store& store,
+                         const std::string& principal_taap_id,
+                         const std::vector<std::string>& object_ids,
+                         AuthorizationCache& cache) {
     std::vector<std::string> missing;
-    auto &loaded = cache.loaded_grant_objects[principal_taap_id];
-    for (const auto &object_id : object_ids) {
+    auto& loaded = cache.loaded_grant_objects[principal_taap_id];
+    for (const auto& object_id : object_ids) {
         if (!loaded.contains(object_id)) {
             missing.push_back(object_id);
         }
@@ -59,28 +66,33 @@ Result<void> load_grants(Store &store, const std::string &principal_taap_id,
     if (!grants) {
         return std::unexpected(grants.error());
     }
-    for (const auto &object_id : missing) {
+    for (const auto& object_id : missing) {
         loaded.insert(object_id);
         cache.grants[principal_taap_id].try_emplace(object_id);
     }
-    for (auto &grant : *grants) {
+    for (auto& grant : *grants) {
         cache.grants[principal_taap_id][grant.object_id].push_back(std::move(grant));
     }
     return {};
 }
 
-AuthorizationDecision decide(const std::string &object_id, const std::string &action,
-                             const std::vector<ObjectPathEntry> &path,
-                             const std::map<std::string, std::vector<Grant>> &grants) {
-    for (const auto &entry : path) {
+AuthorizationDecision decide(const std::string& object_id,
+                             const std::string& action,
+                             const std::vector<ObjectPathEntry>& path,
+                             const std::map<std::string, std::vector<Grant>>& grants) {
+    for (const auto& entry : path) {
         const auto object_grants = grants.find(entry.object.id);
         if (object_grants == grants.end()) {
             continue;
         }
-        for (const auto &grant : object_grants->second) {
+        for (const auto& grant : object_grants->second) {
             if (role_allows(grant.role, action)) {
                 return AuthorizationDecision{
-                    true, object_id, entry.object.id, grant.role, entry.depth != 0,
+                    true,
+                    object_id,
+                    entry.object.id,
+                    grant.role,
+                    entry.depth != 0,
                 };
             }
         }
@@ -161,19 +173,21 @@ bool object_parent_allowed(std::string_view object_type, std::string_view parent
 }
 
 Result<std::map<std::string, AuthorizationDecision>>
-authorize_batch(Store &store, const std::string &principal_taap_id,
-                const std::vector<std::string> &object_ids, const std::string &action,
-                AuthorizationCache &cache) {
+authorize_batch(Store& store,
+                const std::string& principal_taap_id,
+                const std::vector<std::string>& object_ids,
+                const std::string& action,
+                AuthorizationCache& cache) {
     std::map<std::string, AuthorizationDecision> decisions;
     if (principal_taap_id == "admin") {
-        for (const auto &object_id : object_ids) {
+        for (const auto& object_id : object_ids) {
             decisions.emplace(object_id,
                               AuthorizationDecision{true, object_id, object_id, "admin", false});
         }
         return decisions;
     }
     if (principal_taap_id.empty()) {
-        for (const auto &object_id : object_ids) {
+        for (const auto& object_id : object_ids) {
             decisions.emplace(object_id, AuthorizationDecision{false, object_id, {}, {}, false});
         }
         return decisions;
@@ -183,8 +197,8 @@ authorize_batch(Store &store, const std::string &principal_taap_id,
         return std::unexpected(loaded.error());
     }
     std::set<std::string> path_object_ids;
-    for (const auto &object_id : object_ids) {
-        for (const auto &entry : cache.paths[object_id]) {
+    for (const auto& object_id : object_ids) {
+        for (const auto& entry : cache.paths[object_id]) {
             path_object_ids.insert(entry.object.id);
         }
     }
@@ -192,17 +206,23 @@ authorize_batch(Store &store, const std::string &principal_taap_id,
     if (auto loaded = load_grants(store, principal_taap_id, grant_object_ids, cache); !loaded) {
         return std::unexpected(loaded.error());
     }
-    const auto &grants = cache.grants[principal_taap_id];
-    for (const auto &object_id : object_ids) {
+    const auto& grants = cache.grants[principal_taap_id];
+    for (const auto& object_id : object_ids) {
         decisions.emplace(object_id, decide(object_id, action, cache.paths[object_id], grants));
     }
     return decisions;
 }
 
-Result<AuthorizationDecision> authorize(Store &store, const std::string &principal_taap_id,
-                                        const std::string &object_id, const std::string &action,
-                                        AuthorizationCache &cache) {
+Result<AuthorizationDecision> authorize(Store& store,
+                                        const std::string& principal_taap_id,
+                                        const std::string& object_id,
+                                        const std::string& action,
+                                        AuthorizationCache& cache) {
     if (principal_taap_id == "admin") {
+        return AuthorizationDecision{true, object_id, object_id, "admin", false};
+    }
+    const std::string self_object = "principal/" + principal_taap_id;
+    if (!principal_taap_id.empty() && object_id == self_object && role_allows("admin", action)) {
         return AuthorizationDecision{true, object_id, object_id, "admin", false};
     }
     if (object_id.empty()) {
@@ -216,12 +236,12 @@ Result<AuthorizationDecision> authorize(Store &store, const std::string &princip
 }
 
 Result<std::vector<EffectiveAccessEntry>>
-effective_access(Store &store, const std::string &object_id, AuthorizationCache &cache) {
+effective_access(Store& store, const std::string& object_id, AuthorizationCache& cache) {
     if (auto loaded = load_paths(store, {object_id}, cache); !loaded) {
         return std::unexpected(loaded.error());
     }
     std::vector<std::string> path_object_ids;
-    for (const auto &entry : cache.paths[object_id]) {
+    for (const auto& entry : cache.paths[object_id]) {
         path_object_ids.push_back(entry.object.id);
     }
     auto grants = store.list_grants(path_object_ids, std::nullopt, 10000);
@@ -230,13 +250,13 @@ effective_access(Store &store, const std::string &object_id, AuthorizationCache 
     }
 
     std::map<std::string, int> depth_by_object;
-    for (const auto &entry : cache.paths[object_id]) {
+    for (const auto& entry : cache.paths[object_id]) {
         depth_by_object.emplace(entry.object.id, entry.depth);
     }
     std::vector<EffectiveAccessEntry> entries;
-    for (const auto &grant : *grants) {
+    for (const auto& grant : *grants) {
         std::vector<std::string> allowed_actions;
-        for (const auto &action : actions) {
+        for (const auto& action : actions) {
             if (role_allows(grant.role, action)) {
                 allowed_actions.emplace_back(action);
             }
@@ -252,19 +272,19 @@ effective_access(Store &store, const std::string &object_id, AuthorizationCache 
     return entries;
 }
 
-nlohmann::json to_json(const AuthorizationDecision &decision) {
+nlohmann::json to_json(const AuthorizationDecision& decision) {
     return {
         {"allowed", decision.allowed},
         {"object_id", decision.object_id},
-        {"source_object_id", decision.source_object_id.empty()
-                                 ? nlohmann::json(nullptr)
-                                 : nlohmann::json(decision.source_object_id)},
+        {"source_object_id",
+         decision.source_object_id.empty() ? nlohmann::json(nullptr)
+                                           : nlohmann::json(decision.source_object_id)},
         {"role", decision.role.empty() ? nlohmann::json(nullptr) : nlohmann::json(decision.role)},
         {"inherited", decision.inherited},
     };
 }
 
-nlohmann::json to_json(const EffectiveAccessEntry &entry) {
+nlohmann::json to_json(const EffectiveAccessEntry& entry) {
     return {
         {"principal_taap_id", entry.principal_taap_id},
         {"source_object_id", entry.source_object_id},

@@ -13,7 +13,8 @@ Status by error code: `invalid_input` 400, `unauthorized` 403, `not_found` / `un
 404, `conflict` 409, `store_unavailable` 503, anything else 500. MCP `tools/call` returns the same
 envelope as `structuredContent` (and as text), with `isError` set.
 
-**Auth.** Bearer token, see [`auth.md`](auth.md). Everything except `server_info` requires it.
+**Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
+the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
 
 ## Operational routes
 
@@ -39,7 +40,7 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
-| `refs`, `find_missing`, `push`, `pull` | read/action | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
+| `refs`, `find_missing`, `push`, `pull` | read/action, reserved | repository id and the liquid sync protocol body | liquid ref heads, object selection, or metadata stream | [sync.md](sync.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
 | `list_memberships`, `create_membership` | read/action | scope, principal, role, TAAP evidence | membership(s) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
@@ -52,6 +53,14 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `export_audit` | read | audit filters | `{jsonl}` | [audit.md](audit.md) |
 | `verify_audit` | read | — | `{verified: true}` | [audit.md](audit.md) |
 | `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days}` | [audit.md](audit.md) |
+| `sign_up_password`, `sign_in_password`, `verify_totp` | action, public entry | credentials and optional TOTP code | browser session + secret | [identity.md](identity.md) |
+| `enroll_totp` | action | authenticated user | setup secret | [identity.md](identity.md) |
+| `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation | [identity.md](identity.md) |
+| `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |
+| `register_oauth_provider` | action, operator | issuer, client id, secret, scopes | confirmation | [identity.md](identity.md) |
+| `start_oauth` | action, public entry | pool, provider, device name, identity document for a new user | authorization URL | [identity.md](identity.md) |
+| `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | token/session data | [identity.md](identity.md) |
+| `list_devices`, `revoke_device` | read/action | device id for revocation | device data | [identity.md](identity.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
