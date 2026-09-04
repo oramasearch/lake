@@ -10,6 +10,7 @@
 
 #include "lake/control/handles.hpp"
 #include "lake/control/store.hpp"
+#include "lake/search/index.hpp"
 
 namespace lake::api {
 namespace {
@@ -23,6 +24,38 @@ ApiResult from_store_error(const control::StoreError& error) {
 ApiResult no_store() {
     return ApiResult::failure("store_unavailable",
                               "no control-plane store is configured (LAKE_CONTROL_DB_URI)");
+}
+
+ApiResult no_search() {
+    return ApiResult::failure("store_unavailable",
+                              "no search store is configured (LAKE_STORE_ROOT)");
+}
+
+json search_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"customer", {{"type", "string"}}},
+              {"repository", {{"type", "string"}}},
+              {"path", {{"type", "string"}}},
+              {"change", {{"type", "string"}}},
+              {"snippet", {{"type", "string"}}},
+              {"score", {{"type", "number"}}}}}};
+}
+
+ApiResult search_result(search::Result<std::vector<search::Hit>> hits) {
+    if (!hits) {
+        return ApiResult::failure(hits.error().code, hits.error().message);
+    }
+    json values = json::array();
+    for (const search::Hit& hit : *hits) {
+        values.push_back({{"customer", hit.customer},
+                          {"repository", hit.repository},
+                          {"path", hit.path},
+                          {"change", hit.change},
+                          {"snippet", hit.snippet},
+                          {"score", hit.score}});
+    }
+    return ApiResult::success({{"items", std::move(values)}});
 }
 
 std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
@@ -1536,6 +1569,45 @@ void register_policy_capabilities(Registry& registry) {
         }});
 }
 
+void register_search_capability(Registry& registry) {
+    registry.add(
+        Capability{.name = "search",
+                   .title = "Search repositories",
+                   .description = "Ranked BM25F search; quoted text is a substring query and "
+                                  "/expression/ is a regex query.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"query", {{"type", "string"}}},
+                                      {"customer", {{"type", "string"}}},
+                                      {"repository", {{"type", "string"}}},
+                                      {"ref", {{"type", "string"}}},
+                                      {"limit", {{"type", "integer"}}}}},
+                                    {"required", json::array({"query"})},
+                                    {"additionalProperties", false}},
+                   .output_schema = list_schema(search_schema()),
+                   .kind = CapabilityKind::Read,
+                   .object = "repository search results",
+                   .action = "read",
+                   .resolve_object = global_object,
+                   .authorizes_candidates = true,
+                   .handler = [](const json& input, ApiContext& context) {
+                       if (!context.search) {
+                           return no_search();
+                       }
+                       if (!context.store) {
+                           return no_store();
+                       }
+                       return search_result(
+                           context.search->query(search::Query{input.at("query").get<std::string>(),
+                                                               input.value("customer", ""),
+                                                               input.value("repository", ""),
+                                                               input.value("ref", ""),
+                                                               limit_of(input)},
+                                                 context.acting_identity,
+                                                 *context.store));
+                   }});
+}
+
 } // namespace
 
 // ---- instance identity and audit ----
@@ -1697,6 +1769,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_repository_capabilities(registry);
     register_organization_capabilities(registry);
     register_policy_capabilities(registry);
+    register_search_capability(registry);
     register_audit_capabilities(registry);
 }
 

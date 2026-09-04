@@ -43,8 +43,8 @@ h1{margin:.25rem 0 .5rem;font-size:1.75rem}.sub{color:var(--muted);margin:0 0 1.
 code{background:#eef1f4;padding:.1rem .3rem;border-radius:4px;font-size:.9em}table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:8px}
 th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid var(--line)}th{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 tr:last-child td{border-bottom:0}td a{color:var(--accent);text-decoration:none}.badge{display:inline-block;padding:.05rem .45rem;border-radius:999px;font-size:.75rem;border:1px solid var(--line);color:var(--muted)}
-.empty{color:var(--muted);padding:1.5rem;text-align:center}form.login{display:grid;gap:.75rem;max-width:26rem}
-form.login input,.filters input{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px}form.login button,form.inline button,.filters button{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+.empty{color:var(--muted);padding:1.5rem;text-align:center}form.login{display:grid;gap:.75rem;max-width:26rem}form.search{display:flex;gap:.5rem;margin:0 0 1.5rem}
+form.login input,.filters input,form.search input{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px}form.search input{flex:1}form.login button,form.inline button,.filters button,form.search button{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
 form.inline{display:inline}form.inline button{background:transparent;color:var(--accent);padding:0}.error{color:#a12a2a;margin:0 0 .5rem}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}dt{color:var(--muted)}dd{margin:0}
 .filters{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:0 0 1.5rem}.filters label{display:grid;gap:.2rem;color:var(--muted);font-size:.8rem}
 form.stack{display:grid;gap:.75rem;max-width:36rem}form.stack label{display:grid;gap:.25rem;color:var(--muted)}
@@ -59,7 +59,8 @@ namespace {
 std::string nav(bool signed_in) {
     std::string out = "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
                       "href=\"/organizations\">Organizations</a><a "
-                      "href=\"/repositories\">Repositories</a><a href=\"/audit\">Audit</a>";
+                      "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
+                      "<a href=\"/audit\">Audit</a>";
     if (signed_in) {
         out += "<a href=\"/sessions\">Sessions</a><a "
                "href=\"/passkeys\">Passkeys</a><a href=\"/tokens\">Tokens</a>";
@@ -406,6 +407,39 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
     }
     return web_ui_shell(
         "lake — effective access", object.object_type + ":" + object.external_id, content, true);
+}
+
+std::string web_ui_search(std::string_view query, const std::vector<search::Hit>& hits) {
+    std::string content = "<p class=\"eyebrow\">search</p><h1>Search</h1>"
+                          "<p class=\"sub\">Ranked text, quoted substring, or /regex/ search "
+                          "across repositories you may read.</p>"
+                          "<form class=\"search\" method=\"get\" action=\"/search\"><input "
+                          "name=\"query\" value=\"" +
+                          web_ui_escape(query) +
+                          "\" placeholder=\"Search repositories\" required><button "
+                          "type=\"submit\">Search</button></form>";
+    if (query.empty()) {
+        content += "<div class=\"panel empty\">Enter a query to search published "
+                   "changes.</div>";
+    } else if (hits.empty()) {
+        content += "<div class=\"panel empty\">No readable matches.</div>";
+    } else {
+        content += "<table><thead><tr><th>Repository</th><th>Path</th><th>Change</"
+                   "th><th>Snippet</th></tr></thead><tbody>";
+        for (const search::Hit& hit : hits) {
+            content +=
+                std::format("<tr><td>{}/{}</td><td><code>{}</code></td><td><code>{}</code></td>"
+                            "<td>{}</td></tr>",
+                            web_ui_escape(hit.customer),
+                            web_ui_escape(hit.repository),
+                            web_ui_escape(hit.path),
+                            web_ui_escape(hit.change),
+                            web_ui_escape(hit.snippet));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell(
+        "lake — search", query.empty() ? "search" : std::string(query), content, true);
 }
 
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter) {

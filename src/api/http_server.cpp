@@ -59,6 +59,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/store.hpp"
+#include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
 
@@ -878,6 +879,7 @@ struct ApiServer::Impl {
             "/access",
             "/repositories",
             "/repository",
+            "/search",
             "/audit",
             "/sign-up",
             "/sign-in",
@@ -920,6 +922,7 @@ struct ApiServer::Impl {
     ApiContext context_for(const boost::http::route_params& route) const {
         ApiContext ctx;
         ctx.store = options.store.get();
+        ctx.search = options.search.get();
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
@@ -1868,6 +1871,37 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_search_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string query = query_value(route, "query");
+        std::vector<search::Hit> hits;
+        if (!query.empty()) {
+            const ApiResult result =
+                registry.call("search", {{"query", query}, {"limit", 100}}, context);
+            if (!result.ok) {
+                return serve_page_error(route, result);
+            }
+            for (const nlohmann::json& item : result.value.at("items")) {
+                hits.push_back(search::Hit{
+                    .customer = item.at("customer").get<std::string>(),
+                    .repository = item.at("repository").get<std::string>(),
+                    .path = item.at("path").get<std::string>(),
+                    .change = item.at("change").get<std::string>(),
+                    .snippet = item.at("snippet").get<std::string>(),
+                    .score = item.at("score").get<double>(),
+                });
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_search(query, hits),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
     boost::http::route_task serve_audit_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
@@ -2259,6 +2293,10 @@ bool ApiServer::start() {
     router.add(
         http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/repository", impl.serve_repository_page(route));
+        });
+    router.add(
+        http::method::get, "/search", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/search", impl.serve_search_page(route));
         });
     router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/audit", impl.serve_audit_page(route));

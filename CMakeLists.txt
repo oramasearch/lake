@@ -61,6 +61,11 @@ FetchContent_MakeAvailable(boost_core_libs)
 set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
 set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
+# Search uses oramacore-cpp's in-memory BM25F engine. Lake owns persistence
+# and the positional trigram postings in src/search/index.cpp.
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ORAMACORE_CPP_CAPY OFF CACHE BOOL "" FORCE)
+add_subdirectory(modules/oramacore-cpp EXCLUDE_FROM_ALL)
 set(BOOST_BEAST2_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_BEAST2_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/beast2 EXCLUDE_FROM_ALL)
@@ -92,14 +97,14 @@ add_library(lake-core STATIC
   src/api/rest.cpp
   src/api/mcp.cpp
   src/api/capabilities.cpp
-  src/audit/audit.cpp
   src/control/handles.cpp
   src/control/policy.cpp
+  src/search/index.cpp
   src/telemetry/metrics.cpp
 )
 target_include_directories(lake-core PUBLIC include)
 target_compile_features(lake-core PUBLIC cxx_std_26)
-target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid OpenSSL::Crypto)
+target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto)
 
 # lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
 add_library(lake-control-postgres STATIC

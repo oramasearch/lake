@@ -13,6 +13,9 @@
 namespace lake::control {
 class Store;
 }
+namespace lake::search {
+class Service;
+}
 
 // The capability registry — lake's control surface in Zetta's shape: one
 // registry, rendered as REST (/v1/<name>), OpenAPI (/v1/openapi.json) and MCP
@@ -51,6 +54,7 @@ struct ApiContext {
     std::string identity_seed;
     std::string instance_kek;
     SyncStore* sync_store = nullptr;
+    search::Service* search = nullptr;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;
@@ -77,6 +81,8 @@ struct Capability {
     std::string object;
     std::string action;
     CapabilityObjectResolver resolve_object;
+    // Candidate-returning capabilities apply control::authorize_batch internally.
+    bool authorizes_candidates = false;
     CapabilityHandler handler;
 };
 

@@ -24,7 +24,12 @@ liquid is the tool. lake is where it collects.
 > through the signed audit registry. Lake links libliquid as a library-only submodule and opens one
 > customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160's sync contract and
 > client API are pinned; lake's push and pull endpoints await libliquid's public repository/store
-> binding and protocol codec required to preserve the one-customer-store design.
+> binding and protocol codec required to preserve the one-customer-store design. Hot branch-tip
+> search is available over those stores through the registry, including REST, OpenAPI, MCP, and
+> the `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
+> `LAKE_STORE_ROOT/<customer>/index/`, publishes a change through atomic manifest replacement,
+> filters candidates with the batched policy engine, and records the signed query outcome through
+> the registry.
 
 ## Build and run
 
@@ -51,8 +56,8 @@ ctest --test-dir build
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
-| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
+| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, repository search, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |

@@ -51,6 +51,15 @@ TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
     EXPECT_EQ(access.find("<script"), std::string::npos);
 }
 
+TEST(WebUi, SearchEscapesHitsAndOffersTheQueryForm) {
+    const lake::search::Hit hit{"customer", "repository", "<path>", "change", "<snippet>", 1.0};
+    const std::string page = lake::api::web_ui_search("needle", {hit});
+    EXPECT_NE(page.find("action=\"/search\""), std::string::npos);
+    EXPECT_NE(page.find("&lt;path&gt;"), std::string::npos);
+    EXPECT_NE(page.find("&lt;snippet&gt;"), std::string::npos);
+    EXPECT_EQ(page.find("<path>"), std::string::npos);
+}
+
 TEST(WebUi, IdentityFormsUseCapabilityBackedActions) {
     const std::string sign_up = lake::api::web_ui_sign_up("bad <identity>");
     EXPECT_NE(sign_up.find("action=\"/identity/sign-up\""), std::string::npos);

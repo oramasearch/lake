@@ -3,7 +3,7 @@
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on the two passkey
 pages that call `navigator.credentials`, unit-tested as strings. The navigation is on every page:
-Home, Customers, Organizations, Repositories, API
+Home, Customers, Organizations, Repositories, Search, Audit, API
 (`/v1/openapi.json`), and Sign in / Sign out.
 
 | Page | Route | Shows |
@@ -20,6 +20,7 @@ Home, Customers, Organizations, Repositories, API
 | Effective access | `GET /access?object_id=<uuid>` | direct and inherited principals, roles and allowed actions |
 | Repositories | `GET /repositories[?customer_id=<uuid>]` | every repository newest first as `<owner>/<name>`, owner, visibility, description, created |
 | Repository | `GET /repository?id=<uuid>` | one repository: owner, visibility, timestamps, lifecycle state, and the API call that returns it |
+| Search | `GET /search?query=<text>` | ranked text, quoted substring, or regex results that the signed-in caller may read |
 
 **Session.** `POST /session` compares the form token with the operator token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the

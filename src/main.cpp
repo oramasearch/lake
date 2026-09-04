@@ -13,6 +13,7 @@
 #include "lake/api/server.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/search/index.hpp"
 #include "lake/version.hpp"
 
 namespace {
@@ -125,6 +126,9 @@ int main(int argc, char** argv) {
     } else if (!control_db.empty()) {
         opts.store = lake::control::make_postgres_store(control_db);
         store_kind = "postgres";
+    }
+    if (!opts.store_root.empty()) {
+        opts.search = std::make_shared<lake::search::Service>(opts.store_root);
     }
 
     std::signal(SIGINT, on_signal);

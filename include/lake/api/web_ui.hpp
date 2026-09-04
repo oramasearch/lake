@@ -6,6 +6,7 @@
 
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
+#include "lake/search/index.hpp"
 
 // Pure renderers: data in, HTML out. No HTTP type, no I/O. Pages are
 // server-rendered, self-contained (one stylesheet at /style.css, no script) and
@@ -43,6 +44,7 @@ std::string web_ui_grants(const control::PolicyObject& object,
                           const std::vector<control::Grant>& grants);
 std::string web_ui_effective_access(const control::PolicyObject& object,
                                     const std::vector<control::EffectiveAccessEntry>& entries);
+std::string web_ui_search(std::string_view query, const std::vector<search::Hit>& hits);
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter);
 std::string web_ui_sign_up(std::string_view error);
 std::string web_ui_sign_in(std::string_view error);

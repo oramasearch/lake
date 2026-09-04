@@ -117,7 +117,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         result =
             ApiResult::failure("unauthorized", "credential does not grant " + capability->name);
         proceed = false;
-    } else if (capability->requires_auth) {
+    } else if (capability->requires_auth && !capability->authorizes_candidates) {
         if (capability->object.empty() || capability->action.empty() ||
             !capability->resolve_object) {
             result = ApiResult::failure("store_error",
