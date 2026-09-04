@@ -11,12 +11,15 @@ liquid is the tool. lake is where it collects.
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
 > The image `oramasearch/lake` (private) runs under the `Lake` CR on `orama-operator`; see
-> **Container image** below.
+> **Container image** below. GitHub Actions defines matching pull-request builds and tagged image
+> publishing; it becomes active once its required credentials are configured.
 
 ## Build and run
 
 Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3
 (`brew install openssl@3`). Clone with submodules — the HTTP stack is vendored.
+GitHub Actions repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5
+toolchain on every push and pull request; see [`docs/build/ci.md`](docs/build/ci.md).
 
 ```sh
 git clone --recurse-submodules git@github.com:oramasearch/lake.git
@@ -47,23 +50,24 @@ SIGINT/SIGTERM stop it cleanly.
 ## Container image
 
 `Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14
-and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++) as user `lake`,
+and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++ + libpq) as UID/GID 10001,
 `ENTRYPOINT lake`, `CMD --listen 0.0.0.0:4900`, port 4900 exposed. It is Zetta's headless-image
 recipe minus the GUI and Postgres deps. Images go to the **private** Docker Hub repo
-`oramasearch/lake`: the mutable `v1-sandbox` tag plus an immutable date or commit tag.
+`oramasearch/lake` from the tagged [`image` workflow](.github/workflows/image.yml): an immutable
+Git-tag image plus `sha-<short-sha>`. `latest` and workstation-built deployment images are not used.
 
-Build it **natively on amd64** — a C++26 build under QEMU on Apple Silicon is far too slow. From an
-Apple Silicon Mac, use a BuildKit builder running on the AKS node (see `CLAUDE.md`), then push:
+Once the Actions credentials are configured, publish a deployment image by pushing an immutable
+Docker-compatible Git tag:
 
 ```sh
-docker buildx build --builder aks-amd64 --platform linux/amd64 \
-  -t oramasearch/lake:v1-sandbox -t oramasearch/lake:<tag> --load .
-docker push --all-tags oramasearch/lake
+git tag <tag>
+git push origin <tag>
 ```
 
 The `Lake` CR on `orama-operator` runs it: `spec.image: oramasearch/lake:<tag>`,
 `spec.pullSecretName: oramasearch-dockerhub` (the Secret must exist in `spec.namespace`), port 4900
-by default, no args needed.
+by default, no args needed. Details, including the manual dispatch path, are in
+[`docs/build/ci.md`](docs/build/ci.md) and [`docs/build/container-image.md`](docs/build/container-image.md).
 
 ## Layout
 

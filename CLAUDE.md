@@ -113,22 +113,13 @@ that licence boundary.
   `std::println`, and `libpq-dev` for libpqxx. Runtime image = `libssl3 libstdc++6 libpq5
   ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot satisfy a
   `runAsNonRoot` pod security context).
-- **Build natively on amd64.** QEMU emulation of a C++26 build on Apple Silicon is far too slow
-  and hits `Illegal instruction` (zetta-bridge learned this). From this Mac, build on the AKS
-  node with buildx's kubernetes driver (rootless BuildKit pod in namespace `buildkit`):
-
-  ```sh
-  kubectl create namespace buildkit
-  docker buildx create --name aks-amd64 --driver kubernetes --platform linux/amd64 --bootstrap \
-    --driver-opt namespace=buildkit,replicas=1,rootless=true,requests.cpu=2,requests.memory=4Gi,limits.cpu=6,limits.memory=12Gi
-  docker buildx build --builder aks-amd64 --platform linux/amd64 -t oramasearch/lake:v1-sandbox -t oramasearch/lake:<tag> --load .
-  docker push --all-tags oramasearch/lake
-  ```
-
-  `docker buildx rm aks-amd64` removes the pod when done. `--load` then a separate `docker push`
-  keeps registry writes explicit.
-- Tags: `v1-sandbox` (mutable, what the sample CR pulls) plus an immutable tag per build. The Docker
-  Hub repo is private; the `Lake` CR needs `spec.pullSecretName` and the Secret in `spec.namespace`.
+- GitHub Actions uses the same toolchain for pull-request builds and publishes the Dockerfile image
+  on a Git tag, only for `linux/amd64`. `ORAMA_SUBMODULES_TOKEN`, `DOCKERHUB_USERNAME` and
+  `DOCKERHUB_TOKEN` must be configured by Steve before the workflows can complete. See
+  `docs/build/ci.md`.
+- Deployment images are CI-built immutable `oramasearch/lake:<tag>` images; the workflow also
+  publishes `oramasearch/lake:sha-<short-sha>` and rejects `latest`. The Docker Hub repo is private;
+  the `Lake` CR needs `spec.pullSecretName` and the Secret in `spec.namespace`.
 
 ## Open decisions
 
