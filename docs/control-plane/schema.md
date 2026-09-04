@@ -171,13 +171,26 @@ review anchor as a durable value rather than a fixed collection of columns: the 
 line-hunk mapper can be replaced by liquid #174's `map_anchor` result without rewriting stored
 comments. `forge_records` is the area prefix for parallel Phase 6 schema work.
 
+## PKI, callers, and break-glass (migration `0013_pki`)
+
+| Table | Purpose |
+|---|---|
+| `pki_authorities` | One private CA hierarchy per customer. Root and online-intermediate private keys are envelope-encrypted; only the public chain is readable from the row. |
+| `pki_certificates` | Issued short-lived X.509, JWT, ACME, SSH, client, and device credential metadata and public output. |
+| `pki_acme_orders` | ACME order state, identifiers, account key reference, expiry, and issued certificate link. |
+| `pki_callers` | Short-lived workload credentials minted after Kubernetes, federation, AWS, or Azure attestation. |
+| `pki_recovery_ceremonies`, `pki_recovery_shares` | Configured Shamir quorum, recovery evidence digests, expiry, and completed-rehearsal state. Shares are never retained. |
+| `pki_guard` | Guard table for this migration. |
+
+The migration follows forge/export/import migration `0012`.
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`forge_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`pki_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 

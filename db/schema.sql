@@ -790,3 +790,102 @@ CREATE TABLE IF NOT EXISTS forge_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0012_forge_export_import') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- PKI, caller attestation, and break-glass recovery (migration 0013). CA private material is
+-- envelope-encrypted before persistence; certificate and recovery records retain only public
+-- values and audit references.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pki_authorities (
+    id                      uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id             uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    root_key_ciphertext     text        NOT NULL,
+    intermediate_ciphertext text        NOT NULL,
+    root_certificate_pem    text        NOT NULL,
+    intermediate_chain_pem  text        NOT NULL,
+    created_at              timestamptz NOT NULL DEFAULT now(),
+    updated_at              timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pki_authorities_customer_unique UNIQUE (customer_id)
+);
+DROP TRIGGER IF EXISTS pki_authorities_set_updated_at ON pki_authorities;
+CREATE TRIGGER pki_authorities_set_updated_at BEFORE UPDATE ON pki_authorities
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS pki_certificates (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    authority_id    uuid        NOT NULL REFERENCES pki_authorities(id) ON DELETE CASCADE,
+    customer_id     uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    profile         text        NOT NULL,
+    subject         text        NOT NULL,
+    serial          text        NOT NULL,
+    public_value    text        NOT NULL,
+    expires_at      timestamptz NOT NULL,
+    issued_at       timestamptz NOT NULL DEFAULT now(),
+    renewed_from_id uuid        REFERENCES pki_certificates(id) ON DELETE SET NULL,
+    CONSTRAINT pki_certificates_profile_check
+        CHECK (profile IN ('x509_svid', 'jwt_svid', 'acme', 'ssh', 'client', 'device')),
+    CONSTRAINT pki_certificates_authority_serial_unique UNIQUE (authority_id, serial)
+);
+CREATE INDEX IF NOT EXISTS pki_certificates_customer_id_idx
+    ON pki_certificates (customer_id, issued_at DESC);
+
+CREATE TABLE IF NOT EXISTS pki_acme_orders (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id     uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    certificate_id  uuid        REFERENCES pki_certificates(id) ON DELETE SET NULL,
+    identifiers     jsonb       NOT NULL,
+    account_key     text        NOT NULL,
+    status          text        NOT NULL DEFAULT 'pending',
+    expires_at      timestamptz NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pki_acme_orders_status_check
+        CHECK (status IN ('pending', 'ready', 'valid', 'invalid'))
+);
+DROP TRIGGER IF EXISTS pki_acme_orders_set_updated_at ON pki_acme_orders;
+CREATE TRIGGER pki_acme_orders_set_updated_at BEFORE UPDATE ON pki_acme_orders
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS pki_callers (
+    id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id         uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workload_taap_id    text        NOT NULL,
+    attestation_type    text        NOT NULL,
+    issuer              text        NOT NULL DEFAULT '',
+    subject             text        NOT NULL DEFAULT '',
+    attributes          jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    expires_at          timestamptz NOT NULL,
+    issued_at           timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pki_callers_attestation_type_check
+        CHECK (attestation_type IN ('kubernetes', 'oidc', 'jwt', 'aws', 'azure'))
+);
+CREATE INDEX IF NOT EXISTS pki_callers_customer_id_idx
+    ON pki_callers (customer_id, issued_at DESC);
+
+CREATE TABLE IF NOT EXISTS pki_recovery_ceremonies (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id     uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    authority_id    uuid        NOT NULL REFERENCES pki_authorities(id) ON DELETE CASCADE,
+    threshold       integer     NOT NULL,
+    share_count     integer     NOT NULL,
+    recovered_at    timestamptz,
+    expires_at      timestamptz NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pki_recovery_ceremonies_threshold_check
+        CHECK (threshold > 1 AND share_count >= threshold)
+);
+
+CREATE TABLE IF NOT EXISTS pki_recovery_shares (
+    ceremony_id     uuid        NOT NULL REFERENCES pki_recovery_ceremonies(id) ON DELETE CASCADE,
+    share_index     integer     NOT NULL,
+    share_digest    text        NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (ceremony_id, share_index),
+    CONSTRAINT pki_recovery_shares_index_check CHECK (share_index > 0)
+);
+
+CREATE TABLE IF NOT EXISTS pki_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0013_pki') ON CONFLICT DO NOTHING;
