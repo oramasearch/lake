@@ -39,6 +39,24 @@ CASCADE`):
 
 `updated_at` is maintained by a trigger (`set_updated_at()`) on every table.
 
+## Organizations and authorization (migration `0004_organizations_policy`)
+
+Migration `0003` is reserved for the identity-core work developed in parallel.
+
+| Table | Purpose |
+|---|---|
+| `objects` | the authorization graph: type, stable external id, optional parent and `inherit` cut flag |
+| `teams` | named teams within an organization |
+| `memberships` | user or workload membership in an organization or team, its `owner` / `admin` / `member` role, TAAP attestation digest and granting identity |
+| `grants` | principal, policy object and role, with the TAAP attestation digest and granting identity |
+| `invitations` | email or handle invitations, expiry, state and accepted membership |
+| `audit_events` | the provisional Phase 6 event shape used by these mutations until issue #18 formalizes the stream |
+
+The migration backfills policy objects for existing customers, organizations and repositories.
+New rows add their policy objects in the same store transaction. Parent topology and the role
+matrix are validated by the stores; graph traversal and action evaluation are documented in
+[`../api/policy.md`](../api/policy.md).
+
 This mirrors the Orama Cloud v1 tenant model (user and organization are identity, customer is
 the tenant, one handle namespace) and fixes its two known gotchas at the constraint level:
 case-sensitivity and unvalidated handle format.
@@ -49,7 +67,7 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`repositories` today), so a new migration means a new guard and the next Job re-runs the
+(`invitations` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -74,5 +92,6 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
 kubectl get postgresschema -n <namespace>                              # APPLIED = VERSION, PHASE Applied
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
-  -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass"
+  -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
+  -c "SELECT version FROM schema_migrations WHERE version='0004_organizations_policy'"
 ```
