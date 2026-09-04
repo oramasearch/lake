@@ -2,13 +2,14 @@
 
 #include <chrono>
 #include <ctime>
+#include <ranges>
 
 #include "lake/audit/audit.hpp"
 
 #include "lake/api/oauth.hpp"
-#include "lake/control/identity_crypto.hpp"
-
+#include "lake/api/sync_store.hpp"
 #include "lake/control/handles.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 
@@ -29,6 +30,245 @@ ApiResult no_store() {
 ApiResult no_search() {
     return ApiResult::failure("store_unavailable",
                               "no search store is configured (LAKE_STORE_ROOT)");
+}
+
+ApiResult no_repository_store() {
+    return ApiResult::failure("store_unavailable",
+                              "no repository store is configured (LAKE_STORE_ROOT)");
+}
+
+ApiResult from_sync_store_error(const SyncStoreError& error) {
+    return ApiResult::failure(error.code, error.message);
+}
+
+std::expected<control::Repository, ApiError> readable_repository(const json& input,
+                                                                 ApiContext& context) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto repository = context.store->get_repository(input.at("id"));
+    if (!repository) {
+        return std::unexpected(
+            ApiError{repository.error().code, repository.error().message, "/id"});
+    }
+    if (!context.authorized && repository->visibility != "public") {
+        return std::unexpected(ApiError{"unauthorized", "the repository is not public", "/id"});
+    }
+    if (context.authorized) {
+        const auto object = context.store->find_policy_object("repository", repository->id);
+        if (!object) {
+            return std::unexpected(ApiError{object.error().code, object.error().message, "/id"});
+        }
+        const auto decisions = control::authorize_batch(*context.store,
+                                                        context.acting_identity,
+                                                        {object->id},
+                                                        "read",
+                                                        context.authorization_cache);
+        if (!decisions) {
+            return std::unexpected(
+                ApiError{decisions.error().code, decisions.error().message, "/id"});
+        }
+        if (!decisions->at(object->id).allowed) {
+            return std::unexpected(
+                ApiError{"unauthorized", "principal is not allowed to read repository", "/id"});
+        }
+    }
+    return *repository;
+}
+
+json repository_ref_schema() {
+    return {{"type", "object"},
+            {"properties", {{"name", {{"type", "string"}}}, {"change", {{"type", "string"}}}}}};
+}
+
+json repository_tree_entry_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"path", {{"type", "string"}}},
+              {"kind", {{"type", "string"}}},
+              {"blob", {{"type", "string"}}},
+              {"mode", {{"type", "integer"}}}}}};
+}
+
+json repository_change_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"id", {{"type", "string"}}},
+              {"parents", {{"type", "array"}}},
+              {"author", {{"type", "string"}}},
+              {"message", {{"type", "string"}}},
+              {"occurred_at", {{"type", "string"}}}}}};
+}
+
+json repository_conflict_schema() {
+    return {{"type", "object"},
+            {"properties", {{"path", {{"type", "string"}}}, {"blobs", {{"type", "array"}}}}}};
+}
+
+json repository_ref_json(const RepositoryContentRef& ref) {
+    return {{"name", ref.name}, {"change", ref.change}};
+}
+
+json repository_tree_entry_json(const RepositoryTreeEntry& entry) {
+    return {{"path", entry.path}, {"kind", entry.kind}, {"blob", entry.blob}, {"mode", entry.mode}};
+}
+
+json repository_file_json(const RepositoryFile& file) {
+    return {
+        {"path", file.path}, {"blob", file.blob}, {"contents", file.contents}, {"size", file.size}};
+}
+
+json repository_change_json(const RepositoryChange& change) {
+    return {{"id", change.id},
+            {"parents", change.parents},
+            {"author", change.author},
+            {"message", change.message},
+            {"occurred_at", change.occurred_at}};
+}
+
+json repository_conflict_json(const RepositoryConflict& conflict) {
+    return {{"path", conflict.path}, {"blobs", conflict.blobs}};
+}
+
+template <class T, class ToJson>
+ApiResult repository_content_list_result(SyncStoreResult<std::vector<T>> rows, ToJson to_json) {
+    if (!rows) {
+        return from_sync_store_error(rows.error());
+    }
+    json items = json::array();
+    for (const T& row : *rows) {
+        items.push_back(to_json(row));
+    }
+    return ApiResult::success({{"items", std::move(items)}});
+}
+
+ApiResult authorized_repository_list_result(control::Result<std::vector<control::Repository>> rows,
+                                            ApiContext& context) {
+    if (!rows) {
+        return from_store_error(rows.error());
+    }
+    json items = json::array();
+    if (!context.authorized) {
+        for (const control::Repository& repository : *rows) {
+            if (repository.visibility == "public") {
+                items.push_back(control::to_json(repository));
+            }
+        }
+        return ApiResult::success({{"items", std::move(items)}});
+    }
+    std::vector<std::string> objects;
+    objects.reserve(rows->size());
+    std::map<std::string, std::string> objects_by_repository;
+    for (const control::Repository& repository : *rows) {
+        const auto object = context.store->find_policy_object("repository", repository.id);
+        if (!object) {
+            return from_store_error(object.error());
+        }
+        objects.push_back(object->id);
+        objects_by_repository.emplace(repository.id, object->id);
+    }
+    const auto decisions = control::authorize_batch(
+        *context.store, context.acting_identity, objects, "read", context.authorization_cache);
+    if (!decisions) {
+        return from_store_error(decisions.error());
+    }
+    for (const control::Repository& repository : *rows) {
+        if (decisions->at(objects_by_repository.at(repository.id)).allowed) {
+            items.push_back(control::to_json(repository));
+        }
+    }
+    return ApiResult::success({{"items", std::move(items)}});
+}
+
+template <class T>
+ApiResult authorized_entity_list_result(control::Result<std::vector<T>> rows,
+                                        ApiContext& context,
+                                        const std::string& object_type) {
+    if (!rows) {
+        return from_store_error(rows.error());
+    }
+    std::vector<std::string> objects;
+    std::map<std::string, std::string> objects_by_entity;
+    objects.reserve(rows->size());
+    for (const T& row : *rows) {
+        const auto object = context.store->find_policy_object(object_type, row.id);
+        if (!object) {
+            return from_store_error(object.error());
+        }
+        objects.push_back(object->id);
+        objects_by_entity.emplace(row.id, object->id);
+    }
+    const auto decisions = control::authorize_batch(
+        *context.store, context.acting_identity, objects, "read", context.authorization_cache);
+    if (!decisions) {
+        return from_store_error(decisions.error());
+    }
+    json items = json::array();
+    for (const T& row : *rows) {
+        if (decisions->at(objects_by_entity.at(row.id)).allowed) {
+            items.push_back(control::to_json(row));
+        }
+    }
+    return ApiResult::success({{"items", std::move(items)}});
+}
+
+std::expected<void, ApiError>
+authorize_scope(ApiContext& context, const std::string& object_id, const std::string& action) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto decisions = control::authorize_batch(
+        *context.store, context.acting_identity, {object_id}, action, context.authorization_cache);
+    if (!decisions) {
+        return std::unexpected(ApiError{decisions.error().code, decisions.error().message, {}});
+    }
+    if (!decisions->at(object_id).allowed) {
+        return std::unexpected(
+            ApiError{"unauthorized", "principal is not allowed to " + action, {}});
+    }
+    return {};
+}
+
+std::expected<void, ApiError> authorize_entity_scope(ApiContext& context,
+                                                     const std::string& object_type,
+                                                     const std::string& external_id,
+                                                     const std::string& action) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto object = context.store->find_policy_object(object_type, external_id);
+    if (!object) {
+        return std::unexpected(ApiError{object.error().code, object.error().message, {}});
+    }
+    return authorize_scope(context, object->id, action);
+}
+
+ApiResult authorization_failure(const std::expected<void, ApiError>& authorization) {
+    return ApiResult::failure(
+        authorization.error().code, authorization.error().message, authorization.error().path);
+}
+
+ApiResult authorize_user_collection(ApiContext& context) {
+    if (!context.store) {
+        return no_store();
+    }
+    if (context.acting_identity != "admin") {
+        return ApiResult::failure("unauthorized", "principal is not allowed to list users");
+    }
+    const auto decisions = control::authorize_batch(*context.store,
+                                                    context.acting_identity,
+                                                    {"user collection"},
+                                                    "admin",
+                                                    context.authorization_cache);
+    if (!decisions) {
+        return from_store_error(decisions.error());
+    }
+    return decisions->at("user collection").allowed
+               ? ApiResult::success(nullptr)
+               : ApiResult::failure("unauthorized", "principal is not allowed to list users");
 }
 
 json search_schema() {
@@ -99,6 +339,14 @@ CapabilityObjectResolver direct_object(std::string input_field) {
                const json& input, ApiContext&) -> std::expected<std::string, ApiError> {
         return input.at(input_field).get<std::string>();
     };
+}
+
+std::expected<std::string, ApiError> entity_type_object(const json& input, ApiContext& context) {
+    const auto object = context.store->find_policy_object(input.at("object_type"), input.at("id"));
+    if (!object) {
+        return std::unexpected(ApiError{object.error().code, object.error().message, "/id"});
+    }
+    return object->id;
 }
 
 std::expected<std::string, ApiError> scope_object(const json& input, ApiContext& context) {
@@ -421,9 +669,13 @@ void register_identity_capabilities(Registry& registry) {
                             .object = "user collection",
                             .action = "read",
                             .resolve_object = global_object,
+                            .authorizes_candidates = true,
                             .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store ? list_result(ctx.store->list_users(limit_of(in)))
-                                                 : no_store();
+                                const ApiResult authorization = authorize_user_collection(ctx);
+                                if (!authorization.ok) {
+                                    return authorization;
+                                }
+                                return list_result(ctx.store->list_users(limit_of(in)));
                             }});
     registry.add(Capability{.name = "get_user",
                             .title = "Get user",
@@ -462,20 +714,22 @@ void register_identity_capabilities(Registry& registry) {
         }});
 
     // ---- organizations ----
-    registry.add(Capability{.name = "list_organizations",
-                            .title = "List organizations",
-                            .description = "The most recent organizations, newest first.",
-                            .input_schema = list_input(),
-                            .output_schema = list_schema(organization_schema()),
-                            .kind = CapabilityKind::Read,
-                            .object = "organization collection",
-                            .action = "read",
-                            .resolve_object = global_object,
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store ? list_result(
-                                                       ctx.store->list_organizations(limit_of(in)))
-                                                 : no_store();
-                            }});
+    registry.add(Capability{
+        .name = "list_organizations",
+        .title = "List organizations",
+        .description = "The most recent organizations, newest first.",
+        .input_schema = list_input(),
+        .output_schema = list_schema(organization_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "organization collection",
+        .action = "read",
+        .resolve_object = global_object,
+        .authorizes_candidates = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            return ctx.store ? authorized_entity_list_result(
+                                   ctx.store->list_organizations(limit_of(in)), ctx, "organization")
+                             : no_store();
+        }});
     registry.add(Capability{.name = "get_organization",
                             .title = "Get organization",
                             .description = "One organization by id.",
@@ -515,20 +769,22 @@ void register_identity_capabilities(Registry& registry) {
                             }});
 
     // ---- customers ----
-    registry.add(Capability{.name = "list_customers",
-                            .title = "List customers",
-                            .description = "The most recent customers (tenants), newest first.",
-                            .input_schema = list_input(),
-                            .output_schema = list_schema(customer_schema()),
-                            .kind = CapabilityKind::Read,
-                            .object = "customer collection",
-                            .action = "read",
-                            .resolve_object = global_object,
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store
-                                           ? list_result(ctx.store->list_customers(limit_of(in)))
-                                           : no_store();
-                            }});
+    registry.add(Capability{
+        .name = "list_customers",
+        .title = "List customers",
+        .description = "The most recent customers (tenants), newest first.",
+        .input_schema = list_input(),
+        .output_schema = list_schema(customer_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "customer collection",
+        .action = "read",
+        .resolve_object = global_object,
+        .authorizes_candidates = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            return ctx.store ? authorized_entity_list_result(
+                                   ctx.store->list_customers(limit_of(in)), ctx, "customer")
+                             : no_store();
+        }});
     registry.add(Capability{.name = "get_customer",
                             .title = "Get customer",
                             .description = "One customer by id.",
@@ -1075,26 +1331,30 @@ void register_identity_capabilities(Registry& registry) {
 
 void register_repository_capabilities(Registry& registry) {
     // ---- repositories ----
-    registry.add(Capability{.name = "list_repositories",
-                            .title = "List repositories",
-                            .description =
-                                "The most recent repositories, newest first; customer_id "
-                                "narrows to one tenant.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties",
-                                              {{"customer_id", {{"type", "string"}}},
-                                               {"limit", {{"type", "integer"}}}}},
-                                             {"additionalProperties", false}},
-                            .output_schema = list_schema(repository_schema()),
-                            .kind = CapabilityKind::Read,
-                            .object = "repository collection",
-                            .action = "read",
-                            .resolve_object = optional_entity_object("customer", "customer_id"),
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store ? list_result(ctx.store->list_repositories(
-                                                       in.value("customer_id", ""), limit_of(in)))
-                                                 : no_store();
-                            }});
+    registry.add(
+        Capability{.name = "list_repositories",
+                   .title = "List repositories",
+                   .description = "The most recent repositories, newest first; customer_id "
+                                  "narrows to one tenant.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"customer_id", {{"type", "string"}}},
+                                      {"limit", {{"type", "integer"}}}}},
+                                    {"additionalProperties", false}},
+                   .output_schema = list_schema(repository_schema()),
+                   .kind = CapabilityKind::Read,
+                   .object = "repository collection",
+                   .action = "read",
+                   .resolve_object = optional_entity_object("customer", "customer_id"),
+                   .authorizes_candidates = true,
+                   .allows_anonymous_public_read = true,
+                   .handler = [](const json& in, ApiContext& ctx) {
+                       return ctx.store ? authorized_repository_list_result(
+                                              ctx.store->list_repositories(
+                                                  in.value("customer_id", ""), limit_of(in)),
+                                              ctx)
+                                        : no_store();
+                   }});
     registry.add(Capability{.name = "get_repository",
                             .title = "Get repository",
                             .description = "One repository by id.",
@@ -1104,9 +1364,15 @@ void register_repository_capabilities(Registry& registry) {
                             .object = "repository",
                             .action = "read",
                             .resolve_object = entity_object("repository", "id"),
+                            .allows_anonymous_public_read = true,
                             .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store ? one_result(ctx.store->get_repository(in["id"]))
-                                                 : no_store();
+                                const auto repository = readable_repository(in, ctx);
+                                if (!repository) {
+                                    return ApiResult::failure(repository.error().code,
+                                                              repository.error().message,
+                                                              repository.error().path);
+                                }
+                                return ApiResult::success(control::to_json(*repository));
                             }});
     registry.add(Capability{
         .name = "create_repository",
@@ -1218,6 +1484,218 @@ void register_repository_capabilities(Registry& registry) {
                                 return one_result(
                                     ctx.store->delete_repository(in.at("id"), deletion));
                             }});
+    registry.add(Capability{
+        .name = "repository_refs",
+        .title = "List repository refs",
+        .description = "The refs published by libliquid for one repository.",
+        .input_schema = id_input(),
+        .output_schema = list_schema(repository_ref_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            return repository_content_list_result(
+                ctx.sync_store->repository_refs(repository->customer_id, repository->id),
+                repository_ref_json);
+        }});
+    registry.add(Capability{
+        .name = "repository_tree",
+        .title = "Read a repository tree",
+        .description = "Every tree entry at one libliquid ref.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}}, {"ref", {{"type", "string"}}}}},
+                         {"required", json::array({"id", "ref"})},
+                         {"additionalProperties", false}},
+        .output_schema = list_schema(repository_tree_entry_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            return repository_content_list_result(
+                ctx.sync_store->repository_tree(
+                    repository->customer_id, repository->id, in.at("ref").get<std::string>()),
+                repository_tree_entry_json);
+        }});
+    registry.add(Capability{
+        .name = "repository_file",
+        .title = "Read a repository file",
+        .description = "One file and the blob backing it at a libliquid ref.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"path", {{"type", "string"}}}}},
+                         {"required", json::array({"id", "ref", "path"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"path", {{"type", "string"}}},
+                            {"blob", {{"type", "string"}}},
+                            {"contents", {{"type", "string"}}},
+                            {"size", {{"type", "integer"}}}}}},
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            const auto file = ctx.sync_store->repository_file(repository->customer_id,
+                                                              repository->id,
+                                                              in.at("ref").get<std::string>(),
+                                                              in.at("path").get<std::string>());
+            if (!file) {
+                return from_sync_store_error(file.error());
+            }
+            return ApiResult::success(repository_file_json(*file));
+        }});
+    registry.add(Capability{
+        .name = "list_changes",
+        .title = "List repository changes",
+        .description = "The libliquid change history for one repository.",
+        .input_schema = id_input(),
+        .output_schema = list_schema(repository_change_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            return repository_content_list_result(
+                ctx.sync_store->repository_log(repository->customer_id, repository->id),
+                repository_change_json);
+        }});
+    registry.add(Capability{
+        .name = "get_change",
+        .title = "Get repository change",
+        .description = "One change identity and metadata; structural diff follows liquid #166.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}}, {"change_id", {{"type", "string"}}}}},
+                         {"required", json::array({"id", "change_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = repository_change_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            const auto changes =
+                ctx.sync_store->repository_log(repository->customer_id, repository->id);
+            if (!changes) {
+                return from_sync_store_error(changes.error());
+            }
+            const auto change_id = in.at("change_id").get<std::string>();
+            const auto found = std::ranges::find(*changes, change_id, &RepositoryChange::id);
+            if (found == changes->end()) {
+                return ApiResult::failure("not_found", "no change " + change_id);
+            }
+            return ApiResult::success(repository_change_json(*found));
+        }});
+    registry.add(Capability{
+        .name = "list_conflicts",
+        .title = "List repository conflicts",
+        .description = "Unresolved libliquid conflict values for one repository.",
+        .input_schema = id_input(),
+        .output_schema = list_schema(repository_conflict_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            return repository_content_list_result(
+                ctx.sync_store->repository_conflicts(repository->customer_id, repository->id),
+                repository_conflict_json);
+        }});
+    registry.add(Capability{
+        .name = "get_artifact",
+        .title = "Get artifact placeholder",
+        .description = "A result identity; result enumeration and attestations follow liquid #166.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}}, {"result_id", {{"type", "string"}}}}},
+                         {"required", json::array({"id", "result_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"repository_id", {{"type", "string"}}},
+                            {"result_id", {{"type", "string"}}},
+                            {"status", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = entity_object("repository", "id"),
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            return ApiResult::success({{"repository_id", repository->id},
+                                       {"result_id", in.at("result_id")},
+                                       {"status", "waiting for liquid #166"}});
+        }});
 }
 
 void register_organization_capabilities(Registry& registry) {
@@ -1236,7 +1714,13 @@ void register_organization_capabilities(Registry& registry) {
                             .object = "organization",
                             .action = "read",
                             .resolve_object = entity_object("organization", "organization_id"),
+                            .authorizes_candidates = true,
                             .handler = [](const json& in, ApiContext& ctx) {
+                                const auto authorization = authorize_entity_scope(
+                                    ctx, "organization", in.at("organization_id"), "read");
+                                if (!authorization) {
+                                    return authorization_failure(authorization);
+                                }
                                 return list_result(
                                     ctx.store->list_teams(in.at("organization_id"), limit_of(in)));
                             }});
@@ -1293,7 +1777,17 @@ void register_organization_capabilities(Registry& registry) {
                    .object = "organization or team",
                    .action = "read",
                    .resolve_object = scope_object,
+                   .authorizes_candidates = true,
                    .handler = [](const json& in, ApiContext& ctx) {
+                       const std::string team_id = in.value("team_id", "");
+                       const auto authorization = authorize_entity_scope(
+                           ctx,
+                           team_id.empty() ? "organization" : "team",
+                           team_id.empty() ? in.at("organization_id").get<std::string>() : team_id,
+                           "read");
+                       if (!authorization) {
+                           return authorization_failure(authorization);
+                       }
                        return list_result(ctx.store->list_memberships(
                            in.at("organization_id"), in.value("team_id", ""), limit_of(in)));
                    }});
@@ -1357,7 +1851,17 @@ void register_organization_capabilities(Registry& registry) {
                    .object = "organization or team",
                    .action = "admin",
                    .resolve_object = scope_object,
+                   .authorizes_candidates = true,
                    .handler = [](const json& in, ApiContext& ctx) {
+                       const std::string team_id = in.value("team_id", "");
+                       const auto authorization = authorize_entity_scope(
+                           ctx,
+                           team_id.empty() ? "organization" : "team",
+                           team_id.empty() ? in.at("organization_id").get<std::string>() : team_id,
+                           "admin");
+                       if (!authorization) {
+                           return authorization_failure(authorization);
+                       }
                        return list_result(ctx.store->list_invitations(
                            in.at("organization_id"), in.value("team_id", ""), limit_of(in)));
                    }});
@@ -1448,6 +1952,7 @@ void register_policy_capabilities(Registry& registry) {
         .resolve_object = [](const json& in, ApiContext&) -> std::expected<std::string, ApiError> {
             return in.value("parent_id", "");
         },
+        .authorizes_candidates = true,
         .handler =
             [](const json& in, ApiContext& ctx) {
                 return authorized_object_list_result(
@@ -1508,7 +2013,13 @@ void register_policy_capabilities(Registry& registry) {
         .object = "policy object grants",
         .action = "admin",
         .resolve_object = direct_object("object_id"),
+        .authorizes_candidates = true,
         .handler = [](const json& in, ApiContext& ctx) {
+            const auto authorization =
+                authorize_scope(ctx, in.at("object_id").get<std::string>(), "admin");
+            if (!authorization) {
+                return authorization_failure(authorization);
+            }
             return list_result(ctx.store->list_grants(
                 {in.at("object_id").get<std::string>()}, std::nullopt, limit_of(in)));
         }});
@@ -1566,6 +2077,42 @@ void register_policy_capabilities(Registry& registry) {
                 items.push_back(control::to_json(entry));
             }
             return ApiResult::success({{"items", std::move(items)}});
+        }});
+    registry.add(Capability{
+        .name = "entity_effective_access",
+        .title = "Effective entity access",
+        .description = "Effective access for a repository, organization, or team by external id.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"object_type",
+                            {{"type", "string"},
+                             {"enum", json::array({"repository", "organization", "team"})}}},
+                           {"id", {{"type", "string"}}}}},
+                         {"required", json::array({"object_type", "id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"object", object_schema()}, {"items", {{"type", "array"}}}}}},
+        .kind = CapabilityKind::Read,
+        .object = "effective access",
+        .action = "share",
+        .resolve_object = entity_type_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto object = ctx.store->find_policy_object(in.at("object_type"), in.at("id"));
+            if (!object) {
+                return from_store_error(object.error());
+            }
+            const auto entries =
+                control::effective_access(*ctx.store, object->id, ctx.authorization_cache);
+            if (!entries) {
+                return from_store_error(entries.error());
+            }
+            json items = json::array();
+            for (const auto& entry : *entries) {
+                items.push_back(control::to_json(entry));
+            }
+            return ApiResult::success(
+                {{"object", control::to_json(*object)}, {"items", std::move(items)}});
         }});
 }
 

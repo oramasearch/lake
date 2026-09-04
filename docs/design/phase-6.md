@@ -9,14 +9,21 @@
 > `15-consumer-sync-and-web.md`. This page is written before the issues and corrected by them.
 
 lake today is the control surface: one capability registry rendered as REST `/v1`, OpenAPI and
-MCP; users, organizations, customers and repositories in Postgres; server-rendered pages behind
-the admin sign-in; telemetry; CI. Organization administration and the authorization object graph
+MCP; users, organizations, customers and repositories in Postgres; server-rendered pages,
+including anonymous reads of public repository data; telemetry; CI. Organization administration and the authorization object graph
 described below are implemented by lake issues #16 and #19 in migration
 `0004_organizations_policy`; identity core is implemented in migration `0007_identity_core`.
 Everything
 else below is added to that shape and keeps its rules
 (`CLAUDE.md`: one adapter TU, one registry, one auth check, trailing 404, pages never do what
 the API cannot).
+
+**Web UI status: repository browsing is implemented in lake #9.** Repository lists, refs,
+trees, files, change logs, conflict values, organization and team access views render without
+client-side code. Every returned repository candidate passes batched policy authorization, and
+anonymous requests can read only public repositories. Structural change diffs and artifact
+records/attestations are intentionally deferred to liquid #166, which supplies the missing public
+library APIs.
 
 Identity-core status on this branch: verified TAAP documents, password plus TOTP with one-use
 recovery codes and fresh-verification disablement, persisted

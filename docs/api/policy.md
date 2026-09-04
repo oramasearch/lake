@@ -14,9 +14,9 @@ that cut do not apply.
 
 `AuthorizationCache` belongs to one `ApiContext`. It caches ancestor paths and the grants loaded
 for a principal, so repeated checks in a request do not repeat graph reads. `authorize_batch`
-loads paths and grants for a candidate set in batches. `list_objects` filters every candidate
-with it, including children that cut inheritance; search and future lists use the same form
-without creating another permission system.
+loads paths and grants for a candidate set in batches. `list_objects`, organizations, customers,
+repositories, and search filter every candidate with it, including children that cut inheritance.
+Scoped lists authorize their scope with the same batched call before returning rows.
 
 Row-resolved browser and API-token credentials carry the user's TAAP ID into this same function.
 Identity-management capabilities resolve the synthetic object `principal/<taap_id>`; only that
@@ -34,8 +34,11 @@ the operator bearer remains the explicit break-glass principal.
 | `list_grants` | `admin` on `object_id` | direct grants |
 | `create_grant` | `admin` on `object_id` | attestation-backed grant |
 | `effective_access` | `share` on `object_id` | direct and inherited access |
+| `entity_effective_access` | `share` on the resolved repository, organization, or team | its policy object and direct and inherited access |
 
-The pages are `/grants?object_id=…` and `/access?object_id=…`. Effective access returns the
+The pages are `/grants?object_id=…` and `/access?object_id=…`. Repository, organization, and
+team pages link to `/repository/access?id=…`, `/organization/access?id=…`, and
+`/team/access?id=…` through `entity_effective_access`. Effective access returns the
 principal, role, allowed actions, source object, and whether the grant is inherited. This is the
 sharing view required by the product design.
 

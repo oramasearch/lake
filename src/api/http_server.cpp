@@ -8,6 +8,7 @@
 
 #include "lake/api/server.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -21,6 +22,7 @@
 #include <mutex>
 #include <optional>
 #include <print>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -64,6 +66,7 @@
 #include "lake/version.hpp"
 
 #include <liquid/hash.hpp>
+#include <liquid/repository.hpp>
 #include <liquid/runtime.hpp>
 #include <liquid/store.hpp>
 
@@ -301,8 +304,40 @@ control::Repository repository_from_json(const nlohmann::json& value) {
             json_string(value, "name"),
             json_string(value, "description"),
             json_string(value, "visibility"),
+            json_string(value, "deleted_at"),
+            json_string(value, "retention_until"),
             json_string(value, "created_at"),
             json_string(value, "updated_at")};
+}
+
+RepositoryContentRef repository_content_ref_from_json(const nlohmann::json& value) {
+    return {json_string(value, "name"), json_string(value, "change")};
+}
+
+RepositoryTreeEntry repository_tree_entry_from_json(const nlohmann::json& value) {
+    return {json_string(value, "path"),
+            json_string(value, "kind"),
+            json_string(value, "blob"),
+            value.value("mode", 0U)};
+}
+
+RepositoryFile repository_file_from_json(const nlohmann::json& value) {
+    return {json_string(value, "path"),
+            json_string(value, "blob"),
+            json_string(value, "contents"),
+            value.value("size", std::uint64_t{0})};
+}
+
+RepositoryChange repository_change_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            value.value("parents", std::vector<std::string>{}),
+            json_string(value, "author"),
+            json_string(value, "message"),
+            json_string(value, "occurred_at")};
+}
+
+RepositoryConflict repository_conflict_from_json(const nlohmann::json& value) {
+    return {json_string(value, "path"), value.value("blobs", std::vector<std::string>{})};
 }
 
 control::Team team_from_json(const nlohmann::json& value) {
@@ -441,6 +476,126 @@ public:
         return *contents;
     }
 
+    SyncStoreResult<std::vector<RepositoryContentRef>>
+    repository_refs(const std::string& customer_id, const std::string& repository_id) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto refs = liquid::runtime::block_on((*repository)->refs());
+        if (!refs) {
+            return std::unexpected(error_of(refs.error()));
+        }
+        std::vector<RepositoryContentRef> output;
+        output.reserve(refs->size());
+        for (const liquid::ref& ref : *refs) {
+            output.push_back({ref.name, liquid::to_string(ref.id.value)});
+        }
+        return output;
+    }
+
+    SyncStoreResult<std::vector<RepositoryTreeEntry>>
+    repository_tree(const std::string& customer_id,
+                    const std::string& repository_id,
+                    const std::string& ref) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        auto tree = tree_at_ref(**repository, ref);
+        if (!tree) {
+            return std::unexpected(tree.error());
+        }
+        std::vector<RepositoryTreeEntry> output;
+        const auto walked = walk_tree(**repository, *tree, "", output);
+        if (!walked) {
+            return std::unexpected(walked.error());
+        }
+        return output;
+    }
+
+    SyncStoreResult<RepositoryFile> repository_file(const std::string& customer_id,
+                                                    const std::string& repository_id,
+                                                    const std::string& ref,
+                                                    const std::string& path) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        auto tree = tree_at_ref(**repository, ref);
+        if (!tree) {
+            return std::unexpected(tree.error());
+        }
+        auto entry = find_file(**repository, *tree, path);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        const auto bytes = liquid::runtime::block_on((*repository)->blob(entry->ref));
+        if (!bytes) {
+            return std::unexpected(error_of(bytes.error()));
+        }
+        return RepositoryFile{path,
+                              liquid::to_string(entry->ref),
+                              display_contents(*bytes),
+                              static_cast<std::uint64_t>(bytes->size())};
+    }
+
+    SyncStoreResult<std::vector<RepositoryChange>>
+    repository_log(const std::string& customer_id, const std::string& repository_id) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto changes = liquid::runtime::block_on((*repository)->log());
+        if (!changes) {
+            return std::unexpected(error_of(changes.error()));
+        }
+        std::vector<RepositoryChange> output;
+        output.reserve(changes->size());
+        for (const liquid::change& change : *changes) {
+            std::vector<std::string> parents;
+            parents.reserve(change.parents.size());
+            for (const liquid::change_ref& parent : change.parents) {
+                parents.push_back(liquid::to_string(parent.id.value));
+            }
+            output.push_back({liquid::to_string(change.id.value),
+                              std::move(parents),
+                              change.author.taap_id,
+                              change.message,
+                              std::format("{:%FT%TZ}", change.at)});
+        }
+        return output;
+    }
+
+    SyncStoreResult<std::vector<RepositoryConflict>>
+    repository_conflicts(const std::string& customer_id,
+                         const std::string& repository_id) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto conflicts = liquid::runtime::block_on((*repository)->conflicts());
+        if (!conflicts) {
+            return std::unexpected(error_of(conflicts.error()));
+        }
+        std::vector<RepositoryConflict> output;
+        output.reserve(conflicts->size());
+        for (const liquid::conflict& conflict : *conflicts) {
+            std::vector<std::string> blobs;
+            blobs.reserve(conflict.refs.size());
+            for (const liquid::digest& blob : conflict.refs) {
+                blobs.push_back(liquid::to_string(blob));
+            }
+            output.push_back({conflict.path, std::move(blobs)});
+        }
+        return output;
+    }
+
 private:
     static SyncStoreError error_of(const liquid::error& error) {
         const std::string code(liquid::to_string(error.code));
@@ -464,6 +619,122 @@ private:
         auto inserted =
             stores_.emplace(customer_id, std::make_unique<liquid::store>(std::move(*opened)));
         return inserted.first->second.get();
+    }
+
+    static bool path_component_is_safe(const std::string& value) {
+        return !value.empty() && value != "." && value != ".." &&
+               value.find_first_of("/\\\\") == std::string::npos;
+    }
+
+    SyncStoreResult<std::unique_ptr<liquid::repository>>
+    open_repository(const std::string& customer_id, const std::string& repository_id) {
+        if (root_.empty()) {
+            return std::unexpected(
+                SyncStoreError{"store_unavailable", "LAKE_STORE_ROOT is not configured"});
+        }
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
+        }
+        const std::filesystem::path path =
+            std::filesystem::path(root_) / customer_id / "repositories" / repository_id;
+        auto opened = liquid::runtime::block_on(liquid::repository::open(path));
+        if (!opened) {
+            return std::unexpected(error_of(opened.error()));
+        }
+        return std::make_unique<liquid::repository>(std::move(*opened));
+    }
+
+    static SyncStoreResult<liquid::tree> tree_at_ref(liquid::repository& repository,
+                                                     const std::string& ref_name) {
+        if (ref_name.empty()) {
+            return std::unexpected(SyncStoreError{"invalid_input", "ref is required"});
+        }
+        const auto refs = liquid::runtime::block_on(repository.refs());
+        if (!refs) {
+            return std::unexpected(error_of(refs.error()));
+        }
+        const auto found = std::ranges::find(*refs, ref_name, &liquid::ref::name);
+        if (found == refs->end()) {
+            return std::unexpected(SyncStoreError{"not_found", "no ref " + ref_name});
+        }
+        const auto snapshot = liquid::runtime::block_on(repository.at(found->id));
+        if (!snapshot) {
+            return std::unexpected(error_of(snapshot.error()));
+        }
+        return snapshot->root;
+    }
+
+    static std::string node_kind_name(liquid::node_kind kind) {
+        if (kind == liquid::node_kind::blob) {
+            return "blob";
+        }
+        if (kind == liquid::node_kind::tree) {
+            return "tree";
+        }
+        if (kind == liquid::node_kind::repo) {
+            return "repository";
+        }
+        return "object";
+    }
+
+    static SyncStoreResult<void> walk_tree(liquid::repository& repository,
+                                           const liquid::tree& tree,
+                                           const std::string& prefix,
+                                           std::vector<RepositoryTreeEntry>& output) {
+        for (const liquid::tree_entry& entry : tree.entries) {
+            const std::string path = prefix.empty() ? entry.name : prefix + "/" + entry.name;
+            output.push_back(
+                {path, node_kind_name(entry.kind), liquid::to_string(entry.ref), entry.mode});
+            if (entry.kind != liquid::node_kind::tree) {
+                continue;
+            }
+            const auto child = liquid::runtime::block_on(repository.tree(entry.ref));
+            if (!child) {
+                return std::unexpected(error_of(child.error()));
+            }
+            const auto walked = walk_tree(repository, *child, path, output);
+            if (!walked) {
+                return walked;
+            }
+        }
+        return {};
+    }
+
+    static SyncStoreResult<liquid::tree_entry>
+    find_file(liquid::repository& repository, const liquid::tree& tree, const std::string& path) {
+        const std::size_t slash = path.find('/');
+        const std::string part = path.substr(0, slash);
+        const auto found = std::ranges::find(tree.entries, part, &liquid::tree_entry::name);
+        if (found == tree.entries.end()) {
+            return std::unexpected(SyncStoreError{"not_found", "no file " + path});
+        }
+        if (slash == std::string::npos) {
+            if (found->kind != liquid::node_kind::blob) {
+                return std::unexpected(SyncStoreError{"invalid_input", path + " is not a file"});
+            }
+            return *found;
+        }
+        if (found->kind != liquid::node_kind::tree) {
+            return std::unexpected(SyncStoreError{"not_found", "no file " + path});
+        }
+        const auto child = liquid::runtime::block_on(repository.tree(found->ref));
+        if (!child) {
+            return std::unexpected(error_of(child.error()));
+        }
+        return find_file(repository, *child, path.substr(slash + 1));
+    }
+
+    static std::string display_contents(const std::vector<std::byte>& bytes) {
+        std::string output;
+        for (const std::byte value : bytes) {
+            const unsigned char byte = static_cast<unsigned char>(value);
+            if (byte == '\n' || byte == '\r' || byte == '\t' || std::isprint(byte)) {
+                output += static_cast<char>(byte);
+            } else {
+                output += std::format("\\\\x{:02X}", byte);
+            }
+        }
+        return output;
     }
 
     std::string root_;
@@ -877,8 +1148,17 @@ struct ApiServer::Impl {
             "/invitations",
             "/grants",
             "/access",
+            "/repository/access",
+            "/organization/access",
+            "/team/access",
             "/repositories",
             "/repository",
+            "/repository/tree",
+            "/file",
+            "/changes",
+            "/change",
+            "/conflicts",
+            "/artifact",
             "/search",
             "/audit",
             "/sign-up",
@@ -1123,6 +1403,15 @@ struct ApiServer::Impl {
                          rest_envelope(result).dump(),
                          "application/json; charset=utf-8",
                          "no-store");
+    }
+
+    boost::http::route_task serve_repository_page_error(boost::http::route_params& route,
+                                                        const ApiContext& context,
+                                                        const ApiResult& result) {
+        if (!context.authorized && result.error.code == "unauthorized") {
+            return redirect(route, "/login");
+        }
+        return serve_page_error(route, result);
     }
 
     boost::http::route_task serve_customers_page(boost::http::route_params& route) {
@@ -1813,10 +2102,36 @@ struct ApiServer::Impl {
         }
         co_return co_await redirect(route, "/repositories", cookie);
     }
+
+    boost::http::route_task serve_entity_access_page(boost::http::route_params& route,
+                                                     std::string_view object_type) {
+        ApiContext ctx = context_for(route);
+        if (!ctx.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string id = query_value(route, "id");
+        if (id.empty()) {
+            return redirect(route, "/organizations");
+        }
+        const ApiResult access_result = registry.call(
+            "entity_effective_access", {{"object_type", object_type}, {"id", id}}, ctx);
+        if (!access_result.ok) {
+            return serve_page_error(route, access_result);
+        }
+        std::vector<control::EffectiveAccessEntry> entries;
+        for (const nlohmann::json& value : access_result.value.at("items")) {
+            entries.push_back(access_from_json(value));
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_effective_access(object_from_json(access_result.value.at("object")), entries),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
     boost::http::route_task serve_repositories_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/login");
         std::vector<control::Repository> repositories;
         std::map<std::string, control::Customer> owners;
         nlohmann::json input{{"limit", 500}};
@@ -1831,42 +2146,206 @@ struct ApiServer::Impl {
         for (const auto& value : rows.value.at("items")) {
             repositories.push_back(repository_from_json(value));
         }
-        const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, ctx);
-        if (!customers.ok) {
-            return serve_page_error(route, customers);
-        }
-        for (const auto& value : customers.value.at("items")) {
-            control::Customer customer = customer_from_json(value);
-            owners.emplace(customer.id, std::move(customer));
+        if (ctx.authorized) {
+            const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, ctx);
+            if (!customers.ok) {
+                return serve_page_error(route, customers);
+            }
+            for (const auto& value : customers.value.at("items")) {
+                control::Customer customer = customer_from_json(value);
+                owners.emplace(customer.id, std::move(customer));
+            }
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_repositories(repositories, owners),
+                         web_ui_repositories(repositories, owners, ctx.authorized),
                          "text/html; charset=utf-8",
                          "no-store");
     }
 
     boost::http::route_task serve_repository_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/login");
         const std::string id = query_value(route, "id");
         if (id.empty())
             return redirect(route, "/repositories");
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_page_error(route, repository_result);
+            return serve_repository_page_error(route, ctx, repository_result);
         }
         const control::Repository repository = repository_from_json(repository_result.value);
-        const ApiResult owner_result =
-            registry.call("get_customer", {{"id", repository.customer_id}}, ctx);
         std::optional<control::Customer> owner;
-        if (owner_result.ok) {
-            owner = customer_from_json(owner_result.value);
+        if (ctx.authorized) {
+            const ApiResult owner_result =
+                registry.call("get_customer", {{"id", repository.customer_id}}, ctx);
+            if (owner_result.ok) {
+                owner = customer_from_json(owner_result.value);
+            }
+        }
+        const ApiResult refs_result = registry.call("repository_refs", {{"id", id}}, ctx);
+        if (!refs_result.ok) {
+            return serve_repository_page_error(route, ctx, refs_result);
+        }
+        std::vector<RepositoryContentRef> refs;
+        for (const nlohmann::json& value : refs_result.value.at("items")) {
+            refs.push_back(repository_content_ref_from_json(value));
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_repository(repository, owner ? &*owner : nullptr, refs, ctx.authorized),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_repository_tree_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "id");
+        const std::string ref = query_value(route, "ref");
+        if (id.empty() || ref.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult tree_result =
+            registry.call("repository_tree", {{"id", id}, {"ref", ref}}, ctx);
+        if (!tree_result.ok) {
+            return serve_repository_page_error(route, ctx, tree_result);
+        }
+        std::vector<RepositoryTreeEntry> entries;
+        for (const nlohmann::json& value : tree_result.value.at("items")) {
+            entries.push_back(repository_tree_entry_from_json(value));
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_repository_tree(
+                repository_from_json(repository_result.value), ref, entries, ctx.authorized),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_repository_file_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        const std::string ref = query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        if (id.empty() || ref.empty() || path.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult file_result =
+            registry.call("repository_file", {{"id", id}, {"ref", ref}, {"path", path}}, ctx);
+        if (!file_result.ok) {
+            return serve_repository_page_error(route, ctx, file_result);
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_repository(repository, owner ? &*owner : nullptr),
+                         web_ui_repository_file(repository_from_json(repository_result.value),
+                                                repository_file_from_json(file_result.value),
+                                                ctx.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_changes_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        if (id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
+        if (!changes_result.ok) {
+            return serve_repository_page_error(route, ctx, changes_result);
+        }
+        std::vector<RepositoryChange> changes;
+        for (const nlohmann::json& value : changes_result.value.at("items")) {
+            changes.push_back(repository_change_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_repository_log(repository_from_json(repository_result.value),
+                                               changes,
+                                               ctx.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_change_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        const std::string change_id = query_value(route, "id");
+        if (id.empty() || change_id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult change_result =
+            registry.call("get_change", {{"id", id}, {"change_id", change_id}}, ctx);
+        if (!change_result.ok) {
+            return serve_repository_page_error(route, ctx, change_result);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_change(repository_from_json(repository_result.value),
+                                       repository_change_from_json(change_result.value),
+                                       ctx.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_conflicts_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        if (id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult conflicts_result = registry.call("list_conflicts", {{"id", id}}, ctx);
+        if (!conflicts_result.ok) {
+            return serve_repository_page_error(route, ctx, conflicts_result);
+        }
+        std::vector<RepositoryConflict> conflicts;
+        for (const nlohmann::json& value : conflicts_result.value.at("items")) {
+            conflicts.push_back(repository_conflict_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_repository_conflicts(repository_from_json(repository_result.value),
+                                                     conflicts,
+                                                     ctx.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_artifact_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        const std::string result_id = query_value(route, "id");
+        if (id.empty() || result_id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult artifact_result =
+            registry.call("get_artifact", {{"id", id}, {"result_id", result_id}}, ctx);
+        if (!artifact_result.ok) {
+            return serve_repository_page_error(route, ctx, artifact_result);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_artifact(id, result_id, ctx.authorized),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -2201,6 +2680,26 @@ bool ApiServer::start() {
         http::method::get, "/access", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/access", impl.serve_access_page(route));
         });
+    router.add(http::method::get,
+               "/repository/access",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/repository/access",
+                                               impl.serve_entity_access_page(route, "repository"));
+               });
+    router.add(http::method::get,
+               "/organization/access",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/organization/access",
+                       impl.serve_entity_access_page(route, "organization"));
+               });
+    router.add(
+        http::method::get, "/team/access", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/team/access", impl.serve_entity_access_page(route, "team"));
+        });
     router.add(
         http::method::get, "/sign-up", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/sign-up", impl.serve_sign_up(route));
@@ -2293,6 +2792,31 @@ bool ApiServer::start() {
     router.add(
         http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/repository", impl.serve_repository_page(route));
+        });
+    router.add(http::method::get,
+               "/repository/tree",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/repository/tree", impl.serve_repository_tree_page(route));
+               });
+    router.add(http::method::get, "/file", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/file", impl.serve_repository_file_page(route));
+    });
+    router.add(
+        http::method::get, "/changes", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/changes", impl.serve_changes_page(route));
+        });
+    router.add(
+        http::method::get, "/change", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/change", impl.serve_change_page(route));
+        });
+    router.add(
+        http::method::get, "/conflicts", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/conflicts", impl.serve_conflicts_page(route));
+        });
+    router.add(
+        http::method::get, "/artifact", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/artifact", impl.serve_artifact_page(route));
         });
     router.add(
         http::method::get, "/search", [&impl](http::route_params& route) -> http::route_task {

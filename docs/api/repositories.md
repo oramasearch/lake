@@ -23,11 +23,44 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 | `transfer_repository` | action | `id`, `customer_id` | `400 invalid_input` (unknown destination), `404 not_found`, `409 conflict` (tombstoned or destination name taken) |
 | `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
+| `repository_refs` | read | `id` | `{items: [{name, change}]}` |
+| `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode}]}` |
+| `repository_file` | read | `id`, `ref`, `path` | `{path, blob, contents, size}` |
+| `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
+| `get_change` | read | `id`, `change_id` | change identity and metadata |
+| `list_conflicts` | read | `id` | `{items: [{path, blobs}]}` |
+| `get_artifact` | read | `id`, `result_id` | result identity and deferred-data status |
 | `audit` | read | audit filters | [`audit.md`](audit.md), including the lifecycle capability calls |
 
 Every lifecycle capability carries the repository or customer authorization object and its
 `write` action. `Registry::call` invokes `authorize(principal, object, action)` before the
 handler and appends its signed outcome to `audit_events` through `audit::record`.
+
+`list_repositories` resolves every candidate repository policy object and makes one
+`authorize_batch(..., "read", ...)` call before returning the permitted set. Repository content
+capabilities authorize the repository before opening its libliquid data. The other candidate
+lists follow their policy-object or scoped parent authorization paths, and the registry records
+every successful or denied call.
+
+## Repository data and deferred pages
+
+`repository_refs`, `repository_tree`, `repository_file`, `list_changes`, and `list_conflicts`
+read libliquid directly through the lake repository-store adapter. Tree output is recursive;
+every file links to its backing blob identity and rendered contents. Conflict records remain
+first-class values containing a path and the competing blob references.
+
+The public `repository::diff` API required for structural change rendering is not available
+until liquid #166. Therefore `get_change` returns the selected change's identity and metadata,
+and the corresponding page explicitly marks the diff as deferred. `get_artifact` similarly
+renders only a requested result identity until liquid #166 provides public enumeration of
+results, records, provenance, reproducibility, traces, and SBOMs.
+
+## Public repositories
+
+An anonymous caller may call `list_repositories` and the repository read capabilities only for a
+repository marked `public`. The repository list omits every other visibility level. A direct read
+of a private or organization repository returns `unauthorized`; the HTML routes turn that result
+into a sign-in redirect. A signed-in caller continues through the repository policy object.
 
 ## Lifecycle
 
