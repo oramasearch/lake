@@ -11,6 +11,11 @@ Federated issuers use the `federation_issuers` policy table introduced by the SS
 that branch merges, this work exposes a narrow issuer-policy interface with an in-memory stand-in;
 the rebase replaces it with the SSO store implementation without changing the attestation API.
 
+The attestation boundary has four injected verifiers: Kubernetes TokenReview, JWT/OIDC signature
+verification, AWS instance identity, and Azure instance identity. A verified result is insufficient
+on its own: JWT claims must each be allowed by the organization issuer policy before Lake mints a
+credential. This keeps trust-graph policy distinct from transport-specific verification.
+
 ## How to verify
 
 The caller suite exchanges a Kubernetes token against a TokenReview double, rejects an

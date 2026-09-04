@@ -91,6 +91,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 add_library(lake-core STATIC
   src/control/lake_identity.cpp
   src/control/saml.cpp
+  src/control/callers.cpp
   src/control/pki.cpp
   src/version.cpp
   src/api/web_ui.cpp
