@@ -307,9 +307,9 @@ TEST(Audit, IdentityRotatesAndRetentionFloorIsEnforced) {
 }
 
 TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
-  const char *database_uri = std::getenv("LAKE_TEST_DATABASE");
+  const char *database_uri = std::getenv("LAKE_TEST_DB_URI");
   if (database_uri == nullptr || *database_uri == '\0') {
-    GTEST_SKIP() << "LAKE_TEST_DATABASE is not configured";
+    GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
   }
   auto store = lake::control::make_postgres_store(database_uri);
   const auto ready = store->ping();

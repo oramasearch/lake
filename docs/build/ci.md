@@ -7,15 +7,29 @@ images. The Dockerfile remains the canonical Linux toolchain recipe; CI installs
 ## Build and test workflow
 
 [`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It checks out all
-submodules recursively, starts a Postgres 16 service, configures Release with `LAKE_BUILD_TESTS=ON`,
-builds with clang-19, applies `db/schema.sql` in one transaction, then runs:
+submodules recursively, starts a Postgres 16 service, configures Release with
+`LAKE_BUILD_TESTS=ON`, builds with clang-19, applies `db/schema.sql`, then runs:
 
 ```sh
 ctest --test-dir build --output-on-failure
 ```
 
-The workflow exports its service URI as `LAKE_TEST_DATABASE`; this enables the audit store
-integration test in addition to the in-memory unit tests.
+`lake-postgres-tests` reads `LAKE_TEST_DB_URI` and uses unique fixture keys to round-trip every
+registered data capability through the production Postgres store; the audit integration test in
+`lake-tests` reads the same variable and skips without it. The rest of the test binary
+uses `InMemoryStore`, including policy inheritance, delegation, registry metadata and renderer
+coverage.
+
+For the same proof locally:
+
+```sh
+docker run --name lake-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lake_test \
+  -p 55416:5432 -d postgres:16
+PGPASSWORD=postgres psql -h 127.0.0.1 -p 55416 -U postgres -d lake_test -f db/schema.sql
+LAKE_TEST_DB_URI='postgresql://postgres:postgres@127.0.0.1:55416/lake_test' \
+  ctest --test-dir build --output-on-failure
+docker rm -f lake-postgres
+```
 
 The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost,
 nlohmann/json and GoogleTest. Its key includes the hash of `CMakeLists.txt`; a missing cache is

@@ -69,6 +69,9 @@ struct IdentityOptions {
 };
 
 nlohmann::json to_json(const Event &event);
+// The inverse of to_json for events read back through the registry (pages never read the
+// store directly). Absent or null optional fields decode as empty strings.
+Event event_from_json(const nlohmann::json &value);
 nlohmann::json identity_document(const Identity &identity);
 std::string json_lines(const std::vector<Event> &events);
 

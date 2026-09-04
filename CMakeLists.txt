@@ -106,6 +106,7 @@ add_library(lake-core STATIC
   src/api/mcp.cpp
   src/api/capabilities.cpp
   src/control/handles.cpp
+  src/control/policy.cpp
   src/control/memory_store.cpp
   src/telemetry/metrics.cpp
 )

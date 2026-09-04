@@ -478,6 +478,33 @@ nlohmann::json to_json(const Event &event) {
   return value;
 }
 
+Event event_from_json(const nlohmann::json &value) {
+  const auto text = [&value](const char *key) -> std::string {
+    if (!value.contains(key) || value.at(key).is_null()) {
+      return {};
+    }
+    return value.at(key).get<std::string>();
+  };
+  Event event;
+  event.id = text("id");
+  event.occurred_at = text("occurred_at");
+  event.draft.customer_id = text("customer_id");
+  event.draft.kind = text("kind");
+  event.draft.principal = text("principal");
+  event.draft.object = text("object");
+  event.draft.action = text("action");
+  event.draft.outcome = text("outcome");
+  event.draft.request_id = text("request_id");
+  event.draft.method = text("method");
+  event.draft.device = text("device");
+  event.draft.details = value.value("details", nlohmann::json::object());
+  event.previous_digest = text("previous_digest");
+  event.signer = text("signer");
+  event.signature = text("signature");
+  event.digest = text("digest");
+  return event;
+}
+
 nlohmann::json identity_document(const Identity &identity) {
   return {
       {"created_at", identity.created_at},
