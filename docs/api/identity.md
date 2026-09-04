@@ -19,6 +19,10 @@ with a purpose-specific random data key; `keystore` stores that key wrapped unde
 32-byte hexadecimal `LAKE_INSTANCE_KEK`. OAuth client secrets and recovery codes use the same
 envelope format.
 
+`register_oauth_provider` records the issuer, client id, encrypted client secret, and requested
+scopes for a provider in a user pool. The registration is audited. Provider registration is the
+configuration boundary used by the authorization-code callback.
+
 Password sign-up requires the client-held TAAP/1 document as `identity_document`. The document is
 JSON with a `payload` object (`id` and base64 Ed25519 `public_key`) and a base64 `signature` over
 the canonical JSON encoding of `payload`. lake verifies that self-signature, hashes the complete

@@ -105,6 +105,10 @@ struct NewGrant {
   std::string principal_taap_id, object_id, role, attestation_digest,
       granted_by_taap_id, request_id;
 };
+struct OAuthProvider {
+  std::string pool_id, provider, issuer, client_id, client_secret;
+  std::vector<std::string> scopes;
+};
 
 nlohmann::json to_json(const User &);
 nlohmann::json to_json(const Organization &);
