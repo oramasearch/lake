@@ -25,6 +25,10 @@ the canonical JSON encoding of `payload`. lake verifies that self-signature, has
 document with SHA-512/256, writes `identity_documents`, and binds the resulting `taap_id` to the
 new user. lake never receives a person's private key.
 
+`modules/liquid` is pinned to liquid `origin/main` (`7fe008e`) as the identity-library source.
+Its public `include/liquid/identity.hpp` provides `verify_document` and `verify_chain`; lake will
+use those typed APIs for canonical-CBOR documents rather than maintain another TAAP parser.
+
 ## Why
 
 The random bearer secret is not the authority. Every request resolves its session and device row;

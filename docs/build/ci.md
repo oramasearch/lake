@@ -37,6 +37,10 @@ dependencies; lake's adapter and libliquid's sync client share that one Boost.HT
 includes the hash of `CMakeLists.txt`; a missing cache is valid and CMake downloads the dependencies
 again.
 
+`modules/liquid` is a library-only source submodule pinned to liquid `origin/main`. Initialise it
+with the rest of the module tree (`git submodule update --init --recursive`) before configuring a
+consumer build. Its `LIQUID_BUILD_CLI` and `LIQUID_BUILD_TESTS` options stay off for lake.
+
 Postgres-backed identity coverage uses `LAKE_TEST_DB_URI`. To run it locally, start the documented
 test database and apply the schema before the test command:
 
