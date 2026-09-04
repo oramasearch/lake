@@ -41,6 +41,13 @@ public:
     Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
                                              const std::string& name,
                                              const std::string& head) override;
+    Result<ForgeRecord> create_forge_record(const NewForgeRecord&) override;
+    Result<ForgeRecord> get_forge_record(const std::string& id) override;
+    Result<std::vector<ForgeRecord>> list_forge_records(const std::string& repository_id,
+                                                        const std::string& kind,
+                                                        int limit) override;
+    Result<ForgeRecord> update_forge_record(const std::string& id,
+                                            const nlohmann::json& value) override;
     Result<Team> create_team(const NewTeam&) override;
     Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) override;
     Result<Team> get_team(const std::string& id) override;
@@ -237,6 +244,7 @@ private:
     std::vector<Customer> customers_;
     std::vector<Repository> repositories_;
     std::vector<RepositoryRef> repository_refs_;
+    std::vector<ForgeRecord> forge_records_;
     std::vector<Team> teams_;
     std::vector<Membership> memberships_;
     std::vector<Invitation> invitations_;

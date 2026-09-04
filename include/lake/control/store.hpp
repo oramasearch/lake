@@ -43,6 +43,16 @@ struct RepositoryRef {
 struct RepositoryDeletion {
     std::string deleted_at, retention_until;
 };
+// Forge records retain a versioned value because review anchors must be
+// replaceable by libliquid's map_anchor result without a schema migration.
+struct ForgeRecord {
+    std::string id, repository_id, kind, created_at, updated_at;
+    nlohmann::json value;
+};
+struct NewForgeRecord {
+    std::string repository_id, kind;
+    nlohmann::json value;
+};
 struct Team {
     std::string id, organization_id, name, display_name, created_at, updated_at;
 };
@@ -266,6 +276,7 @@ nlohmann::json to_json(const Organization&);
 nlohmann::json to_json(const Customer&);
 nlohmann::json to_json(const Repository&);
 nlohmann::json to_json(const RepositoryRef&);
+nlohmann::json to_json(const ForgeRecord&);
 nlohmann::json to_json(const Team&);
 nlohmann::json to_json(const Membership&);
 nlohmann::json to_json(const Invitation&);
@@ -317,6 +328,12 @@ public:
     virtual Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
                                                      const std::string& name,
                                                      const std::string& head) = 0;
+    virtual Result<ForgeRecord> create_forge_record(const NewForgeRecord&) = 0;
+    virtual Result<ForgeRecord> get_forge_record(const std::string& id) = 0;
+    virtual Result<std::vector<ForgeRecord>>
+    list_forge_records(const std::string& repository_id, const std::string& kind, int limit) = 0;
+    virtual Result<ForgeRecord> update_forge_record(const std::string& id,
+                                                    const nlohmann::json& value) = 0;
 
     virtual Result<Team> create_team(const NewTeam&) = 0;
     virtual Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) = 0;

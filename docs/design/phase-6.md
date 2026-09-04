@@ -250,8 +250,10 @@ break-glass remain in #26–#28.
 
 ## The forge, the drive, models, metering, migration
 
-Change review attaches to liquid's change identity, comments anchor to cursors that survive
-edits, diffs are structural; CI is the build engine, not a product (#30). The drive is the same
+Change review attaches to liquid's change identity. Migration `0012_forge_export_import` now
+stores each review anchor as a value and maps its initial `(change, path, line, column)` shape
+through structural line hunks until liquid #174 provides the batched `map_anchor` API; CI is the
+build engine, not a product (#30). The drive is the same
 repositories with per-folder ACLs, share links and a web surface through the format registry
 (#8, #43, #44, #45). Models and datasets are repositories with training provenance (#7).
 Metering counts unique stored bytes per customer store and never degrades to pointer files at a

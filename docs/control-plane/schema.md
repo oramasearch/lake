@@ -159,13 +159,25 @@ custody cascades with the repository. Lake stores only the recovery token hash o
 never stores an unwrapped repository key. The API and security consequences are in
 [`../api/offline.md`](../api/offline.md) and [`../api/recovery.md`](../api/recovery.md).
 
+## Forge, export, and GitHub import (migration `0012_forge_export_import`)
+
+| Table | Purpose |
+|---|---|
+| `forge_records` | Versioned, repository-owned issue, review, release, webhook, branch-protection, export, and GitHub-import facts. |
+| `forge_guard` | Guard table for the migration. |
+
+The `value` column is a JSON object with a versioned application shape. This deliberately keeps a
+review anchor as a durable value rather than a fixed collection of columns: the temporary
+line-hunk mapper can be replaced by liquid #174's `map_anchor` result without rewriting stored
+comments. `forge_records` is the area prefix for parallel Phase 6 schema work.
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`offline_recovery_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`forge_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -179,9 +191,12 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
 1. Edit `db/schema.sql` idempotently (`IF NOT EXISTS`, `CREATE OR REPLACE`, `DROP … IF EXISTS`
    before `CREATE TRIGGER`), append a new `INSERT INTO schema_migrations`.
 2. Copy to the operator's `assets/lake-schema.sql`; the version hash changes automatically. During
-   the Phase 6 waves this copy and the `GuardTable` update land in a separate operator pull request.
-   The operator change for this migration must carry the byte-identical schema and use
-   `offline_recovery_guard`.
+   the Phase 6 waves this copy and the `GuardTable` update land once per wave in a separate operator
+   pull request, never a partial schema between waves. By the approved Phase 6 wave-level waiver,
+   the operator copies for `0009_secrets` and `0010_sso_federation` are deferred to the separate
+   operator migration pull request that collects this wave; lake keeps the source-of-truth schema
+   and newest guard ready for that update. The forge wave adds `0012_forge_export_import` and
+   `forge_guard` to that same operator copy.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
    lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a
@@ -194,6 +209,6 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery')" \
-  -c "SELECT to_regclass('offline_recovery_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import')" \
+  -c "SELECT to_regclass('forge_guard')"
 ```
