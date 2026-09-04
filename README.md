@@ -24,7 +24,7 @@ liquid is the tool. lake is where it collects.
 
 ## Build and run
 
-Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3
+Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3.6.3
 (`brew install openssl@3`). Clone with submodules — the HTTP stack is vendored.
 GitHub Actions repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5
 toolchain on every push and pull request; see [`docs/build/ci.md`](docs/build/ci.md).
@@ -60,8 +60,8 @@ SIGINT/SIGTERM stop it cleanly.
 
 ## Container image
 
-`Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14
-and CMake 3.31, then ships it on a minimal Ubuntu runtime (OpenSSL 3 + libstdc++ + libpq) as UID/GID 10001,
+`Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14,
+OpenSSL 3.6.3 and CMake 3.31, then ships it on a minimal Ubuntu runtime as UID/GID 10001,
 `ENTRYPOINT lake`, `CMD --listen 0.0.0.0:4900`, port 4900 exposed. It is Zetta's headless-image
 recipe minus the GUI and Postgres deps. Images go to the **private** Docker Hub repo
 `oramasearch/lake` from the tagged [`image` workflow](.github/workflows/image.yml): an immutable

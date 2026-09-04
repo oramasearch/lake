@@ -124,9 +124,10 @@ that licence boundary.
 - `Dockerfile` = Zetta's headless recipe (Ubuntu 24.04, clang-19 from apt.llvm.org, CMake 3.31
   because 24.04's 3.28 does not know `cxx_std_26`) minus GUI/Postgres deps, **plus
   `libstdc++-14-dev`**: 24.04 defaults to libstdc++ 13, which has no `<print>`, and lake uses
-  `std::println`, and `libpq-dev` for libpqxx. Runtime image = `libssl3 libstdc++6 libpq5
-  ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot satisfy a
-  `runAsNonRoot` pod security context).
+  `std::println`, and `libpq-dev` for libpqxx. A checksum-verified OpenSSL 3.6.3 source build
+  provides Corosio TLS and Argon2id. The runtime carries those OpenSSL shared libraries plus
+  `libstdc++6 libpq5 ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot
+  satisfy a `runAsNonRoot` pod security context).
 - GitHub Actions uses the same toolchain for pull-request builds and publishes the Dockerfile image
   on a Git tag, only for `linux/amd64`. `ORAMA_SUBMODULES_TOKEN`, `DOCKERHUB_USERNAME` and
   `DOCKERHUB_TOKEN` must be configured by Steve before the workflows can complete. See

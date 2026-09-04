@@ -32,7 +32,8 @@ docker run --rm -p 4900:4900 oramasearch/lake:<local-tag> version
 ```
 
 Do not deploy or push a workstation-built image. A CI-built immutable tag is the deployment
-artifact.
+artifact. The local emulated `linux/amd64` build is not required on Apple Silicon; CI or the AKS
+amd64 builder produces the image.
 
 ## Change the image recipe
 

@@ -2,7 +2,8 @@
 
 GitHub Actions has two workflows that keep the repository buildable and publish deployment
 images. The Dockerfile remains the canonical Linux toolchain recipe; CI installs the same Ubuntu
-24.04 packages, LLVM 19 channel and CMake 3.31.5 installer.
+24.04 packages, LLVM 19 channel, checksum-verified OpenSSL 3.6.3 source build, and CMake 3.31.5
+installer.
 
 ## Build and test workflow
 
@@ -49,7 +50,8 @@ docker run --rm -d --name lake-test-postgres -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=lake_test -p 5432:5432 postgres:16
 until docker exec lake-test-postgres pg_isready -U postgres -d lake_test; do sleep 1; done
 docker exec -i lake-test-postgres psql -U postgres -d lake_test < db/schema.sql
-LAKE_TEST_DB_URI=postgresql://postgres:postgres@127.0.0.1:5432/lake_test \
+LAKE_INSTANCE_KEK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff \
+  LAKE_TEST_DB_URI=postgresql://postgres:postgres@127.0.0.1:5432/lake_test \
   ctest --test-dir build --output-on-failure -R PostgresIdentity
 docker stop lake-test-postgres
 ```
