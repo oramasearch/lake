@@ -8,6 +8,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/telemetry/metrics.hpp"
 
 using nlohmann::json;
 using namespace lake::api;
@@ -37,6 +38,22 @@ TEST(Registry, ServerInfoNeedsNoAuth) {
     ASSERT_TRUE(r.ok);
     EXPECT_EQ(r.value["name"], "lake");
     EXPECT_EQ(r.value["store"], "memory");
+}
+
+TEST(Telemetry, PrometheusCounterAndHistogram) {
+    lake::telemetry::Metrics metrics;
+    metrics.increment_counter("test_requests_total", {{"result", "ok"}});
+    metrics.increment_counter("test_requests_total", {{"result", "ok"}}, 2.0);
+    metrics.observe_histogram("test_duration_seconds", {{"operation", "read"}}, 0.012);
+
+    const std::string text = metrics.prometheus_text();
+    EXPECT_NE(text.find("# TYPE test_requests_total counter\n"), std::string::npos);
+    EXPECT_NE(text.find("test_requests_total{result=\"ok\"} 3\n"), std::string::npos);
+    EXPECT_NE(text.find("# TYPE test_duration_seconds histogram\n"), std::string::npos);
+    EXPECT_NE(text.find("test_duration_seconds_bucket{operation=\"read\",le=\"0.01\"} 0\n"), std::string::npos);
+    EXPECT_NE(text.find("test_duration_seconds_bucket{operation=\"read\",le=\"0.025\"} 1\n"), std::string::npos);
+    EXPECT_NE(text.find("test_duration_seconds_bucket{operation=\"read\",le=\"+Inf\"} 1\n"), std::string::npos);
+    EXPECT_NE(text.find("test_duration_seconds_count{operation=\"read\"} 1\n"), std::string::npos);
 }
 
 TEST(Registry, EverythingElseNeedsAuth) {
