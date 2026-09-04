@@ -9,13 +9,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <format>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <print>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
-#include <map>
 #include <vector>
 
 #include <boost/beast2/http_server.hpp>
@@ -36,6 +38,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/control/store.hpp"
+#include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
 
 namespace lake::api {
@@ -169,10 +172,16 @@ std::string error_body(std::string_view code, std::string_view message) {
     return nlohmann::json{{"ok", false}, {"error", {{"code", code}, {"message", message}, {"path", ""}}}}.dump();
 }
 
+std::string log_timestamp() {
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    return std::format("{:%FT%T}Z", now);
+}
+
 }  // namespace
 
 struct ApiServer::Impl {
     ServerOptions options;
+    telemetry::Metrics metrics;
     Registry registry;
     std::string openapi_body;
     boost::corosio::io_context io_context;
@@ -187,6 +196,55 @@ struct ApiServer::Impl {
     explicit Impl(ServerOptions opts) : options(std::move(opts)) {
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
+        metrics.set_gauge("lake_build_info",
+                          {{"version", std::string(version_string())}, {"node", options.node_name}}, 1.0);
+        metrics.set_gauge("lake_up", {}, 0.0);
+        options.store = telemetry::instrument_store(std::move(options.store), metrics);
+    }
+
+    void record_request(const boost::http::route_params& route, std::string_view route_pattern,
+                        std::chrono::steady_clock::time_point start) {
+        const double duration_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        const std::string method(route.req.method_text());
+        const std::string status = std::to_string(route.res.status_int());
+        const telemetry::Labels labels{{"method", method}, {"route", std::string(route_pattern)}, {"status", status}};
+        metrics.increment_counter("lake_http_requests_total", labels);
+        metrics.observe_histogram("lake_http_request_duration_seconds", labels, duration_seconds);
+
+        std::println("{}", nlohmann::json{{"ts", log_timestamp()},
+                                         {"method", method},
+                                         {"path", std::string(route.url.path())},
+                                         {"route", route_pattern},
+                                         {"status", route.res.status_int()},
+                                         {"duration_ms", duration_seconds * 1000.0},
+                                         {"node", options.node_name}}
+                               .dump());
+    }
+
+    boost::http::route_task observe_request(boost::http::route_params& route, std::string route_pattern,
+                                            boost::http::route_task task) {
+        const auto start = std::chrono::steady_clock::now();
+        auto result = co_await std::move(task);
+        record_request(route, route_pattern, start);
+        co_return result;
+    }
+
+    std::string route_pattern_for(const boost::http::route_params& route) const {
+        static constexpr std::string_view fixed_routes[] = {
+            "/",          "/style.css",    "/healthz",    "/readyz",    "/metrics",
+            "/login",     "/session",      "/logout",     "/customers", "/repositories",
+            "/repository", "/v1/openapi.json", "/mcp",
+        };
+        const std::string path(route.url.path());
+        for (const std::string_view pattern : fixed_routes) {
+            if (path == pattern) return std::string(pattern);
+        }
+        for (const auto& capability : registry.list()) {
+            const std::string pattern = rest_path(*capability);
+            if (path == pattern) return pattern;
+        }
+        return "unmatched";
     }
 
     ApiContext context_for(const boost::http::route_params& route) const {
@@ -304,6 +362,37 @@ struct ApiServer::Impl {
         return send_text(route, boost::http::status::ok, openapi_body, "application/json; charset=utf-8", "no-store");
     }
 
+    boost::http::route_task serve_healthz(boost::http::route_params& route) {
+        return send_text(route, boost::http::status::ok, R"({"ok":true})", "application/json; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_readyz(boost::http::route_params& route) {
+        if (!options.store) {
+            return send_text(route, boost::http::status::service_unavailable,
+                             error_body("store_unavailable", "no control-plane store is configured"),
+                             "application/json; charset=utf-8", "no-store");
+        }
+        if (auto result = options.store->ping(); !result) {
+            return send_text(route, boost::http::status::service_unavailable,
+                             error_body("store_unavailable", result.error().message),
+                             "application/json; charset=utf-8", "no-store");
+        }
+        return send_text(route, boost::http::status::ok,
+                         nlohmann::json{{"ok", true}, {"store", options.store->kind()}}.dump(),
+                         "application/json; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_metrics(boost::http::route_params& route) {
+        if (!context_for(route).authorized) {
+            return send_text(route, boost::http::status::forbidden,
+                             error_body("unauthorized", "a valid admin bearer token is required"),
+                             "application/json; charset=utf-8", "no-store");
+        }
+        return send_text(route, boost::http::status::ok, metrics.prometheus_text(),
+                         "text/plain; version=0.0.4", "no-store");
+    }
+
     // One REST rendering of a capability: GET reads (input in the query string, coerced by the
     // input schema), POST actions (input as the JSON body). Auth, validation, the call and the
     // envelope are Registry::call + rest_*, exactly the MCP path.
@@ -398,33 +487,64 @@ bool ApiServer::start() {
     impl.failure_reason.clear();
 
     http::router<http::route_params> router;
-    router.use(http::cors());
+    router.use([&impl, cors = http::cors()](http::route_params& route) -> http::route_task {
+        const auto start = std::chrono::steady_clock::now();
+        auto result = co_await cors(route);
+        if (result.what() != http::route_what::next) {
+            impl.record_request(route, impl.route_pattern_for(route), start);
+        }
+        co_return result;
+    });
     router.add(http::method::get, "/", [&impl](http::route_params& route) -> http::route_task {
-        return impl.serve_web_root(route);
+        return impl.observe_request(route, "/", impl.serve_web_root(route));
     });
     router.add(http::method::get, "/style.css", [&impl](http::route_params& route) -> http::route_task {
-        return impl.serve_style(route);
+        return impl.observe_request(route, "/style.css", impl.serve_style(route));
     });
-    router.add(http::method::get, "/login", [&impl](http::route_params& route) -> http::route_task { return impl.serve_login(route); });
-    router.add(http::method::post, "/session", [&impl](http::route_params& route) -> http::route_task { return impl.serve_session(route); });
-    router.add(http::method::post, "/logout", [&impl](http::route_params& route) -> http::route_task { return impl.serve_logout(route); });
-    router.add(http::method::get, "/customers", [&impl](http::route_params& route) -> http::route_task { return impl.serve_customers_page(route); });
-    router.add(http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task { return impl.serve_repositories_page(route); });
-    router.add(http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task { return impl.serve_repository_page(route); });
+    router.add(http::method::get, "/healthz", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/healthz", impl.serve_healthz(route));
+    });
+    router.add(http::method::get, "/readyz", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/readyz", impl.serve_readyz(route));
+    });
+    router.add(http::method::get, "/metrics", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/metrics", impl.serve_metrics(route));
+    });
+    router.add(http::method::get, "/login", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/login", impl.serve_login(route));
+    });
+    router.add(http::method::post, "/session", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/session", impl.serve_session(route));
+    });
+    router.add(http::method::post, "/logout", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/logout", impl.serve_logout(route));
+    });
+    router.add(http::method::get, "/customers", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/customers", impl.serve_customers_page(route));
+    });
+    router.add(http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/repositories", impl.serve_repositories_page(route));
+    });
+    router.add(http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/repository", impl.serve_repository_page(route));
+    });
     router.add(http::method::get, "/v1/openapi.json", [&impl](http::route_params& route) -> http::route_task {
-        return impl.serve_openapi(route);
+        return impl.observe_request(route, "/v1/openapi.json", impl.serve_openapi(route));
     });
     for (const auto& capability : impl.registry.list()) {
         const auto method = rest_method(*capability) == "GET" ? http::method::get : http::method::post;
-        router.add(method, rest_path(*capability),
-                   [&impl, capability](http::route_params& route) -> http::route_task {
-                       return impl.serve_capability(route, capability);
+        const std::string path = rest_path(*capability);
+        router.add(method, path,
+                   [&impl, capability, path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route, path, impl.serve_capability(route, capability));
                    });
     }
     router.add(http::method::post, "/mcp", [&impl](http::route_params& route) -> http::route_task {
-        return impl.serve_mcp(route);
+        return impl.observe_request(route, "/mcp", impl.serve_mcp(route));
     });
-    router.use([&impl](http::route_params& route) -> http::route_task { return impl.serve_not_found(route); });
+    router.use([&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "unmatched", impl.serve_not_found(route));
+    });
 
     impl.server = std::make_unique<beast2::http_server>(
         impl.io_context, static_cast<std::size_t>(impl.options.worker_coroutines), std::move(router),
@@ -441,12 +561,14 @@ bool ApiServer::start() {
     impl.server->start();
     impl.io_thread = std::thread([&impl] { impl.io_context.run(); });
     impl.is_running.store(true);
+    impl.metrics.set_gauge("lake_up", {}, 1.0);
     return true;
 }
 
 void ApiServer::stop() {
     Impl& impl = *impl_;
     if (!impl.is_running.exchange(false)) return;
+    impl.metrics.set_gauge("lake_up", {}, 0.0);
     impl.server->stop();
     impl.io_context.stop();
     if (impl.io_thread.joinable()) impl.io_thread.join();

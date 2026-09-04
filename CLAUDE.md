@@ -12,8 +12,9 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 `oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
 (`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
 the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages
-(`/customers`, `/repositories`, `/repository?id=`) behind the admin sign-in; everything behind the
-admin bearer except `server_info`. State and runbook: `docs/deployment/aks.md`; the specification
+(`/customers`, `/repositories`, `/repository?id=`) behind the admin sign-in; liveness, readiness,
+Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
+`server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
 is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
 identities in place of the single admin token (lake #4), repositories with content once liquid
 Phase 1 lands, incremental migrations (operator #126).
@@ -54,12 +55,15 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   never do what the API cannot.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
-  never add a second path. Pages that read the store redirect to `/login` without it.
+  never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`
+  uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
 - **One registry.** Every capability is a `Capability` in `src/api/capabilities.cpp`; REST,
   OpenAPI and MCP are renderings of it and never special-case an entry. `Registry::call` is the
   only path that authorizes and validates. Recipe: `docs/api/README.md`.
 - **Two TUs name third parties:** `src/api/http_server.cpp` (Beast2, boost::http, Boost.JSON)
   and `src/control/postgres_store.cpp` (libpqxx). nlohmann::json is the API document type.
+- Operational telemetry: `GET /healthz`, `GET /readyz`, authenticated `GET /metrics`, and one JSON
+  request log on stdout. Contract and metric names: `docs/serving/telemetry.md`.
 - Expected stderr noise: beast2 logs `read_header error: end of stream` once per
   keep-alive connection a client closes. Not a bug.
 

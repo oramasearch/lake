@@ -8,6 +8,8 @@
 #include <string_view>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
 #include "lake/api/server.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -92,13 +94,15 @@ int main(int argc, char** argv) {
         std::println(stderr, "lake: cannot start: {}", server.reason());
         return 1;
     }
-    std::println("lake {} — http://{}:{}/  (node {})", lake::version_string(), opts.listen_address, server.port(),
-                 opts.node_name);
-    std::println("  control-plane store: {}", store_kind);
-    std::println("  admin token: {}", opts.admin_token.empty()
-                                          ? "NOT SET — every capability except server_info refuses (unauthorized)"
-                                          : "set");
-    std::println("  API: /v1/openapi.json   MCP: POST /mcp");
+    std::println("{}", nlohmann::json{{"event", "startup"},
+                                     {"version", lake::version_string()},
+                                     {"listen", "http://" + opts.listen_address + ":" + std::to_string(server.port())},
+                                     {"node", opts.node_name},
+                                     {"store", store_kind},
+                                     {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
+                                     {"api", "/v1/openapi.json"},
+                                     {"mcp", "POST /mcp"}}
+                           .dump());
     while (!stop_requested.load()) {
         server.wait_for_work(std::chrono::milliseconds(100));
         server.drain();

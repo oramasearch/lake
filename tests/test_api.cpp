@@ -1,11 +1,17 @@
 #include <gtest/gtest.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <nlohmann/json.hpp>
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
+#include "lake/api/server.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/telemetry/metrics.hpp"
@@ -28,6 +34,42 @@ struct Surface {
     }
     ApiResult call(const std::string& name, json input = json::object()) { return registry.call(name, input, ctx); }
 };
+
+std::string http_get(unsigned short port, std::string_view path, std::string_view authorization = {}) {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) return {};
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1 ||
+        ::connect(socket_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        ::close(socket_fd);
+        return {};
+    }
+
+    std::string request = "GET " + std::string(path) + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
+    if (!authorization.empty()) request += "Authorization: " + std::string(authorization) + "\r\n";
+    request += "\r\n";
+    std::size_t sent = 0;
+    while (sent < request.size()) {
+        const ssize_t count = ::send(socket_fd, request.data() + sent, request.size() - sent, 0);
+        if (count <= 0) {
+            ::close(socket_fd);
+            return {};
+        }
+        sent += static_cast<std::size_t>(count);
+    }
+
+    std::string response;
+    char buffer[4096];
+    for (;;) {
+        const ssize_t count = ::recv(socket_fd, buffer, sizeof(buffer), 0);
+        if (count <= 0) break;
+        response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(socket_fd);
+    return response;
+}
 
 }  // namespace
 
@@ -66,6 +108,47 @@ TEST(Telemetry, StorePingIsMeasured) {
               std::string::npos);
     EXPECT_NE(text.find("lake_store_call_duration_seconds_count{store=\"memory\",operation=\"ping\",result=\"ok\"} 1\n"),
               std::string::npos);
+}
+
+TEST(TelemetryHttp, HealthAndMemoryReadinessNeedNoAuth) {
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "test-node";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::string health = http_get(server.port(), "/healthz");
+    EXPECT_NE(health.find(" 200 "), std::string::npos);
+    EXPECT_TRUE(health.ends_with("{\"ok\":true}"));
+
+    const std::string ready = http_get(server.port(), "/readyz");
+    EXPECT_NE(ready.find(" 200 "), std::string::npos);
+    EXPECT_TRUE(ready.ends_with("{\"ok\":true,\"store\":\"memory\"}"));
+    server.stop();
+}
+
+TEST(TelemetryHttp, MetricsRequireExistingAuthAndUsePrometheusContentType) {
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "test-node";
+    options.admin_token = "test-token";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::string denied = http_get(server.port(), "/metrics");
+    EXPECT_NE(denied.find(" 403 "), std::string::npos);
+    EXPECT_NE(denied.find("\"code\":\"unauthorized\""), std::string::npos);
+
+    const std::string served = http_get(server.port(), "/metrics", "Bearer test-token");
+    EXPECT_NE(served.find(" 200 "), std::string::npos);
+    EXPECT_NE(served.find("Content-Type: text/plain; version=0.0.4"), std::string::npos);
+    EXPECT_NE(served.find("lake_build_info{version=\"0.0.1\",node=\"test-node\"} 1\n"), std::string::npos);
+    EXPECT_NE(served.find("lake_up 1\n"), std::string::npos);
+    EXPECT_NE(served.find("lake_http_requests_total{method=\"GET\",route=\"/metrics\",status=\"403\"} 1\n"),
+              std::string::npos);
+    server.stop();
 }
 
 TEST(Registry, EverythingElseNeedsAuth) {
