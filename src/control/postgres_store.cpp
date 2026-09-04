@@ -1492,9 +1492,9 @@ ForgeRecord forge_record_of(const pqxx::row& row) {
     return ForgeRecord{row[0].as<std::string>(),
                        row[1].as<std::string>(),
                        row[2].as<std::string>(),
-                       nlohmann::json::parse(row[3].as<std::string>()),
                        row[4].as<std::string>(),
-                       row[5].as<std::string>()};
+                       row[5].as<std::string>(),
+                       nlohmann::json::parse(row[3].as<std::string>())};
 }
 
 void remove_scim_user_access(pqxx::work& tx,

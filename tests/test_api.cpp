@@ -1289,6 +1289,71 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
     EXPECT_EQ(s.call("get_repository", {{"id", "missing"}}).error.code, "not_found");
 }
 
+TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "forge"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+
+    const ApiResult issue = surface.call(
+        "create_issue",
+        {{"repository_id", repository_id},
+         {"title", "Document anchors"},
+         {"body", "Discuss `src/lib.cpp`."},
+         {"labels", json::array({"docs"})},
+         {"assignees", json::array({"taap:1:ed25519:ada"})},
+         {"references", json::array({{"change", "change-1"}, {"path", "src/lib.cpp"}})}});
+    ASSERT_TRUE(issue.ok) << issue.error.message;
+    EXPECT_EQ(issue.value["value"]["state"], "open");
+    EXPECT_TRUE(surface
+                    .call("update_issue",
+                          {{"repository_id", repository_id},
+                           {"issue_id", issue.value["id"]},
+                           {"state", "closed"}})
+                    .ok);
+    EXPECT_TRUE(surface
+                    .call("create_issue_comment",
+                          {{"repository_id", repository_id},
+                           {"issue_id", issue.value["id"]},
+                           {"body", "Resolved by change-2."}})
+                    .ok);
+
+    const ApiResult review = surface.call("create_review",
+                                          {{"repository_id", repository_id},
+                                           {"change_id", "change-1"},
+                                           {"reviewers", json::array({"taap:1:ed25519:ada"})}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    const ApiResult comment = surface.call(
+        "create_review_comment",
+        {{"repository_id", repository_id},
+         {"review_id", review.value["id"]},
+         {"body", "Use a more specific name."},
+         {"anchor",
+          {{"change", "change-1"}, {"path", "src/lib.cpp"}, {"line", 8}, {"column", 4}}}});
+    ASSERT_TRUE(comment.ok) << comment.error.message;
+
+    const ApiResult mapped = surface.call(
+        "map_review_anchors",
+        {{"repository_id", repository_id},
+         {"source_change", "change-1"},
+         {"target_change", "change-2"},
+         {"path", "src/lib.cpp"},
+         {"hunks",
+          json::array({{{"old_line", 1}, {"old_count", 0}, {"new_line", 1}, {"new_count", 2}}})}});
+    ASSERT_TRUE(mapped.ok) << mapped.error.message;
+    ASSERT_EQ(mapped.value["items"].size(), 1);
+    EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["change"], "change-2");
+    EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["line"], 10);
+    EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
+}
+
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
     Surface s;
     const ApiResult user = s.call("create_user", {{"display_name", "Ada"}});

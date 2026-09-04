@@ -2163,7 +2163,7 @@ Result<ForgeRecord> InMemoryStore::create_forge_record(const NewForgeRecord& inp
     }
     const std::string now = now_iso8601();
     forge_records_.push_back(
-        ForgeRecord{new_uuid_v4(), input.repository_id, input.kind, input.value, now, now});
+        ForgeRecord{new_uuid_v4(), input.repository_id, input.kind, now, now, input.value});
     return forge_records_.back();
 }
 

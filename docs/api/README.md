@@ -54,6 +54,8 @@ repository and its content; all other repository visibility levels remain protec
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
 | `refs` | read | `repository_id` | `{items: [repository ref]}` | [sync.md](sync.md) |
 | `find_missing`, `push`, `pull`, `upload_chunks`, `read_chunk` | binary read/action | repository id plus liquid sync body, digest, or range | binary liquid response | [sync.md](sync.md) |
+| `create_issue`, `update_issue`, `list_issues`, `create_issue_comment`, `list_issue_comments` | read/action | repository id, issue fields, state, or issue id | durable Markdown issue and discussion records | [forge.md](forge.md) |
+| `create_review`, `update_review`, `list_reviews`, `create_review_comment`, `list_review_comments`, `map_review_anchors` | read/action | repository id, liquid change, review state, anchor, or text hunks | change review and cursor-compatible anchored discussion records | [forge.md](forge.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
 | `list_memberships`, `create_membership` | read/action | scope, principal, role, TAAP evidence | membership(s) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
