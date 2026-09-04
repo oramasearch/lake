@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `identity_mfa_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `sso_federation_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -463,3 +463,117 @@ CREATE TABLE IF NOT EXISTS identity_mfa_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0008_mfa_recovery') ON CONFLICT DO NOTHING;
+
+-- SSO and federation (migration 0009): enterprise identity providers, SCIM resources, and the
+-- organization policy that names which issuer may assert each claim. The provider records only
+-- encrypted client secrets and SCIM bearer-token hashes. Deactivating a SCIM user revokes every
+-- one of that user's sessions in the same transaction.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE credentials DROP CONSTRAINT IF EXISTS credentials_kind_check;
+ALTER TABLE credentials ADD CONSTRAINT credentials_kind_check
+    CHECK (kind IN ('password', 'totp', 'recovery', 'passkey', 'oauth', 'saml', 'oidc', 'admin'));
+
+CREATE TABLE IF NOT EXISTS sso_providers (
+    id                      uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id         uuid        NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    pool_id                 text        NOT NULL DEFAULT 'lake',
+    name                    varchar(256) NOT NULL,
+    protocol                text        NOT NULL,
+    issuer                  text        NOT NULL,
+    metadata                text        NOT NULL DEFAULT '',
+    signing_certificate     text        NOT NULL DEFAULT '',
+    client_id               text        NOT NULL DEFAULT '',
+    encrypted_client_secret bytea,
+    scim_token_hash         text        NOT NULL,
+    attribute_mapping       jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    jit_provisioning        boolean     NOT NULL DEFAULT false,
+    enabled                 boolean     NOT NULL DEFAULT true,
+    tested_at               timestamptz,
+    created_at              timestamptz NOT NULL DEFAULT now(),
+    updated_at              timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT sso_providers_protocol_check CHECK (protocol IN ('saml', 'oidc')),
+    CONSTRAINT sso_providers_name_unique UNIQUE (organization_id, name),
+    CONSTRAINT sso_providers_issuer_unique UNIQUE (organization_id, issuer)
+);
+CREATE INDEX IF NOT EXISTS sso_providers_organization_id_idx
+    ON sso_providers (organization_id, created_at DESC);
+DROP TRIGGER IF EXISTS sso_providers_set_updated_at ON sso_providers;
+CREATE TRIGGER sso_providers_set_updated_at BEFORE UPDATE ON sso_providers
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS federation_issuers (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id uuid        NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    issuer          text        NOT NULL,
+    claim           varchar(256) NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT federation_issuers_claim_check CHECK (length(claim) > 0),
+    CONSTRAINT federation_issuers_unique UNIQUE (organization_id, issuer, claim)
+);
+CREATE INDEX IF NOT EXISTS federation_issuers_lookup_idx
+    ON federation_issuers (organization_id, issuer, claim);
+
+CREATE TABLE IF NOT EXISTS scim_users (
+    provider_id  uuid        NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    external_id  text        NOT NULL,
+    user_id      uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    active       boolean     NOT NULL DEFAULT true,
+    attributes   jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider_id, external_id),
+    CONSTRAINT scim_users_provider_user_unique UNIQUE (provider_id, user_id)
+);
+DROP TRIGGER IF EXISTS scim_users_set_updated_at ON scim_users;
+CREATE TRIGGER scim_users_set_updated_at BEFORE UPDATE ON scim_users
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS scim_groups (
+    provider_id  uuid        NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    external_id  text        NOT NULL,
+    team_id      uuid        NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    display_name text        NOT NULL,
+    attributes   jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider_id, external_id),
+    CONSTRAINT scim_groups_provider_team_unique UNIQUE (provider_id, team_id)
+);
+DROP TRIGGER IF EXISTS scim_groups_set_updated_at ON scim_groups;
+CREATE TRIGGER scim_groups_set_updated_at BEFORE UPDATE ON scim_groups
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS scim_group_members (
+    provider_id       uuid        NOT NULL,
+    group_external_id text        NOT NULL,
+    user_external_id  text        NOT NULL,
+    membership_id     uuid        NOT NULL REFERENCES memberships(id) ON DELETE CASCADE,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider_id, group_external_id, user_external_id),
+    FOREIGN KEY (provider_id, group_external_id)
+        REFERENCES scim_groups(provider_id, external_id) ON DELETE CASCADE,
+    FOREIGN KEY (provider_id, user_external_id)
+        REFERENCES scim_users(provider_id, external_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sso_provisioning_logs (
+    id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider_id  uuid        NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+    resource     text        NOT NULL,
+    operation    text        NOT NULL,
+    external_id  text        NOT NULL DEFAULT '',
+    outcome      text        NOT NULL,
+    details      jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT sso_provisioning_logs_resource_check CHECK (resource IN ('user', 'group')),
+    CONSTRAINT sso_provisioning_logs_operation_check CHECK (operation IN ('create', 'update', 'deactivate')),
+    CONSTRAINT sso_provisioning_logs_outcome_check CHECK (outcome IN ('success', 'failure'))
+);
+CREATE INDEX IF NOT EXISTS sso_provisioning_logs_provider_id_idx
+    ON sso_provisioning_logs (provider_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS sso_federation_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0009_sso_federation') ON CONFLICT DO NOTHING;

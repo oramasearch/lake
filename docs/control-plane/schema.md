@@ -105,13 +105,28 @@ an encrypted `totp` credential and eight independently Argon2id-hashed recovery 
 Successful recovery-code verification revokes that row immediately. Re-enrollment and verified
 disablement revoke all prior recovery rows. `identity_mfa_guard` is the migration guard.
 
+## SSO and federation (migration `0009_sso_federation`)
+
+| Table | Purpose |
+|---|---|
+| `sso_providers` | Organization and pool-scoped SAML or OIDC configuration: issuer, metadata, signing certificate, OIDC client settings, mapped attributes, JIT setting, SCIM token hash, test state, and enabled state. OIDC client secrets are encrypted. |
+| `federation_issuers` | The acceptable `(organization, issuer, claim)` triples. An SSO assertion or token exchange may use a claim only when this table admits its issuer. |
+| `scim_users` | Stable SCIM external-user to lake-user mapping, active state, and source attributes. Deactivation revokes the mapped user's sessions in the same transaction. |
+| `scim_groups` | Stable SCIM external-group to lake-team mapping. |
+| `scim_group_members` | Source-managed group membership and its resulting organization-team membership. |
+| `sso_provisioning_logs` | Immutable operational evidence for SCIM create, update, and deactivation outcomes. |
+| `sso_federation_guard` | The migration guard. |
+
+The credential-kind constraint also accepts `saml` and `oidc`; both remain proofs bound to the
+user's TAAP identity, rather than identities in their own right.
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`identity_mfa_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`sso_federation_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -128,7 +143,9 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    the Phase 6 waves this copy and the `GuardTable` update land once per wave in a separate operator
    pull request (orama-operator #134 carries migration `0006`; identity core still needs its
    operator copy), never
-   a partial schema between waves. The `0008_mfa_recovery` copy remains required in the operator.
+   a partial schema between waves. By the approved Phase 6 wave-level waiver, the operator copy
+   for `0009_sso_federation` is deferred to the separate operator migration PR that collects this
+   wave; lake keeps this source-of-truth schema and guard ready for that update.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
    lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a
@@ -141,5 +158,5 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_sso_federation')"
 ```
