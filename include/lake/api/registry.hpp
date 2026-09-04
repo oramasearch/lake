@@ -43,6 +43,10 @@ struct ApiContext {
     std::string node_name;
     std::string acting_identity; // "admin" for the bearer, empty otherwise
     std::string request_id;
+    std::string authentication_method;
+    std::string device;
+    std::string identity_seed;
+    std::string instance_kek;
     bool authorized = false;
     control::AuthorizationCache authorization_cache;
 };
@@ -77,7 +81,7 @@ class Registry {
     bool add(Capability capability);
     std::shared_ptr<const Capability> find(const std::string &name) const;
     std::vector<std::shared_ptr<const Capability>> list() const;
-    // Authorize (requires_auth vs context.authorized), validate, run, time.
+    // Authorize (requires_auth vs context.authorized), validate, run, time and audit once.
     ApiResult call(const std::string &name, const nlohmann::json &input, ApiContext &context) const;
 
   private:

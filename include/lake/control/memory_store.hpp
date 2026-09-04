@@ -54,6 +54,15 @@ class InMemoryStore final : public Store {
     Result<std::vector<Grant>> list_grants(const std::vector<std::string> &object_ids,
                                            const std::optional<std::string> &principal_taap_id,
                                            int limit) override;
+    audit::Result<audit::Identity> current_lake_identity() override;
+    audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string &taap_id) override;
+    audit::Result<void> create_lake_identity(const audit::Identity &identity) override;
+    audit::Result<void> rotate_lake_identity(const audit::Identity &previous,
+                                             const audit::Identity &replacement) override;
+    Result<void> append_audit_event(const audit::Event &event) override;
+    Result<audit::Event> latest_audit_event() override;
+    Result<std::vector<audit::Event>> list_audit_events(const audit::Filter &filter) override;
+    Result<void> set_audit_retention_days(const std::string &customer_id, int days) override;
 
   private:
     std::mutex mutex_;
@@ -66,6 +75,9 @@ class InMemoryStore final : public Store {
     std::vector<Invitation> invitations_;
     std::vector<PolicyObject> policy_objects_;
     std::vector<Grant> grants_;
+    std::vector<audit::Identity> identities_;
+    std::vector<audit::Event> audit_events_;
+    std::vector<std::pair<std::string, int>> audit_retentions_;
 };
 
 } // namespace lake::control

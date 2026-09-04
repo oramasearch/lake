@@ -44,8 +44,9 @@ code{background:#eef1f4;padding:.1rem .3rem;border-radius:4px;font-size:.9em}tab
 th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid var(--line)}th{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 tr:last-child td{border-bottom:0}td a{color:var(--accent);text-decoration:none}.badge{display:inline-block;padding:.05rem .45rem;border-radius:999px;font-size:.75rem;border:1px solid var(--line);color:var(--muted)}
 .empty{color:var(--muted);padding:1.5rem;text-align:center}form.login{display:grid;gap:.75rem;max-width:26rem}
-form.login input{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px}form.login button,form.inline button{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+form.login input,.filters input{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px}form.login button,form.inline button,.filters button{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
 form.inline{display:inline}form.inline button{background:transparent;color:var(--accent);padding:0}.error{color:#a12a2a;margin:0 0 .5rem}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}dt{color:var(--muted)}dd{margin:0}
+.filters{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:0 0 1.5rem}.filters label{display:grid;gap:.2rem;color:var(--muted);font-size:.8rem}
 )css";
 }
 
@@ -55,7 +56,7 @@ std::string nav(bool signed_in) {
     std::string out =
         "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
         "href=\"/organizations\">Organizations</a><a href=\"/repositories\">Repositories</a>"
-        "<a href=\"/v1/openapi.json\">API</a></nav>";
+        "<a href=\"/audit\">Audit</a><a href=\"/v1/openapi.json\">API</a></nav>";
     if (signed_in) {
         out += "<span class=\"session\"><form class=\"inline\" method=\"post\" "
                "action=\"/logout\"><button type=\"submit\">Sign out</button></form></span>";
@@ -344,6 +345,49 @@ std::string web_ui_effective_access(const control::PolicyObject &object,
     }
     return web_ui_shell("lake — effective access", object.object_type + ":" + object.external_id,
                         content, true);
+}
+
+std::string web_ui_audit(const std::vector<audit::Event> &events, const audit::Filter &filter) {
+    std::string content =
+        "<p class=\"eyebrow\">control plane</p><h1>Audit log</h1><p class=\"sub\">Signed, "
+        "hash-linked events. Use the filters to narrow the evidence view.</p>"
+        "<form class=\"filters\" method=\"get\" action=\"/audit\">"
+        "<label>Principal<input name=\"principal\" value=\"" +
+        web_ui_escape(filter.principal) +
+        "\"></label>"
+        "<label>Object<input name=\"object\" value=\"" +
+        web_ui_escape(filter.object) +
+        "\"></label>"
+        "<label>Outcome<input name=\"outcome\" value=\"" +
+        web_ui_escape(filter.outcome) +
+        "\"></label>"
+        "<label>From<input name=\"from\" value=\"" +
+        web_ui_escape(filter.from) +
+        "\"></label>"
+        "<label>To<input name=\"to\" value=\"" +
+        web_ui_escape(filter.to) +
+        "\"></label>"
+        "<button type=\"submit\">Filter</button></form>";
+    if (events.empty()) {
+        content += "<div class=\"panel empty\">No audit events match these filters.</div>";
+    } else {
+        content += "<table><thead><tr><th>When</th><th>Principal</th><th>Object</th><th>Action</th>"
+                   "<th>Outcome</th><th>Digest</th></tr></thead><tbody>";
+        for (const audit::Event &event : events) {
+            content += std::format("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td>"
+                                   "<td>{}</td><td><span class=\"badge\">{}</span></td>"
+                                   "<td><code>{}</code></td></tr>",
+                                   web_ui_escape(event.occurred_at),
+                                   web_ui_escape(event.draft.principal),
+                                   web_ui_escape(event.draft.object),
+                                   web_ui_escape(event.draft.action),
+                                   web_ui_escape(event.draft.outcome), web_ui_escape(event.digest));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<p class=\"sub\">API: <code>GET /v1/audit</code>, <code>GET /v1/export_audit</code>, "
+               "and <code>GET /v1/verify_audit</code>.</p>";
+    return web_ui_shell("lake — audit", std::format("{} events", events.size()), content, true);
 }
 
 } // namespace lake::api

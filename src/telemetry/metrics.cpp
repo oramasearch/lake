@@ -352,6 +352,31 @@ class InstrumentedStore final : public control::Store {
             return store_->list_grants(object_ids, principal_taap_id, limit);
         });
     }
+    audit::Result<audit::Identity> current_lake_identity() override {
+        return call("current_lake_identity", [&] { return store_->current_lake_identity(); });
+    }
+    audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) override {
+        return call("lake_identity_by_taap_id", [&] { return store_->lake_identity_by_taap_id(taap_id); });
+    }
+    audit::Result<void> create_lake_identity(const audit::Identity& identity) override {
+        return call("create_lake_identity", [&] { return store_->create_lake_identity(identity); });
+    }
+    audit::Result<void> rotate_lake_identity(const audit::Identity& previous,
+                                             const audit::Identity& replacement) override {
+        return call("rotate_lake_identity", [&] { return store_->rotate_lake_identity(previous, replacement); });
+    }
+    control::Result<void> append_audit_event(const audit::Event& event) override {
+        return call("append_audit_event", [&] { return store_->append_audit_event(event); });
+    }
+    control::Result<audit::Event> latest_audit_event() override {
+        return call("latest_audit_event", [&] { return store_->latest_audit_event(); });
+    }
+    control::Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) override {
+        return call("list_audit_events", [&] { return store_->list_audit_events(filter); });
+    }
+    control::Result<void> set_audit_retention_days(const std::string& customer_id, int days) override {
+        return call("set_audit_retention_days", [&] { return store_->set_audit_retention_days(customer_id, days); });
+    }
 
   private:
     std::shared_ptr<control::Store> store_;

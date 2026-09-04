@@ -15,7 +15,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 `lake-postgres-tests` reads `LAKE_TEST_DB_URI` and uses unique fixture keys to round-trip every
-registered data capability through the production Postgres store. The rest of the test binary
+registered data capability through the production Postgres store; the audit integration test in
+`lake-tests` reads the same variable and skips without it. The rest of the test binary
 uses `InMemoryStore`, including policy inheritance, delegation, registry metadata and renderer
 coverage.
 

@@ -44,6 +44,12 @@ envelope as `structuredContent` (and as text), with `isError` set.
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role, TAAP evidence | grant(s) | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |
+| `identity` | read, **no auth** | — | lake TAAP identity document | [audit.md](audit.md) |
+| `rotate_identity` | action | — | replacement lake identity document | [audit.md](audit.md) |
+| `audit` | read | `principal?`, `object?`, `outcome?`, `from?`, `to?`, `limit?` | `{items: [audit event]}` | [audit.md](audit.md) |
+| `export_audit` | read | audit filters | `{jsonl}` | [audit.md](audit.md) |
+| `verify_audit` | read | — | `{verified: true}` | [audit.md](audit.md) |
+| `set_audit_retention` | action | `customer_id`, `days` (≥400) | `{customer_id, days}` | [audit.md](audit.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

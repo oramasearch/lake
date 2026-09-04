@@ -27,6 +27,10 @@ struct ServerOptions {
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except server_info
     // refuses with unauthorized.
     std::string admin_token;
+    // A base64 32-byte Ed25519 seed. When empty lake creates its own identity at server start.
+    std::string identity_seed;
+    // Customer-independent key-encryption key for the generated identity seed.
+    std::string instance_kek;
 };
 
 class ApiServer {

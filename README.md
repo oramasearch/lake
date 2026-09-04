@@ -39,8 +39,8 @@ ctest --test-dir build
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
-| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration and policy; bearer required |
+| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, tenants, repositories, organization administration, policy, the lake identity and the signed audit stream; bearer required except `server_info` and `identity` |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
@@ -83,11 +83,12 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/control/`, `src/control/` | the control-plane store and policy engine: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
+| `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `capy`, `corosio`, `http`, `beast2`, `libpqxx` — vendored at Zetta's exact pins |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration and the authorization object graph. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, tenants, repositories, organization administration, the authorization object graph, the lake identity and the signed audit stream. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 

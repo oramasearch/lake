@@ -38,5 +38,6 @@ std::string web_ui_grants(const control::PolicyObject &object,
                           const std::vector<control::Grant> &grants);
 std::string web_ui_effective_access(const control::PolicyObject &object,
                                     const std::vector<control::EffectiveAccessEntry> &entries);
+std::string web_ui_audit(const std::vector<audit::Event> &events, const audit::Filter &filter);
 
 } // namespace lake::api
