@@ -30,6 +30,7 @@ class Service;
 namespace lake::transparency {
 class Service;
 class CheckpointService;
+class TiledLog;
 } // namespace lake::transparency
 
 // The capability registry — lake's control surface in Zetta's shape: one
@@ -99,6 +100,7 @@ struct ApiContext {
     control::callers::Service* callers = nullptr;
     transparency::Service* transparency = nullptr;
     transparency::CheckpointService* checkpoints = nullptr;
+    transparency::TiledLog* transparency_log = nullptr;
     transparency::TransparencySubmitter transparency_submitter;
     bool authorized = false;
     bool operator_credential = false;

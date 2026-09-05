@@ -379,6 +379,27 @@ TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     EXPECT_NE(page.find("Effective mode: <code>witnessed</code>"), std::string::npos);
 }
 
+TEST(WebUi, TransparencyPageRendersVerifiedIdentityMatches) {
+    const nlohmann::json scan{
+        {"duration_ms", 12.5},
+        {"root_hash", "abcdef<&"},
+        {"tiles_scanned", 98},
+        {"tree_size", 100000},
+        {"matches",
+         nlohmann::json::array({nlohmann::json{{"index", 42},
+                                               {"profile", "authorship/1<&"},
+                                               {"issuer", "taap:1:ed25519:issuer<&"},
+                                               {"subject", "blake3:subject<&"}}})}};
+    const std::string page = lake::api::web_ui_transparency("taap:1:ed25519:person<&", scan);
+    EXPECT_NE(page.find("action=\"/transparency\""), std::string::npos);
+    EXPECT_NE(page.find("100000 entries"), std::string::npos);
+    EXPECT_NE(page.find("98"), std::string::npos);
+    EXPECT_NE(page.find("authorship/1&lt;&amp;"), std::string::npos);
+    EXPECT_NE(page.find("person&lt;&amp;"), std::string::npos);
+    EXPECT_EQ(page.find("person<&"), std::string::npos);
+    EXPECT_EQ(page.find("<script"), std::string::npos);
+}
+
 TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
     const lake::control::SecretMount mount{"mount-1",
                                            "customer-1",

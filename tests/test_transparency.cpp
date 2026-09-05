@@ -3,14 +3,23 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <future>
+#include <iostream>
 #include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
 #include <openssl/evp.h>
+
+#include <liquid/attestation.hpp>
+#include <liquid/runtime.hpp>
+
+#include "objects/records.hpp"
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
@@ -19,6 +28,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/transparency/checkpoint.hpp"
+#include "lake/transparency/log.hpp"
 #include "lake/transparency/tuf.hpp"
 
 using nlohmann::json;
@@ -276,7 +286,134 @@ lake::transparency::LogConfiguration air_gapped_configuration() {
     return {.mode = lake::transparency::LogMode::AirGapped};
 }
 
+std::string base64url(std::span<const std::byte> value) {
+    std::string output(((value.size() + 2) / 3) * 4, '\0');
+    const int size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(output.data()),
+                                     reinterpret_cast<const unsigned char*>(value.data()),
+                                     static_cast<int>(value.size()));
+    EXPECT_GE(size, 0);
+    output.resize(static_cast<std::size_t>(size));
+    std::ranges::replace(output, '+', '-');
+    std::ranges::replace(output, '/', '_');
+    while (output.ends_with('=')) {
+        output.pop_back();
+    }
+    return output;
+}
+
+std::string signed_attestation(std::string identity, unsigned char marker) {
+    liquid::attestation statement{
+        .subject = liquid::digest{liquid::algorithm::blake3, {}},
+        .profile = "authorship/1",
+        .at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()),
+        .subject_kind = liquid::attestation_subject_kind::drip,
+        .attributes = {{"author", std::move(identity)}},
+    };
+    statement.subject.bytes.front() = std::byte{marker};
+    auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
+    EXPECT_TRUE(signer) << signer.error().message;
+    statement.issuer = signer->identity();
+    auto body = liquid::objects::encode_attestation_body(statement);
+    EXPECT_TRUE(body) << body.error().message;
+    auto signed_value = liquid::runtime::block_on(signer->sign("attestation", *body));
+    EXPECT_TRUE(signed_value) << signed_value.error().message;
+    auto signature = liquid::encode_attestation_signature(*signed_value);
+    EXPECT_TRUE(signature) << signature.error().message;
+    statement.signature = std::move(*signature);
+    auto encoded = liquid::encode_attestation(statement);
+    EXPECT_TRUE(encoded) << encoded.error().message;
+    return base64url(*encoded);
+}
+
 } // namespace
+
+TEST(TransparencyLog, BulkTilesDetectTamperingAndScanOneHundredThousandEntries) {
+    TemporaryRoot temporary;
+    lake::transparency::TiledLog log(temporary.path(), "monitor-instance");
+    const std::string monitored_identity = "taap:1:ed25519:monitored";
+    const std::string monitored = signed_attestation(monitored_identity, 1);
+    const std::string unrelated = signed_attestation("taap:1:ed25519:other", 2);
+    constexpr std::size_t entry_count = 100000;
+    constexpr std::size_t batch_size = 1000;
+    const auto growth_started = std::chrono::steady_clock::now();
+    for (std::size_t first = 0; first < entry_count; first += batch_size) {
+        std::vector<std::string> batch;
+        batch.reserve(batch_size);
+        for (std::size_t index = first; index < first + batch_size; ++index) {
+            batch.push_back(index % 1000 == 0 ? monitored : unrelated);
+        }
+        const auto appended = log.append(batch);
+        ASSERT_TRUE(appended) << appended.error().message;
+    }
+    const double growth_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - growth_started)
+            .count();
+    const auto state = log.state();
+    ASSERT_TRUE(state) << state.error().message;
+    EXPECT_EQ(state->tree_size, entry_count);
+
+    const auto first_tile = log.tile(0, lake::transparency::transparency_tile_width);
+    ASSERT_TRUE(first_tile) << first_tile.error().message;
+    EXPECT_EQ(first_tile->width, lake::transparency::transparency_tile_width);
+    EXPECT_FALSE(first_tile->encoded.empty());
+    const std::size_t final_width = entry_count % lake::transparency::transparency_tile_width;
+    const auto final_tile =
+        log.tile(entry_count / lake::transparency::transparency_tile_width, final_width);
+    ASSERT_TRUE(final_tile) << final_tile.error().message;
+
+    const auto scan = log.scan_identity(monitored_identity, state->tree_size, state->root_hash);
+    ASSERT_TRUE(scan) << scan.error().message;
+    EXPECT_TRUE(scan->duration_ms < growth_ms);
+    EXPECT_EQ(scan->entries_scanned, entry_count);
+    EXPECT_EQ(scan->tiles_scanned, 98U);
+    ASSERT_EQ(scan->matches.size(), 100U);
+    EXPECT_EQ(scan->matches.front().index, 0U);
+    EXPECT_EQ(scan->matches.back().index, 99000U);
+    std::cout << "100000-entry transparency growth_ms=" << growth_ms
+              << " scan_ms=" << scan->duration_ms << '\n';
+
+    const std::filesystem::path tile_path =
+        log.directory() / "tiles" / "entries" / "0" / "1024.tile";
+    std::fstream tile_file(tile_path, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(tile_file);
+    tile_file.seekg(-1, std::ios::end);
+    char byte = 0;
+    tile_file.read(&byte, 1);
+    byte ^= 1;
+    tile_file.seekp(-1, std::ios::end);
+    tile_file.write(&byte, 1);
+    tile_file.close();
+    const auto tampered = log.scan_identity(monitored_identity, state->tree_size, state->root_hash);
+    EXPECT_FALSE(tampered);
+    EXPECT_EQ(tampered.error().code, "unrecoverable");
+}
+
+TEST(TransparencyLog, ConcurrentWritersPreserveEveryEntry) {
+    TemporaryRoot temporary;
+    lake::transparency::TiledLog first_log(temporary.path(), "concurrent-instance");
+    lake::transparency::TiledLog second_log(temporary.path(), "concurrent-instance");
+    const std::string identity = "taap:1:ed25519:concurrent";
+    const std::string attestation = signed_attestation(identity, 3);
+    const std::vector<std::string> first_entries(700, attestation);
+    const std::vector<std::string> second_entries(700, attestation);
+
+    auto first_append =
+        std::async(std::launch::async, [&]() { return first_log.append(first_entries); });
+    auto second_append =
+        std::async(std::launch::async, [&]() { return second_log.append(second_entries); });
+    const auto first_result = first_append.get();
+    const auto second_result = second_append.get();
+    ASSERT_TRUE(first_result) << first_result.error().message;
+    ASSERT_TRUE(second_result) << second_result.error().message;
+
+    const auto state = first_log.state();
+    ASSERT_TRUE(state) << state.error().message;
+    EXPECT_EQ(state->tree_size, 1400U);
+    const auto scan = first_log.scan_identity(identity, state->tree_size, state->root_hash);
+    ASSERT_TRUE(scan) << scan.error().message;
+    EXPECT_EQ(scan->entries_scanned, 1400U);
+    EXPECT_EQ(scan->matches.size(), 1400U);
+}
 
 TEST(TransparencyCheckpoint, ValidatesRuntimeConfiguration) {
     const auto default_configuration =
@@ -518,6 +655,7 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
     lake::transparency::Service service(temporary.path(), "registry-instance");
     lake::transparency::CheckpointService checkpoints(
         temporary.path(), "registry-instance", air_gapped_configuration());
+    lake::transparency::TiledLog log(temporary.path(), "registry-instance");
     lake::control::InMemoryStore store;
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
@@ -525,6 +663,7 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
     context.store = &store;
     context.transparency = &service;
     context.checkpoints = &checkpoints;
+    context.transparency_log = &log;
     context.authorized = true;
     context.operator_credential = true;
     context.acting_identity = "admin";
@@ -540,6 +679,12 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
         {{"targets", first.targets}, {"snapshot", first.snapshot}, {"timestamp", first.timestamp}},
         context);
     ASSERT_TRUE(published.ok) << published.error.message;
+    const std::string monitored_identity = "taap:1:ed25519:registry-monitor";
+    const std::string attestation = signed_attestation(monitored_identity, 3);
+    context.request_id.clear();
+    const auto appended =
+        registry.call("append_transparency_entries", {{"attestations", {attestation}}}, context);
+    ASSERT_TRUE(appended.ok) << appended.error.message;
     context.request_id.clear();
     const auto configuration =
         registry.call("transparency_log_configuration", nlohmann::json::object(), context);
@@ -550,6 +695,16 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
         registry.call("publish_transparency_checkpoint", nlohmann::json::object(), context);
     ASSERT_TRUE(checkpoint.ok) << checkpoint.error.message;
     EXPECT_EQ(checkpoint.value.at("sequence"), 1);
+    EXPECT_EQ(checkpoint.value.at("checkpoint").at("tree_size"), 1);
+    context.request_id.clear();
+    const auto tile = registry.call("transparency_tile", {{"index", 0}, {"width", 1}}, context);
+    ASSERT_TRUE(tile.ok) << tile.error.message;
+    EXPECT_EQ(tile.value.at("entries"), 1);
+    context.request_id.clear();
+    const auto scan =
+        registry.call("transparency_identity_scan", {{"identity", monitored_identity}}, context);
+    ASSERT_TRUE(scan.ok) << scan.error.message;
+    EXPECT_EQ(scan.value.at("matches").size(), 1U);
     context.request_id.clear();
     const auto fetched = registry.call("tuf_metadata", {{"role", "timestamp"}}, context);
     ASSERT_TRUE(fetched.ok) << fetched.error.message;
@@ -574,6 +729,7 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     lake::transparency::Service service(temporary.path(), "postgres-instance");
     lake::transparency::CheckpointService checkpoints(
         temporary.path(), "postgres-instance", air_gapped_configuration());
+    lake::transparency::TiledLog log(temporary.path(), "postgres-instance");
     auto store = lake::control::make_postgres_store(
         database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     const auto ready = store->ping();
@@ -584,6 +740,7 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     context.store = store.get();
     context.transparency = &service;
     context.checkpoints = &checkpoints;
+    context.transparency_log = &log;
     context.authorized = true;
     context.operator_credential = true;
     context.acting_identity = "admin";
@@ -600,6 +757,12 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
         {{"targets", first.targets}, {"snapshot", first.snapshot}, {"timestamp", first.timestamp}},
         context);
     ASSERT_TRUE(published.ok) << published.error.message;
+    const std::string monitored_identity = "taap:1:ed25519:postgres-monitor";
+    const std::string attestation = signed_attestation(monitored_identity, 4);
+    context.request_id = "postgres-transparency-append";
+    const auto appended =
+        registry.call("append_transparency_entries", {{"attestations", {attestation}}}, context);
+    ASSERT_TRUE(appended.ok) << appended.error.message;
     const json second_root = root_document(
         2, keys.roots(), keys.targets(), keys.snapshot, keys.timestamp, keys.root_threshold());
     context.request_id = "postgres-transparency-rotate";
@@ -616,6 +779,14 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     const auto checkpoint =
         registry.call("publish_transparency_checkpoint", nlohmann::json::object(), context);
     ASSERT_TRUE(checkpoint.ok) << checkpoint.error.message;
+    context.request_id = "postgres-transparency-tile";
+    const auto tile = registry.call("transparency_tile", {{"index", 0}, {"width", 1}}, context);
+    ASSERT_TRUE(tile.ok) << tile.error.message;
+    context.request_id = "postgres-transparency-scan";
+    const auto scan =
+        registry.call("transparency_identity_scan", {{"identity", monitored_identity}}, context);
+    ASSERT_TRUE(scan.ok) << scan.error.message;
+    EXPECT_EQ(scan.value.at("matches").size(), 1U);
 
     const auto events = store->list_audit_events({.limit = 1000000});
     ASSERT_TRUE(events) << events.error().message;
@@ -627,10 +798,13 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     EXPECT_EQ(event->draft.outcome, "success");
     for (const std::string_view action : {"initialize_tuf",
                                           "publish_tuf_metadata",
+                                          "append_transparency_entries",
                                           "rotate_tuf_root",
                                           "tuf_metadata",
                                           "transparency_log_configuration",
-                                          "publish_transparency_checkpoint"}) {
+                                          "publish_transparency_checkpoint",
+                                          "transparency_tile",
+                                          "transparency_identity_scan"}) {
         EXPECT_TRUE(std::ranges::any_of(*events, [action](const lake::audit::Event& candidate) {
             return candidate.draft.kind == "transparency" && candidate.draft.action == action;
         }));

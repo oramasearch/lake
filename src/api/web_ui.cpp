@@ -66,7 +66,8 @@ std::string nav(bool signed_in) {
                       "href=\"/applications\">Applications</a><a "
                       "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
                       "<a href=\"/metering\">Metering</a>"
-                      "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>"
+                      "<a href=\"/secret-mounts\">Secrets</a>"
+                      "<a href=\"/transparency\">Transparency</a><a href=\"/audit\">Audit</a>"
                       "<a href=\"/sso\">SSO</a><a href=\"/exports\">Exports</a>";
     if (signed_in) {
         out += "<a href=\"/sessions\">Sessions</a><a "
@@ -1064,6 +1065,50 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
                "/v1/export_audit</code>, "
                "and <code>GET /v1/verify_audit</code>.</p>";
     return web_ui_shell("lake — audit", std::format("{} events", events.size()), content, true);
+}
+
+std::string web_ui_transparency(std::string_view identity, const nlohmann::json& scan) {
+    std::string content =
+        "<p class=\"eyebrow\">public evidence</p><h1>Transparency monitor</h1>"
+        "<p class=\"sub\">Scan checkpoint-bound bulk tiles for every TAAP attestation that "
+        "names an identity.</p><form class=\"search\" method=\"get\" action=\"/transparency\">"
+        "<input name=\"identity\" aria-label=\"TAAP identity\" placeholder=\"taap:1:…\" value=\"" +
+        web_ui_escape(identity) + "\"><button type=\"submit\">Scan</button></form>";
+    if (identity.empty()) {
+        content += "<div class=\"panel empty\">Enter a TAAP identity to verify the current "
+                   "checkpoint and scan its immutable tiles.</div>";
+    } else {
+        content += std::format(
+            "<div class=\"panel\"><dl><dt>Checkpoint</dt><dd>{} entries</dd>"
+            "<dt>Root</dt><dd><code>{}</code></dd><dt>Tiles read</dt><dd>{}</dd>"
+            "<dt>Scan</dt><dd>{:.3f} ms; verified</dd><dt>Matches</dt><dd>{}</dd></dl></div>",
+            scan.value("tree_size", std::uint64_t{0}),
+            web_ui_escape(scan.value("root_hash", "")),
+            scan.value("tiles_scanned", std::uint64_t{0}),
+            scan.value("duration_ms", 0.0),
+            scan.value("matches", nlohmann::json::array()).size());
+        const nlohmann::json matches = scan.value("matches", nlohmann::json::array());
+        if (matches.empty()) {
+            content += "<div class=\"panel empty\">No attestations name this identity.</div>";
+        } else {
+            content += "<div class=\"table-wrap\"><table><thead><tr><th>Index</th><th>Profile</th>"
+                       "<th>Issuer</th><th>Subject</th></tr></thead><tbody>";
+            for (const nlohmann::json& match : matches) {
+                content +=
+                    std::format("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td>"
+                                "<td><code>{}</code></td></tr>",
+                                match.value("index", std::uint64_t{0}),
+                                web_ui_escape(match.value("profile", "")),
+                                web_ui_escape(match.value("issuer", "")),
+                                web_ui_escape(match.value("subject", "")));
+            }
+            content += "</tbody></table></div>";
+        }
+    }
+    content += "<p class=\"sub\">API: <code>GET /v1/transparency_identity_scan</code>, "
+               "<code>GET /v1/transparency_tile</code>, and "
+               "<code>GET /v1/transparency_checkpoint</code>.</p>";
+    return web_ui_shell("lake — transparency", "public monitor", content, false);
 }
 
 std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts) {

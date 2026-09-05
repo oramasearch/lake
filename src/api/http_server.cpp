@@ -78,6 +78,7 @@
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
+#include "lake/transparency/log.hpp"
 #include "lake/transparency/tuf.hpp"
 #include "lake/version.hpp"
 
@@ -3374,6 +3375,7 @@ struct ApiServer::Impl {
     mutable control::pki::Service pki;
     std::unique_ptr<transparency::Service> transparency;
     std::unique_ptr<transparency::CheckpointService> checkpoints;
+    std::unique_ptr<transparency::TiledLog> transparency_log;
     std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
@@ -3402,6 +3404,8 @@ struct ApiServer::Impl {
                 std::make_unique<transparency::Service>(options.store_root, options.node_name);
             checkpoints = std::make_unique<transparency::CheckpointService>(
                 options.store_root, options.node_name, options.log_configuration);
+            transparency_log =
+                std::make_unique<transparency::TiledLog>(options.store_root, options.node_name);
         }
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
@@ -3514,6 +3518,7 @@ struct ApiServer::Impl {
             "/drive/share",
             "/search",
             "/metering",
+            "/transparency",
             "/secret-mounts",
             "/secrets",
             "/encryption-keys",
@@ -3572,6 +3577,7 @@ struct ApiServer::Impl {
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
+        ctx.transparency_log = transparency_log.get();
         ctx.transparency_submitter = [this](const std::string& endpoint,
                                             const nlohmann::json& request) {
             return submit_transparency(endpoint, request);
@@ -6584,6 +6590,25 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_transparency_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string identity = query_value(route, "identity");
+        nlohmann::json scan;
+        if (!identity.empty()) {
+            const ApiResult result =
+                registry.call("transparency_identity_scan", {{"identity", identity}}, context);
+            if (!result.ok) {
+                return serve_page_error(route, result);
+            }
+            scan = result.value;
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_transparency(identity, scan),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
     boost::http::route_task serve_secret_mounts_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
@@ -7568,6 +7593,11 @@ bool ApiServer::start() {
     router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/audit", impl.serve_audit_page(route));
     });
+    router.add(
+        http::method::get, "/transparency", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/transparency", impl.serve_transparency_page(route));
+        });
     router.add(http::method::get,
                "/secret-mounts",
                [&impl](http::route_params& route) -> http::route_task {
