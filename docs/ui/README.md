@@ -65,6 +65,10 @@ Lifecycle mutations remain capability-only; the page has no mutation form.
 Repository-page details and the liquid #166 deferrals are recorded in
 [`repositories.md`](repositories.md).
 
+The reproducible seeded screenshot workflow and complete before/after page inventory are recorded
+in [`design-system.md`](design-system.md). The fixture uses the production HTTP and renderer paths;
+it does not add a fixture route to the server.
+
 Secret mutations and cryptographic operations are also capability-only. The secrets page renders
 metadata and lifecycle timestamps, while the encryption page renders key metadata. Neither page
 puts protected input or output into HTML.

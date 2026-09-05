@@ -46,3 +46,26 @@ swap`. No browser request reaches a third-party origin.
 The shell, component catalog, page recipe, accessibility checks, and screenshot workflow are
 recorded here as they are introduced. Lake keeps pure C++ renderers; the generated token layer is
 committed, so neither deployment nor request handling invokes Node.
+
+## Seeded screenshot fixture
+
+`lake-ui-fixture` runs the production HTTP server with representative customer, organization,
+identity, repository, team, SSO, policy, secret, encryption, export, sharing, metering, and audit
+records. Its on-disk libliquid repository contains history and a build result.
+The live mode of `tools/ui/screenshot.sh` then fetches every page in the generated manifest and
+renders both themes at 1440 by 900. Session values and generated identifiers remain under
+`.cache`; only the PNG evidence is checked in.
+
+The baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. It contains light and dark
+captures for all 38 pages in the fixture manifest:
+
+```text
+home login sign-up sign-in mfa passkey-sign-in sessions passkeys tokens
+customers organizations teams sso members invitations grants access
+repositories repository exports repository-tree file changes change conflicts
+artifacts artifact search secret-mounts secrets encryption-keys metering audit
+drive drive-preview drive-history drive-share shared-link
+```
+
+The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
+path-for-path pair.

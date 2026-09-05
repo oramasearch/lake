@@ -160,6 +160,10 @@ target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boo
 add_executable(lake src/main.cpp)
 target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
 
+add_executable(lake-ui-fixture tools/ui/fixture_server.cpp)
+target_compile_features(lake-ui-fixture PRIVATE cxx_std_26)
+target_link_libraries(lake-ui-fixture PRIVATE lake-api lake-core lake-control-postgres OpenSSL::Crypto)
+
 if(LAKE_BUILD_TESTS)
   find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
   FetchContent_Declare(googletest
