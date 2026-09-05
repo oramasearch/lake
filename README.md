@@ -43,6 +43,9 @@ liquid is the tool. lake is where it collects.
 > signed query outcome through the registry. Change pages render libliquid's per-path structural
 > diff, text hunks, modes, blob identities, moves, and conflict values. Artifact pages provide filtered cursor pages of results
 > plus result outputs, timing, cache state, verified attestations, and retained trace summaries.
+> Metering migration `0014_metering` aggregates hourly unique stored bytes, sync transfer, and
+> build compute. The `metering_usage` capability and `/metering` page apply configured integer
+> pricing. A configured storage quota throttles new writes without changing existing content.
 > Migration `0009_secrets` adds customer-namespaced organization mounts, versioned
 > static secrets with delete/restore/destroy history, and named encryption keys with rotation,
 > encrypt/decrypt/rewrap, Ed25519 signatures, HMAC, derivation and customer-KEK rotation. The
@@ -81,7 +84,7 @@ ctest --test-dir build
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
-| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
@@ -97,6 +100,8 @@ ctest --test-dir build
 `--node NAME` names the node. `--control-db URI` (default `$LAKE_CONTROL_DB_URI`) selects the
 Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-token`
 (default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
+Metering and quota configuration uses the `LAKE_PRICE_*` and `LAKE_STORAGE_QUOTA_BYTES`
+environment variables documented in [`docs/api/metering.md`](docs/api/metering.md).
 SIGINT/SIGTERM stop it cleanly.
 
 ## Container image

@@ -271,8 +271,11 @@ policies are evaluated from the proposed ref update once liquid #177 supplies it
 authorizer; CI is the build engine, not a product (#30). The drive is the same
 repositories with per-folder ACLs, share links and a web surface through the format registry
 (#8, #43, #44, #45). Models and datasets are repositories with training provenance (#7).
-Metering counts unique stored bytes per customer store and never degrades to pointer files at a
-quota (#33). **Export and import status (#31): implemented.** A signed `lake_export/1` archive
+**Metering status (#33): implemented.** Hourly rows combine exact unique stored bytes from each
+customer store, transfer bytes on sync paths, and build-record compute seconds. Integer pricing is
+configuration. Over-quota writes are warned and throttled while reads remain complete; content is
+never replaced by pointer files. See [`../api/metering.md`](../api/metering.md). **Export and import
+status (#31): implemented.** A signed `lake_export/1` archive
 carries cursor-exported liquid history and its verified object graph, artifact evidence, forge
 records, direct grants, deployment configuration, and an optional Git projection; import verifies
 every member digest and the exporting identity signature before recreating the destination

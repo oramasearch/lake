@@ -16,3 +16,6 @@ the same change (bridge `CLAUDE.md`, *Documentation is part of every change*). `
 
 The product specification is in `oramasearch/liquid` `docs/features/18-lake-service.md`; the
 cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
+
+Customer usage, integer pricing, and quota behavior are documented in
+[`api/metering.md`](api/metering.md).

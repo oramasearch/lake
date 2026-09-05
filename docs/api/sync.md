@@ -161,6 +161,11 @@ registry rejects an anonymous or unauthorized request before callbacks run. Succ
 refreshes the control plane's `repository_refs` rows from the live repository. Pull and chunk reads
 require `read`; push and chunk upload require `write`.
 
+The five binary paths add accepted request and returned response byte counts to the customer's
+current UTC-hour metering row. Chunk writes also sample the store's exact unique raw bytes.
+`LAKE_STORAGE_QUOTA_BYTES` limits that gauge: a write that would cross it returns `busy` (HTTP
+429), while reads continue and existing bytes stay complete. See [metering.md](metering.md).
+
 Liquid #184 rejects the complete metadata batch when a reference callback refuses it. Lake therefore
 returns the precise reference-and-rule reason to the sync client and leaves every ref in that push
 unchanged. Liquid #189 will make reference application independent by default, with `atomic` for a

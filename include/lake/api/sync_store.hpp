@@ -185,9 +185,11 @@ public:
     find_missing(const std::string& customer_id, const std::vector<std::string>& digests) = 0;
     virtual SyncStoreResult<void> write(const std::string& customer_id,
                                         const std::string& digest,
-                                        std::vector<std::byte> contents) = 0;
+                                        std::vector<std::byte> contents,
+                                        std::uint64_t storage_quota_bytes = 0) = 0;
     virtual SyncStoreResult<std::vector<std::byte>> read(const std::string& customer_id,
                                                          const std::string& digest) = 0;
+    virtual SyncStoreResult<std::uint64_t> unique_stored_bytes(const std::string& customer_id) = 0;
 
     virtual SyncStoreResult<std::vector<RepositoryContentRef>>
     repository_refs(const std::string& customer_id, const std::string& repository_id) = 0;
@@ -235,13 +237,15 @@ public:
     virtual SyncStoreResult<std::vector<std::byte>> push(const std::string& customer_id,
                                                          const std::string& repository_id,
                                                          std::span<const std::byte> request,
-                                                         SyncPushAuthorizer authorize) = 0;
+                                                         SyncPushAuthorizer authorize,
+                                                         std::uint64_t storage_quota_bytes = 0) = 0;
     virtual SyncStoreResult<std::vector<std::byte>> pull(const std::string& customer_id,
                                                          const std::string& repository_id,
                                                          std::span<const std::byte> request) = 0;
-    virtual SyncStoreResult<void> upload_chunks(const std::string& customer_id,
-                                                const std::string& repository_id,
-                                                std::span<const std::byte> request) = 0;
+    virtual SyncStoreResult<std::uint64_t> upload_chunks(const std::string& customer_id,
+                                                         const std::string& repository_id,
+                                                         std::span<const std::byte> request,
+                                                         std::uint64_t storage_quota_bytes = 0) = 0;
     virtual SyncStoreResult<std::vector<std::byte>> read_chunk(const std::string& customer_id,
                                                                const std::string& repository_id,
                                                                const std::string& digest,

@@ -60,6 +60,15 @@ std::string_view to_string(CapabilityKind kind);
 
 enum class CapabilityTransport { Json, LiquidSync, Acme };
 
+struct MeteringConfig {
+    std::string currency = "USD";
+    std::uint64_t storage_quota_bytes = 0;
+    std::uint64_t storage_gib_hour_micros = 0;
+    std::uint64_t transfer_in_gib_micros = 0;
+    std::uint64_t transfer_out_gib_micros = 0;
+    std::uint64_t compute_second_micros = 0;
+};
+
 struct ApiContext {
     control::Store* store = nullptr; // null = no control-plane store configured
     std::string node_name;
@@ -73,6 +82,7 @@ struct ApiContext {
     std::string instance_kek;
     WebhookSender webhook_sender;
     SyncStore* sync_store = nullptr;
+    MeteringConfig metering;
     bool sync_wire_request = false;
     std::span<const std::byte> sync_request;
     std::vector<std::byte> sync_response;

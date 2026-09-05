@@ -63,6 +63,7 @@ std::string nav(bool signed_in) {
     std::string out = "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
                       "href=\"/organizations\">Organizations</a><a "
                       "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
+                      "<a href=\"/metering\">Metering</a>"
                       "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>"
                       "<a href=\"/sso\">SSO</a><a href=\"/exports\">Exports</a>";
     if (signed_in) {
@@ -917,6 +918,50 @@ std::string web_ui_search(const search::Query& query, const search::QueryResult&
         content += "</tbody></table>";
     }
     return web_ui_shell("lake — search", query.text.empty() ? "search" : query.text, content, true);
+}
+
+std::string web_ui_metering(const nlohmann::json& usage) {
+    const std::string customer_id = usage.value("customer_id", "");
+    std::string content =
+        "<p class=\"eyebrow\">economics</p><h1>Metering</h1>"
+        "<p class=\"sub\">Hourly unique stored bytes, transfer, build compute, and configured "
+        "pricing.</p><form class=\"filters\" method=\"get\" action=\"/metering\">"
+        "<label>Customer<input name=\"customer_id\" value=\"" +
+        web_ui_escape(customer_id) +
+        "\" required></label><button type=\"submit\">Show usage</button></form>";
+    if (customer_id.empty()) {
+        content += "<div class=\"panel empty\">Choose a customer.</div>";
+        return web_ui_shell("lake — metering", "metering", content, true);
+    }
+    if (usage.value("over_quota", false)) {
+        content +=
+            std::format("<p class=\"notice\">{}</p>", web_ui_escape(usage.value("warning", "")));
+    }
+    content += std::format("<div class=\"panel\"><dl><dt>Storage quota</dt><dd>{} bytes</dd>"
+                           "<dt>Charge</dt><dd>{} micro-{}</dd></dl></div>",
+                           usage.value("quota_bytes", std::uint64_t{0}),
+                           usage.value("cost_micros", std::uint64_t{0}),
+                           web_ui_escape(usage.value("currency", "USD")));
+    const auto items = usage.value("items", nlohmann::json::array());
+    if (items.empty()) {
+        content += "<div class=\"panel empty\">No hourly usage.</div>";
+    } else {
+        content += "<table><thead><tr><th>Hour</th><th>Stored</th><th>In</th><th>Out</th>"
+                   "<th>Compute</th><th>Charge</th></tr></thead><tbody>";
+        for (const nlohmann::json& row : items) {
+            content += std::format(
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}s</td>"
+                "<td>{}</td></tr>",
+                web_ui_escape(row.value("hour", "")),
+                row.value("stored_bytes", std::uint64_t{0}),
+                row.value("transfer_in_bytes", std::uint64_t{0}),
+                row.value("transfer_out_bytes", std::uint64_t{0}),
+                row.value("compute_seconds", std::uint64_t{0}),
+                row.value("cost_micros", std::uint64_t{0}));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell("lake — metering", customer_id, content, true);
 }
 
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter) {
