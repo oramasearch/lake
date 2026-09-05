@@ -50,7 +50,7 @@ int usage() {
     std::println("");
     std::println("  --control-db   Postgres URI of the control plane (default "
                  "$LAKE_CONTROL_DB_URI)");
-    std::println("  --store-root   customer liquid-store root (default $LAKE_STORE_ROOT)");
+    std::println("  --store-root   customer and instance data root (default $LAKE_STORE_ROOT)");
     std::println("  --admin-token  bearer for /v1 capabilities and MCP tools "
                  "(default $LAKE_ADMIN_TOKEN)");
     std::println("  --identity-seed base64 Ed25519 seed for lake's TAAP identity "

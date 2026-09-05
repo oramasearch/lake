@@ -291,6 +291,17 @@ report and `liquid wrap` replacement analysis. The
 transparency log (#34 to #38, #39) follows liquid's `docs/features/25` tiled, witnessed design
 with the log as Zetta objects.
 
+**TUF repository-metadata status (#34): implemented on the lake side.** Lake verifies and appends
+the root, targets, snapshot, and timestamp roles at
+`LAKE_STORE_ROOT/<instance>/log/tuf/`. Role thresholds count distinct Ed25519 keys; snapshot and
+timestamp bind their child metadata by version, exact byte length, and SHA-256 digest; root
+rotation requires the trusted old-root threshold and the candidate new-root threshold. The
+registry exposes initialize, publish, rotate, and immutable fetch capabilities, and records every
+outcome in the signed audit stream. The recovery rehearsal replaces root and targets keys and
+proves removed keys cannot publish. Complete client enforcement is tracked in liquid #186.
+Witnessing, anchoring, trusted timestamps, tile monitoring, replication, and agent session keys
+remain #35–#39.
+
 ## Waves
 
 The codebase is small and every leaf touches the registry and the schema, so the work runs in

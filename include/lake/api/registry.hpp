@@ -26,6 +26,9 @@ class Service;
 namespace lake::control::callers {
 class Service;
 }
+namespace lake::transparency {
+class Service;
+}
 
 // The capability registry — lake's control surface in Zetta's shape: one
 // registry rendered as HTTP and OpenAPI. JSON capabilities are also MCP tools;
@@ -92,6 +95,7 @@ struct ApiContext {
     search::Service* search = nullptr;
     control::pki::Service* pki = nullptr;
     control::callers::Service* callers = nullptr;
+    transparency::Service* transparency = nullptr;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;
