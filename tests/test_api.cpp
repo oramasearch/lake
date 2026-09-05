@@ -419,6 +419,13 @@ std::vector<std::string> tree_fingerprint(const liquid::tree& tree) {
     return output;
 }
 
+const liquid::sync_ref_outcome* reference_outcome(const liquid::sync_report& report,
+                                                  std::string_view name) {
+    const auto outcome =
+        std::ranges::find(report.references, name, &liquid::sync_ref_outcome::name);
+    return outcome == report.references.end() ? nullptr : &*outcome;
+}
+
 bool send_socket_bytes(int socket_fd, std::string_view bytes) {
     std::size_t sent = 0;
     while (sent < bytes.size()) {
@@ -1290,6 +1297,16 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/chunks/{digest}"));
     EXPECT_TRUE(doc["paths"].contains("/mcp"));
     EXPECT_TRUE(doc["paths"]["/v1/server_info"]["get"]["security"].empty());
+    const json& push = doc["paths"]["/v1/repositories/{repository_id}/sync/push"]["post"];
+    const json& request_header = push["requestBody"]["content"]["application/vnd.liquid.sync-v1"]
+                                     ["schema"]["x-liquid-sync-header-schema"];
+    EXPECT_EQ(request_header["properties"]["atomic"]["type"], "boolean");
+    const json& outcome =
+        push["responses"]["200"]["content"]["application/vnd.liquid.sync-v1"]["schema"]
+            ["x-liquid-sync-header-schema"]["properties"]["outcomes"]["items"];
+    EXPECT_EQ(outcome["properties"]["name"]["type"], "string");
+    EXPECT_EQ(outcome["properties"]["outcome"]["enum"], json::array({"applied", "refused"}));
+    EXPECT_EQ(outcome["properties"]["reason"]["type"], "string");
 }
 
 TEST(SyncRegistry, DeclaresTransportPolicyAndRecordsDenial) {
@@ -2639,11 +2656,13 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
                                        {"allowed_pushers", json::array({"admin"})}}});
     ASSERT_TRUE(protection) << protection.error().message;
 
-    const auto review_refusal = liquid::runtime::block_on(owner_endpoint.push(*source));
-    ASSERT_FALSE(review_refusal);
-    EXPECT_EQ(review_refusal.error().code, liquid::errc::conflict);
-    EXPECT_NE(review_refusal.error().message.find("main"), std::string::npos);
-    EXPECT_NE(review_refusal.error().message.find("approved review"), std::string::npos);
+    const auto review_push = liquid::runtime::block_on(owner_endpoint.push(*source));
+    ASSERT_TRUE(review_push) << review_push.error().message;
+    const auto* review_refusal = reference_outcome(*review_push, "main");
+    ASSERT_NE(review_refusal, nullptr);
+    EXPECT_EQ(review_refusal->outcome, liquid::sync_ref_outcome_kind::refused);
+    EXPECT_EQ(review_refusal->reason,
+              "branch protection rejects main: an approved review is required");
 
     const auto approved = control->create_forge_record(
         {repository->id, "review", {{"change_id", reviewed_id}, {"state", "approved"}}});
@@ -2651,11 +2670,13 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     ASSERT_TRUE(liquid::runtime::block_on(owner_endpoint.push(*source)));
 
     ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("main", *base)));
-    const auto fast_forward_refusal = liquid::runtime::block_on(owner_endpoint.push(*source));
-    ASSERT_FALSE(fast_forward_refusal);
-    EXPECT_EQ(fast_forward_refusal.error().code, liquid::errc::conflict);
-    EXPECT_NE(fast_forward_refusal.error().message.find("main"), std::string::npos);
-    EXPECT_NE(fast_forward_refusal.error().message.find("non-fast-forward"), std::string::npos);
+    const auto fast_forward_push = liquid::runtime::block_on(owner_endpoint.push(*source));
+    ASSERT_TRUE(fast_forward_push) << fast_forward_push.error().message;
+    const auto* fast_forward_refusal = reference_outcome(*fast_forward_push, "main");
+    ASSERT_NE(fast_forward_refusal, nullptr);
+    EXPECT_EQ(fast_forward_refusal->outcome, liquid::sync_ref_outcome_kind::refused);
+    EXPECT_EQ(fast_forward_refusal->reason,
+              "branch protection rejects a non-fast-forward update to main");
 
     const auto events_before_unauthorized = control->list_audit_events({.limit = 1000});
     ASSERT_TRUE(events_before_unauthorized) << events_before_unauthorized.error().message;
@@ -2695,8 +2716,7 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     server.stop();
 }
 
-// Liquid #189 makes independent reference application available to this test.
-TEST(DISABLED_SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
+TEST(SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
     TemporarySyncRoot temporary;
     auto control = std::make_shared<lake::control::InMemoryStore>();
     const auto owner =
@@ -2735,6 +2755,16 @@ TEST(DISABLED_SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
 
     const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
     ASSERT_TRUE(pushed) << pushed.error().message;
+    ASSERT_EQ(pushed->references.size(), 2U);
+    const auto* main_outcome = reference_outcome(*pushed, "main");
+    const auto* release_outcome = reference_outcome(*pushed, "release");
+    ASSERT_NE(main_outcome, nullptr);
+    ASSERT_NE(release_outcome, nullptr);
+    EXPECT_EQ(main_outcome->outcome, liquid::sync_ref_outcome_kind::refused);
+    EXPECT_EQ(main_outcome->reason,
+              "branch protection rejects main: an approved review is required");
+    EXPECT_EQ(release_outcome->outcome, liquid::sync_ref_outcome_kind::applied);
+    EXPECT_TRUE(release_outcome->reason.empty());
     const auto references = control->list_repository_refs(repository->id);
     ASSERT_TRUE(references) << references.error().message;
     EXPECT_TRUE(std::ranges::any_of(*references, [&base](const auto& reference) {
@@ -2743,6 +2773,63 @@ TEST(DISABLED_SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
     EXPECT_TRUE(std::ranges::any_of(*references, [&candidate](const auto& reference) {
         return reference.name == "release" && reference.head == liquid::to_string(candidate->value);
     }));
+    server.stop();
+}
+
+TEST(SyncHttp, AtomicProtectedRefusalReportsEveryReferenceAndLandsNothing) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto owner = control->create_user(
+        {"taap:1:ed25519:atomic-branch-owner", "atomic@example.test", "Owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto customer = control->create_customer({"individual", owner->id, "", "atomic-owner"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = control->create_repository({customer->id, "atomic", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "atomic-source"));
+    ASSERT_TRUE(source) << source.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("base.txt", sync_bytes("base"))));
+    const auto base = liquid::runtime::block_on(source->cut("base"));
+    ASSERT_TRUE(base) << base.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.admin_token = "atomic-admin";
+    options.instance_kek = "atomic-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint endpoint(
+        url, liquid::sync_endpoint_options{.bearer_token = options.admin_token, .atomic = true});
+    ASSERT_TRUE(liquid::runtime::block_on(endpoint.push(*source)));
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("candidate.txt", sync_bytes("candidate"))));
+    const auto candidate = liquid::runtime::block_on(source->cut("candidate"));
+    ASSERT_TRUE(candidate) << candidate.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("release", *candidate)));
+    ASSERT_TRUE(control->create_forge_record(
+        {repository->id, "branch_protection", {{"ref", "main"}, {"required_review", true}}}));
+
+    const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    ASSERT_EQ(pushed->references.size(), 2U);
+    const auto* main_outcome = reference_outcome(*pushed, "main");
+    const auto* release_outcome = reference_outcome(*pushed, "release");
+    ASSERT_NE(main_outcome, nullptr);
+    ASSERT_NE(release_outcome, nullptr);
+    EXPECT_EQ(main_outcome->outcome, liquid::sync_ref_outcome_kind::refused);
+    EXPECT_EQ(main_outcome->reason,
+              "branch protection rejects main: an approved review is required");
+    EXPECT_EQ(release_outcome->outcome, liquid::sync_ref_outcome_kind::refused);
+    EXPECT_EQ(release_outcome->reason, "atomic push refused because another reference was refused");
+    const auto references = control->list_repository_refs(repository->id);
+    ASSERT_TRUE(references) << references.error().message;
+    ASSERT_EQ(references->size(), 1U);
+    EXPECT_EQ(references->front().name, "main");
+    EXPECT_EQ(references->front().head, liquid::to_string(base->value));
     server.stop();
 }
 

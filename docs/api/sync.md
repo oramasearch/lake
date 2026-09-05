@@ -158,11 +158,14 @@ waiting operations are Capy tasks.
 
 The registry entries are `refs`, `find_missing`, `push`, `pull`, `upload_chunks`, and `read_chunk`.
 `refs` is the ordinary JSON read capability. The five binary operations use the repository-scoped
-routes above, appear in OpenAPI with their binary media types, and are omitted from MCP because MCP
-tools accept JSON input rather than streaming bodies. Every route still calls `Registry::call`, so
-credential resolution, repository policy, and signed outcome audit use the same path as JSON
-capabilities. Request buffering is bounded at 64 MiB and accepts fixed-length or HTTP chunked
-bodies before passing one byte span to `sync_server`.
+routes above. OpenAPI exposes their binary media types; the push operation also publishes
+`x-liquid-sync-header-schema` for the `atomic` request field and the response's `outcomes` entries.
+The binary operations are omitted from MCP because MCP tool arguments cannot carry the request and
+response streams; MCP clients use the repository-scoped REST route and receive the outcome shape
+described above. Every route still calls `Registry::call`, so credential resolution, repository
+policy, and signed outcome audit use the same path as JSON capabilities. Request buffering is
+bounded at 64 MiB and accepts fixed-length or HTTP chunked bodies before passing one byte span to
+`sync_server`.
 
 Push additionally calls the policy engine with the repository object and `write` action once for
 each change through `sync_server_options::authorize`. On each reference callback, lake evaluates
@@ -203,6 +206,7 @@ with an authorization callback when exposing a service boundary.
 `SyncHttp.*` starts lake, exchanges two on-disk repositories through a real `sync_endpoint`, proves
 that a second push transfers only newly introduced chunks and an unchanged push transfers none,
 and compares the pulled tree and file bytes. It also corrupts a TAAP signature, denies a writer,
-and verifies atomic rejection plus signed audit outcomes. `PostgresSync.*` repeats push and pull
-with the production Postgres control store. The full macOS suite and Linux image build run with the
-rest of the proof documented in [`../build/ci.md`](../build/ci.md).
+applies an unprotected ref beside a protected refusal, preserves the exact refusal reason, and
+keeps both refs unchanged for the same atomic push while reporting both outcomes. `PostgresSync.*`
+repeats push and pull with the production Postgres control store. The full macOS suite and Linux
+image build run with the rest of the proof documented in [`../build/ci.md`](../build/ci.md).
