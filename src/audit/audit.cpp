@@ -925,6 +925,27 @@ Result<nlohmann::json> sign_transparency_checkpoint(control::Store& store,
         {"algorithm", "ed25519"}, {"signer", current->taap_id}, {"signature", *signature}};
 }
 
+Result<void> verify_transparency_checkpoint(control::Store& store,
+                                            const nlohmann::json& checkpoint,
+                                            const nlohmann::json& signature) {
+    if (!signature.is_object() || signature.value("algorithm", "") != "ed25519" ||
+        !signature.contains("signer") || !signature.at("signer").is_string() ||
+        !signature.contains("signature") || !signature.at("signature").is_string()) {
+        return std::unexpected(Error{"invalid_input", "checkpoint signature is malformed"});
+    }
+    const auto identity = store.lake_identity_by_taap_id(signature.at("signer").get<std::string>());
+    if (!identity) {
+        return std::unexpected(Error{identity.error().code, identity.error().message});
+    }
+    const auto public_key = base64_decode(identity->public_key);
+    if (!public_key || public_key->size() != 32) {
+        return std::unexpected(Error{"invalid_input", "checkpoint signer key is malformed"});
+    }
+    return verify_signature(*public_key,
+                            checkpoint_signed_bytes(checkpoint),
+                            signature.at("signature").get<std::string>());
+}
+
 Result<nlohmann::json> sign_export_manifest(control::Store& store,
                                             const nlohmann::json& manifest,
                                             const IdentityOptions& options) {

@@ -435,6 +435,117 @@ Result<json> CheckpointService::publish(const json& checkpoint,
     return record;
 }
 
+Result<json> CheckpointService::adopt(const json& record) {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    if (!record.is_object() || !record.contains("checkpoint") ||
+        !record.at("checkpoint").is_object() || !record.contains("checkpoint_hash_sha256") ||
+        !record.at("checkpoint_hash_sha256").is_string() || !record.contains("sequence") ||
+        !record.at("sequence").is_number_unsigned() || !record.contains("signature") ||
+        !record.at("signature").is_object() || !record.contains("witness_signatures") ||
+        !record.at("witness_signatures").is_array()) {
+        return std::unexpected(Error{"invalid_input", "replicated checkpoint is malformed"});
+    }
+    const std::uint64_t sequence = record.at("sequence").get<std::uint64_t>();
+    if (sequence == 0) {
+        return std::unexpected(Error{"invalid_input", "checkpoint sequence must be positive"});
+    }
+    const std::string encoded = record.at("checkpoint").dump();
+    const auto checkpoint_hash = sha256(encoded);
+    if (!checkpoint_hash ||
+        *checkpoint_hash != record.at("checkpoint_hash_sha256").get<std::string>()) {
+        return std::unexpected(
+            Error{"unrecoverable", "replicated checkpoint hash does not match its body"});
+    }
+    std::set<std::string> accepted_witnesses;
+    for (const json& signature : record.at("witness_signatures")) {
+        if (!signature.is_object() || !signature.contains("endpoint") ||
+            !signature.at("endpoint").is_string() || !signature.contains("public_key") ||
+            !signature.at("public_key").is_string() || !signature.contains("signature") ||
+            !signature.at("signature").is_string()) {
+            continue;
+        }
+        const std::string endpoint = signature.at("endpoint").get<std::string>();
+        const std::string public_key = signature.at("public_key").get<std::string>();
+        const auto configured =
+            std::ranges::find_if(impl_->configuration.witnesses, [&](const Witness& witness) {
+                return witness.endpoint == endpoint && witness.public_key == public_key;
+            });
+        if (configured != impl_->configuration.witnesses.end() &&
+            signature_valid(public_key, encoded, signature.at("signature").get<std::string>())) {
+            accepted_witnesses.insert(public_key);
+        }
+    }
+    if (accepted_witnesses.size() < impl_->configuration.witness_threshold) {
+        return std::unexpected(
+            Error{"unrecoverable", "replicated checkpoint lacks the configured witness quorum"});
+    }
+    if (impl_->configuration.mode == LogMode::Anchored &&
+        (!record.contains("anchor") || !record.at("anchor").is_object() ||
+         record.at("anchor").value("endpoint", "") != impl_->configuration.aggregator_endpoint ||
+         !record.at("anchor").contains("proof"))) {
+        return std::unexpected(
+            Error{"unrecoverable", "replicated checkpoint lacks its configured anchor proof"});
+    }
+    std::error_code error;
+    std::filesystem::create_directories(impl_->directory, error);
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not create checkpoint directory: " + error.message()});
+    }
+    const std::filesystem::path current_path = impl_->directory / "current.json";
+    if (std::filesystem::exists(current_path)) {
+        const auto current = read_json(current_path);
+        if (!current || !current->contains("sequence") ||
+            !current->at("sequence").is_number_unsigned()) {
+            return std::unexpected(Error{"store_error", "current checkpoint is malformed"});
+        }
+        const std::uint64_t current_sequence = current->at("sequence").get<std::uint64_t>();
+        if (current_sequence == sequence) {
+            if (*current == record) {
+                return record;
+            }
+            return std::unexpected(
+                Error{"unrecoverable", "checkpoint sequence has conflicting contents"});
+        }
+        if (current_sequence > sequence) {
+            return std::unexpected(Error{"conflict", "checkpoint replication would roll back"});
+        }
+    }
+    const std::filesystem::path checkpoint_path =
+        impl_->directory / (std::to_string(sequence) + ".checkpoint.json");
+    if (std::filesystem::exists(checkpoint_path)) {
+        const auto existing = read_json(checkpoint_path);
+        if (!existing || *existing != record) {
+            return std::unexpected(
+                Error{"unrecoverable", "checkpoint sequence has conflicting contents"});
+        }
+    } else {
+        const auto saved = write_json(checkpoint_path, record, true);
+        if (!saved) {
+            return std::unexpected(saved.error());
+        }
+    }
+    if (record.contains("anchor")) {
+        const std::filesystem::path anchor_path =
+            impl_->directory / (std::to_string(sequence) + ".ots.json");
+        if (!std::filesystem::exists(anchor_path)) {
+            const auto saved = write_json(anchor_path, record.at("anchor"), true);
+            if (!saved) {
+                return std::unexpected(saved.error());
+            }
+        }
+    }
+    const auto current = write_json(current_path, record, false);
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    return record;
+}
+
 Result<json> CheckpointService::current() const {
     std::unique_lock lock(impl_->mutex);
     if (!impl_->valid_instance) {

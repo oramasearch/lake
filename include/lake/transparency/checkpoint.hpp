@@ -55,6 +55,7 @@ public:
     Result<nlohmann::json> publish(const nlohmann::json& checkpoint,
                                    const CheckpointSigner& signer,
                                    const TransparencySubmitter& submitter);
+    Result<nlohmann::json> adopt(const nlohmann::json& record);
     Result<nlohmann::json> current() const;
     [[nodiscard]] nlohmann::json configuration() const;
     [[nodiscard]] const std::filesystem::path& directory() const;

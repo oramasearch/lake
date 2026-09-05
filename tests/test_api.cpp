@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -18,7 +19,9 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <spawn.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -48,6 +51,8 @@
 
 using nlohmann::json;
 using namespace lake::api;
+
+extern char** environ;
 
 namespace {
 
@@ -731,6 +736,85 @@ json response_json(std::string_view response) {
     }
     return json::parse(response.substr(separator + 4), nullptr, false);
 }
+
+unsigned short unused_loopback_port() {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
+        return 0;
+    }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = 0;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::bind(socket_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        ::close(socket_fd);
+        return 0;
+    }
+    socklen_t size = sizeof(address);
+    if (::getsockname(socket_fd, reinterpret_cast<sockaddr*>(&address), &size) != 0) {
+        ::close(socket_fd);
+        return 0;
+    }
+    ::close(socket_fd);
+    return ntohs(address.sin_port);
+}
+
+class LakeProcess {
+public:
+    LakeProcess(unsigned short port,
+                const std::string& node,
+                const std::string& database_uri,
+                const std::filesystem::path& store_root) {
+        std::vector<std::string> arguments{
+            LAKE_TEST_SERVER_PATH,
+            "--listen",
+            "127.0.0.1:" + std::to_string(port),
+            "--node",
+            node,
+            "--control-db",
+            database_uri,
+            "--store-root",
+            store_root.string(),
+            "--admin-token",
+            "replication-admin",
+            "--instance-kek",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        };
+        std::vector<char*> raw;
+        raw.reserve(arguments.size() + 1);
+        for (std::string& argument : arguments) {
+            raw.push_back(argument.data());
+        }
+        raw.push_back(nullptr);
+        if (::posix_spawn(&pid_, raw.front(), nullptr, nullptr, raw.data(), environ) != 0) {
+            pid_ = -1;
+            return;
+        }
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            const std::string ready = http_request(port, "GET", "/readyz", "", "application/json");
+            if (ready.find(" 200 ") != std::string::npos) {
+                ready_ = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    ~LakeProcess() {
+        if (pid_ > 0) {
+            ::kill(pid_, SIGTERM);
+            static_cast<void>(::waitpid(pid_, nullptr, 0));
+        }
+    }
+
+    [[nodiscard]] bool ready() const {
+        return ready_;
+    }
+
+private:
+    pid_t pid_{-1};
+    bool ready_ = false;
+};
 
 } // namespace
 
@@ -3022,6 +3106,90 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
         return event.draft.action == "push" && event.draft.outcome == "failure";
     }));
+}
+
+TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
+    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TemporarySyncRoot temporary;
+    auto control = lake::control::make_postgres_store(
+        database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    const auto ready = control->ping();
+    ASSERT_TRUE(ready) << ready.error().message;
+    const std::string unique = lake::control::new_uuid_v4();
+    const auto user = control->create_user(
+        {"taap:1:ed25519:" + unique, unique + "@example.test", "Replication Owner"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer =
+        control->create_customer({"individual", user->id, "", "replication-owner-" + unique});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = control->create_repository({customer->id, "replicated", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    auto local_source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "local-source"));
+    ASSERT_TRUE(local_source) << local_source.error().message;
+    ASSERT_TRUE(
+        liquid::runtime::block_on(local_source->write("entry.txt", sync_bytes("region data"))));
+    ASSERT_TRUE(liquid::runtime::block_on(local_source->cut("initial")));
+
+    const unsigned short source_port = unused_loopback_port();
+    const unsigned short replica_port = unused_loopback_port();
+    ASSERT_NE(source_port, 0);
+    ASSERT_NE(replica_port, 0);
+    ASSERT_NE(source_port, replica_port);
+    LakeProcess source(source_port, "region-a", database_uri, temporary.path() / "region-a");
+    ASSERT_TRUE(source.ready());
+    const std::string source_repository_url =
+        "http://127.0.0.1:" + std::to_string(source_port) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint source_endpoint(
+        source_repository_url, liquid::sync_endpoint_options{.bearer_token = "replication-admin"});
+    const auto pushed = liquid::runtime::block_on(source_endpoint.push(*local_source));
+    ASSERT_TRUE(pushed) << pushed.error().message;
+
+    LakeProcess replica(replica_port, "region-b", database_uri, temporary.path() / "region-b");
+    ASSERT_TRUE(replica.ready());
+
+    const std::string source_origin = "http://127.0.0.1:" + std::to_string(source_port);
+    const auto replicate = [&] {
+        return http_request(replica_port,
+                            "POST",
+                            "/v1/replicate_repository",
+                            json{{"repository_id", repository->id},
+                                 {"source_instance", "region-a"},
+                                 {"source_url", source_origin}}
+                                .dump(),
+                            "application/json",
+                            {},
+                            "Bearer replication-admin");
+    };
+    const std::string first_response = replicate();
+    EXPECT_NE(first_response.find(" 200 "), std::string::npos) << first_response;
+    EXPECT_GT(response_json(first_response).at("value").at("received_objects").get<std::uint64_t>(),
+              0U);
+
+    const std::string replica_repository_url =
+        "http://127.0.0.1:" + std::to_string(replica_port) + "/v1/repositories/" + repository->id;
+    auto destination =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "destination"));
+    ASSERT_TRUE(destination) << destination.error().message;
+    liquid::sync_endpoint replica_endpoint(
+        replica_repository_url, liquid::sync_endpoint_options{.bearer_token = "replication-admin"});
+    const auto pulled = liquid::runtime::block_on(replica_endpoint.pull(*destination));
+    ASSERT_TRUE(pulled) << pulled.error().message;
+    const auto source_tree = liquid::runtime::block_on(local_source->root());
+    const auto destination_tree = liquid::runtime::block_on(destination->root());
+    ASSERT_TRUE(source_tree) << source_tree.error().message;
+    ASSERT_TRUE(destination_tree) << destination_tree.error().message;
+    EXPECT_EQ(tree_fingerprint(*source_tree), tree_fingerprint(*destination_tree));
+
+    const std::string resumed_response = replicate();
+    EXPECT_NE(resumed_response.find(" 200 "), std::string::npos) << resumed_response;
+    EXPECT_EQ(response_json(resumed_response).at("value").at("received_bytes"), 0);
+    EXPECT_TRUE(std::filesystem::exists(temporary.path() / "region-b" / customer->id /
+                                        "repositories" / repository->id / "replication" /
+                                        "region-a.cursor"));
 }
 
 TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {

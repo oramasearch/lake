@@ -213,6 +213,14 @@ struct RepositoryModelProvenance {
     std::string reason;
 };
 
+struct RepositoryReplicationReport {
+    std::string cursor;
+    std::uint64_t metadata_items = 0;
+    std::uint64_t received_objects = 0;
+    std::uint64_t received_bytes = 0;
+    std::size_t references = 0;
+};
+
 // The portable portion of a lake export. `history` is liquid's signed sync
 // data plus every referenced object. `artifacts` is the public #166
 // enumeration used to check the reconstructed store. `git` is present only
@@ -344,6 +352,14 @@ public:
                                                                const std::string& digest,
                                                                std::uint64_t offset,
                                                                std::uint64_t length) = 0;
+    virtual SyncStoreResult<RepositoryReplicationReport> replicate_from(const std::string&,
+                                                                        const std::string&,
+                                                                        const std::string&,
+                                                                        const std::string&,
+                                                                        const std::string&) {
+        return std::unexpected(
+            SyncStoreError{"unsupported", "repository replication is unavailable"});
+    }
 };
 
 } // namespace lake::api

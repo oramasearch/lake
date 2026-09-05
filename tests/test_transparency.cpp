@@ -584,6 +584,111 @@ TEST(TransparencyLog, ConcurrentWritersPreserveEveryEntry) {
     EXPECT_EQ(scan->matches.size(), 1400U);
 }
 
+TEST(TransparencyLog, TwoRegionsConvergeOnlyFromACommonPrefix) {
+    TemporaryRoot temporary;
+    lake::transparency::TiledLog source(temporary.path(), "replication-source");
+    lake::transparency::TiledLog target(temporary.path(), "replication-target");
+    const std::string attestation = signed_attestation("taap:1:ed25519:replication-subject", 18);
+    std::vector<std::string> initial(1100, attestation);
+    const auto source_initial = source.append(initial);
+    ASSERT_TRUE(source_initial) << source_initial.error().message;
+    const auto first_batch = source.replication_batch(0);
+    ASSERT_TRUE(first_batch) << first_batch.error().message;
+    lake::transparency::TiledLog tampered_target(temporary.path(), "replication-tampered");
+    auto tampered = *first_batch;
+    tampered.head.root_hash.front() = tampered.head.root_hash.front() == '0' ? '1' : '0';
+    const auto rejected = tampered_target.apply_replication_batch(tampered);
+    EXPECT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().code, "unrecoverable");
+    const auto empty = tampered_target.state();
+    ASSERT_TRUE(empty) << empty.error().message;
+    EXPECT_EQ(empty->tree_size, 0U);
+
+    const auto target_initial = target.apply_replication_batch(*first_batch);
+    ASSERT_TRUE(target_initial) << target_initial.error().message;
+    EXPECT_EQ(target_initial->tree_size, source_initial->tree_size);
+    EXPECT_EQ(target_initial->root_hash, source_initial->root_hash);
+    const auto retried = target.apply_replication_batch(*first_batch);
+    ASSERT_TRUE(retried) << retried.error().message;
+    EXPECT_EQ(retried->tiles_published, 0U);
+
+    lake::transparency::TiledLog divergent_target(temporary.path(), "replication-divergent");
+    const auto divergent_head =
+        divergent_target.append({signed_attestation("taap:1:ed25519:replication-divergent", 20)});
+    ASSERT_TRUE(divergent_head) << divergent_head.error().message;
+    const auto divergent_rejected = divergent_target.apply_replication_batch(*first_batch);
+    EXPECT_FALSE(divergent_rejected);
+    EXPECT_EQ(divergent_rejected.error().code, "unrecoverable");
+    const auto divergent_unchanged = divergent_target.state();
+    ASSERT_TRUE(divergent_unchanged) << divergent_unchanged.error().message;
+    EXPECT_EQ(divergent_unchanged->root_hash, divergent_head->root_hash);
+
+    std::vector<std::string> suffix(17, attestation);
+    const auto source_head = source.append(suffix);
+    ASSERT_TRUE(source_head) << source_head.error().message;
+    const auto second_batch = source.replication_batch(target_initial->tree_size);
+    ASSERT_TRUE(second_batch) << second_batch.error().message;
+    const auto target_head = target.apply_replication_batch(*second_batch);
+    ASSERT_TRUE(target_head) << target_head.error().message;
+    EXPECT_EQ(target_head->tree_size, source_head->tree_size);
+    EXPECT_EQ(target_head->root_hash, source_head->root_hash);
+
+    const auto unchanged = target.state();
+    ASSERT_TRUE(unchanged) << unchanged.error().message;
+    EXPECT_EQ(unchanged->root_hash, source_head->root_hash);
+}
+
+TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsAudit) {
+    TemporaryRoot temporary;
+    lake::transparency::TiledLog source_log(temporary.path(), "registry-replication-source");
+    lake::transparency::TiledLog target_log(temporary.path(), "registry-replication-target");
+    lake::control::InMemoryStore store;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext source_context;
+    source_context.store = &store;
+    source_context.node_name = "registry-replication-source";
+    source_context.transparency_log = &source_log;
+    source_context.authorized = true;
+    source_context.operator_credential = true;
+    source_context.acting_identity = "admin";
+    source_context.instance_kek = "registry-replication-kek";
+    lake::api::ApiContext target_context = source_context;
+    target_context.node_name = "registry-replication-target";
+    target_context.transparency_log = &target_log;
+    target_context.replication_requester =
+        [&](const std::string&, std::uint64_t after) -> std::expected<json, lake::api::ApiError> {
+        source_context.request_id.clear();
+        const auto response = registry.call(
+            "export_transparency_replication_batch", {{"after_tree_size", after}}, source_context);
+        if (!response.ok) {
+            return std::unexpected(response.error);
+        }
+        return response.value;
+    };
+    const std::string attestation = signed_attestation("taap:1:ed25519:registry-replication", 19);
+    ASSERT_TRUE(source_log.append(std::vector<std::string>(1025, attestation)));
+    const auto replicated = registry.call(
+        "replicate_transparency_log", {{"source_url", "https://source.example"}}, target_context);
+    ASSERT_TRUE(replicated.ok) << replicated.error.message;
+    EXPECT_TRUE(replicated.value.at("caught_up"));
+    EXPECT_EQ(replicated.value.at("entries_applied"), 1025);
+    const auto source_state = source_log.state();
+    const auto target_state = target_log.state();
+    ASSERT_TRUE(source_state);
+    ASSERT_TRUE(target_state);
+    EXPECT_EQ(target_state->tree_size, source_state->tree_size);
+    EXPECT_EQ(target_state->root_hash, source_state->root_hash);
+
+    const auto events = store.list_audit_events({.limit = 100});
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
+        return event.draft.kind == "replication" &&
+               event.draft.action == "replicate_transparency_log";
+    }));
+    EXPECT_TRUE(lake::audit::verify(store, *events));
+}
+
 TEST(TransparencyCheckpoint, ValidatesRuntimeConfiguration) {
     const auto default_configuration =
         lake::transparency::log_configuration_from_environment("witnessed", "[]", 0, "");
@@ -1113,6 +1218,7 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     context.authorized = true;
     context.operator_credential = true;
     context.acting_identity = "admin";
+    context.node_name = "postgres-instance";
     context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     context.request_id = "postgres-transparency-initialize";
     const json root = root_document(
@@ -1171,6 +1277,35 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     ASSERT_TRUE(timestamp_evidence.ok) << timestamp_evidence.error.message;
     EXPECT_EQ(timestamp_evidence.value.at("archive_timestamps").size(), 2U);
 
+    lake::transparency::CheckpointService replica_checkpoints(
+        temporary.path(), "postgres-replica", air_gapped_configuration());
+    lake::transparency::TiledLog replica_log(temporary.path(), "postgres-replica");
+    lake::api::ApiContext replica_context = context;
+    replica_context.node_name = "postgres-replica";
+    replica_context.checkpoints = &replica_checkpoints;
+    replica_context.transparency_log = &replica_log;
+    replica_context.replication_requester =
+        [&](const std::string&, std::uint64_t after) -> std::expected<json, lake::api::ApiError> {
+        context.request_id = "postgres-transparency-replication-export";
+        const auto response = registry.call(
+            "export_transparency_replication_batch", {{"after_tree_size", after}}, context);
+        if (!response.ok) {
+            return std::unexpected(response.error);
+        }
+        return response.value;
+    };
+    replica_context.request_id = "postgres-transparency-replication-apply";
+    const auto replicated = registry.call("replicate_transparency_log",
+                                          {{"source_url", "https://postgres-source.example"}},
+                                          replica_context);
+    ASSERT_TRUE(replicated.ok) << replicated.error.message;
+    EXPECT_TRUE(replicated.value.at("caught_up"));
+    EXPECT_EQ(replicated.value.at("checkpoint_sequence"), 1);
+    const auto replica_checkpoint = replica_checkpoints.current();
+    ASSERT_TRUE(replica_checkpoint) << replica_checkpoint.error().message;
+    EXPECT_EQ(replica_checkpoint->at("checkpoint_hash_sha256"),
+              checkpoint.value.at("checkpoint_hash_sha256"));
+
     const auto events = store->list_audit_events({.limit = 1000000});
     ASSERT_TRUE(events) << events.error().message;
     const auto event = std::ranges::find_if(*events, [](const lake::audit::Event& candidate) {
@@ -1193,6 +1328,12 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
                                           "timestamp_evidence"}) {
         EXPECT_TRUE(std::ranges::any_of(*events, [action](const lake::audit::Event& candidate) {
             return candidate.draft.kind == "transparency" && candidate.draft.action == action;
+        }));
+    }
+    for (const std::string_view action :
+         {"export_transparency_replication_batch", "replicate_transparency_log"}) {
+        EXPECT_TRUE(std::ranges::any_of(*events, [action](const lake::audit::Event& candidate) {
+            return candidate.draft.kind == "replication" && candidate.draft.action == action;
         }));
     }
     EXPECT_TRUE(lake::audit::verify(*store, *events));

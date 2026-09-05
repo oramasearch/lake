@@ -61,6 +61,8 @@ struct WebhookDeliveryResult {
 };
 using WebhookSender = std::function<WebhookDeliveryResult(
     const std::string& url, const nlohmann::json& headers, const std::string& payload)>;
+using ReplicationRequester = std::function<std::expected<nlohmann::json, ApiError>(
+    const std::string& source_url, std::uint64_t after_tree_size)>;
 
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
@@ -108,6 +110,8 @@ struct ApiContext {
     std::string tsa_endpoint;
     std::string tsa_trust_pem;
     transparency::TimestampPolicy timestamp_policy;
+    ReplicationRequester replication_requester;
+    std::string replication_token;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;

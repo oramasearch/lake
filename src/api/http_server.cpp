@@ -97,6 +97,36 @@ constexpr auto sync_content_type = "application/vnd.liquid.sync-v1";
 constexpr auto sync_error_content_type = "application/vnd.liquid.error-v1";
 constexpr auto maximum_sync_body_size = std::size_t{64} * 1024 * 1024;
 
+bool peer_url_is_safe(std::string_view value) {
+    bool secure = false;
+    if (value.starts_with("https://")) {
+        secure = true;
+        value.remove_prefix(8);
+    } else if (value.starts_with("http://")) {
+        value.remove_prefix(7);
+    } else {
+        return false;
+    }
+    const std::size_t end = value.find_first_of("/?#");
+    const std::string_view authority = end == std::string_view::npos ? value : value.substr(0, end);
+    if (authority.empty() || authority.find('@') != std::string_view::npos) {
+        return false;
+    }
+    std::string_view host = authority;
+    if (authority.starts_with('[')) {
+        const std::size_t close = authority.find(']');
+        if (close == std::string_view::npos ||
+            (close + 1 < authority.size() && authority[close + 1] != ':')) {
+            return false;
+        }
+        host = authority.substr(1, close - 1);
+    } else if (const std::size_t colon = authority.rfind(':'); colon != std::string_view::npos) {
+        host = authority.substr(0, colon);
+    }
+    const bool loopback = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    return !host.empty() && (secure || loopback);
+}
+
 std::string base64_encode(std::span<const std::byte> input) {
     if (input.empty()) {
         return {};
@@ -1349,6 +1379,74 @@ public:
         return output;
     }
 
+    SyncStoreResult<RepositoryReplicationReport>
+    replicate_from(const std::string& customer_id,
+                   const std::string& repository_id,
+                   const std::string& source_instance,
+                   const std::string& source_url,
+                   const std::string& bearer) override {
+        std::lock_guard lock(mutex_);
+        if (!peer_url_is_safe(source_url)) {
+            return std::unexpected(SyncStoreError{
+                "invalid_input", "replication peer URL must use HTTPS or loopback HTTP"});
+        }
+        if (!path_component_is_safe(source_instance)) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "source instance is not a safe identifier"});
+        }
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        const std::filesystem::path cursor_directory = (*state)->path / "replication";
+        const std::filesystem::path cursor_path = cursor_directory / (source_instance + ".cursor");
+        liquid::sync_endpoint_options options;
+        options.bearer_token = bearer;
+        options.atomic = true;
+        std::ifstream cursor_input(cursor_path, std::ios::binary);
+        if (cursor_input) {
+            options.cursor.token.assign(std::istreambuf_iterator<char>(cursor_input),
+                                        std::istreambuf_iterator<char>());
+        } else if (std::filesystem::exists(cursor_path)) {
+            return std::unexpected(
+                SyncStoreError{"io", "could not read repository replication cursor"});
+        }
+        liquid::sync_endpoint endpoint(source_url, std::move(options));
+        const auto pulled = liquid::runtime::block_on(endpoint.pull(*(*state)->subject));
+        if (!pulled) {
+            return std::unexpected(error_of(pulled.error()));
+        }
+        std::error_code cursor_error;
+        std::filesystem::create_directories(cursor_directory, cursor_error);
+        if (cursor_error) {
+            return std::unexpected(
+                SyncStoreError{"io", "could not create repository replication cursor directory"});
+        }
+        const std::filesystem::path temporary_cursor = cursor_path.string() + ".tmp";
+        {
+            std::ofstream cursor_output(temporary_cursor, std::ios::binary | std::ios::trunc);
+            cursor_output.write(pulled->cursor.token.data(),
+                                static_cast<std::streamsize>(pulled->cursor.token.size()));
+            cursor_output.flush();
+            if (!cursor_output) {
+                return std::unexpected(
+                    SyncStoreError{"io", "could not write repository replication cursor"});
+            }
+        }
+        std::filesystem::rename(temporary_cursor, cursor_path, cursor_error);
+        if (cursor_error) {
+            return std::unexpected(
+                SyncStoreError{"io", "could not publish repository replication cursor"});
+        }
+        return RepositoryReplicationReport{
+            .cursor = pulled->cursor.token,
+            .metadata_items = pulled->metadata_items,
+            .received_objects = pulled->received.objects,
+            .received_bytes = pulled->received.bytes,
+            .references = pulled->references.size(),
+        };
+    }
+
     SyncStoreResult<std::vector<RepositoryContentRef>>
     repository_refs(const std::string& customer_id, const std::string& repository_id) override {
         std::lock_guard lock(mutex_);
@@ -2275,6 +2373,7 @@ private:
     struct RepositoryState {
         std::unique_ptr<liquid::repository> subject;
         liquid::store* objects{};
+        std::filesystem::path path;
     };
 
     static SyncStoreError error_of(const liquid::error& error) {
@@ -3034,6 +3133,7 @@ private:
         auto state = std::make_unique<RepositoryState>();
         state->subject = std::make_unique<liquid::repository>(std::move(*opened));
         state->objects = *objects;
+        state->path = path;
         auto inserted = repositories_.emplace(key, std::move(state));
         return inserted.first->second.get();
     }
@@ -3530,6 +3630,47 @@ struct ApiServer::Impl {
         }
     }
 
+    std::expected<nlohmann::json, ApiError>
+    request_replication_batch(std::string source_url, std::uint64_t after_tree_size) const {
+        while (source_url.ends_with('/')) {
+            source_url.pop_back();
+        }
+        std::vector<std::pair<std::string, std::string>> headers{
+            {"Accept", "application/json"},
+            {"Content-Type", "application/json"},
+            {"User-Agent", "lake-replication/1"},
+        };
+        if (!options.replication_token.empty()) {
+            headers.emplace_back("Authorization", "Bearer " + options.replication_token);
+        }
+        const OutboundResponse response =
+            outbound_http.request({"POST",
+                                   source_url + "/v1/export_transparency_replication_batch",
+                                   nlohmann::json{{"after_tree_size", after_tree_size}}.dump(),
+                                   std::move(headers)});
+        if (!response.error.empty()) {
+            return std::unexpected(ApiError{
+                "store_unavailable", "replication peer request failed: " + response.error, {}});
+        }
+        const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
+        if (body.is_discarded() || !body.is_object()) {
+            return std::unexpected(
+                ApiError{"unrecoverable", "replication peer returned invalid JSON", {}});
+        }
+        if (response.status < 200 || response.status >= 300 || !body.value("ok", false)) {
+            const nlohmann::json error = body.value("error", nlohmann::json::object());
+            return std::unexpected(
+                ApiError{error.value("code", "store_unavailable"),
+                         error.value("message", "replication peer refused request"),
+                         error.value("path", "")});
+        }
+        if (!body.contains("value")) {
+            return std::unexpected(
+                ApiError{"unrecoverable", "replication peer returned no value", {}});
+        }
+        return body.at("value");
+    }
+
     void record_request(const boost::http::route_params& route,
                         std::string_view route_pattern,
                         std::chrono::steady_clock::time_point start) {
@@ -3667,6 +3808,11 @@ struct ApiServer::Impl {
             return submit_transparency(endpoint, request);
         };
         configure_timestamp_context(ctx);
+        ctx.replication_requester = [this](const std::string& source_url,
+                                           std::uint64_t after_tree_size) {
+            return request_replication_batch(source_url, after_tree_size);
+        };
+        ctx.replication_token = options.replication_token;
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;

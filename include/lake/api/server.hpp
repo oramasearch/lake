@@ -46,6 +46,9 @@ struct ServerOptions {
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;
+    // Bearer presented to another Lake during asynchronous replication. The
+    // executable defaults it to the admin bearer when no separate Secret is set.
+    std::string replication_token;
     // A base64 32-byte Ed25519 seed. When empty lake creates its own identity at
     // server start.
     std::string identity_seed;

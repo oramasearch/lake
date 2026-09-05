@@ -325,8 +325,13 @@ signature value into an RFC 3161 request, verifies the TSA response and trust ch
 DER RFC 4998 evidence record at `LAKE_STORE_ROOT/<instance>/log/timestamps/`. The owner loop renews
 before the configured age or TSA-certificate expiry margin by timestamping the prior archive
 timestamp; every creation, renewal, and read uses the registry authorization and signed audit path.
-RFC 3161 and RFC 4998 client verification is tracked in liquid #210. Replication and agent session
-keys remain #38 and #39.
+RFC 3161 and RFC 4998 client verification is tracked in liquid #210.
+**Multi-region replication status (#38): implemented on the lake side.** Standbys pull liquid
+repository journals with durable per-source cursors and pull transparency-log suffixes only from
+their current Merkle prefix. Entries and signed checkpoints are verified before adoption; a
+different prefix is a hard failure. The active/standby consistency and operator mapping contracts
+are [`../api/replication.md`](../api/replication.md) and
+[`../control-plane/replication.md`](../control-plane/replication.md). Agent session keys remain #39.
 
 ## Waves
 

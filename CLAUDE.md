@@ -104,6 +104,11 @@ and appears on `/audit`; the Lake-CR environment mapping is `docs/control-plane/
 Canonical TAAP attestations append to immutable 1,024-entry bulk tiles, and checkpoints bind their
 Merkle root and tree size. Public tile fetches and the hosted `/transparency` identity monitor
 verify the complete checkpoint root before returning matches and refuse modified tiles.
+Customer repositories and the transparency log replicate asynchronously from one active Lake to
+standbys. Repository pulls persist per-source liquid cursors after successful import. Log pulls
+require the destination's exact Merkle prefix, verify the proposed head and signed checkpoint, and
+never roll back. `docs/api/replication.md` defines consistency;
+`docs/control-plane/replication.md` is the operator handoff.
 
 RFC 3161 timestamping hashes checkpoint signature values, verifies TSA responses and trust, and
 stores DER RFC 4998 evidence records at `LAKE_STORE_ROOT/<instance>/log/timestamps/`. The owner

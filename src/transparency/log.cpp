@@ -591,6 +591,157 @@ struct TiledLog::Impl {
         }
         return write_bytes(path, *encoded);
     }
+
+    Result<std::pair<StoredState, std::vector<std::string>>>
+    replay(std::uint64_t end,
+           std::uint64_t source_tree_size,
+           std::optional<std::uint64_t> collect_from = std::nullopt) const {
+        StoredState replayed;
+        const auto initial_root = empty_root();
+        if (!initial_root) {
+            return std::unexpected(initial_root.error());
+        }
+        replayed.root = *initial_root;
+        std::vector<std::string> collected;
+        const std::uint64_t tile_count =
+            end == 0 ? 0 : (end + transparency_tile_width - 1) / transparency_tile_width;
+        for (std::uint64_t tile_index = 0; tile_index < tile_count; ++tile_index) {
+            const std::uint64_t tile_start = tile_index * transparency_tile_width;
+            const std::size_t stored_width = static_cast<std::size_t>(
+                std::min<std::uint64_t>(source_tree_size - tile_start, transparency_tile_width));
+            const auto entries = load_tile(tile_index, stored_width);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            const std::size_t used = static_cast<std::size_t>(
+                std::min<std::uint64_t>(end - tile_start, entries->size()));
+            for (std::size_t offset = 0; offset < used; ++offset) {
+                const auto digest = leaf_hash(entries->at(offset));
+                if (!digest) {
+                    return std::unexpected(digest.error());
+                }
+                const auto added = add_leaf(replayed.frontier, *digest);
+                if (!added) {
+                    return std::unexpected(added.error());
+                }
+                const std::uint64_t entry_index = tile_start + offset;
+                if (collect_from && entry_index >= *collect_from) {
+                    const auto encoded = base64url_encode(entries->at(offset));
+                    if (!encoded) {
+                        return std::unexpected(encoded.error());
+                    }
+                    collected.push_back(*encoded);
+                }
+                ++replayed.tree_size;
+            }
+        }
+        const auto root = frontier_root(replayed.frontier);
+        if (!root) {
+            return std::unexpected(root.error());
+        }
+        replayed.root = *root;
+        return std::pair{std::move(replayed), std::move(collected)};
+    }
+
+    Result<AppendResult> append_entries(const std::vector<std::string>& attestations,
+                                        const std::optional<LogState>& expected_base,
+                                        const std::optional<LogState>& expected_head) const {
+        if (attestations.empty() && !expected_head) {
+            return std::unexpected(Error{"invalid_input", "at least one attestation is required"});
+        }
+        if (attestations.size() > 100000) {
+            return std::unexpected(
+                Error{"invalid_input", "one append may contain at most 100000 attestations"});
+        }
+        const auto decoded = validated_entries(attestations);
+        if (!decoded) {
+            return std::unexpected(decoded.error());
+        }
+        std::error_code error;
+        std::filesystem::create_directories(directory / "tiles" / "entries", error);
+        if (error) {
+            return std::unexpected(Error{
+                "store_error", "could not create transparency tile directory: " + error.message()});
+        }
+        const auto append_lock = AppendLock::acquire(directory / "append.lock");
+        if (!append_lock) {
+            return std::unexpected(append_lock.error());
+        }
+        auto current = stored_state(state_path());
+        if (!current) {
+            return std::unexpected(current.error());
+        }
+        if (expected_head && current->tree_size == expected_head->tree_size &&
+            hex(current->root) == expected_head->root_hash) {
+            return AppendResult{current->tree_size, current->tree_size, hex(current->root), 0};
+        }
+        if (expected_base && (current->tree_size != expected_base->tree_size ||
+                              hex(current->root) != expected_base->root_hash)) {
+            return std::unexpected(
+                Error{"unrecoverable", "replication base does not match the local log prefix"});
+        }
+        StoredState candidate = *current;
+        for (const Bytes& entry : *decoded) {
+            const auto digest = leaf_hash(entry);
+            if (!digest) {
+                return std::unexpected(digest.error());
+            }
+            const auto added = add_leaf(candidate.frontier, *digest);
+            if (!added) {
+                return std::unexpected(added.error());
+            }
+            ++candidate.tree_size;
+        }
+        const auto candidate_root = frontier_root(candidate.frontier);
+        if (!candidate_root) {
+            return std::unexpected(candidate_root.error());
+        }
+        candidate.root = *candidate_root;
+        if (expected_head && (candidate.tree_size != expected_head->tree_size ||
+                              hex(candidate.root) != expected_head->root_hash)) {
+            return std::unexpected(
+                Error{"unrecoverable", "replication entries do not produce the declared log head"});
+        }
+        const std::uint64_t first_index = current->tree_size;
+        if (decoded->empty()) {
+            return AppendResult{first_index, current->tree_size, hex(current->root), 0};
+        }
+        std::uint64_t tile_index = current->tree_size / transparency_tile_width;
+        const std::size_t partial_width = current->tree_size % transparency_tile_width;
+        std::vector<Bytes> tile_entries;
+        if (partial_width != 0) {
+            const auto partial = load_tile(tile_index, partial_width);
+            if (!partial) {
+                return std::unexpected(partial.error());
+            }
+            tile_entries = *partial;
+        }
+        std::size_t tiles_published = 0;
+        for (const Bytes& entry : *decoded) {
+            tile_entries.push_back(entry);
+            if (tile_entries.size() == transparency_tile_width) {
+                const auto written = publish_tile(tile_index, tile_entries);
+                if (!written) {
+                    return std::unexpected(written.error());
+                }
+                ++tiles_published;
+                ++tile_index;
+                tile_entries.clear();
+            }
+        }
+        if (!tile_entries.empty()) {
+            const auto written = publish_tile(tile_index, tile_entries);
+            if (!written) {
+                return std::unexpected(written.error());
+            }
+            ++tiles_published;
+        }
+        const auto state_written = write_json(state_path(), state_json(candidate));
+        if (!state_written) {
+            return std::unexpected(state_written.error());
+        }
+        return AppendResult{first_index, candidate.tree_size, hex(candidate.root), tiles_published};
+    }
 };
 
 TiledLog::TiledLog(std::filesystem::path store_root, std::string instance_name)
@@ -602,81 +753,7 @@ Result<AppendResult> TiledLog::append(const std::vector<std::string>& attestatio
         return std::unexpected(
             Error{"invalid_input", "lake instance name is not a safe path component"});
     }
-    if (attestations.empty()) {
-        return std::unexpected(Error{"invalid_input", "at least one attestation is required"});
-    }
-    if (attestations.size() > 100000) {
-        return std::unexpected(
-            Error{"invalid_input", "one append may contain at most 100000 attestations"});
-    }
-    const auto decoded = validated_entries(attestations);
-    if (!decoded) {
-        return std::unexpected(decoded.error());
-    }
-    std::error_code error;
-    std::filesystem::create_directories(impl_->directory / "tiles" / "entries", error);
-    if (error) {
-        return std::unexpected(Error{
-            "store_error", "could not create transparency tile directory: " + error.message()});
-    }
-    const auto append_lock = AppendLock::acquire(impl_->directory / "append.lock");
-    if (!append_lock) {
-        return std::unexpected(append_lock.error());
-    }
-    auto current = stored_state(impl_->state_path());
-    if (!current) {
-        return std::unexpected(current.error());
-    }
-    const std::uint64_t first_index = current->tree_size;
-    std::uint64_t tile_index = current->tree_size / transparency_tile_width;
-    const std::size_t partial_width = current->tree_size % transparency_tile_width;
-    std::vector<Bytes> tile_entries;
-    if (partial_width != 0) {
-        const auto partial = impl_->load_tile(tile_index, partial_width);
-        if (!partial) {
-            return std::unexpected(partial.error());
-        }
-        tile_entries = *partial;
-    }
-    std::size_t tiles_published = 0;
-    for (const Bytes& entry : *decoded) {
-        const auto digest = leaf_hash(entry);
-        if (!digest) {
-            return std::unexpected(digest.error());
-        }
-        const auto added = add_leaf(current->frontier, *digest);
-        if (!added) {
-            return std::unexpected(added.error());
-        }
-        ++current->tree_size;
-        tile_entries.push_back(entry);
-        if (tile_entries.size() == transparency_tile_width) {
-            const auto written = impl_->publish_tile(tile_index, tile_entries);
-            if (!written) {
-                return std::unexpected(written.error());
-            }
-            ++tiles_published;
-            ++tile_index;
-            tile_entries.clear();
-        }
-    }
-    if (!tile_entries.empty()) {
-        const auto written = impl_->publish_tile(tile_index, tile_entries);
-        if (!written) {
-            return std::unexpected(written.error());
-        }
-        ++tiles_published;
-    }
-    const auto root = frontier_root(current->frontier);
-    if (!root) {
-        return std::unexpected(root.error());
-    }
-    current->root = *root;
-    const auto state_written = write_json(impl_->state_path(), state_json(*current));
-    if (!state_written) {
-        return std::unexpected(state_written.error());
-    }
-    return AppendResult{first_index, current->tree_size, hex(current->root), tiles_published};
+    return impl_->append_entries(attestations, std::nullopt, std::nullopt);
 }
 
 Result<Tile> TiledLog::tile(std::uint64_t index, std::size_t width) const {
@@ -718,6 +795,99 @@ Result<LogState> TiledLog::state() const {
         return std::unexpected(current.error());
     }
     return LogState{current->tree_size, hex(current->root)};
+}
+
+Result<LogState> TiledLog::state_at(std::uint64_t tree_size) const {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    std::error_code error;
+    std::filesystem::create_directories(impl_->directory, error);
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not create transparency directory: " + error.message()});
+    }
+    const auto append_lock = AppendLock::acquire(impl_->directory / "append.lock");
+    if (!append_lock) {
+        return std::unexpected(append_lock.error());
+    }
+    const auto current = stored_state(impl_->state_path());
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    if (tree_size > current->tree_size) {
+        return std::unexpected(
+            Error{"invalid_input", "requested tree size is beyond the current log"});
+    }
+    const auto replayed = impl_->replay(tree_size, current->tree_size);
+    if (!replayed) {
+        return std::unexpected(replayed.error());
+    }
+    return LogState{replayed->first.tree_size, hex(replayed->first.root)};
+}
+
+Result<LogReplicationBatch> TiledLog::replication_batch(std::uint64_t after_tree_size) const {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    std::error_code error;
+    std::filesystem::create_directories(impl_->directory, error);
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not create transparency directory: " + error.message()});
+    }
+    const auto append_lock = AppendLock::acquire(impl_->directory / "append.lock");
+    if (!append_lock) {
+        return std::unexpected(append_lock.error());
+    }
+    const auto current = stored_state(impl_->state_path());
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    if (after_tree_size > current->tree_size) {
+        return std::unexpected(
+            Error{"invalid_input", "replication cursor is beyond the current log"});
+    }
+    constexpr std::uint64_t batch_limit = 100000;
+    const std::uint64_t available = current->tree_size - after_tree_size;
+    const std::uint64_t head_tree_size =
+        after_tree_size + std::min<std::uint64_t>(available, batch_limit);
+    const auto base = impl_->replay(after_tree_size, current->tree_size);
+    if (!base) {
+        return std::unexpected(base.error());
+    }
+    const auto head = impl_->replay(head_tree_size, current->tree_size, after_tree_size);
+    if (!head) {
+        return std::unexpected(head.error());
+    }
+    if (head_tree_size == current->tree_size && head->first.root != current->root) {
+        return std::unexpected(
+            Error{"unrecoverable", "transparency tiles do not match the stored log root"});
+    }
+    return LogReplicationBatch{
+        .base = {base->first.tree_size, hex(base->first.root)},
+        .head = {head->first.tree_size, hex(head->first.root)},
+        .source_tree_size = current->tree_size,
+        .attestations = std::move(head->second),
+    };
+}
+
+Result<AppendResult> TiledLog::apply_replication_batch(const LogReplicationBatch& batch) {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    if (batch.source_tree_size < batch.head.tree_size ||
+        batch.head.tree_size < batch.base.tree_size ||
+        batch.head.tree_size - batch.base.tree_size != batch.attestations.size()) {
+        return std::unexpected(Error{"invalid_input", "replication batch bounds are invalid"});
+    }
+    return impl_->append_entries(batch.attestations, batch.base, batch.head);
 }
 
 Result<IdentityScan> TiledLog::scan_identity(const std::string& identity,

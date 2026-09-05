@@ -15,6 +15,8 @@ add_executable(lake-tests test_web_ui.cpp
   test_postgres_identity.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest_main)
 target_include_directories(lake-tests PRIVATE ${PROJECT_SOURCE_DIR}/modules/liquid/src)
+target_compile_definitions(lake-tests PRIVATE LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>")
+add_dependencies(lake-tests lake)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)
 
