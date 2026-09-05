@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -58,6 +60,7 @@ struct Surface {
 };
 
 struct RepositoryFixtureStore final : SyncStore {
+    std::map<std::string, RepositoryPortableData> imported;
     SyncStoreResult<std::vector<std::string>>
     find_missing(const std::string&, const std::vector<std::string>&) override {
         return std::vector<std::string>{};
@@ -142,6 +145,34 @@ struct RepositoryFixtureStore final : SyncStore {
     SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string&, const std::string&) override {
         return std::vector<RepositoryConflict>{{"readme.md", {"blob-1", "blob-2"}}};
+    }
+
+    SyncStoreResult<RepositoryPortableData>
+    export_portable(const std::string&, const std::string&, bool include_git) override {
+        RepositoryPortableData output;
+        output.history = {{"refs", {{{"name", "main"}, {"change", "change-1"}}}},
+                          {"changes",
+                           {{{"id", "change-1"},
+                             {"parents", json::array()},
+                             {"author", "taap:1:ed25519:author"},
+                             {"message", "initial"},
+                             {"occurred_at", "2026-09-04T00:00:00Z"}}}}};
+        output.artifacts = {{{"id", "result-1"}, {"action", "action-1"}}};
+        output.git = {{"requested", include_git}};
+        return output;
+    }
+
+    SyncStoreResult<void> import_portable(const std::string& customer_id,
+                                          const std::string& repository_id,
+                                          const RepositoryPortableData& data) override {
+        imported[customer_id + "/" + repository_id] = data;
+        return {};
+    }
+
+    SyncStoreResult<RepositoryGitImport>
+    import_git(const std::string&, const std::string&, const std::string&) override {
+        return RepositoryGitImport{
+            .commits = 1, .blobs = 1, .commit_changes = {{"deadbeef", "change-1"}}};
     }
 
     SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
@@ -1354,6 +1385,105 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["change"], "change-2");
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["line"], 10);
     EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
+}
+
+TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
+    Surface source;
+    RepositoryFixtureStore source_store;
+    source.ctx.sync_store = &source_store;
+    const ApiResult user = source.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = source.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = source.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "portable"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    ASSERT_TRUE(source
+                    .call("create_issue",
+                          {{"repository_id", repository.value["id"]}, {"title", "Portable"}})
+                    .ok);
+    const auto object = source.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(object) << object.error().message;
+    ASSERT_TRUE(
+        source.store
+            .create_grant(
+                {"taap:1:ed25519:reader", object->id, "read", "grant-proof", "admin", "test"})
+            .has_value());
+
+    const ApiResult exported = source.call(
+        "export_repository", {{"repository_id", repository.value["id"]}, {"include_git", true}});
+    ASSERT_TRUE(exported.ok) << exported.error.message;
+    EXPECT_EQ(exported.value["archive"]["format"], "lake_export/1");
+
+    Surface destination;
+    RepositoryFixtureStore destination_store;
+    destination.ctx.sync_store = &destination_store;
+    const ApiResult target_user = destination.call("create_user", {{"display_name", "Grace"}});
+    ASSERT_TRUE(target_user.ok) << target_user.error.message;
+    const ApiResult target_customer = destination.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", target_user.value["id"]}, {"name", "grace"}});
+    ASSERT_TRUE(target_customer.ok) << target_customer.error.message;
+    const ApiResult imported = destination.call("import_repository",
+                                                {{"customer_id", target_customer.value["id"]},
+                                                 {"name", "portable-copy"},
+                                                 {"archive", exported.value["archive"]}});
+    ASSERT_TRUE(imported.ok) << imported.error.message;
+    const auto portable =
+        destination_store.imported.find(target_customer.value["id"].get<std::string>() + "/" +
+                                        imported.value["id"].get<std::string>());
+    ASSERT_NE(portable, destination_store.imported.end());
+    EXPECT_EQ(portable->second.history, exported.value["archive"]["payload"]["history"]);
+    EXPECT_EQ(portable->second.artifacts, exported.value["archive"]["payload"]["artifacts"]);
+    EXPECT_EQ(destination.call("list_issues", {{"repository_id", imported.value["id"]}})
+                  .value["items"]
+                  .size(),
+              1);
+
+    json altered = exported.value["archive"];
+    altered["payload"]["history"]["changes"][0]["message"] = "changed";
+    EXPECT_EQ(destination
+                  .call("import_repository",
+                        {{"customer_id", target_customer.value["id"]},
+                         {"name", "tampered"},
+                         {"archive", altered}})
+                  .error.code,
+              "invalid_digest");
+}
+
+TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    std::ifstream input(std::filesystem::path(__FILE__).parent_path() / "fixtures" /
+                        "github-import-recording.json");
+    ASSERT_TRUE(input.good());
+    const json recording = json::parse(input);
+    const ApiResult imported = surface.call("import_github_repository",
+                                            {{"customer_id", customer.value["id"]},
+                                             {"name", "example"},
+                                             {"git_directory", "/recorded/example.git"},
+                                             {"recording", recording}});
+    ASSERT_TRUE(imported.ok) << imported.error.message;
+    EXPECT_EQ(imported.value["fidelity"]["format"], "github_import_fidelity/1");
+    EXPECT_EQ(imported.value["fidelity"]["workflows"][0]["wrap_replacements"][0]["replacement"],
+              "liquid wrap");
+    EXPECT_EQ(surface.call("list_issues", {{"repository_id", imported.value["repository"]["id"]}})
+                  .value["items"]
+                  .size(),
+              1);
+    EXPECT_EQ(surface.call("list_reviews", {{"repository_id", imported.value["repository"]["id"]}})
+                  .value["items"]
+                  .size(),
+              1);
 }
 
 TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {

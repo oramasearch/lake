@@ -61,6 +61,8 @@
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 
+#include <openssl/evp.h>
+
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/oauth.hpp"
@@ -77,6 +79,7 @@
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
 
+#include <liquid/git.hpp>
 #include <liquid/hash.hpp>
 #include <liquid/repository.hpp>
 #include <liquid/runtime.hpp>
@@ -89,6 +92,180 @@ namespace {
 constexpr auto sync_content_type = "application/vnd.liquid.sync-v1";
 constexpr auto sync_error_content_type = "application/vnd.liquid.error-v1";
 constexpr auto maximum_sync_body_size = std::size_t{64} * 1024 * 1024;
+
+std::string base64_encode(std::span<const std::byte> input) {
+    if (input.empty()) {
+        return {};
+    }
+    std::string output(4 * ((input.size() + 2) / 3), '\0');
+    const int size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(output.data()),
+                                     reinterpret_cast<const unsigned char*>(input.data()),
+                                     static_cast<int>(input.size()));
+    output.resize(static_cast<std::size_t>(size));
+    return output;
+}
+
+SyncStoreResult<std::vector<std::byte>> base64_decode(std::string_view input) {
+    if (input.empty()) {
+        return std::vector<std::byte>{};
+    }
+    if (input.size() % 4 != 0) {
+        return std::unexpected(SyncStoreError{"invalid_input", "invalid base64 data", "export"});
+    }
+    std::vector<std::byte> output((input.size() / 4) * 3);
+    const int size = EVP_DecodeBlock(reinterpret_cast<unsigned char*>(output.data()),
+                                     reinterpret_cast<const unsigned char*>(input.data()),
+                                     static_cast<int>(input.size()));
+    if (size < 0) {
+        return std::unexpected(SyncStoreError{"invalid_input", "invalid base64 data", "export"});
+    }
+    std::size_t padding = 0;
+    if (!input.empty() && input.back() == '=') {
+        ++padding;
+    }
+    if (input.size() > 1 && input[input.size() - 2] == '=') {
+        ++padding;
+    }
+    output.resize(static_cast<std::size_t>(size) - padding);
+    return output;
+}
+
+std::string node_id_text(const liquid::node_id& value) {
+    std::string output;
+    output.reserve(value.size() * 2);
+    for (const std::byte byte : value) {
+        output += std::format("{:02x}", std::to_integer<unsigned char>(byte));
+    }
+    return output;
+}
+
+SyncStoreResult<liquid::node_id> parse_node_id(std::string_view input) {
+    if (input.size() != 32) {
+        return std::unexpected(
+            SyncStoreError{"invalid_input", "invalid node identifier", "export"});
+    }
+    liquid::node_id output{};
+    for (std::size_t index = 0; index < output.size(); ++index) {
+        unsigned value = 0;
+        const auto parsed =
+            std::from_chars(input.data() + index * 2, input.data() + index * 2 + 2, value, 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != input.data() + index * 2 + 2) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "invalid node identifier", "export"});
+        }
+        output[index] = static_cast<std::byte>(value);
+    }
+    return output;
+}
+
+nlohmann::json sync_item_json(const liquid::sync_item& item) {
+    return {{"kind", static_cast<unsigned>(item.kind)},
+            {"author",
+             {{"taap_id", item.author.taap_id},
+              {"algorithm", item.author.algorithm},
+              {"fingerprint", item.author.fingerprint},
+              {"public_key", base64_encode(item.author.public_key)},
+              {"key_fingerprint", item.author.key_fingerprint}}},
+            {"repository", node_id_text(item.repository)},
+            {"directory", node_id_text(item.directory)},
+            {"root", item.root},
+            {"name", item.name},
+            {"reference", liquid::to_string(item.reference.value)},
+            {"body", base64_encode(item.body)},
+            {"signature", base64_encode(item.signature)}};
+}
+
+SyncStoreResult<liquid::sync_item> sync_item_from_json(const nlohmann::json& value) {
+    const auto repository = parse_node_id(value.value("repository", ""));
+    if (!repository) {
+        return std::unexpected(repository.error());
+    }
+    const auto directory = parse_node_id(value.value("directory", ""));
+    if (!directory) {
+        return std::unexpected(directory.error());
+    }
+    const auto public_key = base64_decode(value.at("author").value("public_key", ""));
+    if (!public_key) {
+        return std::unexpected(public_key.error());
+    }
+    const auto body = base64_decode(value.value("body", ""));
+    if (!body) {
+        return std::unexpected(body.error());
+    }
+    const auto signature = base64_decode(value.value("signature", ""));
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    liquid::sync_item output;
+    const unsigned kind = value.value("kind", 0U);
+    if (kind < static_cast<unsigned>(liquid::sync_item_kind::drip) ||
+        kind > static_cast<unsigned>(liquid::sync_item_kind::reference)) {
+        return std::unexpected(SyncStoreError{"invalid_input", "invalid sync item kind", "export"});
+    }
+    output.kind = static_cast<liquid::sync_item_kind>(kind);
+    output.author = {.taap_id = value.at("author").value("taap_id", ""),
+                     .algorithm = value.at("author").value("algorithm", ""),
+                     .fingerprint = value.at("author").value("fingerprint", ""),
+                     .public_key = *public_key,
+                     .key_fingerprint = value.at("author").value("key_fingerprint", "")};
+    output.repository = *repository;
+    output.directory = *directory;
+    output.root = value.value("root", false);
+    output.name = value.value("name", "");
+    const std::string reference = value.value("reference", "");
+    if (!reference.empty()) {
+        const auto parsed = liquid::parse_digest(reference);
+        if (!parsed) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "invalid sync item reference", "export"});
+        }
+        output.reference = liquid::change_id{*parsed};
+    }
+    output.body = *body;
+    output.signature = *signature;
+    return output;
+}
+
+class ArchiveBlobSource final : public liquid::remote_blob_source {
+public:
+    explicit ArchiveBlobSource(std::map<std::string, std::vector<std::byte>> contents = {})
+        : contents_(std::move(contents)) {}
+
+    liquid::runtime::task<std::vector<liquid::digest>>
+    find_missing(std::string, std::vector<liquid::digest> blobs) override {
+        co_return blobs;
+    }
+
+    liquid::runtime::task<std::uint64_t> read_range(std::string,
+                                                    liquid::digest blob,
+                                                    std::uint64_t offset,
+                                                    std::span<std::byte> output) override {
+        const auto found = contents_.find(liquid::to_string(blob));
+        if (found == contents_.end() || offset > found->second.size()) {
+            co_return std::unexpected(liquid::error{
+                liquid::errc::not_found, "archive object is unavailable", liquid::to_string(blob)});
+        }
+        const std::size_t count =
+            std::min(output.size(), found->second.size() - static_cast<std::size_t>(offset));
+        std::ranges::copy(found->second.begin() + static_cast<std::ptrdiff_t>(offset),
+                          found->second.begin() + static_cast<std::ptrdiff_t>(offset + count),
+                          output.begin());
+        co_return count;
+    }
+
+    liquid::runtime::task<void>
+    write(std::string, liquid::digest blob, std::vector<std::byte> contents) override {
+        contents_.insert_or_assign(liquid::to_string(blob), std::move(contents));
+        co_return liquid::result<void>{};
+    }
+
+    const std::map<std::string, std::vector<std::byte>>& contents() const noexcept {
+        return contents_;
+    }
+
+private:
+    std::map<std::string, std::vector<std::byte>> contents_;
+};
 
 // Beast2 computes the framing from the payload size we declare; anything a
 // handler set by hand would race it. Same rule as Zetta.
@@ -586,6 +763,15 @@ control::Repository repository_from_json(const nlohmann::json& value) {
             json_string(value, "retention_until"),
             json_string(value, "created_at"),
             json_string(value, "updated_at")};
+}
+
+control::ForgeRecord forge_record_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "repository_id"),
+            json_string(value, "kind"),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at"),
+            value.value("value", nlohmann::json::object())};
 }
 
 RepositoryContentRef repository_content_ref_from_json(const nlohmann::json& value) {
@@ -1340,6 +1526,249 @@ public:
         return output;
     }
 
+    SyncStoreResult<RepositoryPortableData> export_portable(const std::string& customer_id,
+                                                            const std::string& repository_id,
+                                                            bool include_git) override {
+        RepositoryPortableData output;
+        {
+            std::lock_guard lock(mutex_);
+            auto state = open_repository(customer_id, repository_id);
+            if (!state) {
+                return std::unexpected(state.error());
+            }
+            output.history["format"] = "liquid_portable_history/1";
+            output.history["items"] = nlohmann::json::array();
+            liquid::journal_cursor cursor;
+            std::vector<liquid::digest> roots;
+            for (;;) {
+                std::array<liquid::sync_item, 256> page;
+                const auto exported =
+                    liquid::runtime::block_on((*state)->subject->export_drips(cursor, page));
+                if (!exported) {
+                    return std::unexpected(error_of(exported.error()));
+                }
+                for (std::size_t index = 0; index < exported->count; ++index) {
+                    output.history["items"].push_back(sync_item_json(page[index]));
+                }
+                roots = exported->objects;
+                cursor = exported->cursor;
+                if (exported->done) {
+                    break;
+                }
+            }
+            ArchiveBlobSource archive;
+            liquid::sync_session transfer(*(*state)->objects, archive, "lake-export");
+            const auto sent = liquid::runtime::block_on(transfer.send(roots));
+            if (!sent) {
+                return std::unexpected(error_of(sent.error()));
+            }
+            output.history["roots"] = nlohmann::json::array();
+            for (const liquid::digest& root : roots) {
+                output.history["roots"].push_back(liquid::to_string(root));
+            }
+            output.history["objects"] = nlohmann::json::array();
+            for (const auto& [id, contents] : archive.contents()) {
+                output.history["objects"].push_back(
+                    {{"digest", id}, {"contents", base64_encode(contents)}});
+            }
+            output.git = {{"requested", include_git}, {"status", "omitted"}};
+            if (include_git) {
+                const auto refs = liquid::runtime::block_on((*state)->subject->refs());
+                if (!refs) {
+                    return std::unexpected(error_of(refs.error()));
+                }
+                if (refs->empty()) {
+                    output.git["status"] = "empty";
+                } else {
+                    static std::atomic<unsigned long> export_number{0};
+                    const std::filesystem::path target =
+                        std::filesystem::temp_directory_path() /
+                        ("lake-export-" + repository_id + "-" + std::to_string(++export_number));
+                    const auto exported = liquid::runtime::block_on(
+                        liquid::export_git(*(*state)->subject, target, refs->front().name));
+                    if (!exported) {
+                        std::error_code ignored;
+                        std::filesystem::remove_all(target, ignored);
+                        return std::unexpected(error_of(exported.error()));
+                    }
+                    output.git = {{"requested", true},
+                                  {"status", "included"},
+                                  {"ref", refs->front().name},
+                                  {"degradations", exported->degradations},
+                                  {"files", nlohmann::json::array()}};
+                    for (const auto& entry :
+                         std::filesystem::recursive_directory_iterator(target)) {
+                        if (!entry.is_regular_file()) {
+                            continue;
+                        }
+                        std::ifstream input(entry.path(), std::ios::binary);
+                        const std::vector<char> raw((std::istreambuf_iterator<char>(input)),
+                                                    std::istreambuf_iterator<char>());
+                        std::vector<std::byte> contents;
+                        contents.reserve(raw.size());
+                        for (const char byte : raw) {
+                            contents.push_back(
+                                static_cast<std::byte>(static_cast<unsigned char>(byte)));
+                        }
+                        output.git["files"].push_back(
+                            {{"path",
+                              std::filesystem::relative(entry.path(), target).generic_string()},
+                             {"contents", base64_encode(contents)}});
+                    }
+                    std::error_code ignored;
+                    std::filesystem::remove_all(target, ignored);
+                }
+            }
+        }
+        RepositoryArtifactFilter filter;
+        filter.limit = 1'000;
+        for (;;) {
+            const auto page = repository_artifacts(customer_id, repository_id, filter);
+            if (!page) {
+                return std::unexpected(page.error());
+            }
+            for (const RepositoryArtifact& artifact : page->items) {
+                const auto detailed = repository_artifact(customer_id, repository_id, artifact.id);
+                if (!detailed) {
+                    return std::unexpected(detailed.error());
+                }
+                output.artifacts.push_back(artifact_json(*detailed));
+            }
+            if (page->done || page->next_cursor.empty()) {
+                break;
+            }
+            filter.cursor = page->next_cursor;
+        }
+        if (output.artifacts.empty()) {
+            std::lock_guard lock(mutex_);
+            auto state = open_repository(customer_id, repository_id);
+            if (!state) {
+                return std::unexpected(state.error());
+            }
+            const auto saved =
+                liquid::runtime::block_on((*state)->subject->metadata("lake.export.artifacts"));
+            if (!saved) {
+                return std::unexpected(error_of(saved.error()));
+            }
+            if (*saved) {
+                const std::string serialized(reinterpret_cast<const char*>((*saved)->data()),
+                                             (*saved)->size());
+                const nlohmann::json restored = nlohmann::json::parse(serialized, nullptr, false);
+                if (restored.is_discarded() || !restored.is_array()) {
+                    return std::unexpected(SyncStoreError{
+                        "corrupt", "restored artifact evidence is invalid", "export"});
+                }
+                output.artifacts = restored;
+            }
+        }
+        return output;
+    }
+
+    SyncStoreResult<void> import_portable(const std::string& customer_id,
+                                          const std::string& repository_id,
+                                          const RepositoryPortableData& portable) override {
+        if (portable.history.value("format", "") != "liquid_portable_history/1" ||
+            !portable.history.contains("items") || !portable.history.contains("roots") ||
+            !portable.history.contains("objects")) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "invalid portable history", "export"});
+        }
+        std::vector<liquid::sync_item> items;
+        for (const nlohmann::json& value : portable.history.at("items")) {
+            const auto item = sync_item_from_json(value);
+            if (!item) {
+                return std::unexpected(item.error());
+            }
+            items.push_back(*item);
+        }
+        std::vector<liquid::digest> roots;
+        for (const nlohmann::json& value : portable.history.at("roots")) {
+            const auto root = liquid::parse_digest(value.get<std::string>());
+            if (!root) {
+                return std::unexpected(error_of(root.error()));
+            }
+            roots.push_back(*root);
+        }
+        std::map<std::string, std::vector<std::byte>> objects;
+        for (const nlohmann::json& value : portable.history.at("objects")) {
+            const std::string digest = value.at("digest").get<std::string>();
+            const auto parsed = liquid::parse_digest(digest);
+            if (!parsed) {
+                return std::unexpected(error_of(parsed.error()));
+            }
+            const auto contents = base64_decode(value.at("contents").get<std::string>());
+            if (!contents) {
+                return std::unexpected(contents.error());
+            }
+            const auto actual = liquid::hash(parsed->alg, *contents);
+            if (!actual || liquid::to_string(*actual) != digest) {
+                return std::unexpected(SyncStoreError{
+                    "invalid_digest", "archive object digest does not match", digest});
+            }
+            objects.emplace(digest, *contents);
+        }
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        ArchiveBlobSource archive(std::move(objects));
+        liquid::sync_session transfer(*(*state)->objects, archive, "lake-export");
+        const auto received = liquid::runtime::block_on(transfer.receive(roots));
+        if (!received) {
+            return std::unexpected(error_of(received.error()));
+        }
+        const auto imported = liquid::runtime::block_on((*state)->subject->import_drips(items));
+        if (!imported) {
+            return std::unexpected(error_of(imported.error()));
+        }
+        const std::string artifact_evidence = portable.artifacts.dump();
+        std::vector<std::byte> artifact_bytes;
+        artifact_bytes.reserve(artifact_evidence.size());
+        for (const char byte : artifact_evidence) {
+            artifact_bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(byte)));
+        }
+        const auto saved = liquid::runtime::block_on(
+            (*state)->subject->set_metadata("lake.export.artifacts", std::move(artifact_bytes)));
+        if (!saved) {
+            return std::unexpected(error_of(saved.error()));
+        }
+        return {};
+    }
+
+    SyncStoreResult<RepositoryGitImport> import_git(const std::string& customer_id,
+                                                    const std::string& repository_id,
+                                                    const std::string& source_directory) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        const auto report = liquid::runtime::block_on(
+            liquid::import_git(*(*state)->subject, std::filesystem::path(source_directory)));
+        if (!report) {
+            return std::unexpected(error_of(report.error()));
+        }
+        RepositoryGitImport output{.commits = report->commits, .blobs = report->blobs};
+        const auto keys =
+            liquid::runtime::block_on((*state)->subject->metadata_keys("git.commit."));
+        if (!keys) {
+            return std::unexpected(error_of(keys.error()));
+        }
+        for (const std::string& key : *keys) {
+            const auto value = liquid::runtime::block_on((*state)->subject->metadata(key));
+            if (!value) {
+                return std::unexpected(error_of(value.error()));
+            }
+            if (!*value) {
+                continue;
+            }
+            output.commit_changes[key.substr(std::string("git.commit.").size())] =
+                std::string(reinterpret_cast<const char*>((*value)->data()), (*value)->size());
+        }
+        return output;
+    }
+
 private:
     struct RepositoryState {
         std::unique_ptr<liquid::repository> subject;
@@ -1421,6 +1850,44 @@ private:
                 {artifact.path, artifact.mode, liquid::to_string(artifact.blob)});
         }
         return output;
+    }
+
+    static nlohmann::json artifact_json(const RepositoryArtifact& artifact) {
+        nlohmann::json outputs = nlohmann::json::array();
+        for (const RepositoryArtifactOutput& output : artifact.outputs) {
+            outputs.push_back(
+                {{"path", output.path}, {"mode", output.mode}, {"blob", output.blob}});
+        }
+        nlohmann::json attestations = nlohmann::json::array();
+        for (const RepositoryArtifactAttestation& attestation : artifact.attestations) {
+            attestations.push_back({{"id", attestation.id},
+                                    {"profile", attestation.profile},
+                                    {"subject", attestation.subject},
+                                    {"issuer", attestation.issuer},
+                                    {"verified", attestation.verified},
+                                    {"reason", attestation.reason}});
+        }
+        nlohmann::json value = {{"id", artifact.id},
+                                {"action", artifact.action},
+                                {"exit_code", artifact.exit_code},
+                                {"outputs", std::move(outputs)},
+                                {"cache_status", artifact.cache_status},
+                                {"divergent", artifact.divergent},
+                                {"verification", artifact.verification},
+                                {"worker", artifact.worker},
+                                {"observed_at", artifact.observed_at},
+                                {"started_at", artifact.started_at},
+                                {"finished_at", artifact.finished_at},
+                                {"attestations", std::move(attestations)}};
+        if (artifact.trace) {
+            value["trace"] = {{"id", artifact.trace->id},
+                              {"wall_ms", artifact.trace->wall_ms},
+                              {"actions", artifact.trace->actions},
+                              {"dependencies", artifact.trace->dependencies},
+                              {"cache_hits", artifact.trace->cache_hits},
+                              {"cache_misses", artifact.trace->cache_misses}};
+        }
+        return value;
     }
 
     static void append_attestation(RepositoryArtifact& artifact,
@@ -3479,6 +3946,55 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_exports_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        if (repository_id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result =
+            registry.call("get_repository", {{"id", repository_id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult exports_result =
+            registry.call("list_exports", {{"repository_id", repository_id}}, ctx);
+        if (!exports_result.ok) {
+            return serve_repository_page_error(route, ctx, exports_result);
+        }
+        std::vector<control::ForgeRecord> exports;
+        for (const nlohmann::json& value : exports_result.value.at("items")) {
+            exports.push_back(forge_record_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_exports(repository_from_json(repository_result.value), exports),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_export_download(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        if (repository_id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult exported =
+            registry.call("export_repository",
+                          {{"repository_id", repository_id},
+                           {"include_git", query_value(route, "include_git") == "true"}},
+                          ctx);
+        if (!exported.ok) {
+            return serve_repository_page_error(route, ctx, exported);
+        }
+        route.res.set("content-disposition", "attachment; filename=lake-export.json");
+        return send_text(route,
+                         boost::http::status::ok,
+                         exported.value.at("archive").dump(2),
+                         "application/vnd.lake.export+json",
+                         "no-store");
+    }
+
     boost::http::route_task serve_repository_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "id");
@@ -4413,6 +4929,16 @@ bool ApiServer::start() {
             return impl.observe_request(
                 route, "/repositories", impl.serve_repositories_page(route));
         });
+    router.add(
+        http::method::get, "/exports", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/exports", impl.serve_exports_page(route));
+        });
+    router.add(http::method::get,
+               "/exports/download",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/exports/download", impl.serve_export_download(route));
+               });
     router.add(
         http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/repository", impl.serve_repository_page(route));

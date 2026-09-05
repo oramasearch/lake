@@ -261,7 +261,14 @@ authorizer; CI is the build engine, not a product (#30). The drive is the same
 repositories with per-folder ACLs, share links and a web surface through the format registry
 (#8, #43, #44, #45). Models and datasets are repositories with training provenance (#7).
 Metering counts unique stored bytes per customer store and never degrades to pointer files at a
-quota (#33). Full export and the GitHub importer state their fidelity (#31, #32). The
+quota (#33). **Export and import status (#31): implemented.** A signed `lake_export/1` archive
+carries cursor-exported liquid history and its verified object graph, artifact evidence, forge
+records, direct grants, deployment configuration, and an optional Git projection; import verifies
+every member digest and the exporting identity signature before recreating the destination
+repository. The export page requests and downloads that archive. **GitHub import status (#32):
+implemented.** Recorded GitHub API responses map Git history, issue and review discussion,
+anchored comments, and Actions workflow documents; every import stores its explicit fidelity
+report and `liquid wrap` replacement analysis. The
 transparency log (#34 to #38, #39) follows liquid's `docs/features/25` tiled, witnessed design
 with the log as Zetta objects.
 

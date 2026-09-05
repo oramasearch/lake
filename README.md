@@ -27,6 +27,10 @@ liquid is the tool. lake is where it collects.
 > public server, and protocol contract are pinned. Lake serves push, pull, missing-object
 > negotiation, chunk upload, and ranged chunk read through the registry, with per-change policy,
 > offline-grant revocation checks, exact refusal reasons, atomic refusal, and signed outcome audit.
+> The source tree also provides signed portable repository export and import, including liquid
+> history/object transfer, forge state, grants, artifact evidence, an optional Git projection, and
+> a server-rendered export download page. Recorded GitHub imports map Git history, issues,
+> reviews, and workflow documents with an explicit fidelity report.
 > Migration `0011_offline_recovery` adds bounded cached-read grants, recovery codes, 24-hour email
 > recovery, two-administrator organization recovery, device notices, and designated custody of
 > client-wrapped repository keys. Account recovery does not recreate a lost repository key. Hot branch-tip

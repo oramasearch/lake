@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace lake::api {
 
 struct SyncStoreError {
@@ -139,6 +141,22 @@ struct RepositoryArtifactPage {
     bool done = false;
 };
 
+// The portable portion of a lake export. `history` is liquid's signed sync
+// data plus every referenced object. `artifacts` is the public #166
+// enumeration used to check the reconstructed store. `git` is present only
+// when the caller requested a Git projection.
+struct RepositoryPortableData {
+    nlohmann::json history = nlohmann::json::object();
+    nlohmann::json artifacts = nlohmann::json::array();
+    nlohmann::json git = nlohmann::json::object();
+};
+
+struct RepositoryGitImport {
+    std::uint64_t commits = 0;
+    std::uint64_t blobs = 0;
+    nlohmann::json commit_changes = nlohmann::json::object();
+};
+
 // HTTP-free access to the liquid store selected by a repository's customer.
 // The libliquid implementation remains inside the HTTP adapter translation
 // unit.
@@ -180,6 +198,16 @@ public:
                         const std::string& result_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id, const std::string& repository_id) = 0;
+
+    virtual SyncStoreResult<RepositoryPortableData> export_portable(
+        const std::string& customer_id, const std::string& repository_id, bool include_git) = 0;
+    virtual SyncStoreResult<void> import_portable(const std::string& customer_id,
+                                                  const std::string& repository_id,
+                                                  const RepositoryPortableData& data) = 0;
+    virtual SyncStoreResult<RepositoryGitImport>
+    import_git(const std::string& customer_id,
+               const std::string& repository_id,
+               const std::string& source_directory) = 0;
 
     virtual SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
     refs(const std::string& customer_id, const std::string& repository_id) = 0;

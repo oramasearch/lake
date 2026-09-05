@@ -36,7 +36,10 @@ Lake links libliquid as a library-only submodule and opens one customer store at
 are pinned. The source tree serves repository push, pull, missing-object negotiation, chunk upload,
 and ranged reads through the registry, with per-change policy and signed audit. These routes are not
 part of the production state above until a containing image and operator volume support are
-deployed. Identity core
+deployed. The source tree also provides signed portable repository export/import, including the
+liquid history/object transfer, forge state, direct grants, artifact evidence, optional Git
+projection, and its export download page. Recorded GitHub imports map history, issue/review
+discussion, and workflow documents with a durable fidelity report. Identity core
 adds migrations `0007_identity_core` and `0008_mfa_recovery`, verified TAAP documents, password
 plus TOTP with one-use recovery codes, persisted WebAuthn, OAuth, row-resolved sessions, scoped
 tokens, device revocation, lake-signed passkey-to-TAAP bindings, and the hosted identity pages.

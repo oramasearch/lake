@@ -24,6 +24,12 @@ the lake `identity`, and the identity sign-up/sign-in entry capabilities documen
 Repository reads are the deliberate public-read exception: anonymous calls return only a public
 repository and its content; all other repository visibility levels remain protected.
 
+[`export.md`](export.md) defines the signed `lake_export/1` portable repository archive and its
+import validation.
+
+[`github-import.md`](github-import.md) defines recorded GitHub migration input and its explicit
+fidelity report.
+
 ## Operational routes
 
 | Route | Contract |
@@ -59,6 +65,8 @@ repository and its content; all other repository visibility levels remain protec
 | `create_release`, `list_releases` | read/action | repository id, tag, change, and build-result IDs | tag release retaining verified attestation evidence | [forge.md](forge.md) |
 | `create_webhook`, `list_webhooks`, `deliver_webhook`, `retry_webhook_delivery`, `list_webhook_deliveries` | read/action | repository id, subscription, endpoint, event, payload, or delivery ID | signed delivery attempts and retained retry log | [forge.md](forge.md) |
 | `set_branch_protection`, `list_branch_protections` | read/action | repository id, ref pattern, review/verification/fast-forward requirements, and allowed pushers | ref policy records and policy-object binding; enforcement waits on liquid #177 | [forge.md](forge.md) |
+| `export_repository`, `import_repository`, `list_exports` | read/action | repository or destination customer, archive, and optional Git projection | signed portable archive, recreated repository, or prior export records | [export.md](export.md) |
+| `import_github_repository` | action | destination customer, local Git directory, and recorded GitHub responses | imported repository and durable fidelity report | [github-import.md](github-import.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
 | `list_memberships`, `create_membership` | read/action | scope, principal, role, TAAP evidence | membership(s) | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
