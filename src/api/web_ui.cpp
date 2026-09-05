@@ -1313,6 +1313,119 @@ std::string web_ui_change(const control::Repository& repository,
     return web_ui_change(repository, change, differences, {}, signed_in);
 }
 
+std::string web_ui_issues(const control::Repository& repository,
+                          const std::vector<control::ForgeRecord>& issues,
+                          std::string_view state,
+                          std::string_view label,
+                          std::string_view assignee,
+                          bool signed_in) {
+    std::string content = std::format(
+        "<p class=\"eyebrow\">issue tracker</p><h1>Issues</h1><p class=\"sub\">{}</p>{}"
+        "<form class=\"filters\" method=\"get\" action=\"/issues\">"
+        "<input type=\"hidden\" name=\"repository_id\" value=\"{}\">"
+        "<label>State<select name=\"state\"><option value=\"\"{}>All</option>"
+        "<option value=\"open\"{}>Open</option><option value=\"closed\"{}>Closed</option>"
+        "</select></label><label>Label<input name=\"label\" value=\"{}\"></label>"
+        "<label>Assignee<input name=\"assignee\" value=\"{}\"></label>"
+        "<button type=\"submit\">Filter</button></form>",
+        web_ui_escape(repository_name(repository)),
+        forge_tabs(repository, "issues"),
+        web_ui_escape(repository.id),
+        state.empty() ? " selected" : "",
+        state == "open" ? " selected" : "",
+        state == "closed" ? " selected" : "",
+        web_ui_escape(label),
+        web_ui_escape(assignee));
+    std::size_t visible = 0;
+    content += "<div class=\"issue-list\">";
+    for (const control::ForgeRecord& issue : issues) {
+        const std::string issue_state = issue.value.value("state", "open");
+        const std::vector<std::string> labels =
+            issue.value.value("labels", std::vector<std::string>{});
+        const std::vector<std::string> assignees =
+            issue.value.value("assignees", std::vector<std::string>{});
+        if ((!state.empty() && issue_state != state) ||
+            (!label.empty() && !std::ranges::contains(labels, label)) ||
+            (!assignee.empty() && !std::ranges::contains(assignees, assignee))) {
+            continue;
+        }
+        ++visible;
+        std::string label_markup;
+        for (const std::string& item : labels) {
+            label_markup += badge_markup(item);
+        }
+        content += std::format("<article class=\"panel issue-row\"><div><h2><a "
+                               "href=\"/issue?repository_id={}&amp;id={}\">"
+                               "{}</a></h2><p class=\"sub\">{} · opened {} · assignees "
+                               "{}</p></div><div>{}{}</div></article>",
+                               web_ui_escape(url_component(repository.id)),
+                               web_ui_escape(url_component(issue.id)),
+                               web_ui_escape(issue.value.value("title", "Untitled issue")),
+                               identifier_markup(issue.id),
+                               web_ui_escape(issue.created_at),
+                               web_ui_escape(joined(assignees)),
+                               badge_markup(issue_state),
+                               label_markup);
+    }
+    content += "</div>";
+    if (visible == 0) {
+        content += "<div class=\"panel empty\">No issues match these filters.</div>";
+    }
+    return web_ui_shell("lake — issues", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_issue(const control::Repository& repository,
+                         const control::ForgeRecord& issue,
+                         const std::vector<control::ForgeRecord>& comments,
+                         bool signed_in) {
+    const std::vector<std::string> labels = issue.value.value("labels", std::vector<std::string>{});
+    const std::vector<std::string> assignees =
+        issue.value.value("assignees", std::vector<std::string>{});
+    const std::vector<std::string> references =
+        issue.value.value("references", std::vector<std::string>{});
+    std::string labels_markup;
+    for (const std::string& label : labels) {
+        labels_markup += badge_markup(label);
+    }
+    std::string references_markup;
+    for (const std::string& reference : references) {
+        references_markup += std::format("<li>{}</li>", identifier_markup(reference));
+    }
+    if (references_markup.empty()) {
+        references_markup = "<li class=\"muted\">No linked changes.</li>";
+    }
+    std::string content = std::format(
+        "<p class=\"eyebrow\">issue</p><h1>{}</h1><p class=\"sub\">{} opened {} {}</p>{}"
+        "<div class=\"issue-layout\"><div><article class=\"panel issue-body\">{}</article>"
+        "<section class=\"discussion\"><h2>Discussion</h2>",
+        web_ui_escape(issue.value.value("title", "Untitled issue")),
+        identifier_markup(issue.id),
+        web_ui_escape(issue.created_at),
+        badge_markup(issue.value.value("state", "open")),
+        forge_tabs(repository, "issues"),
+        web_ui_markdown(issue.value.value("body", "")));
+    if (comments.empty()) {
+        content += "<div class=\"panel empty\">No discussion yet.</div>";
+    } else {
+        for (const control::ForgeRecord& comment : comments) {
+            content += std::format(
+                "<article class=\"panel issue-comment\"><p class=\"sub\">{} · {}</p>{}</article>",
+                identifier_markup(comment.id),
+                web_ui_escape(comment.created_at),
+                web_ui_markdown(comment.value.value("body", "")));
+        }
+    }
+    content +=
+        std::format("</section></div><aside class=\"panel issue-details\"><h2>Details</h2><dl>"
+                    "<dt>labels</dt><dd>{}</dd><dt>assignees</dt><dd>{}</dd></dl>"
+                    "<h3>Linked changes</h3><ul>{}</ul></aside></div>",
+                    labels_markup.empty() ? "<span class=\"muted\">None</span>" : labels_markup,
+                    assignees.empty() ? "<span class=\"muted\">Unassigned</span>"
+                                      : web_ui_escape(joined(assignees)),
+                    references_markup);
+    return web_ui_shell("lake — issue", repository_name(repository), content, signed_in);
+}
+
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
                                         bool signed_in) {

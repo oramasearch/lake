@@ -544,6 +544,51 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     expect_theme_scripts(artifact_page);
 }
 
+TEST(WebUi, IssueTrackerRendersFiltersDiscussionAndLinkedChangesSafely) {
+    const lake::control::Repository repository{
+        "r1", "c1", "forge", "description", "public", "", "", "created", "updated"};
+    const lake::control::ForgeRecord open_issue{
+        "issue-long-identifier-0123456789",
+        "r1",
+        "issue",
+        "2026-09-05",
+        "2026-09-05",
+        {{"title", "Fix <parser>"},
+         {"body", "## Reproduction\n\nUse `lake`. <script>x</script>"},
+         {"state", "open"},
+         {"labels", {"bug", "priority"}},
+         {"assignees", {"taap:1:alice"}},
+         {"references", {"blake3:change-0123456789"}}}};
+    const lake::control::ForgeRecord closed_issue{
+        "issue-2", "r1", "issue", "created", "updated", {{"title", "Closed"}, {"state", "closed"}}};
+    const std::string list =
+        lake::api::web_ui_issues(repository, {open_issue, closed_issue}, "open", "bug", "", false);
+    EXPECT_NE(list.find("Fix &lt;parser&gt;"), std::string::npos);
+    EXPECT_NE(list.find("name=\"state\""), std::string::npos);
+    EXPECT_NE(list.find("value=\"open\" selected"), std::string::npos);
+    EXPECT_NE(list.find("taap:1:alice"), std::string::npos);
+    EXPECT_EQ(list.find(">Closed</a>"), std::string::npos);
+    expect_theme_scripts(list);
+
+    const lake::control::ForgeRecord comment{
+        "comment-1",
+        "r1",
+        "issue_comment",
+        "2026-09-05",
+        "2026-09-05",
+        {{"issue_id", open_issue.id}, {"body", "Confirmed with **tests**. <iframe>x</iframe>"}}};
+    const std::string detail = lake::api::web_ui_issue(repository, open_issue, {comment}, false);
+    EXPECT_NE(detail.find("id=\"reproduction\""), std::string::npos);
+    EXPECT_NE(detail.find("Use <code>lake</code>. &lt;script&gt;x&lt;/script&gt;"),
+              std::string::npos);
+    EXPECT_NE(detail.find("Confirmed with <strong>tests</strong>. &lt;iframe&gt;x&lt;/iframe&gt;"),
+              std::string::npos);
+    EXPECT_NE(detail.find("Linked changes"), std::string::npos);
+    EXPECT_NE(detail.find("blake3:chang…3456789"), std::string::npos);
+    EXPECT_EQ(detail.find("<script>x</script>"), std::string::npos);
+    expect_theme_scripts(detail);
+}
+
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     lake::audit::Event event{
         .id = "event-1",

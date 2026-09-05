@@ -356,6 +356,25 @@ int main(int argc, char** argv) {
                  "export",
                  {{"include_git", false}, {"manifest", {{"format", "lake_export_manifest/1"}}}}}),
             "create export record");
+    const std::string change_id = liquid::to_string(change.value);
+    const auto fixture_issue = require(
+        store->create_forge_record(
+            {repository.id,
+             "issue",
+             {{"title", "Keep source anchors stable"},
+              {"body",
+               "## Context\n\nSource links should survive a new change and remain safe to share."},
+              {"state", "open"},
+              {"labels", {"forge", "accessibility"}},
+              {"assignees", {principal.taap_id}},
+              {"references", {change_id}}}}),
+        "create issue record");
+    require(store->create_forge_record(
+                {repository.id,
+                 "issue_comment",
+                 {{"issue_id", fixture_issue.id},
+                  {"body", "Confirmed with keyboard navigation and a **fresh** source view."}}}),
+            "create issue comment");
 
     const std::string operator_token = admin_token;
     const std::vector<std::tuple<std::string, std::string, std::string>> pages = {
@@ -409,8 +428,11 @@ int main(int argc, char** argv) {
         {"changes", operator_token, std::format("/changes?repository_id={}", repository.id)},
         {"change",
          operator_token,
-         std::format(
-             "/change?repository_id={}&id={}", repository.id, liquid::to_string(change.value))},
+         std::format("/change?repository_id={}&id={}", repository.id, change_id)},
+        {"issues", operator_token, std::format("/issues?repository_id={}", repository.id)},
+        {"issue",
+         operator_token,
+         std::format("/issue?repository_id={}&id={}", repository.id, fixture_issue.id)},
         {"conflicts", operator_token, std::format("/conflicts?repository_id={}", repository.id)},
         {"artifacts", operator_token, std::format("/artifacts?repository_id={}", repository.id)},
         {"artifact",

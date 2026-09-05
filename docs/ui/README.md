@@ -33,6 +33,8 @@ exports, SSO, repository content, and drive views.
 | File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>`, `/file/raw`, `/file/download` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download responses |
 | Changes | `GET /changes?repository_id=<uuid>` | the libliquid change log |
 | Change | `GET /change?repository_id=<uuid>&id=<change>` | title and rendered message, compact identities, review state, file stats, unified/side-by-side text hunks, anchored comments, conflicts, checks, and attestations |
+| Issues | `GET /issues?repository_id=<uuid>[&state=<state>&label=<label>&assignee=<identity>]` | filterable issue list with state, labels, assignees, and compact identities |
+| Issue | `GET /issue?repository_id=<uuid>&id=<issue>` | sanitized Markdown body and discussion, labels, assignees, and linked changes |
 | Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |
 | Artifacts | `GET /artifacts?repository_id=<uuid>[&action=<digest>&output=<path>&content=<digest>&cursor=<cursor>&limit=<n>]` | filtered cursor pages of build results |
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |

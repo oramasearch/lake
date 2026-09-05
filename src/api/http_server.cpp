@@ -3737,6 +3737,8 @@ struct ApiServer::Impl {
             "/file",
             "/changes",
             "/change",
+            "/issues",
+            "/issue",
             "/conflicts",
             "/artifact",
             "/drive",
@@ -5982,6 +5984,90 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_issues_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        if (id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult issues_result =
+            registry.call("list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!issues_result.ok) {
+            return serve_repository_page_error(route, ctx, issues_result);
+        }
+        std::vector<control::ForgeRecord> issues;
+        for (const nlohmann::json& value : issues_result.value.at("items")) {
+            issues.push_back(forge_record_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_issues(repository_from_json(repository_result.value),
+                                       issues,
+                                       query_value(route, "state"),
+                                       query_value(route, "label"),
+                                       query_value(route, "assignee"),
+                                       ctx.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_issue_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        const std::string issue_id = query_value(route, "id");
+        if (id.empty() || issue_id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult issues_result =
+            registry.call("list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!issues_result.ok) {
+            return serve_repository_page_error(route, ctx, issues_result);
+        }
+        std::optional<control::ForgeRecord> issue;
+        for (const nlohmann::json& value : issues_result.value.at("items")) {
+            control::ForgeRecord candidate = forge_record_from_json(value);
+            if (candidate.id == issue_id) {
+                issue = std::move(candidate);
+                break;
+            }
+        }
+        if (!issue) {
+            return send_text(
+                route,
+                boost::http::status::not_found,
+                nlohmann::json{{"error", "not_found"}, {"message", "issue not found"}}.dump(),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        const ApiResult comments_result =
+            registry.call("list_issue_comments", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!comments_result.ok) {
+            return serve_repository_page_error(route, ctx, comments_result);
+        }
+        std::vector<control::ForgeRecord> comments;
+        for (const nlohmann::json& value : comments_result.value.at("items")) {
+            control::ForgeRecord comment = forge_record_from_json(value);
+            if (comment.value.value("issue_id", "") == issue_id) {
+                comments.push_back(std::move(comment));
+            }
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_issue(
+                repository_from_json(repository_result.value), *issue, comments, ctx.authorized),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
     boost::http::route_task serve_conflicts_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "repository_id");
@@ -7853,6 +7939,13 @@ bool ApiServer::start() {
         http::method::get, "/change", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/change", impl.serve_change_page(route));
         });
+    router.add(
+        http::method::get, "/issues", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/issues", impl.serve_issues_page(route));
+        });
+    router.add(http::method::get, "/issue", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/issue", impl.serve_issue_page(route));
+    });
     router.add(
         http::method::get, "/conflicts", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/conflicts", impl.serve_conflicts_page(route));

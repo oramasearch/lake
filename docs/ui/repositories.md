@@ -12,6 +12,8 @@ capability as REST and MCP, so authorization and audit recording have one path.
 | File | `GET /file?repository_id=<id>&ref=<ref>&path=<path>` | `repository_file`, `list_changes`, `change_diff` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download links |
 | Change log | `GET /changes?repository_id=<id>` | `list_changes` | libliquid change identities and metadata |
 | Change | `GET /change?repository_id=<id>&id=<change>` | `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` | review title/message, compact identities, state, file stats, text-hunk views, anchored comments, conflict values, checks, and attestations |
+| Issues | `GET /issues?repository_id=<id>` | `list_issues` | issue state, labels and assignees with server-side query filtering |
+| Issue | `GET /issue?repository_id=<id>&id=<issue>` | `list_issues`, `list_issue_comments` | sanitized issue body and discussion, labels, assignees, and linked change identities |
 | Conflicts | `GET /conflicts?repository_id=<id>` | `list_conflicts` | unresolved conflict paths and their blob values |
 | Artifacts | `GET /artifacts?repository_id=<id>` | `list_artifacts` | filtered cursor pages of libliquid build results |
 | Artifact | `GET /artifact?repository_id=<id>&id=<result>` | `get_artifact` | one result, outputs, timing, cache/divergence state, verified attestations and trace summary |
@@ -37,6 +39,11 @@ default, while one small script switches to an already-rendered side-by-side rep
 copies the full change identity. Comments remain bound to their liquid text anchor. Review state,
 per-file statistics, check outcomes, and verified attestation counts are readable without that
 script.
+
+Issue list and detail routes likewise stay adapters over forge capabilities. State, label, and
+assignee filters are applied to the authorized list; detail lookup and comment association use
+their durable record identities. Bodies and comments share the server-side Markdown renderer, so
+stored raw HTML is displayed as text and never reaches the response as markup.
 
 The file browser resolves each path's newest change from those structural diffs. File pages map
 text-hunk ranges onto numbered source lines for blame. C and C++ source is parsed with liquid's

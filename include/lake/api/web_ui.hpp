@@ -132,6 +132,16 @@ std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
                           bool signed_in);
+std::string web_ui_issues(const control::Repository& repository,
+                          const std::vector<control::ForgeRecord>& issues,
+                          std::string_view state,
+                          std::string_view label,
+                          std::string_view assignee,
+                          bool signed_in);
+std::string web_ui_issue(const control::Repository& repository,
+                         const control::ForgeRecord& issue,
+                         const std::vector<control::ForgeRecord>& comments,
+                         bool signed_in);
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
                                         bool signed_in);

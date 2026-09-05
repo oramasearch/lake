@@ -60,6 +60,18 @@ representation and copies the complete change identity. If the script is unavail
 hunk, comment, conflict, check, attestation count, and full identity remains present. Full
 identities are also available on hover through `title`.
 
+## Issues
+
+`GET /issues?repository_id=<id>` lists forge issues and accepts state, label, and assignee filters
+as an ordinary GET form. Each result keeps its state, labels, assignees, creation date, and compact
+identity visible. An unmatched filter combination has a specific empty result rather than an
+empty table.
+
+`GET /issue?repository_id=<id>&id=<issue>` renders the issue body and discussion Markdown on the
+server, followed by labels, assignees, and linked change identities. Raw HTML in every body is
+escaped before Markdown markup is introduced. The page has no local script: links, filters,
+discussion, and supporting details follow document order and work unchanged without JavaScript.
+
 ## Keyboard and no-script behavior
 
 Source order is skip link, primary navigation, top-bar controls, breadcrumbs, repository tabs,

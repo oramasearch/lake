@@ -802,6 +802,47 @@ dd {
   color: var(--lake-text-primary);
   background: var(--lake-surface-raised);
 }
+.issue-list,
+.discussion {
+  display: grid;
+  gap: var(--lake-space-3);
+}
+.issue-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--lake-space-4);
+}
+.issue-row h2 {
+  margin-bottom: var(--lake-space-1);
+  font-size: var(--lake-text-16);
+}
+.issue-row h2 a {
+  color: inherit;
+  text-decoration: none;
+}
+.issue-row .sub {
+  margin: 0;
+}
+.issue-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(16rem, 1fr);
+  gap: var(--lake-space-5);
+}
+.issue-body,
+.issue-comment {
+  margin-bottom: var(--lake-space-4);
+}
+.issue-comment .sub {
+  padding-bottom: var(--lake-space-2);
+  border-bottom: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+.issue-details {
+  align-self: start;
+}
+.issue-details .badge {
+  margin: 0 var(--lake-space-1) var(--lake-space-1) 0;
+}
 .image-preview {
   max-width: 100%;
   max-height: 40rem;
@@ -1132,6 +1173,9 @@ dd {
     top: var(--lake-topbar-height);
   }
   .repository-layout {
+    grid-template-columns: 1fr;
+  }
+  .issue-layout {
     grid-template-columns: 1fr;
   }
   .tree-browser-heading,
