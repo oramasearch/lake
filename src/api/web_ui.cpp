@@ -378,6 +378,18 @@ std::string identifier_markup(std::string_view value) {
         web_ui_escape(abbreviated_identifier(value)));
 }
 
+std::string identifier_list_markup(const std::vector<std::string>& values) {
+    if (values.empty()) {
+        return "<span class=\"muted\">None</span>";
+    }
+    std::string output = "<span class=\"identity-list\">";
+    for (const std::string& value : values) {
+        output += identifier_markup(value);
+    }
+    output += "</span>";
+    return output;
+}
+
 std::string file_language(std::string_view path) {
     const std::size_t dot = path.find_last_of('.');
     if (dot == std::string_view::npos) {
@@ -1157,7 +1169,7 @@ std::string web_ui_change(const control::Repository& repository,
                 "{}</div><p class=\"sub\">Reviewers: {}</p></div>",
                 web_ui_escape(item.value.value("state", "open")),
                 badge_markup(item.value.value("state", "open")),
-                web_ui_escape(joined(item.value.value("reviewers", std::vector<std::string>{}))));
+                identifier_list_markup(item.value.value("reviewers", std::vector<std::string>{})));
         }
     }
     content += "</section>";
@@ -1259,19 +1271,6 @@ std::string web_ui_change(const control::Repository& repository,
                                            new_line,
                                            new_line,
                                            web_ui_escape(line));
-                    for (const control::ForgeRecord& comment : review.comments) {
-                        const nlohmann::json anchor =
-                            comment.value.value("anchor", nlohmann::json::object());
-                        if (anchor.value("path", "") != entry.path ||
-                            anchor.value("line", std::uint64_t{0}) != new_line) {
-                            continue;
-                        }
-                        content += std::format("<article class=\"review-comment\"><p "
-                                               "class=\"sub\">{} · line {}</p>{}</article>",
-                                               identifier_markup(comment.id),
-                                               new_line,
-                                               web_ui_markdown(comment.value.value("body", "")));
-                    }
                     ++new_line;
                 }
                 content += "</div>";
@@ -1300,6 +1299,21 @@ std::string web_ui_change(const control::Repository& repository,
                 }
             }
             content += "</div>";
+            for (const control::ForgeRecord& comment : review.comments) {
+                const nlohmann::json anchor =
+                    comment.value.value("anchor", nlohmann::json::object());
+                if (anchor.value("path", "") != entry.path) {
+                    continue;
+                }
+                const std::uint64_t line = anchor.value("line", std::uint64_t{0});
+                content += std::format("<article class=\"review-comment\"><p class=\"sub\">{} · "
+                                       "<a href=\"#{}-new-{}\">line {}</a></p>{}</article>",
+                                       identifier_markup(comment.id),
+                                       web_ui_escape(markdown_slug(entry.path)),
+                                       line,
+                                       line,
+                                       web_ui_markdown(comment.value.value("body", "")));
+            }
         }
         content += "</section>";
     }
@@ -1383,7 +1397,7 @@ std::string web_ui_issues(const control::Repository& repository,
                                web_ui_escape(issue.value.value("title", "Untitled issue")),
                                identifier_markup(issue.id),
                                web_ui_escape(issue.created_at),
-                               web_ui_escape(joined(assignees)),
+                               identifier_list_markup(assignees),
                                badge_markup(issue_state),
                                label_markup);
     }
@@ -1441,7 +1455,7 @@ std::string web_ui_issue(const control::Repository& repository,
                     "<h3>Linked changes</h3><ul>{}</ul></aside></div>",
                     labels_markup.empty() ? "<span class=\"muted\">None</span>" : labels_markup,
                     assignees.empty() ? "<span class=\"muted\">Unassigned</span>"
-                                      : web_ui_escape(joined(assignees)),
+                                      : identifier_list_markup(assignees),
                     references_markup);
     return web_ui_shell("lake — issue", repository_name(repository), content, signed_in);
 }
@@ -1574,7 +1588,7 @@ std::string web_ui_branch_protection(const control::Repository& repository,
                                                                           : "optional"),
             badge_markup(rule.value.value("fast_forward_only", false) ? "fast-forward only"
                                                                       : "any"),
-            web_ui_escape(joined(pushers)),
+            identifier_list_markup(pushers),
             identifier_markup(rule.value.value("policy_object_id", "")));
     }
     content += "</section><section><h2>Refused updates</h2>";

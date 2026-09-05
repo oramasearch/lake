@@ -764,6 +764,12 @@ dd {
 .review-state .sub {
   margin: 0;
 }
+.identity-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--lake-space-1);
+  max-width: 100%;
+}
 .file-summary ul {
   margin-bottom: 0;
   padding: 0;

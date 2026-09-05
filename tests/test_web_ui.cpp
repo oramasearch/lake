@@ -477,6 +477,7 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     EXPECT_NE(change_page.find("approved"), std::string::npos);
     EXPECT_NE(change_page.find("Looks <strong>good</strong>. &lt;img src=x&gt;"),
               std::string::npos);
+    EXPECT_NE(change_page.find("href=\"#readme-md-new-2\">line 2</a>"), std::string::npos);
     EXPECT_NE(change_page.find("1 attestations"), std::string::npos);
     EXPECT_EQ(change_page.find("<script>x</script>"), std::string::npos);
     EXPECT_NE(change_page.find("id=\"change-review-script\""), std::string::npos);

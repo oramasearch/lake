@@ -58,7 +58,10 @@ selected by change and review identity after their capability reads.
 The unified diff is the no-script view. One page-local vanilla script switches to the side-by-side
 representation and copies the complete change identity. If the script is unavailable, every file,
 hunk, comment, conflict, check, attestation count, and full identity remains present. Full
-identities are also available on hover through `title`.
+identities are also available on hover through `title`. Comment threads follow both diff
+representations and link back to their numbered new-line anchor, so switching layouts never hides
+discussion. Reviewer, assignee, and allowed-pusher identities use the same compact rule and wrap
+as groups rather than overflowing their panels.
 
 ## Issues
 

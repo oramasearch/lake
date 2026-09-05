@@ -152,22 +152,26 @@ renders both themes at 1440 by 900. Session values and generated identifiers rem
 `.cache`; only the PNG evidence is checked in.
 
 The baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. The fixture manifest covers
-all 48 pages below in light and dark:
+all 53 pages below in light and dark:
 
 ```text
 home login sign-up sign-in mfa passkey-sign-in sessions passkeys tokens
 customers organizations teams sso members invitations grants access
 applications application application-users application-organizations application-events
 application-sign-up application-sign-in application-mfa application-passkey
-repositories repository exports repository-tree file changes change conflicts
+repositories repository exports repository-tree file changes change issues issue releases webhooks
+protection conflicts
 artifacts artifact search secret-mounts secrets encryption-keys metering audit transparency
 drive drive-preview drive-history drive-share shared-link
 ```
 
 The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
-path-for-path pair. Both directories contain 96 PNG files, and every capture is 1440 by 900.
+path-for-path pair. Both directories contain 106 PNG files, and every capture is 1440 by 900.
+The five routes introduced with the forge work had no old response; their baseline slot uses the
+closest prior record-list or record-detail page so the comparison still records the layout that
+preceded the new forge page.
 The three primary review screens are the
 [repository](screenshots/after/repository-light.png),
 [change](screenshots/after/change-light.png), and
-[organizations](screenshots/after/organizations-light.png) pages; each has a neighboring
+[issue](screenshots/after/issue-light.png) pages; each has a neighboring
 `-dark.png` capture from the same seeded run.
