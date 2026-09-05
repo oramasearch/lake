@@ -1128,9 +1128,9 @@ public:
         }
         liquid::sync_server_options options;
         options.authorize =
-            [authorize = std::move(authorize)](
-                const liquid::sync_item& item,
-                std::span<const liquid::sync_ref_update> updates) -> liquid::runtime::task<void> {
+            [authorize = std::move(authorize)](const liquid::sync_item& item,
+                                               std::span<const liquid::sync_ref_update> updates)
+            -> liquid::runtime::task<std::vector<liquid::sync_ref_verdict>> {
             std::vector<BranchRefUpdate> reference_updates;
             reference_updates.reserve(updates.size());
             for (const liquid::sync_ref_update& update : updates) {
@@ -1152,7 +1152,18 @@ public:
             if (!result) {
                 co_return std::unexpected(liquid_error(result.error()));
             }
-            co_return liquid::result<void>{};
+            std::vector<liquid::sync_ref_verdict> verdicts;
+            verdicts.reserve(result->size());
+            for (const SyncRefVerdict& verdict : *result) {
+                verdicts.push_back({
+                    .name = verdict.name,
+                    .verdict = verdict.verdict == SyncRefVerdictKind::Accepted
+                                   ? liquid::sync_ref_verdict_kind::accepted
+                                   : liquid::sync_ref_verdict_kind::refused,
+                    .reason = verdict.reason,
+                });
+            }
+            co_return verdicts;
         };
         auto server =
             liquid::sync_server{*(*state)->subject, *(*state)->objects, std::move(options)};

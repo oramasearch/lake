@@ -1045,10 +1045,12 @@ bool offline_grant_fields_match(const control::OfflineGrant& grant) {
 SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
                                           const std::string& customer_id,
                                           const std::string& repository_id) {
-    return [&context, customer_id, repository_id](
-               const SyncPushItem& item,
-               std::span<const BranchRefUpdate> updates) -> SyncStoreResult<void> {
+    return [&context, customer_id, repository_id](const SyncPushItem& item,
+                                                  std::span<const BranchRefUpdate> updates)
+               -> SyncStoreResult<std::vector<SyncRefVerdict>> {
         if (item.kind == SyncPushItemKind::Reference) {
+            std::vector<SyncRefVerdict> verdicts;
+            verdicts.reserve(updates.size());
             for (const BranchRefUpdate& update : updates) {
                 const auto evaluated = evaluate_branch_protection(*context.store,
                                                                   context.acting_identity,
@@ -1066,7 +1068,9 @@ SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
                     if (!recorded) {
                         return std::unexpected(recorded.error());
                     }
-                    return std::unexpected(evaluated.error());
+                    verdicts.push_back(
+                        {update.name, SyncRefVerdictKind::Refused, evaluated.error().message});
+                    continue;
                 }
                 for (const std::string& rule : evaluated->matched_rules) {
                     const auto recorded =
@@ -1081,8 +1085,9 @@ SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
                         return std::unexpected(recorded.error());
                     }
                 }
+                verdicts.push_back({update.name, SyncRefVerdictKind::Accepted, {}});
             }
-            return {};
+            return verdicts;
         }
 
         const std::string& change_id = item.change_id;
@@ -1168,7 +1173,12 @@ SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
         if (!decision->allowed) {
             return std::unexpected(SyncStoreError{"unauthorized", reason, change_id});
         }
-        return {};
+        std::vector<SyncRefVerdict> verdicts;
+        verdicts.reserve(updates.size());
+        for (const BranchRefUpdate& update : updates) {
+            verdicts.push_back({update.name, SyncRefVerdictKind::Accepted, {}});
+        }
+        return verdicts;
     };
 }
 

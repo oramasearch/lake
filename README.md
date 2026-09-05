@@ -23,11 +23,13 @@ liquid is the tool. lake is where it collects.
 > capabilities now create, rename, transfer, set `private` / `organization` / `public` visibility,
 > and tombstone repositories in migration `0006_repository_lifecycle`; every outcome is recorded
 > through the signed audit registry. Lake links libliquid as a library-only submodule and opens one
-> customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160, #165, and #184's
-> client, public server, protocol, and reference-update authorization contracts are pinned. Lake
+> customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160, #165, and #192's
+> client, public server, protocol, and per-reference authorization and outcome contracts are
+> pinned. Lake
 > serves push, pull, missing-object negotiation, chunk upload, and ranged chunk read through the
 > registry, with per-change and protected-reference policy,
-> offline-grant revocation checks, exact refusal reasons, atomic refusal, and signed outcome audit.
+> offline-grant revocation checks, exact refusal reasons, independent reference application,
+> opt-in atomic refusal, and signed outcome audit.
 > The source tree also provides signed portable repository export and import, including liquid
 > history/object transfer, forge state, grants, artifact evidence, an optional Git projection, and
 > a server-rendered export download page. Recorded GitHub imports map Git history, issues,

@@ -125,8 +125,8 @@ from the registry.
 
 The binary sync operations use `/v1/repositories/<repository-id>/sync/*` rather than the generic
 `/v1/<capability>` mapping. Their OpenAPI operations are generated from registry entries, and the
-complete wire contract, including Liquid #184's server-derived reference-update authorization
-context and branch-protection enforcement, is mirrored in [`sync.md`](sync.md) and
+complete wire contract, including Liquid #192's server-derived per-reference authorization,
+outcome context, and branch-protection enforcement, is mirrored in [`sync.md`](sync.md) and
 [`forge.md`](forge.md).
 
 OAuth providers return the browser to `GET /v1/oauth/<provider>/callback`. This callback is the

@@ -62,10 +62,8 @@ set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
 set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
 # Search uses oramacore-cpp's in-memory BM25F engine. Lake owns persistence
-# and the positional trigram postings in src/search/index.cpp.
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(ORAMACORE_CPP_CAPY OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/oramacore-cpp EXCLUDE_FROM_ALL)
+# and the positional trigram postings in src/search/index.cpp. Liquid supplies
+# the shared oramacore-cpp target at its pinned revision.
 set(BOOST_BEAST2_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_BEAST2_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/beast2 EXCLUDE_FROM_ALL)

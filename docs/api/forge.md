@@ -73,11 +73,12 @@ repository-child `path` policy object. A non-operator pusher must be permitted t
 object through `authorize`; inherited repository grants therefore remain effective and ref-specific
 grants can narrow access.
 
-Liquid #184 supplies `BranchRefUpdate` values containing the ref name, server-derived prior and
+Liquid #192 supplies `BranchRefUpdate` values containing the ref name, server-derived prior and
 proposed heads, and computed fast-forward result. Lake evaluates every reference callback with the
-authenticated caller and refuses the first failed rule. A refusal names the reference and rule; for
-example, `branch protection rejects a non-fast-forward update to main`. The registry refuses an
-anonymous or unauthorized push before invoking the reference evaluator.
+authenticated caller and returns one accepted or refused verdict per reference. A refusal names the
+reference and carries the rule's reason verbatim; for example,
+`branch protection rejects a non-fast-forward update to main`. The registry refuses an anonymous
+or unauthorized push before invoking the reference evaluator.
 
 An approved review is a `review` record whose `change_id` exactly equals the reference's proposed
 head and whose current `state` is `approved`. Approval for an ancestor, a different change, or a
@@ -87,10 +88,11 @@ Lake records one signed audit event for each protected reference decision. Allow
 kind `forge.branch_protection.allowed`; refusals use `forge.branch_protection.refused`. Both retain
 the repository, reference, caller, matched rule, and reason, never a credential.
 
-At the Liquid #184 pin, a callback refusal rejects the complete metadata batch before import, so a
-push with any refused reference applies no references. Liquid #189 changes this to per-reference
-application and returns an applied or refused verdict for each reference; clients that require the
-current all-or-nothing behavior will request `atomic`.
+An ordinary push applies accepted references independently and leaves refused references at their
+pre-push heads. The successful reply reports every requested reference as `applied` or `refused`;
+refused entries include the exact rule reason. A client that requires all-or-nothing publication
+sets `atomic: true`. Any refusal then leaves every reference unchanged, preserving the original
+refusal reason and reporting otherwise accepted entries as refused because the atomic push failed.
 
 ## Verify
 

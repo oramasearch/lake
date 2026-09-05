@@ -30,6 +30,14 @@ struct BranchRefUpdate {
     bool fast_forward = false;
 };
 
+enum class SyncRefVerdictKind { Accepted, Refused };
+
+struct SyncRefVerdict {
+    std::string name;
+    SyncRefVerdictKind verdict = SyncRefVerdictKind::Accepted;
+    std::string reason;
+};
+
 enum class SyncPushItemKind { Change, Reference };
 
 struct SyncPushItem {
@@ -37,8 +45,8 @@ struct SyncPushItem {
     std::string change_id;
 };
 
-using SyncPushAuthorizer =
-    std::function<SyncStoreResult<void>(const SyncPushItem&, std::span<const BranchRefUpdate>)>;
+using SyncPushAuthorizer = std::function<SyncStoreResult<std::vector<SyncRefVerdict>>(
+    const SyncPushItem&, std::span<const BranchRefUpdate>)>;
 
 struct RepositoryContentRef {
     std::string name;

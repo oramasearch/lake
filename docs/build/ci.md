@@ -35,10 +35,10 @@ docker rm -f lake-postgres
 ```
 
 The workflow caches `build/_deps`, which contains the CMake FetchContent downloads for Boost and
-GoogleTest. libliquid supplies nlohmann/json, Capy, Corosio, Boost.HTTP, and its own transitive
-dependencies; lake's adapter and libliquid's sync client share that one Boost.HTTP target. Its key
-includes the hash of `CMakeLists.txt`; a missing cache is valid and CMake downloads the dependencies
-again.
+GoogleTest. libliquid supplies nlohmann/json, Capy, Corosio, Boost.HTTP, OramaCore, and its own
+transitive dependencies; lake's adapter and libliquid's sync client share that one Boost.HTTP
+target. Its key includes the hash of `CMakeLists.txt`; a missing cache is valid and CMake downloads
+the dependencies again.
 
 `modules/liquid` is a library-only source submodule pinned to liquid `origin/main`. Initialise it
 with the rest of the module tree (`git submodule update --init --recursive`) before configuring a

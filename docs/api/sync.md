@@ -4,11 +4,11 @@
 metadata and content. This page mirrors liquid's `docs/library/sync.md` at the pinned revision and
 records lake's adapter-specific authorization, storage, and audit behavior.
 
-**Status: implemented.** liquid #160, #165, and #184 provide the bounded client, public
-`sync_server`, and server-derived reference-update authorization contracts. Lake registers their
-operations through its capability registry, streams the binary bodies in its one HTTP adapter
-translation unit, and stores all repositories owned by a customer in that customer's caller-owned
-liquid store.
+**Status: implemented.** liquid #160, #165, and #192 provide the bounded client, public
+`sync_server`, and server-derived per-reference authorization and outcome contracts. Lake
+registers their operations through its capability registry, streams the binary bodies in its one
+HTTP adapter translation unit, and stores all repositories owned by a customer in that customer's
+caller-owned liquid store.
 
 ## Repository URL and requests
 
@@ -31,10 +31,13 @@ chunked transfer coding. Frame boundaries are independent of HTTP read boundarie
 | `GET <repository>/sync/chunks/<digest>?offset=<n>&length=<n>` | none | raw verified logical bytes for the requested range |
 
 The metadata header is a canonical-CBOR map with `v: 1`, `cursor`, sorted `refs`, and sorted
-`objects`. A push header cursor is the end of the exported client journal. A pull request cursor is
-the last server cursor observed by that client. A response cursor is the next opaque cursor to
-persist for that peer. `objects` contains roots referenced by the metadata stream. Missing-object
-negotiation walks their content-addressed graph and sends only objects the receiver reports absent.
+`objects`. A push request may add `atomic: true`. A successful push reply may add `outcomes`, an
+array in request-ref order. Each entry is `{name, outcome: "applied"}` or
+`{name, outcome: "refused", reason}`. A push header cursor is the end of the exported client
+journal. A pull request cursor is the last server cursor observed by that client. A response
+cursor is the next opaque cursor to persist for that peer. `objects` contains roots referenced by
+the metadata stream. Missing-object negotiation walks their content-addressed graph and sends only
+objects the receiver reports absent.
 
 An optional `Authorization: Bearer <token>` header carries lake authentication. The CLI reads the
 token from `LIQUID_TOKEN`; credentials never appear in the URL or output.
@@ -72,9 +75,10 @@ peer messages. A retry can therefore name a dependency older than the active che
 without contradicting the shallow document's retained actor sequence.
 
 Before import changes state, the receiver parses every frame, verifies each actor identifier and
-TAAP signature, checks each change digest and referenced object, applies every directory message to
-candidate documents through the checked patch-returning path, and validates all refs. Any failure
-rejects the whole batch. The error `item` is the zero-based metadata-frame index that failed.
+TAAP signature, checks each change digest and referenced object, applies every selected directory
+message to candidate documents through the checked patch-returning path, and validates accepted
+refs. A validation failure rejects the selected import. The error `item` is the zero-based
+metadata-frame index that failed.
 
 ## Chunk stream
 
@@ -114,7 +118,8 @@ Non-success responses use `Content-Type: application/vnd.liquid.error-v1` and a 
 
 An interrupted request has no success response and is retried from the last acknowledged cursor.
 Servers do not advance that cursor until metadata import and required chunk publication both
-succeed.
+succeed. A reply that reports refused references is still successful and acknowledges the batch;
+the refused refs are offered again on later pushes.
 
 ## Public server and client contract
 
@@ -126,21 +131,28 @@ queries, pack-frame uploads, and logical range reads; the canonical codecs remai
 the transport status.
 
 `sync_server_options::authorize` is an optional asynchronous callback for changes and reference
-updates. The callback receives the metadata item plus the affected `sync_ref_update` values. Each
-update names the ref, supplies its server-derived prior and proposed heads, and reports whether the
-old head is reachable from the new head. Push computes this context before invoking callbacks in
-frame order and before repository import. A callback failure returns that error and leaves the
-complete metadata batch unchanged; object uploads that arrived earlier remain unreferenced
-content-addressed data eligible for collection. Embedders can perform authorization and audit work
-without reimplementing the wire format.
+updates. The callback receives the metadata item plus the affected `sync_ref_update` values and
+returns exactly one named `sync_ref_verdict` for each update. Each update names the ref, supplies
+its server-derived prior and proposed heads, and reports whether the old head is reachable from the
+new head. Push computes this context before invoking callbacks in frame order and before repository
+import. A refused verdict applies only to that ref and preserves its reason string; a callback task
+error refuses every affected ref. Object uploads that arrived earlier remain content-addressed data
+eligible for collection. Embedders can perform authorization and audit work without reimplementing
+the wire format.
+
+The server imports shared metadata with accepted ref frames and leaves refused refs at their
+pre-push heads. With `atomic: true`, any refusal prevents metadata import. Originally refused refs
+keep their reasons, while otherwise accepted refs report
+`atomic push refused because another reference was refused`.
 
 `repository::export_drips` writes as many `sync_item` values as fit in the supplied span and returns
 the next cursor plus an end flag. `repository::import_drips` accepts a span, verifies it as one
 atomic batch, and reports the number imported. `sync_session` sends or receives an object graph
 through a `remote_blob_source` after `find_missing`. `sync_endpoint` implements that source and the
-push/pull requests over vendored `oramasearch/http`. A caller may put its last observed cursor in
-`sync_endpoint_options`; the returned report supplies the next cursor to retain. All waiting
-operations are Capy tasks.
+push/pull requests over vendored `oramasearch/http`. A caller may put its last observed cursor and
+the push's `atomic` choice in `sync_endpoint_options`. The returned `sync_report::references`
+contains every reference outcome and reason, and the report supplies the next cursor to retain. All
+waiting operations are Capy tasks.
 
 ## Lake adapter
 
@@ -166,10 +178,11 @@ current UTC-hour metering row. Chunk writes also sample the store's exact unique
 `LAKE_STORAGE_QUOTA_BYTES` limits that gauge: a write that would cross it returns `busy` (HTTP
 429), while reads continue and existing bytes stay complete. See [metering.md](metering.md).
 
-Liquid #184 rejects the complete metadata batch when a reference callback refuses it. Lake therefore
-returns the precise reference-and-rule reason to the sync client and leaves every ref in that push
-unchanged. Liquid #189 will make reference application independent by default, with `atomic` for a
-client that requires all-or-nothing application.
+Lake returns one verdict per reference from branch-protection evaluation. A normal push applies
+accepted refs, leaves refused refs unchanged, and returns every outcome with the precise
+reference-and-rule reason. An atomic push with any refusal changes no ref and still reports every
+outcome. Shared metadata imports only when at least one ref can apply; uploaded objects remain in
+the content-addressed store regardless of the outcomes.
 
 Lake opens one caller-owned `liquid::store` at
 `LAKE_STORE_ROOT/<customer-id>/store` and passes it through `repository_options.store` when opening
