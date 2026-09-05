@@ -481,7 +481,7 @@ TEST(WebUi, TransparencyPageRendersVerifiedIdentityMatches) {
     EXPECT_NE(page.find("authorship/1&lt;&amp;"), std::string::npos);
     EXPECT_NE(page.find("person&lt;&amp;"), std::string::npos);
     EXPECT_EQ(page.find("person<&"), std::string::npos);
-    EXPECT_EQ(page.find("<script"), std::string::npos);
+    expect_theme_scripts(page);
 }
 
 TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {

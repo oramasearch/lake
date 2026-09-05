@@ -63,6 +63,8 @@ sort indicators, and expandable identifiers; neutral and semantic badges with st
 empty states, notices, toasts, code blocks, diffs, pagination, breadcrumbs, and inline SVG icons.
 Existing page markup uses these shared selectors, so the operator and Lake identity routes move
 together without adding renderer-side CSS.
+The public transparency monitor uses the same shell and the two shared theme scripts; it adds no
+page-specific script.
 
 Hosted application identity pages use a compact version of the same token, font, form, focus,
 theme, and motion contracts. Their validated application accent is a decorative rule and their
