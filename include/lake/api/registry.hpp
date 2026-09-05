@@ -14,6 +14,7 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/transparency/checkpoint.hpp"
+#include "lake/transparency/timestamps.hpp"
 
 namespace lake::control {
 class Store;
@@ -102,6 +103,11 @@ struct ApiContext {
     transparency::CheckpointService* checkpoints = nullptr;
     transparency::TiledLog* transparency_log = nullptr;
     transparency::TransparencySubmitter transparency_submitter;
+    transparency::TimestampService* timestamping = nullptr;
+    transparency::TsaSender tsa_sender;
+    std::string tsa_endpoint;
+    std::string tsa_trust_pem;
+    transparency::TimestampPolicy timestamp_policy;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;

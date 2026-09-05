@@ -125,6 +125,7 @@ add_library(lake-core STATIC
   src/api/drive_capabilities.cpp
   src/api/model_capabilities.cpp
   src/api/transparency_capabilities.cpp
+  src/api/timestamp_capabilities.cpp
   src/api/app_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
@@ -135,6 +136,7 @@ add_library(lake-core STATIC
   src/transparency/checkpoint.cpp
   src/transparency/log.cpp
   src/transparency/tuf.cpp
+  src/transparency/timestamps.cpp
   src/telemetry/metrics.cpp
 )
 target_include_directories(lake-core PUBLIC include)

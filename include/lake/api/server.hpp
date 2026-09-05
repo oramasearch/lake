@@ -25,9 +25,8 @@ class FederationIssuerPolicy;
 // (src/api/http_server.cpp). No beast2 / http / Boost.JSON type appears here.
 //
 // Threading: the server's io_context runs on its own thread. The owning loop
-// calls wait_for_work() to idle and drain() each tick (no-ops until lake has a
-// node to marshal onto — the API is kept so the shape matches Zetta from day
-// one).
+// calls wait_for_work() to idle and drain() each tick. drain() runs scheduled
+// owner-loop work such as timestamp-evidence renewal.
 namespace lake::api {
 
 struct ServerOptions {
@@ -66,6 +65,14 @@ struct ServerOptions {
     // LAKE_LOG_* environment variables and defaults the deployed mode to
     // witnessed.
     transparency::LogConfiguration log_configuration;
+    // RFC 3161 endpoint and trust roots used to timestamp checkpoint signatures.
+    // Empty endpoint disables timestamp creation and scheduled renewal.
+    std::string tsa_endpoint;
+    std::string tsa_trust_pem;
+    transparency::TimestampPolicy timestamp_policy;
+    // Optional transport supplied by embedded users and integration tests.
+    // The standalone server uses its outbound HTTP client when this is empty.
+    transparency::TsaSender tsa_sender;
     MeteringConfig metering;
 };
 

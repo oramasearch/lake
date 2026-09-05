@@ -29,8 +29,8 @@ std::string env_or(const char* name, std::string fallback) {
     return value && *value ? std::string(value) : std::move(fallback);
 }
 
-std::uint64_t env_u64(const char* name) {
-    const std::string value = env_or(name, "0");
+std::uint64_t env_u64(const char* name, std::uint64_t fallback = 0) {
+    const std::string value = env_or(name, std::to_string(fallback));
     std::uint64_t parsed = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
@@ -45,7 +45,7 @@ int usage() {
     std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] "
                  "[--store-root PATH]");
     std::println("       [--admin-token TOKEN] [--identity-seed BASE64] "
-                 "[--instance-kek VALUE] [--memory-store]");
+                 "[--instance-kek VALUE] [--tsa-url URL] [--memory-store]");
     std::println("  lake version");
     std::println("");
     std::println("  --control-db   Postgres URI of the control plane (default "
@@ -62,6 +62,10 @@ int usage() {
     std::println("  LAKE_LOG_WITNESSES JSON witness endpoint/public_key records; "
                  "LAKE_LOG_WITNESS_THRESHOLD selects their quorum");
     std::println("  LAKE_LOG_AGGREGATOR endpoint required by anchored mode");
+    std::println("  --tsa-url      RFC 3161 endpoint (default $LAKE_TSA_URL)");
+    std::println("  $LAKE_TSA_TRUST_CERT contains optional PEM trust roots for timestamp tokens");
+    std::println(
+        "  $LAKE_TSA_RENEWAL_SECONDS and $LAKE_TSA_RENEW_BEFORE_SECONDS set renewal policy");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -76,6 +80,12 @@ int main(int argc, char** argv) {
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
+    opts.tsa_endpoint = env_or("LAKE_TSA_URL", "");
+    opts.tsa_trust_pem = env_or("LAKE_TSA_TRUST_CERT", "");
+    opts.timestamp_policy.renewal_interval =
+        std::chrono::seconds{env_u64("LAKE_TSA_RENEWAL_SECONDS", 31'536'000)};
+    opts.timestamp_policy.renew_before_expiry =
+        std::chrono::seconds{env_u64("LAKE_TSA_RENEW_BEFORE_SECONDS", 2'592'000)};
     opts.metering.currency = env_or("LAKE_PRICE_CURRENCY", "USD");
     opts.metering.storage_quota_bytes = env_u64("LAKE_STORAGE_QUOTA_BYTES");
     opts.metering.storage_gib_hour_micros = env_u64("LAKE_PRICE_STORAGE_GIB_HOUR_MICROS");
@@ -148,6 +158,10 @@ int main(int argc, char** argv) {
             opts.instance_kek = value("--instance-kek");
             continue;
         }
+        if (arg == "--tsa-url") {
+            opts.tsa_endpoint = value("--tsa-url");
+            continue;
+        }
         if (arg == "--memory-store") {
             memory_store = true;
             continue;
@@ -186,6 +200,7 @@ int main(int argc, char** argv) {
             {"store", store_kind},
             {"store_root_configured", opts.store_root.empty() ? "no" : "yes"},
             {"log_mode", lake::transparency::to_string(opts.log_configuration.mode)},
+            {"tsa_configured", opts.tsa_endpoint.empty() ? "no" : "yes"},
             {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}

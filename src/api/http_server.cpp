@@ -79,6 +79,7 @@
 #include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/transparency/log.hpp"
+#include "lake/transparency/timestamps.hpp"
 #include "lake/transparency/tuf.hpp"
 #include "lake/version.hpp"
 
@@ -3376,6 +3377,7 @@ struct ApiServer::Impl {
     std::unique_ptr<transparency::Service> transparency;
     std::unique_ptr<transparency::CheckpointService> checkpoints;
     std::unique_ptr<transparency::TiledLog> transparency_log;
+    std::unique_ptr<transparency::TimestampService> timestamping;
     std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
@@ -3393,6 +3395,8 @@ struct ApiServer::Impl {
     std::string failure_reason;
     std::mutex work_mutex;
     std::condition_variable work_cv;
+    std::chrono::steady_clock::time_point next_timestamp_renewal_check =
+        std::chrono::steady_clock::now();
 
     explicit Impl(ServerOptions opts) : options(std::move(opts)), sync_store(options.store_root) {
         if (!options.store_root.empty()) {
@@ -3400,12 +3404,20 @@ struct ApiServer::Impl {
             if (!valid) {
                 failure_reason = "invalid transparency log configuration: " + valid.error().message;
             }
+            const auto valid_timestamp_policy =
+                transparency::validate_timestamp_policy(options.timestamp_policy);
+            if (!options.tsa_endpoint.empty() && !valid_timestamp_policy) {
+                failure_reason =
+                    "invalid timestamp policy: " + valid_timestamp_policy.error().message;
+            }
             transparency =
                 std::make_unique<transparency::Service>(options.store_root, options.node_name);
             checkpoints = std::make_unique<transparency::CheckpointService>(
                 options.store_root, options.node_name, options.log_configuration);
             transparency_log =
                 std::make_unique<transparency::TiledLog>(options.store_root, options.node_name);
+            timestamping = std::make_unique<transparency::TimestampService>(options.store_root,
+                                                                            options.node_name);
         }
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
@@ -3449,6 +3461,73 @@ struct ApiServer::Impl {
                 transparency::Error{"store_error", "transparency endpoint returned invalid JSON"});
         }
         return body;
+    }
+
+    transparency::TsaReply send_timestamp_request(std::string_view endpoint,
+                                                  std::string_view request_der) const {
+        const OutboundResponse response =
+            outbound_http.request({"POST",
+                                   std::string(endpoint),
+                                   std::string(request_der),
+                                   {{"Content-Type", "application/timestamp-query"},
+                                    {"Accept", "application/timestamp-reply"}}});
+        return transparency::TsaReply{response.status, response.body, response.error};
+    }
+
+    void configure_timestamp_context(ApiContext& context) const {
+        context.timestamping = timestamping.get();
+        context.tsa_endpoint = options.tsa_endpoint;
+        context.tsa_trust_pem = options.tsa_trust_pem;
+        context.timestamp_policy = options.timestamp_policy;
+        context.tsa_sender = options.tsa_sender;
+        if (!context.tsa_sender) {
+            context.tsa_sender = [this](std::string_view endpoint, std::string_view request_der) {
+                return send_timestamp_request(endpoint, request_der);
+            };
+        }
+    }
+
+    void renew_due_timestamps() {
+        const auto now = std::chrono::steady_clock::now();
+        if (!timestamping || options.tsa_endpoint.empty() || !options.store ||
+            now < next_timestamp_renewal_check) {
+            return;
+        }
+        next_timestamp_renewal_check = now + std::chrono::hours{1};
+        const auto due =
+            timestamping->due(std::chrono::system_clock::now(), options.timestamp_policy);
+        if (!due) {
+            std::println(stderr,
+                         "{}",
+                         nlohmann::json{{"event", "timestamp_renewal"},
+                                        {"outcome", "failure"},
+                                        {"error", due.error().message}}
+                             .dump());
+            return;
+        }
+        for (const std::string& checkpoint_digest : *due) {
+            ApiContext context;
+            context.store = options.store.get();
+            context.node_name = options.node_name;
+            context.acting_identity = "admin";
+            context.authorized = true;
+            context.operator_credential = true;
+            context.authentication_method = "scheduled_timestamp_renewal";
+            context.identity_seed = options.identity_seed;
+            context.instance_kek = options.instance_kek;
+            configure_timestamp_context(context);
+            const ApiResult result = registry.call(
+                "renew_timestamp_evidence", {{"checkpoint_digest", checkpoint_digest}}, context);
+            if (!result.ok) {
+                std::println(stderr,
+                             "{}",
+                             nlohmann::json{{"event", "timestamp_renewal"},
+                                            {"outcome", "failure"},
+                                            {"checkpoint_digest", checkpoint_digest},
+                                            {"error", result.error.message}}
+                                 .dump());
+            }
+        }
     }
 
     void record_request(const boost::http::route_params& route,
@@ -3587,6 +3666,7 @@ struct ApiServer::Impl {
                                             const nlohmann::json& request) {
             return submit_transparency(endpoint, request);
         };
+        configure_timestamp_context(ctx);
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
@@ -7827,7 +7907,9 @@ const std::string& ApiServer::reason() const {
     return impl_->failure_reason;
 }
 
-void ApiServer::drain() {}
+void ApiServer::drain() {
+    impl_->renew_due_timestamps();
+}
 
 void ApiServer::wait_for_work(std::chrono::milliseconds max_idle) {
     Impl& impl = *impl_;
