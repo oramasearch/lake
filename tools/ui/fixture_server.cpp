@@ -427,6 +427,7 @@ int main(int argc, char** argv) {
          operator_token,
          std::format("/metering?customer_id={}", organization_customer.id)},
         {"audit", operator_token, "/audit"},
+        {"transparency", "-", "/transparency"},
         {"drive",
          operator_token,
          std::format("/drive?repository_id={}&ref={}&path=docs", repository.id, ref)},
