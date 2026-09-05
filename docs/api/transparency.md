@@ -9,7 +9,8 @@ checkpoint binds the current root and timestamp metadata together with the tiled
 Merkle root and tree size. Its configured mode determines whether Lake may serve it immediately,
 must first obtain witness cosignatures, or must also retain an OpenTimestamps-style aggregation
 proof. RFC 3161 trusted timestamps and RFC 4998 evidence renewal are implemented by lake #36.
-Replication and agent session keys remain lake #38 and #39.
+Asynchronous replication is implemented by lake #38, and logged durable-agent delegation is
+implemented by lake #39 under the [agent-session contract](agents.md).
 
 The log accepts batches of canonical-CBOR TAAP attestations encoded as base64url. Lake decodes each
 entry through libliquid, verifies its registered profile and TAAP signature, hashes it as an RFC

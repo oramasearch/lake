@@ -108,6 +108,7 @@ add_library(lake-core STATIC
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/callers.cpp
+  src/control/agents.cpp
   src/control/pki.cpp
   src/version.cpp
   src/api/web_ui.cpp
@@ -128,6 +129,7 @@ add_library(lake-core STATIC
   src/api/timestamp_capabilities.cpp
   src/api/replication_capabilities.cpp
   src/api/app_capabilities.cpp
+  src/api/agent_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp

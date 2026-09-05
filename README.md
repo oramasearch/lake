@@ -99,6 +99,10 @@ liquid is the tool. lake is where it collects.
 > custom-domain identity pages, per-application JWT signing and JWKS, lifecycle webhooks, and
 > operator pages for application users and organizations. The registry authorizes and audits its
 > application management capabilities.
+> Agent-session migration `0017_agent_sessions` adds short-lived Ed25519 session identities
+> delegated to durable agents through logged `delegation/1` attestations. The private seed is
+> returned once and never stored; signed drips verify as the durable agent until expiry. The
+> contract is [`docs/api/agents.md`](docs/api/agents.md).
 
 ## Build and run
 
@@ -135,7 +139,7 @@ ctest --test-dir build
 | `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
@@ -192,6 +196,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
 | `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, root rotation, checkpoint-bound Merkle entry/hash tiles and compact proofs, identity monitoring, RFC 3161 timestamping, and RFC 4998 archive renewal |
+| `include/lake/control/agents.hpp`, `src/control/agents.cpp` | short-lived agent-session key minting, canonical TAAP delegation, expiry, and durable drip attribution |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |
@@ -214,7 +219,7 @@ by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator)
 | Drive | *Where is my stuff?* — for people who do not think in commits |
 | Platform | *Is it running?* — deploy on drip, preview environments |
 | Registry | OCI, npm, PyPI, Maven, apt, models and datasets — one deduplicated store |
-| Identity, secrets, PKI | TAAP/1 identities, application authentication, dynamic secrets, one CA |
+| Identity, secrets, PKI | TAAP/1 identities, application authentication, agent-session keys, dynamic secrets, one CA |
 | Search | BM25F plus a positional trigram index, over history and inside artifacts |
 
 ## Internal documentation

@@ -30,5 +30,6 @@ kubectl get secret lake-<name>-admin -n <namespace> -o jsonpath='{.data.token}' 
 ```
 
 The operator bearer remains a break-glass credential rather than a user identity. TAAP user
-identities, scoped sessions, and device revocation are the default user path; workload identities
-and lake acting as an OIDC issuer remain later work.
+identities, scoped sessions, and device revocation are the default user path. Agent workloads use
+the short-lived delegated keys in [agents.md](agents.md); general external workload credential
+resolution and lake acting as an OIDC issuer remain later work.

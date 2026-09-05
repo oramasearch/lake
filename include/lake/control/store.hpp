@@ -330,6 +330,38 @@ struct NewPkiCallerRecord {
     std::string expires_at;
 };
 
+struct AgentSession {
+    std::string id;
+    std::string customer_id;
+    std::string durable_agent_taap_id;
+    std::string dispatcher_taap_id;
+    std::string session_taap_id;
+    std::string public_key;
+    std::vector<std::string> scopes;
+    std::string attestation;
+    std::uint64_t transparency_index = 0;
+    std::string transparency_root;
+    std::int64_t expires_unix = 0;
+    std::string issued_at;
+    std::string expires_at;
+};
+
+struct NewAgentSession {
+    std::string id;
+    std::string customer_id;
+    std::string durable_agent_taap_id;
+    std::string dispatcher_taap_id;
+    std::string session_taap_id;
+    std::string public_key;
+    std::vector<std::string> scopes;
+    std::string attestation;
+    std::uint64_t transparency_index = 0;
+    std::string transparency_root;
+    std::int64_t expires_unix = 0;
+    std::string issued_at;
+    std::string expires_at;
+};
+
 struct PkiRecoveryCeremonyRecord {
     std::string id;
     std::string customer_id;
@@ -556,6 +588,9 @@ public:
     virtual Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& value) = 0;
     virtual Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
                                                                   int limit) = 0;
+    virtual Result<AgentSession> create_agent_session(const NewAgentSession& value) = 0;
+    virtual Result<AgentSession> get_agent_session(const std::string& customer_id,
+                                                   const std::string& id) = 0;
     virtual Result<PkiRecoveryCeremonyRecord>
     create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& value) = 0;
     virtual Result<PkiRecoveryCeremonyRecord>

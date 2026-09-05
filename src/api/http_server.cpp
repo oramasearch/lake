@@ -7,6 +7,8 @@
 
 #include "lake/api/server.hpp"
 
+#include "lake/control/agents.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -3476,6 +3478,7 @@ struct ApiServer::Impl {
     mutable LiquidCustomerStores sync_store;
     Registry registry;
     mutable control::pki::Service pki;
+    mutable control::agents::Service agents;
     std::unique_ptr<transparency::Service> transparency;
     std::unique_ptr<transparency::CheckpointService> checkpoints;
     std::unique_ptr<transparency::TiledLog> transparency_log;
@@ -3807,6 +3810,7 @@ struct ApiServer::Impl {
         ctx.store = options.store.get();
         ctx.search = options.search.get();
         ctx.pki = &pki;
+        ctx.agents = &agents;
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();

@@ -18,3 +18,7 @@ Run both through CTest after configuring the repository with CMake.
 fixture. Its Python generator and independent C++ verifier cover entry and parent-hash tile bytes,
 checkpoint-bound inclusion proofs for every leaf, consistency between two tree sizes, and changed
 tile or proof bytes. See `fixtures/transparency/README.md` for regeneration commands.
+
+Agent-session coverage uses an injected clock and a real Ed25519 TAAP signature. The portable and
+Postgres cases mint a response-only key, verify its logged `delegation/1` attestation, attribute a
+signed drip to the durable agent, reject a modified body, and reject the key after expiry.

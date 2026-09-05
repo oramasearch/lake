@@ -3064,6 +3064,54 @@ Result<std::vector<PkiCallerRecord>> InMemoryStore::list_pki_callers(const std::
     return output;
 }
 
+Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& input) {
+    std::lock_guard lock(mutex_);
+    const auto customer = std::ranges::find_if(
+        customers_, [&](const Customer& value) { return value.id == input.customer_id; });
+    if (customer == customers_.end()) {
+        return std::unexpected(StoreError{"not_found", "customer does not exist"});
+    }
+    if (input.id.empty() || input.durable_agent_taap_id.empty() ||
+        input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||
+        input.public_key.empty() || input.scopes.empty() || input.attestation.empty() ||
+        input.transparency_root.empty() || input.expires_unix <= 0 || input.issued_at.empty() ||
+        input.expires_at <= input.issued_at) {
+        return std::unexpected(StoreError{"invalid_input", "agent session record is invalid"});
+    }
+    if (std::ranges::any_of(agent_sessions_, [&](const AgentSession& value) {
+            return value.id == input.id || value.session_taap_id == input.session_taap_id;
+        })) {
+        return std::unexpected(StoreError{"conflict", "agent session already exists"});
+    }
+    AgentSession record{input.id,
+                        input.customer_id,
+                        input.durable_agent_taap_id,
+                        input.dispatcher_taap_id,
+                        input.session_taap_id,
+                        input.public_key,
+                        input.scopes,
+                        input.attestation,
+                        input.transparency_index,
+                        input.transparency_root,
+                        input.expires_unix,
+                        input.issued_at,
+                        input.expires_at};
+    agent_sessions_.push_back(record);
+    return record;
+}
+
+Result<AgentSession> InMemoryStore::get_agent_session(const std::string& customer_id,
+                                                      const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto session = std::ranges::find_if(agent_sessions_, [&](const AgentSession& value) {
+        return value.id == id && value.customer_id == customer_id;
+    });
+    if (session == agent_sessions_.end()) {
+        return std::unexpected(StoreError{"not_found", "agent session does not exist"});
+    }
+    return *session;
+}
+
 Result<PkiRecoveryCeremonyRecord>
 InMemoryStore::create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& input) {
     std::lock_guard lock(mutex_);

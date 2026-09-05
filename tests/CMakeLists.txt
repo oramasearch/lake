@@ -10,6 +10,7 @@ add_executable(lake-tests test_web_ui.cpp
   test_secrets.cpp
   test_offline_recovery.cpp
   test_pki.cpp
+  test_agents.cpp
   test_callers.cpp
   test_transparency.cpp
   test_transparency_fixture.cpp

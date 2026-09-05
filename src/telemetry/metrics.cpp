@@ -563,6 +563,15 @@ public:
         return call("list_pki_callers",
                     [&] { return store_->list_pki_callers(customer_id, limit); });
     }
+    control::Result<control::AgentSession>
+    create_agent_session(const control::NewAgentSession& value) override {
+        return call("create_agent_session", [&] { return store_->create_agent_session(value); });
+    }
+    control::Result<control::AgentSession> get_agent_session(const std::string& customer_id,
+                                                             const std::string& id) override {
+        return call("get_agent_session",
+                    [&] { return store_->get_agent_session(customer_id, id); });
+    }
     control::Result<control::PkiRecoveryCeremonyRecord>
     create_pki_recovery_ceremony(const control::NewPkiRecoveryCeremonyRecord& value) override {
         return call("create_pki_recovery_ceremony",
