@@ -140,9 +140,11 @@ add_library(lake-core STATIC
   src/transparency/timestamps.cpp
   src/telemetry/metrics.cpp
 )
-target_include_directories(lake-core PUBLIC include)
+target_include_directories(lake-core PUBLIC include PRIVATE modules/liquid)
 target_compile_features(lake-core PUBLIC cxx_std_26)
-target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto)
+target_link_libraries(lake-core
+  PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto
+  PRIVATE liquid_frontend_syntax)
 
 # lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
 add_library(lake-control-postgres STATIC

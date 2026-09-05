@@ -857,6 +857,148 @@ dd {
   padding: 0;
   background: transparent;
 }
+.tree-browser {
+  padding: 0;
+  overflow: hidden;
+}
+.tree-browser-heading,
+.tree-view li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 30%);
+  gap: var(--lake-space-4);
+  align-items: center;
+}
+.tree-browser-heading {
+  min-height: 2.5rem;
+  padding: 0 var(--lake-space-4);
+  color: var(--lake-text-secondary);
+  background: var(--lake-layer);
+  font-size: var(--lake-text-11);
+  font-weight: var(--lake-weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.tree-view {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tree-view li {
+  min-height: 3.25rem;
+  padding: var(--lake-space-2) var(--lake-space-4);
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+.tree-view li:hover {
+  background: var(--lake-layer-hover);
+}
+.tree-entry-name {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  gap: var(--lake-space-2);
+  align-items: start;
+}
+.tree-entry-meta,
+.tree-last-change {
+  display: block;
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-12);
+}
+.tree-last-change {
+  min-width: 0;
+  display: grid;
+  gap: var(--lake-space-1);
+}
+.file-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--lake-space-4);
+}
+.file-meta {
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--lake-space-3);
+  padding: 0 var(--lake-space-3);
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-bottom: 0;
+  color: var(--lake-text-secondary);
+  background: var(--lake-layer);
+  font-size: var(--lake-text-12);
+}
+.source-view {
+  max-width: 100%;
+  overflow: auto;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  background: var(--lake-surface);
+}
+.source-view table {
+  min-width: 52rem;
+  border: 0;
+  table-layout: fixed;
+}
+.source-view tr:hover,
+.source-view tr.selected,
+.source-view tr:target {
+  background: var(--lake-selected);
+}
+.source-view td {
+  height: auto;
+  padding-top: 0;
+  padding-bottom: 0;
+  border: 0;
+  line-height: 1.65;
+}
+.blame-cell {
+  width: 15rem;
+  padding-left: var(--lake-space-3);
+  color: var(--lake-text-tertiary);
+  background: var(--lake-layer);
+  font-size: var(--lake-text-11);
+}
+.blame-cell .identifier,
+.blame-cell span,
+.blame-cell time {
+  display: block;
+}
+.line-number {
+  width: 4rem;
+  padding-right: var(--lake-space-2);
+  color: var(--lake-text-tertiary);
+  background: var(--lake-layer);
+  text-align: right;
+  user-select: none;
+}
+.line-number a {
+  color: inherit;
+  text-decoration: none;
+}
+.source-line {
+  padding-right: var(--lake-space-4);
+  padding-left: var(--lake-space-3);
+  white-space: pre;
+}
+.source-line code {
+  padding: 0;
+  color: inherit;
+  background: transparent;
+}
+.syntax-keyword {
+  color: var(--lake-ai);
+  font-weight: var(--lake-weight-medium);
+}
+.syntax-string {
+  color: var(--lake-success);
+}
+.syntax-comment {
+  color: var(--lake-text-tertiary);
+  font-style: italic;
+}
+.syntax-unit .source-line {
+  box-shadow: inset 0.125rem 0 var(--lake-border-subtle);
+}
 
 @media (max-width: 58rem) {
   .app-shell {
@@ -895,6 +1037,13 @@ dd {
   .repository-layout {
     grid-template-columns: 1fr;
   }
+  .tree-browser-heading,
+  .tree-view li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tree-browser-heading span:last-child {
+    display: none;
+  }
 }
 
 @media (max-width: 40rem) {
@@ -917,6 +1066,9 @@ dd {
   }
   dd {
     margin-bottom: var(--lake-space-2);
+  }
+  .file-heading {
+    display: block;
   }
   form.search input,
   .filters label,

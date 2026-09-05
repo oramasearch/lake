@@ -27,19 +27,40 @@ The tree uses native `details` and `summary` elements for expansion, so the stru
 available without JavaScript. Clone and push examples use the repository sync URL documented in
 [`../api/sync.md`](../api/sync.md) and keep credentials in `LIQUID_TOKEN`, never in the URL.
 
+## Tree and file
+
+`GET /repository/tree?id=<id>&ref=<ref>` presents recursive entries as a file browser. Each row
+keeps the entry kind, mode, logical size, and newest change that touched the path. Directory rows
+also match changes below their path. The HTTP adapter derives this annotation from `list_changes`
+and `change_diff`; the renderer receives only typed values.
+
+`GET /file?repository_id=<id>&ref=<ref>&path=<path>` renders breadcrumbs, complete blob metadata,
+raw and download links, stable `L<number>` anchors, selectable `L<first>-L<last>` ranges, and
+per-line blame. Blame is resolved newest-first from text-hunk ranges in the change log; a change
+without text hunks owns the remaining lines for that version. `GET /file/raw` returns source as
+plain text and `GET /file/download` adds an attachment disposition. Both use the same
+`repository_file` capability and authorization as the HTML page.
+
+C and C++ extensions are parsed server-side with the tree-sitter grammar target shared by
+liquid's bundled frontends. Parsed source units and a small token renderer add syntax roles. The
+recognized extension list matches those frontends. Every other extension uses the same numbered
+source layout with fully escaped plain text.
+
 ## Keyboard and no-script behavior
 
-Source order is skip link, primary navigation, top-bar controls, repository tabs, primary content,
-then supporting details. All links, native disclosure controls, and theme controls are keyboard
-focusable. Without JavaScript the full repository home remains readable and navigable; only the
-shared theme button stops changing themes.
+Source order is skip link, primary navigation, top-bar controls, breadcrumbs, repository tabs,
+primary content, then supporting details. All links, native disclosure controls, line anchors, and
+theme controls are keyboard focusable. Without JavaScript the repository, tree, and file views
+remain readable and navigable. The file-range island only adds shift-click range selection and
+range highlighting; individual line anchors remain ordinary links without it.
 
 ## Verify
 
-Run `lake-tests --gtest_filter='WebUi.Markdown*:WebUi.Repositories*'`. The string tests prove raw
-HTML is escaped, heading anchors are stable, repository sections are present, long identities are
-compact, and the shared shell remains intact. The seeded visual proof is generated through
-`tools/ui/screenshot.sh` and recorded in `docs/ui/screenshots/`.
+Run `lake-tests --gtest_filter='WebUi.Markdown*:WebUi.Repositories*:WebUi.RepositoryContent*'`.
+The string tests prove raw HTML is escaped, heading anchors are stable, repository sections are
+present, tree rows carry last-change context, known source is highlighted, line anchors and blame
+are rendered, long identities are compact, and the shared shell remains intact. The seeded visual
+proof is generated through `tools/ui/screenshot.sh` and recorded in `docs/ui/screenshots/`.
 
 ## Change
 

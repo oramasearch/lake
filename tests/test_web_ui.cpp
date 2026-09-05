@@ -367,17 +367,47 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
 TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     const lake::control::Repository repository{
         "r1", "c1", "liquid", "", "public", "", "", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"};
-    const lake::api::RepositoryTreeEntry tree_entry{"<readme>.md", "blob", "blob-1", 0644};
+    const lake::api::RepositoryTreeEntry tree_entry{.path = "<readme>.md",
+                                                    .kind = "blob",
+                                                    .blob = "blob-1",
+                                                    .mode = 0644,
+                                                    .size = 8,
+                                                    .last_change = "change-1",
+                                                    .last_message = "Add README",
+                                                    .last_author = "author",
+                                                    .last_changed_at = "2026-09-04"};
     const std::string tree =
         lake::api::web_ui_repository_tree(repository, "main", {tree_entry}, false);
     EXPECT_NE(tree.find("&lt;readme&gt;.md"), std::string::npos);
     EXPECT_NE(tree.find("href=\"/file?repository_id=r1"), std::string::npos);
+    EXPECT_NE(tree.find("Last change"), std::string::npos);
+    EXPECT_NE(tree.find("Add README"), std::string::npos);
+    EXPECT_EQ(tree.find("<table>"), std::string::npos);
     expect_theme_scripts(tree);
 
     const lake::api::RepositoryFile file{"<readme>.md", "blob-1", "<source>", 8};
     const std::string contents = lake::api::web_ui_repository_file(repository, file, false);
     EXPECT_NE(contents.find("&lt;source&gt;"), std::string::npos);
     EXPECT_EQ(contents.find("<source>"), std::string::npos);
+
+    const lake::api::RepositoryFile source{
+        "src/main.cpp", "blake3:source", "int main() {\n    return 0;\n}\n", 29};
+    const std::vector<lake::api::RepositoryBlameLine> blame{
+        {1, "blake3:change-one", "taap:1:author", "2026-09-04"},
+        {2, "blake3:change-two", "taap:1:reviewer", "2026-09-05"},
+        {3, "blake3:change-one", "taap:1:author", "2026-09-04"},
+    };
+    const std::string source_page =
+        lake::api::web_ui_repository_file(repository, "main", source, blame, false);
+    EXPECT_NE(source_page.find("class=\"source-view syntax-highlighted\""), std::string::npos);
+    EXPECT_NE(source_page.find("class=\"syntax-keyword\">int</span>"), std::string::npos);
+    EXPECT_NE(source_page.find("id=\"L2\""), std::string::npos);
+    EXPECT_NE(source_page.find("data-line-range=\"L2-L2\""), std::string::npos);
+    EXPECT_NE(source_page.find("taap:1:reviewer"), std::string::npos);
+    EXPECT_NE(source_page.find("/file/raw?repository_id=r1"), std::string::npos);
+    EXPECT_NE(source_page.find("/file/download?repository_id=r1"), std::string::npos);
+    EXPECT_NE(source_page.find("id=\"file-range-script\""), std::string::npos);
+    expect_theme_scripts(source_page, 1);
 
     const lake::api::RepositoryChange change{
         "change-1", {"parent-1"}, "taap:1:ed25519:author", "<message>", "2026-09-04T00:00:00Z"};

@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <format>
+#include <optional>
+#include <set>
 #include <sstream>
+
+#include "modules/frontends/common/syntax.hpp"
 
 namespace lake::api {
 
@@ -409,6 +413,170 @@ std::string byte_count(std::uint64_t bytes) {
     return std::format("{:.1f} MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
 }
 
+std::string path_breadcrumbs(const control::Repository& repository,
+                             std::string_view ref,
+                             std::string_view path) {
+    std::string output = "<nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\">";
+    output += row_link("/repository?id=" + repository.id, repository_name(repository));
+    output += "<span aria-hidden=\"true\">/</span>";
+    output += row_link("/repository/tree?id=" + repository.id + "&ref=" + url_component(ref), ref);
+    std::string accumulated;
+    std::size_t offset = 0;
+    while (offset < path.size()) {
+        const std::size_t slash = path.find('/', offset);
+        const std::size_t end = slash == std::string_view::npos ? path.size() : slash;
+        const std::string_view part = path.substr(offset, end - offset);
+        if (!accumulated.empty()) {
+            accumulated += '/';
+        }
+        accumulated += part;
+        output += "<span aria-hidden=\"true\">/</span>";
+        if (end == path.size()) {
+            output += "<span aria-current=\"page\">" + web_ui_escape(part) + "</span>";
+        } else {
+            output += row_link("/repository/tree?id=" + repository.id +
+                                   "&ref=" + url_component(ref) + "#" + url_component(accumulated),
+                               part);
+        }
+        offset = end + 1;
+    }
+    output += "</nav>";
+    return output;
+}
+
+std::optional<liquid_frontend::syntax_language> syntax_language(std::string_view path) {
+    const std::size_t dot = path.find_last_of('.');
+    const std::string_view extension =
+        dot == std::string_view::npos ? std::string_view{} : path.substr(dot);
+    if (extension == ".c" || extension == ".h") {
+        return liquid_frontend::syntax_language::c;
+    }
+    if (extension == ".cc" || extension == ".cpp" || extension == ".cxx" || extension == ".hh" ||
+        extension == ".hpp" || extension == ".hxx") {
+        return liquid_frontend::syntax_language::cpp;
+    }
+    return std::nullopt;
+}
+
+bool source_keyword(std::string_view token) {
+    static const std::set<std::string_view> keywords{
+        "alignas",   "alignof",  "auto",     "bool",      "break",    "case",    "catch",
+        "char",      "class",    "const",    "constexpr", "continue", "default", "delete",
+        "do",        "double",   "else",     "enum",      "explicit", "extern",  "false",
+        "float",     "for",      "friend",   "if",        "inline",   "int",     "long",
+        "namespace", "new",      "noexcept", "nullptr",   "operator", "private", "protected",
+        "public",    "return",   "short",    "signed",    "sizeof",   "static",  "struct",
+        "switch",    "template", "this",     "throw",     "true",     "try",     "typedef",
+        "typename",  "union",    "unsigned", "using",     "virtual",  "void",    "volatile",
+        "while"};
+    return keywords.contains(token);
+}
+
+std::string highlight_source_line(std::string_view line) {
+    std::string output;
+    std::size_t offset = 0;
+    while (offset < line.size()) {
+        if (offset + 1 < line.size() && line[offset] == '/' && line[offset + 1] == '/') {
+            output +=
+                "<span class=\"syntax-comment\">" + web_ui_escape(line.substr(offset)) + "</span>";
+            break;
+        }
+        if (line[offset] == '"' || line[offset] == '\'') {
+            const char quote = line[offset];
+            std::size_t end = offset + 1;
+            bool escaped = false;
+            while (end < line.size()) {
+                if (!escaped && line[end] == quote) {
+                    ++end;
+                    break;
+                }
+                escaped = !escaped && line[end] == '\\';
+                if (line[end] != '\\') {
+                    escaped = false;
+                }
+                ++end;
+            }
+            output += "<span class=\"syntax-string\">" +
+                      web_ui_escape(line.substr(offset, end - offset)) + "</span>";
+            offset = end;
+            continue;
+        }
+        if (std::isalpha(static_cast<unsigned char>(line[offset])) || line[offset] == '_') {
+            std::size_t end = offset + 1;
+            while (end < line.size() &&
+                   (std::isalnum(static_cast<unsigned char>(line[end])) || line[end] == '_')) {
+                ++end;
+            }
+            const std::string_view token = line.substr(offset, end - offset);
+            if (source_keyword(token)) {
+                output += "<span class=\"syntax-keyword\">" + web_ui_escape(token) + "</span>";
+            } else {
+                output += web_ui_escape(token);
+            }
+            offset = end;
+            continue;
+        }
+        output += web_ui_escape(line.substr(offset, 1));
+        ++offset;
+    }
+    return output;
+}
+
+const RepositoryBlameLine* blame_for_line(const std::vector<RepositoryBlameLine>& blame,
+                                          std::uint64_t line) {
+    const auto found = std::ranges::find(blame, line, &RepositoryBlameLine::line);
+    return found == blame.end() ? nullptr : &*found;
+}
+
+std::string source_view(const RepositoryFile& file, const std::vector<RepositoryBlameLine>& blame) {
+    std::set<std::uint64_t> syntax_lines;
+    const auto language = syntax_language(file.path);
+    if (language) {
+        const auto* first = reinterpret_cast<const std::uint8_t*>(file.contents.data());
+        const auto units = liquid_frontend::parse_units(
+            *language, std::span<const std::uint8_t>{first, file.contents.size()});
+        for (const liquid_frontend::syntax_unit& unit : units) {
+            for (std::uint64_t line = unit.start.line; line <= unit.end.line; ++line) {
+                syntax_lines.insert(line);
+            }
+        }
+    }
+    std::istringstream input{file.contents};
+    std::string line;
+    std::string output = std::format(
+        "<div class=\"source-view{}\" data-language=\"{}\"><table><thead class=\"sr-only\">"
+        "<tr><th>Blame</th><th>Line</th><th>Source</th></tr></thead><tbody>",
+        language ? " syntax-highlighted" : " plain-text",
+        language ? file_language(file.path) : "Plain text");
+    std::uint64_t number = 1;
+    while (std::getline(input, line)) {
+        const RepositoryBlameLine* line_blame = blame_for_line(blame, number);
+        output += std::format(
+            "<tr id=\"L{}\" data-line=\"{}\"{}><td class=\"blame-cell\">{}{}{}</td>"
+            "<td class=\"line-number\"><a href=\"#L{}\" data-line-range=\"L{}-L{}\" "
+            "aria-label=\"Line {}\">{}</a></td><td class=\"source-line\"><code>{}</code></td>"
+            "</tr>",
+            number,
+            number,
+            syntax_lines.contains(number) ? " class=\"syntax-unit\"" : "",
+            line_blame ? identifier_markup(line_blame->change) : "",
+            line_blame ? "<span>" + web_ui_escape(line_blame->author) + "</span>" : "",
+            line_blame ? "<time>" + web_ui_escape(line_blame->occurred_at) + "</time>" : "",
+            number,
+            number,
+            number,
+            number,
+            number,
+            language ? highlight_source_line(line) : web_ui_escape(line));
+        ++number;
+    }
+    if (number == 1) {
+        output += "<tr><td colspan=\"3\" class=\"empty\">This file is empty.</td></tr>";
+    }
+    output += "</tbody></table></div>";
+    return output;
+}
+
 std::string error_markup(std::string_view error) {
     return error.empty() ? std::string()
                          : std::format("<p class=\"error\">{}</p>", web_ui_escape(error));
@@ -806,49 +974,82 @@ std::string web_ui_repository_tree(const control::Repository& repository,
                                    std::string_view ref,
                                    const std::vector<RepositoryTreeEntry>& entries,
                                    bool signed_in) {
-    std::string content = std::format("<p class=\"eyebrow\">repository tree</p><h1>{}</h1>"
-                                      "<p class=\"sub\">Ref <code>{}</code>.</p>",
+    std::string content = path_breadcrumbs(repository, ref, "") +
+                          std::format("<p class=\"eyebrow\">repository tree</p><h1>{}</h1>"
+                                      "<p class=\"sub\">Browse <code>{}</code> by path and last "
+                                      "change.</p>{}",
                                       web_ui_escape(repository_name(repository)),
-                                      web_ui_escape(ref));
+                                      web_ui_escape(ref),
+                                      forge_tabs(repository, "code"));
     if (entries.empty()) {
-        content += "<div class=\"panel empty\">This tree has no files.</div>";
+        content += "<div class=\"panel empty\"><strong>This ref has no files.</strong><p>Push a "
+                   "change to publish its first tree.</p></div>";
     } else {
-        content += "<table><thead><tr><th>Path</th><th>Kind</th><th>Blob</th><th>Mode</th>"
-                   "</tr></thead><tbody>";
+        content += "<section class=\"panel tree-browser\"><div class=\"tree-browser-heading\">"
+                   "<span>Path</span><span>Last change</span></div><ul class=\"tree-view\">";
         for (const RepositoryTreeEntry& entry : entries) {
             const std::string path = "/file?repository_id=" + repository.id +
                                      "&ref=" + url_component(ref) +
                                      "&path=" + url_component(entry.path);
             const std::string displayed =
-                entry.kind == "blob" ? row_link(path, entry.path) : web_ui_escape(entry.path);
-            content += std::format("<tr><td>{}</td><td>{}</td><td><code>{}</code></td>"
-                                   "<td><code>{:o}</code></td></tr>",
-                                   displayed,
-                                   web_ui_escape(entry.kind),
-                                   web_ui_escape(entry.blob),
-                                   entry.mode);
+                entry.kind == "blob" ? row_link(path, entry.path)
+                                     : row_link("#" + url_component(entry.path), entry.path);
+            content += std::format(
+                "<li id=\"{}\"><div class=\"tree-entry-name\"><span class=\"tree-kind\" "
+                "aria-hidden=\"true\">{}</span><div>{}<span class=\"tree-entry-meta\">{} · "
+                "<code>{:o}</code>{}</span></div></div><div class=\"tree-last-change\">{}{}"
+                "</div></li>",
+                web_ui_escape(entry.path),
+                entry.kind == "blob" ? "·" : "›",
+                displayed,
+                web_ui_escape(entry.kind),
+                entry.mode,
+                entry.kind == "blob" ? " · " + byte_count(entry.size) : "",
+                entry.last_change.empty() ? "<span class=\"muted\">No recorded change</span>"
+                                          : identifier_markup(entry.last_change),
+                entry.last_message.empty()
+                    ? ""
+                    : "<span class=\"muted\">" + web_ui_escape(entry.last_message) + " · " +
+                          web_ui_escape(entry.last_changed_at) + "</span>");
         }
-        content += "</tbody></table>";
+        content += "</ul></section>";
     }
-    content +=
-        std::format("<p>{}</p>", row_link("/repository?id=" + repository.id, "Back to repository"));
     return web_ui_shell("lake — tree", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_repository_file(const control::Repository& repository,
+                                   std::string_view ref,
+                                   const RepositoryFile& file,
+                                   const std::vector<RepositoryBlameLine>& blame,
+                                   bool signed_in) {
+    const std::string query = "repository_id=" + url_component(repository.id) +
+                              "&ref=" + url_component(ref) + "&path=" + url_component(file.path);
+    std::string content =
+        path_breadcrumbs(repository, ref, file.path) +
+        std::format("<p class=\"eyebrow\">file</p><div class=\"file-heading\">"
+                    "<div><h1>{}</h1><p class=\"sub\">{} at <code>{}</code></p>"
+                    "</div><div class=\"actions\">{}{}</div></div>{}"
+                    "<div class=\"file-meta\"><span>{}</span><span>{}</span>"
+                    "<span>{}</span></div>{}",
+                    web_ui_escape(file.path),
+                    web_ui_escape(repository_name(repository)),
+                    web_ui_escape(ref),
+                    row_link("/file/raw?" + query, "Raw"),
+                    row_link("/file/download?" + query, "Download"),
+                    forge_tabs(repository, "code"),
+                    identifier_markup(file.blob),
+                    byte_count(file.size),
+                    syntax_language(file.path) ? file_language(file.path) : "Plain text",
+                    source_view(file, blame));
+    content +=
+        R"(<script id="file-range-script">(()=>{const rows=[...document.querySelectorAll('[data-line]')];const select=()=>{rows.forEach(r=>r.classList.remove('selected'));const match=location.hash.match(/^#L(\d+)(?:-L(\d+))?$/);if(!match)return;const first=Number(match[1]);const last=Number(match[2]||match[1]);rows.forEach(r=>{const line=Number(r.dataset.line);if(line>=first&&line<=last)r.classList.add('selected');});};let anchor=null;document.addEventListener('click',event=>{const link=event.target.closest('[data-line-range]');if(!link)return;const line=Number(link.closest('[data-line]').dataset.line);if(event.shiftKey&&anchor!==null){event.preventDefault();const first=Math.min(anchor,line);const last=Math.max(anchor,line);location.hash=`L${first}-L${last}`;}else{anchor=line;}});addEventListener('hashchange',select);select();})();</script>)";
+    return web_ui_shell("lake — file", file.path, content, signed_in);
 }
 
 std::string web_ui_repository_file(const control::Repository& repository,
                                    const RepositoryFile& file,
                                    bool signed_in) {
-    const std::string content =
-        std::format("<p class=\"eyebrow\">file</p><h1>{}</h1><p class=\"sub\">{}</p>"
-                    "<div class=\"panel\"><dl><dt>blob</dt><dd><code>{}</code></dd><dt>size</dt>"
-                    "<dd>{} bytes</dd></dl></div><pre>{}</pre><p>{}</p>",
-                    web_ui_escape(file.path),
-                    web_ui_escape(repository_name(repository)),
-                    web_ui_escape(file.blob),
-                    file.size,
-                    web_ui_escape(file.contents),
-                    row_link("/repository?id=" + repository.id, "Back to repository"));
-    return web_ui_shell("lake — file", file.path, content, signed_in);
+    return web_ui_repository_file(repository, "main", file, {}, signed_in);
 }
 
 std::string web_ui_repository_log(const control::Repository& repository,

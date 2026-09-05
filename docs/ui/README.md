@@ -29,8 +29,8 @@ exports, SSO, repository content, and drive views.
 | Repository | `GET /repository?id=<uuid>` | forge home with tree, recent changes, rendered README, refs and releases, clone/push commands, language/size summary, lifecycle state, and effective access |
 | Model | `GET /models/<namespace>/<name>` or `/models/<uuid>` | card, revisions, file sizes and deduplication savings, storage totals, and the verified dataset-to-model provenance chain |
 | Exports | `GET /exports?repository_id=<uuid>` | signed archive requests and prior export manifests; its download form calls the export capability |
-| Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree at a published ref |
-| File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>` | one file, backing blob and escaped contents |
+| Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree with breadcrumbs, sizes, modes, and per-path last changes |
+| File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>`, `/file/raw`, `/file/download` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download responses |
 | Changes | `GET /changes?repository_id=<uuid>` | the libliquid change log |
 | Change | `GET /change?repository_id=<uuid>&id=<change>` | change identity, metadata, per-path status, modes, blobs, text hunks, moves, and conflict values |
 | Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |

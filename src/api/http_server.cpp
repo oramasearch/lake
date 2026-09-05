@@ -5744,6 +5744,33 @@ struct ApiServer::Impl {
         for (const nlohmann::json& value : tree_result.value.at("items")) {
             entries.push_back(repository_tree_entry_from_json(value));
         }
+        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
+        if (!changes_result.ok) {
+            return serve_repository_page_error(route, ctx, changes_result);
+        }
+        for (const nlohmann::json& value : changes_result.value.at("items")) {
+            const RepositoryChange change = repository_change_from_json(value);
+            const ApiResult diff_result =
+                registry.call("change_diff", {{"id", id}, {"change_id", change.id}}, ctx);
+            if (!diff_result.ok) {
+                return serve_repository_page_error(route, ctx, diff_result);
+            }
+            for (const nlohmann::json& difference : diff_result.value.at("items")) {
+                const std::string changed_path = json_string(difference, "path");
+                for (RepositoryTreeEntry& entry : entries) {
+                    const bool contains_change =
+                        entry.kind != "blob" && changed_path.starts_with(entry.path + "/");
+                    if (!entry.last_change.empty() ||
+                        (changed_path != entry.path && !contains_change)) {
+                        continue;
+                    }
+                    entry.last_change = change.id;
+                    entry.last_message = change.message;
+                    entry.last_author = change.author;
+                    entry.last_changed_at = change.occurred_at;
+                }
+            }
+        }
         return send_text(
             route,
             boost::http::status::ok,
@@ -5770,12 +5797,86 @@ struct ApiServer::Impl {
         if (!file_result.ok) {
             return serve_repository_page_error(route, ctx, file_result);
         }
+        const RepositoryFile file = repository_file_from_json(file_result.value);
+        std::size_t line_count = 0;
+        if (!file.contents.empty()) {
+            line_count = static_cast<std::size_t>(std::ranges::count(file.contents, '\n') +
+                                                  (file.contents.ends_with('\n') ? 0 : 1));
+        }
+        std::vector<RepositoryBlameLine> blame(line_count);
+        for (std::size_t index = 0; index < blame.size(); ++index) {
+            blame[index].line = index + 1;
+        }
+        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
+        if (!changes_result.ok) {
+            return serve_repository_page_error(route, ctx, changes_result);
+        }
+        for (const nlohmann::json& value : changes_result.value.at("items")) {
+            const RepositoryChange change = repository_change_from_json(value);
+            const ApiResult diff_result =
+                registry.call("change_diff", {{"id", id}, {"change_id", change.id}}, ctx);
+            if (!diff_result.ok) {
+                return serve_repository_page_error(route, ctx, diff_result);
+            }
+            for (const nlohmann::json& value_difference : diff_result.value.at("items")) {
+                const RepositoryDiffEntry difference =
+                    repository_diff_entry_from_json(value_difference);
+                if (difference.path != path) {
+                    continue;
+                }
+                auto assign_line = [&](std::uint64_t line) {
+                    if (line == 0 || line > blame.size() || !blame[line - 1].change.empty()) {
+                        return;
+                    }
+                    blame[line - 1].change = change.id;
+                    blame[line - 1].author = change.author;
+                    blame[line - 1].occurred_at = change.occurred_at;
+                };
+                if (difference.line_hunks && !difference.line_hunks->empty()) {
+                    for (const RepositoryLineHunk& hunk : *difference.line_hunks) {
+                        const std::uint64_t count = std::max<std::uint64_t>(hunk.new_count, 1);
+                        for (std::uint64_t line = hunk.new_line; line < hunk.new_line + count;
+                             ++line) {
+                            assign_line(line);
+                        }
+                    }
+                } else {
+                    for (std::uint64_t line = 1; line <= blame.size(); ++line) {
+                        assign_line(line);
+                    }
+                }
+            }
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_repository_file(
+                repository_from_json(repository_result.value), ref, file, blame, ctx.authorized),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_repository_file_content(boost::http::route_params& route,
+                                                          bool download) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string ref = query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        if (repository_id.empty() || ref.empty() || path.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult result = registry.call(
+            "repository_file", {{"id", repository_id}, {"ref", ref}, {"path", path}}, context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        if (download) {
+            route.res.set("content-disposition", "attachment; filename=download");
+        }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_repository_file(repository_from_json(repository_result.value),
-                                                repository_file_from_json(file_result.value),
-                                                ctx.authorized),
-                         "text/html; charset=utf-8",
+                         json_string(result.value, "contents"),
+                         "text/plain; charset=utf-8",
                          "no-store");
     }
 
@@ -7693,6 +7794,17 @@ bool ApiServer::start() {
     router.add(http::method::get, "/file", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/file", impl.serve_repository_file_page(route));
     });
+    router.add(
+        http::method::get, "/file/raw", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/file/raw", impl.serve_repository_file_content(route, false));
+        });
+    router.add(http::method::get,
+               "/file/download",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/file/download", impl.serve_repository_file_content(route, true));
+               });
     router.add(
         http::method::get, "/changes", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/changes", impl.serve_changes_page(route));

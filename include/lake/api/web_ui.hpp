@@ -14,8 +14,8 @@
 #include "lake/search/index.hpp"
 
 // Pure renderers: data in, HTML out. No HTTP type, no I/O. Pages are
-// server-rendered, self-contained (one stylesheet at /style.css, no script) and
-// unit-tested here.
+// server-rendered, self-contained (one stylesheet at /style.css and only the
+// documented progressive-enhancement scripts) and unit-tested here.
 namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
@@ -105,6 +105,11 @@ std::string web_ui_repository(const control::Repository& repository,
 std::string web_ui_repository_tree(const control::Repository& repository,
                                    std::string_view ref,
                                    const std::vector<RepositoryTreeEntry>& entries,
+                                   bool signed_in);
+std::string web_ui_repository_file(const control::Repository& repository,
+                                   std::string_view ref,
+                                   const RepositoryFile& file,
+                                   const std::vector<RepositoryBlameLine>& blame,
                                    bool signed_in);
 std::string web_ui_repository_file(const control::Repository& repository,
                                    const RepositoryFile& file,

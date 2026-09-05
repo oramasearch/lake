@@ -9,7 +9,7 @@ capability as REST and MCP, so authorization and audit recording have one path.
 | Repository list | `GET /repositories` | `list_repositories` | repositories the caller may open |
 | Repository | `GET /repository?id=<id>` | `get_repository`, repository content, forge release, and effective-access reads | tree, recent changes, rendered README, refs and releases, clone/push commands, indexed language and size totals, lifecycle, and access |
 | Tree | `GET /repository/tree?id=<id>&ref=<ref>` | `repository_tree` | paths, kinds, blobs, modes, stable nodes, and sizes at the ref |
-| File | `GET /file?repository_id=<id>&ref=<ref>&path=<path>` | `repository_file` | a file, its backing blob and escaped contents |
+| File | `GET /file?repository_id=<id>&ref=<ref>&path=<path>` | `repository_file`, `list_changes`, `change_diff` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download links |
 | Change log | `GET /changes?repository_id=<id>` | `list_changes` | libliquid change identities and metadata |
 | Change | `GET /change?repository_id=<id>&id=<change>` | `get_change`, `change_diff` | change identity and its first-parent structural diff, including text hunks |
 | Conflicts | `GET /conflicts?repository_id=<id>` | `list_conflicts` | unresolved conflict paths and their blob values |
@@ -31,6 +31,11 @@ its added, removed, modified, moved, mode-changed, and conflicted status; old an
 digests remain visible. Text hunks include their old/new ranges and escaped removed/added lines.
 Conflict digests are values on the path instead of an error state. A change with no visible hunks
 renders the explicit empty state.
+
+The file browser resolves each path's newest change from those structural diffs. File pages map
+text-hunk ranges onto numbered source lines for blame. C and C++ source is parsed with liquid's
+tree-sitter grammar target before the renderer adds syntax roles; unknown extensions remain
+escaped plain text. The range script enhances ordinary line anchors and does not fetch data.
 
 ## Artifact results
 
