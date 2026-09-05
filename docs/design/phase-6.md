@@ -205,11 +205,14 @@ code runs inside lake as the library-only `liquid::liquid` target, and its pack 
 manifest, and collector state remain libliquid-owned. The chunk index is liquid's own, held per
 customer store. Zetta remains lake’s serving-model reference, not this repository-data backend.
 
-**Push and pull (#12) is implemented** with liquid #160 and #165's published
+**Push and pull (#12) is implemented** with liquid #160, #165, and #184's published
 `docs/library/sync.md`, public client, and `sync_server`. Lake registers `refs`, `find_missing`,
 `push`, `pull`, chunk upload, and ranged chunk read through the capability registry. The adapter
 opens every repository with `repository_options.store` against its customer store, delegates the
-binary protocol to `sync_server`, authorizes each pushed change, and records all outcomes.
+binary protocol to `sync_server`, authorizes each pushed change and protected reference update, and
+records all outcomes. Branch protection enforcement is complete at the Liquid #184 pin; a refused
+reference currently rejects that metadata batch. Liquid #189 will add independent reference
+application with opt-in atomic behavior.
 
 **Repository lifecycle (#13)** stays in the control plane: create, rename, transfer between
 customers, delete (tombstone first, content collected by the customer store's collector after

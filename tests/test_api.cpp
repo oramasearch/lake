@@ -188,8 +188,9 @@ struct RepositoryFixtureStore final : SyncStore {
     SyncStoreResult<std::vector<std::byte>> push(const std::string&,
                                                  const std::string&,
                                                  std::span<const std::byte>,
-                                                 SyncChangeAuthorizer authorize) override {
-        const auto authorized = authorize("change-refused");
+                                                 SyncPushAuthorizer authorize) override {
+        const auto authorized =
+            authorize({.kind = SyncPushItemKind::Change, .change_id = "change-refused"}, {});
         if (!authorized) {
             return std::unexpected(authorized.error());
         }
@@ -2176,6 +2177,170 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
         return event.draft.action == "pull" && event.draft.outcome == "success";
     }));
+}
+
+TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
+    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TemporarySyncRoot temporary;
+    const std::string instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    std::shared_ptr<lake::control::Store> control =
+        lake::control::make_postgres_store(database_uri, instance_kek);
+    ASSERT_TRUE(control->ping());
+    const std::string suffix = lake::control::new_uuid_v4();
+    const auto owner = control->create_user({"taap:1:ed25519:branch-owner-" + suffix,
+                                             "branch-owner-" + suffix + "@example.test",
+                                             "Branch Owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto customer =
+        control->create_customer({"individual", owner->id, "", "branch-owner-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = control->create_repository({customer->id, "protected", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+
+    auto source = liquid::runtime::block_on(
+        liquid::repository::create(temporary.path() / "branch-protection-source"));
+    ASSERT_TRUE(source) << source.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("base.txt", sync_bytes("base"))));
+    const auto base = liquid::runtime::block_on(source->cut("base"));
+    ASSERT_TRUE(base) << base.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "postgres-branch-protection";
+    options.admin_token = "postgres-branch-protection-admin";
+    options.instance_kek = instance_kek;
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint owner_endpoint(
+        url, liquid::sync_endpoint_options{.bearer_token = options.admin_token});
+    ASSERT_TRUE(liquid::runtime::block_on(owner_endpoint.push(*source)));
+
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("reviewed.txt", sync_bytes("reviewed"))));
+    const auto reviewed = liquid::runtime::block_on(source->cut("reviewed"));
+    ASSERT_TRUE(reviewed) << reviewed.error().message;
+    const std::string reviewed_id = liquid::to_string(reviewed->value);
+    const auto protection =
+        control->create_forge_record({repository->id,
+                                      "branch_protection",
+                                      {{"ref", "main"},
+                                       {"required_review", true},
+                                       {"fast_forward_only", true},
+                                       {"allowed_pushers", json::array({"admin"})}}});
+    ASSERT_TRUE(protection) << protection.error().message;
+
+    const auto review_refusal = liquid::runtime::block_on(owner_endpoint.push(*source));
+    ASSERT_FALSE(review_refusal);
+    EXPECT_EQ(review_refusal.error().code, liquid::errc::conflict);
+    EXPECT_NE(review_refusal.error().message.find("main"), std::string::npos);
+    EXPECT_NE(review_refusal.error().message.find("approved review"), std::string::npos);
+
+    const auto approved = control->create_forge_record(
+        {repository->id, "review", {{"change_id", reviewed_id}, {"state", "approved"}}});
+    ASSERT_TRUE(approved) << approved.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(owner_endpoint.push(*source)));
+
+    ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("main", *base)));
+    const auto fast_forward_refusal = liquid::runtime::block_on(owner_endpoint.push(*source));
+    ASSERT_FALSE(fast_forward_refusal);
+    EXPECT_EQ(fast_forward_refusal.error().code, liquid::errc::conflict);
+    EXPECT_NE(fast_forward_refusal.error().message.find("main"), std::string::npos);
+    EXPECT_NE(fast_forward_refusal.error().message.find("non-fast-forward"), std::string::npos);
+
+    const auto events_before_unauthorized = control->list_audit_events({.limit = 1000});
+    ASSERT_TRUE(events_before_unauthorized) << events_before_unauthorized.error().message;
+    const auto branch_events_before =
+        std::ranges::count_if(*events_before_unauthorized, [](const auto& event) {
+            return event.draft.kind.starts_with("forge.branch_protection.");
+        });
+    EXPECT_TRUE(std::ranges::any_of(*events_before_unauthorized, [](const auto& event) {
+        return event.draft.kind == "forge.branch_protection.refused" &&
+               event.draft.details.value("reference", "") == "main" &&
+               event.draft.details.value("caller", "") == "admin" &&
+               event.draft.details.value("rule", "") == "required_review";
+    }));
+    EXPECT_TRUE(std::ranges::any_of(*events_before_unauthorized, [](const auto& event) {
+        return event.draft.kind == "forge.branch_protection.allowed" &&
+               event.draft.details.value("reference", "") == "main" &&
+               event.draft.details.value("caller", "") == "admin";
+    }));
+
+    auto anonymous_source = liquid::runtime::block_on(
+        liquid::repository::create(temporary.path() / "branch-protection-anonymous"));
+    ASSERT_TRUE(anonymous_source) << anonymous_source.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(
+        anonymous_source->write("anonymous.txt", sync_bytes("anonymous"))));
+    ASSERT_TRUE(liquid::runtime::block_on(anonymous_source->cut("anonymous")));
+    liquid::sync_endpoint anonymous_endpoint(url);
+    const auto anonymous = liquid::runtime::block_on(anonymous_endpoint.push(*anonymous_source));
+    ASSERT_FALSE(anonymous);
+    EXPECT_EQ(anonymous.error().code, liquid::errc::unauthorized);
+    const auto events_after_anonymous = control->list_audit_events({.limit = 1000});
+    ASSERT_TRUE(events_after_anonymous) << events_after_anonymous.error().message;
+    const auto branch_events_after =
+        std::ranges::count_if(*events_after_anonymous, [](const auto& event) {
+            return event.draft.kind.starts_with("forge.branch_protection.");
+        });
+    EXPECT_EQ(branch_events_after, branch_events_before);
+    server.stop();
+}
+
+// Liquid #189 makes independent reference application available to this test.
+TEST(DISABLED_SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto owner =
+        control->create_user({"taap:1:ed25519:mixed-branch-owner", "mixed@example.test", "Owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto customer = control->create_customer({"individual", owner->id, "", "mixed-owner"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = control->create_repository({customer->id, "mixed", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "mixed-source"));
+    ASSERT_TRUE(source) << source.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("base.txt", sync_bytes("base"))));
+    const auto base = liquid::runtime::block_on(source->cut("base"));
+    ASSERT_TRUE(base) << base.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.admin_token = "mixed-admin";
+    options.instance_kek = "mixed-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string url =
+        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint endpoint(
+        url, liquid::sync_endpoint_options{.bearer_token = options.admin_token});
+    ASSERT_TRUE(liquid::runtime::block_on(endpoint.push(*source)));
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("candidate.txt", sync_bytes("candidate"))));
+    const auto candidate = liquid::runtime::block_on(source->cut("candidate"));
+    ASSERT_TRUE(candidate) << candidate.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("release", *candidate)));
+    ASSERT_TRUE(control->create_forge_record(
+        {repository->id, "branch_protection", {{"ref", "main"}, {"required_review", true}}}));
+
+    const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(pushed) << pushed.error().message;
+    const auto references = control->list_repository_refs(repository->id);
+    ASSERT_TRUE(references) << references.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*references, [&base](const auto& reference) {
+        return reference.name == "main" && reference.head == liquid::to_string(base->value);
+    }));
+    EXPECT_TRUE(std::ranges::any_of(*references, [&candidate](const auto& reference) {
+        return reference.name == "release" && reference.head == liquid::to_string(candidate->value);
+    }));
+    server.stop();
 }
 
 TEST(Identity, PasswordSessionsTokensAndRevocation) {

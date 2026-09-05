@@ -550,11 +550,12 @@ ApiResult set_branch_protection(const json& input, ApiContext& context) {
 
 } // namespace
 
-SyncStoreResult<void> evaluate_branch_protection(control::Store& store,
-                                                 const std::string& acting_identity,
-                                                 control::AuthorizationCache& authorization_cache,
-                                                 const std::string& repository_id,
-                                                 const BranchRefUpdate& update) {
+SyncStoreResult<BranchProtectionEvaluation>
+evaluate_branch_protection(control::Store& store,
+                           const std::string& acting_identity,
+                           control::AuthorizationCache& authorization_cache,
+                           const std::string& repository_id,
+                           const BranchRefUpdate& update) {
     const auto rules = store.list_forge_records(repository_id, "branch_protection", 1000);
     if (!rules) {
         return std::unexpected(
@@ -570,43 +571,61 @@ SyncStoreResult<void> evaluate_branch_protection(control::Store& store,
         return std::unexpected(
             SyncStoreError{releases.error().code, releases.error().message, update.name});
     }
+    BranchProtectionEvaluation evaluation;
     for (const control::ForgeRecord& rule : *rules) {
-        if (!branch_matches(rule.value.value("ref", ""), update.name)) {
+        const std::string rule_ref = rule.value.value("ref", "");
+        if (!branch_matches(rule_ref, update.name)) {
             continue;
         }
+        evaluation.matched_rules.push_back(rule_ref);
         if (rule.value.value("fast_forward_only", false) && !update.fast_forward) {
             return std::unexpected(SyncStoreError{
-                "conflict", "branch protection rejects a non-fast-forward update", update.name});
+                "conflict",
+                "branch protection rejects a non-fast-forward update to " + update.name,
+                update.name,
+                "fast_forward_only"});
         }
         if (!allowed_pusher(rule.value, acting_identity)) {
-            return std::unexpected(SyncStoreError{
-                "unauthorized", "branch protection rejects this pusher", update.name});
+            return std::unexpected(
+                SyncStoreError{"unauthorized",
+                               "branch protection rejects this pusher for " + update.name,
+                               update.name,
+                               "allowed_pushers"});
         }
         const std::string policy_object_id = rule.value.value("policy_object_id", "");
         if (acting_identity != "admin" && !policy_object_id.empty()) {
             const auto decision = control::authorize(
                 store, acting_identity, policy_object_id, "write", authorization_cache);
             if (!decision) {
-                return std::unexpected(
-                    SyncStoreError{decision.error().code, decision.error().message, update.name});
+                return std::unexpected(SyncStoreError{
+                    decision.error().code, decision.error().message, update.name, "write_policy"});
             }
             if (!decision->allowed) {
-                return std::unexpected(SyncStoreError{
-                    "unauthorized", "policy does not allow a push to this ref", update.name});
+                return std::unexpected(SyncStoreError{"unauthorized",
+                                                      "branch protection rejects a push to " +
+                                                          update.name + " by write policy",
+                                                      update.name,
+                                                      "write_policy"});
             }
         }
         if (rule.value.value("required_review", false) &&
             !approved_review(*reviews, update.new_head)) {
-            return std::unexpected(SyncStoreError{
-                "conflict", "branch protection requires an approved review", update.name});
+            return std::unexpected(SyncStoreError{"conflict",
+                                                  "branch protection rejects " + update.name +
+                                                      ": an approved review is required",
+                                                  update.name,
+                                                  "required_review"});
         }
         if (rule.value.value("required_verification", false) &&
             !verified_release(*releases, update.new_head)) {
-            return std::unexpected(SyncStoreError{
-                "conflict", "branch protection requires verified build evidence", update.name});
+            return std::unexpected(SyncStoreError{"conflict",
+                                                  "branch protection rejects " + update.name +
+                                                      ": verified build evidence is required",
+                                                  update.name,
+                                                  "required_verification"});
         }
     }
-    return {};
+    return evaluation;
 }
 
 void register_forge_capabilities(Registry& registry) {
