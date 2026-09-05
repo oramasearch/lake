@@ -21,6 +21,7 @@
 #include <liquid/liquid.hpp>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/api/forge.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
@@ -1287,6 +1288,183 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
     EXPECT_EQ(none.value["items"].size(), 0u);
     EXPECT_EQ(s.call("get_repository", {{"id", repo.value["id"]}}).value["name"], "liquid");
     EXPECT_EQ(s.call("get_repository", {{"id", "missing"}}).error.code, "not_found");
+}
+
+TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "forge"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+
+    const ApiResult issue = surface.call(
+        "create_issue",
+        {{"repository_id", repository_id},
+         {"title", "Document anchors"},
+         {"body", "Discuss `src/lib.cpp`."},
+         {"labels", json::array({"docs"})},
+         {"assignees", json::array({"taap:1:ed25519:ada"})},
+         {"references", json::array({{"change", "change-1"}, {"path", "src/lib.cpp"}})}});
+    ASSERT_TRUE(issue.ok) << issue.error.message;
+    EXPECT_EQ(issue.value["value"]["state"], "open");
+    EXPECT_TRUE(surface
+                    .call("update_issue",
+                          {{"repository_id", repository_id},
+                           {"issue_id", issue.value["id"]},
+                           {"state", "closed"}})
+                    .ok);
+    EXPECT_TRUE(surface
+                    .call("create_issue_comment",
+                          {{"repository_id", repository_id},
+                           {"issue_id", issue.value["id"]},
+                           {"body", "Resolved by change-2."}})
+                    .ok);
+
+    const ApiResult review = surface.call("create_review",
+                                          {{"repository_id", repository_id},
+                                           {"change_id", "change-1"},
+                                           {"reviewers", json::array({"taap:1:ed25519:ada"})}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    const ApiResult comment = surface.call(
+        "create_review_comment",
+        {{"repository_id", repository_id},
+         {"review_id", review.value["id"]},
+         {"body", "Use a more specific name."},
+         {"anchor",
+          {{"change", "change-1"}, {"path", "src/lib.cpp"}, {"line", 8}, {"column", 4}}}});
+    ASSERT_TRUE(comment.ok) << comment.error.message;
+
+    const ApiResult mapped = surface.call(
+        "map_review_anchors",
+        {{"repository_id", repository_id},
+         {"source_change", "change-1"},
+         {"target_change", "change-2"},
+         {"path", "src/lib.cpp"},
+         {"hunks",
+          json::array({{{"old_line", 1}, {"old_count", 0}, {"new_line", 1}, {"new_count", 2}}})}});
+    ASSERT_TRUE(mapped.ok) << mapped.error.message;
+    ASSERT_EQ(mapped.value["items"].size(), 1);
+    EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["change"], "change-2");
+    EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["line"], 10);
+    EXPECT_EQ(mapped.value["items"][0]["value"]["anchor"]["disposition"], "shifted");
+}
+
+TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "releases"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+
+    const ApiResult release = surface.call("create_release",
+                                           {{"repository_id", repository.value["id"]},
+                                            {"tag", "v1.0.0"},
+                                            {"change_id", "change-1"},
+                                            {"artifact_ids", json::array({"result-1"})}});
+    ASSERT_TRUE(release.ok) << release.error.message;
+    EXPECT_EQ(release.value["value"]["artifacts"][0]["id"], "result-1");
+    EXPECT_EQ(release.value["value"]["artifacts"][0]["attestations"][0]["id"], "attestation-1");
+}
+
+TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "hooks"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    const ApiResult webhook = surface.call("create_webhook",
+                                           {{"repository_id", repository_id},
+                                            {"url", "https://example.test/lake"},
+                                            {"events", json::array({"issue"})},
+                                            {"secret", "delivery-secret"}});
+    ASSERT_TRUE(webhook.ok) << webhook.error.message;
+
+    int calls = 0;
+    surface.ctx.webhook_sender = [&calls](const std::string&,
+                                          const json& headers,
+                                          const std::string&) -> WebhookDeliveryResult {
+        EXPECT_TRUE(headers.at("x-lake-signature-256").get<std::string>().starts_with("sha256="));
+        ++calls;
+        if (calls == 1) {
+            return {.status = 503, .error = "service unavailable"};
+        }
+        return {.status = 204};
+    };
+    ASSERT_TRUE(
+        surface.call("create_issue", {{"repository_id", repository_id}, {"title", "Trigger hook"}})
+            .ok);
+
+    const ApiResult listed =
+        surface.call("list_webhook_deliveries", {{"repository_id", repository_id}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 1);
+    EXPECT_FALSE(listed.value["items"][0]["value"]["delivered"]);
+    const ApiResult retried = surface.call(
+        "retry_webhook_delivery",
+        {{"repository_id", repository_id}, {"delivery_id", listed.value["items"][0]["id"]}});
+    ASSERT_TRUE(retried.ok) << retried.error.message;
+    EXPECT_TRUE(retried.value["value"]["delivered"]);
+    EXPECT_EQ(retried.value["value"]["attempt"], 2);
+    EXPECT_EQ(calls, 2);
+}
+
+TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
+    Surface surface;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "protected"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    const std::string repository_id = repository.value["id"];
+    ASSERT_TRUE(surface
+                    .call("set_branch_protection",
+                          {{"repository_id", repository_id},
+                           {"ref", "refs/heads/main"},
+                           {"required_review", true},
+                           {"allowed_pushers", json::array({"admin"})}})
+                    .ok);
+
+    const BranchRefUpdate update{
+        .name = "refs/heads/main", .new_head = "change-1", .fast_forward = true};
+    const auto rejected = evaluate_branch_protection(
+        surface.store, "admin", surface.ctx.authorization_cache, repository_id, update);
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().code, "conflict");
+
+    const ApiResult review = surface.call(
+        "create_review", {{"repository_id", repository_id}, {"change_id", "change-1"}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    ASSERT_TRUE(surface
+                    .call("update_review",
+                          {{"repository_id", repository_id},
+                           {"review_id", review.value["id"]},
+                           {"state", "approved"}})
+                    .ok);
+    EXPECT_TRUE(evaluate_branch_protection(
+        surface.store, "admin", surface.ctx.authorization_cache, repository_id, update));
 }
 
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {

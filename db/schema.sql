@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `offline_recovery_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `forge_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -762,3 +762,31 @@ CREATE TABLE IF NOT EXISTS offline_recovery_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0011_offline_recovery') ON CONFLICT DO NOTHING;
+
+-- Forge, export, and GitHub import (migration 0012): a versioned value per
+-- durable forge fact. Review anchors remain values so libliquid map_anchor can
+-- replace the temporary line mapping without changing persistent columns.
+CREATE TABLE IF NOT EXISTS forge_records (
+    id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    repository_id uuid        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    kind          text        NOT NULL,
+    value         jsonb       NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT forge_records_kind_check CHECK (kind IN (
+        'issue', 'issue_comment', 'review', 'review_comment', 'release',
+        'webhook', 'webhook_delivery', 'branch_protection', 'export', 'github_import'
+    )),
+    CONSTRAINT forge_records_value_check CHECK (jsonb_typeof(value) = 'object')
+);
+CREATE INDEX IF NOT EXISTS forge_records_repository_kind_created_idx
+    ON forge_records (repository_id, kind, created_at DESC);
+DROP TRIGGER IF EXISTS forge_records_set_updated_at ON forge_records;
+CREATE TRIGGER forge_records_set_updated_at BEFORE UPDATE ON forge_records
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS forge_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0012_forge_export_import') ON CONFLICT DO NOTHING;

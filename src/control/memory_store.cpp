@@ -132,6 +132,15 @@ nlohmann::json to_json(const RepositoryRef& reference) {
             {"updated_at", reference.updated_at}};
 }
 
+nlohmann::json to_json(const ForgeRecord& record) {
+    return {{"id", record.id},
+            {"repository_id", record.repository_id},
+            {"kind", record.kind},
+            {"value", record.value},
+            {"created_at", record.created_at},
+            {"updated_at", record.updated_at}};
+}
+
 nlohmann::json to_json(const Team& team) {
     return {{"id", team.id},
             {"organization_id", team.organization_id},
@@ -2140,6 +2149,62 @@ Result<RepositoryRef> InMemoryStore::set_repository_ref(const std::string& repos
     }
     repository_refs_.push_back(RepositoryRef{repository_id, name, head, now_iso8601()});
     return repository_refs_.back();
+}
+
+Result<ForgeRecord> InMemoryStore::create_forge_record(const NewForgeRecord& input) {
+    std::lock_guard lock(mutex_);
+    if (repository_by_id(repositories_, input.repository_id) == repositories_.end()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "repository_id does not reference a repository"});
+    }
+    if (input.kind.empty() || !input.value.is_object()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "forge record kind and object value are required"});
+    }
+    const std::string now = now_iso8601();
+    forge_records_.push_back(
+        ForgeRecord{new_uuid_v4(), input.repository_id, input.kind, now, now, input.value});
+    return forge_records_.back();
+}
+
+Result<ForgeRecord> InMemoryStore::get_forge_record(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto record = std::ranges::find(forge_records_, id, &ForgeRecord::id);
+    if (record == forge_records_.end()) {
+        return std::unexpected(StoreError{"not_found", "no forge record " + id});
+    }
+    return *record;
+}
+
+Result<std::vector<ForgeRecord>> InMemoryStore::list_forge_records(const std::string& repository_id,
+                                                                   const std::string& kind,
+                                                                   int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ForgeRecord> result;
+    for (auto record = forge_records_.rbegin(); record != forge_records_.rend(); ++record) {
+        if (record->repository_id == repository_id && (kind.empty() || record->kind == kind)) {
+            result.push_back(*record);
+        }
+        if (limit > 0 && result.size() >= static_cast<std::size_t>(limit)) {
+            break;
+        }
+    }
+    return result;
+}
+
+Result<ForgeRecord> InMemoryStore::update_forge_record(const std::string& id,
+                                                       const nlohmann::json& value) {
+    std::lock_guard lock(mutex_);
+    if (!value.is_object()) {
+        return std::unexpected(StoreError{"invalid_input", "forge record value must be an object"});
+    }
+    const auto record = std::ranges::find(forge_records_, id, &ForgeRecord::id);
+    if (record == forge_records_.end()) {
+        return std::unexpected(StoreError{"not_found", "no forge record " + id});
+    }
+    record->value = value;
+    record->updated_at = now_iso8601();
+    return *record;
 }
 
 Result<Team> InMemoryStore::create_team(const NewTeam& in) {

@@ -1485,6 +1485,17 @@ constexpr const char* scim_group_columns =
 constexpr const char* provisioning_log_columns =
     "id::text, provider_id::text, resource, operation, external_id, outcome, details::text, "
     "created_at::text";
+constexpr const char* forge_record_columns =
+    "id::text, repository_id::text, kind, value::text, created_at::text, updated_at::text";
+
+ForgeRecord forge_record_of(const pqxx::row& row) {
+    return ForgeRecord{row[0].as<std::string>(),
+                       row[1].as<std::string>(),
+                       row[2].as<std::string>(),
+                       row[4].as<std::string>(),
+                       row[5].as<std::string>(),
+                       nlohmann::json::parse(row[3].as<std::string>())};
+}
 
 void remove_scim_user_access(pqxx::work& tx,
                              const std::string& provider_id,
@@ -1868,6 +1879,75 @@ public:
                                name,
                                head);
             return repository_ref_of(rows[0]);
+        });
+    }
+
+    Result<ForgeRecord> create_forge_record(const NewForgeRecord& input) override {
+        return with_tx<ForgeRecord>([&](pqxx::work& tx) -> Result<ForgeRecord> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO forge_records (repository_id, kind, value) VALUES "
+                            "($1::uuid, $2, $3::jsonb) RETURNING ") +
+                    forge_record_columns,
+                input.repository_id,
+                input.kind,
+                input.value.dump());
+            return forge_record_of(rows[0]);
+        });
+    }
+
+    Result<ForgeRecord> get_forge_record(const std::string& id) override {
+        return with_tx<ForgeRecord>([&](pqxx::work& tx) -> Result<ForgeRecord> {
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + forge_record_columns +
+                                                         " FROM forge_records WHERE id = $1::uuid",
+                                                     id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no forge record " + id});
+            }
+            return forge_record_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<ForgeRecord>> list_forge_records(const std::string& repository_id,
+                                                        const std::string& kind,
+                                                        int limit) override {
+        return with_tx<std::vector<ForgeRecord>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ForgeRecord>> {
+                const pqxx::result rows =
+                    kind.empty() ? tx.exec_params(std::string("SELECT ") + forge_record_columns +
+                                                      " FROM forge_records WHERE "
+                                                      "repository_id = $1::uuid "
+                                                      "ORDER BY created_at DESC LIMIT $2",
+                                                  repository_id,
+                                                  limit)
+                                 : tx.exec_params(std::string("SELECT ") + forge_record_columns +
+                                                      " FROM forge_records WHERE "
+                                                      "repository_id = $1::uuid AND "
+                                                      "kind = $2 ORDER BY created_at "
+                                                      "DESC LIMIT $3",
+                                                  repository_id,
+                                                  kind,
+                                                  limit);
+                std::vector<ForgeRecord> output;
+                for (const auto& row : rows) {
+                    output.push_back(forge_record_of(row));
+                }
+                return output;
+            });
+    }
+
+    Result<ForgeRecord> update_forge_record(const std::string& id,
+                                            const nlohmann::json& value) override {
+        return with_tx<ForgeRecord>([&](pqxx::work& tx) -> Result<ForgeRecord> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE forge_records SET value = $2::jsonb WHERE id = $1::uuid "
+                            "RETURNING ") +
+                    forge_record_columns,
+                id,
+                value.dump());
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no forge record " + id});
+            }
+            return forge_record_of(rows[0]);
         });
     }
 
