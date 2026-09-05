@@ -15,6 +15,10 @@ submodules recursively, starts a Postgres 16 service, configures Release with
 ctest --test-dir build --output-on-failure
 ```
 
+The workflow installs pinned `huggingface_hub` 1.30.0 in a Python virtual environment before the
+test step. The model/dataset client integration therefore runs in CI; a local environment without
+the package reports an explicit skip while the direct C++ HTTP coverage still runs.
+
 `lake-postgres-tests` reads `LAKE_TEST_DB_URI` and uses unique fixture keys to round-trip every
 registered data capability through the production Postgres store; the audit and repository-sync
 integration tests in `lake-tests` read the same variable and skip without it. The sync integration

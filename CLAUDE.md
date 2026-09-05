@@ -85,9 +85,12 @@ persist quorum, expiry, completion, and one-way share evidence while keeping sha
 reconstructed root material out of storage. Both use the signed registry audit path.
 Drive and models add migration `0015_drive`, stable-node folder ACLs, live recipient grants,
 expiring and revocable links, format-registry previews, per-path history and restore, and the
-server-rendered browse/share/history pages. Model repositories expose cards, exact revision files,
-and verified `sbom/1` plus `slsa_provenance/1` build evidence through compatible metadata and
-resolve routes. The liquid sync client and Linux desktop work are tracked in liquid #195 and #196.
+server-rendered browse/share/history pages. Models and datasets use the liquid sync protocol for
+resumable deduplicated transfer and unique-byte metering. The compatible Hub routes support create,
+file/folder upload, basic LFS, list, info, snapshot, and named or digest downloads. Model metadata
+and the server-rendered model page include per-revision storage savings plus the verified liquid
+attestation chain from dataset and code revisions through the training run. The liquid sync client
+and Linux desktop work are tracked in liquid #195 and #196.
 TUF repository metadata adds immutable root, targets, snapshot, and timestamp objects at
 `LAKE_STORE_ROOT/<instance>/log/tuf/`, distinct-key threshold verification, version/expiry and
 cross-role binding checks, dual-threshold root rotation, and a rehearsed compromised-key

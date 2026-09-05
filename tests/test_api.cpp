@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +27,8 @@
 
 #include <liquid/liquid.hpp>
 
+#include "../modules/liquid/src/objects/records.hpp"
+
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
 #include "lake/api/mcp.hpp"
@@ -36,6 +39,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/handles.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -321,7 +325,8 @@ class TemporarySyncRoot {
 public:
     TemporarySyncRoot() {
         static std::atomic<unsigned long> next{0};
-        path_ = std::filesystem::temp_directory_path() / ("lake-sync-" + std::to_string(++next));
+        path_ = std::filesystem::temp_directory_path() /
+                ("lake-sync-" + std::to_string(getpid()) + "-" + std::to_string(++next));
         std::filesystem::create_directories(path_);
     }
 
@@ -345,6 +350,32 @@ std::vector<std::byte> bytes(const std::string& value) {
         output.push_back(static_cast<std::byte>(character));
     }
     return output;
+}
+
+std::string base64_bytes(std::span<const std::byte> input) {
+    if (input.empty()) {
+        return {};
+    }
+    std::string output(4 * ((input.size() + 2) / 3), '\0');
+    const int size = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(output.data()),
+                                     reinterpret_cast<const unsigned char*>(input.data()),
+                                     static_cast<int>(input.size()));
+    output.resize(static_cast<std::size_t>(size));
+    return output;
+}
+
+liquid::attestation sign_attestation(liquid::attestation value) {
+    auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
+    EXPECT_TRUE(signer) << signer.error().message;
+    value.issuer = signer->identity();
+    auto body = liquid::objects::encode_attestation_body(value);
+    EXPECT_TRUE(body) << body.error().message;
+    auto signed_value = liquid::runtime::block_on(signer->sign("attestation", *body));
+    EXPECT_TRUE(signed_value) << signed_value.error().message;
+    auto signature = liquid::encode_attestation_signature(*signed_value);
+    EXPECT_TRUE(signature) << signature.error().message;
+    value.signature = std::move(*signature);
+    return value;
 }
 
 std::string share_token_hash(std::string_view token) {
@@ -1393,6 +1424,8 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/find-missing"));
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/chunks"));
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/chunks/{digest}"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/attach_model_provenance"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/verify_model_provenance"));
     EXPECT_TRUE(doc["paths"].contains("/mcp"));
     EXPECT_TRUE(doc["paths"]["/v1/server_info"]["get"]["security"].empty());
     const json& push = doc["paths"]["/v1/repositories/{repository_id}/sync/push"]["post"];
@@ -1510,6 +1543,12 @@ TEST(Mcp, InitializeListAndCall) {
         return entry->transport == CapabilityTransport::Json;
     });
     EXPECT_EQ(tools["result"]["tools"].size(), json_capabilities);
+    EXPECT_TRUE(std::ranges::any_of(tools["result"]["tools"], [](const json& tool) {
+        return tool.value("name", "") == "attach_model_provenance";
+    }));
+    EXPECT_TRUE(std::ranges::any_of(tools["result"]["tools"], [](const json& tool) {
+        return tool.value("name", "") == "verify_model_provenance";
+    }));
 
     const json call = {
         {"jsonrpc", "2.0"},
@@ -2103,6 +2142,402 @@ TEST(Models, MetadataAndResolveUseRepositoryHistoryAndProvenance) {
     EXPECT_EQ(file.value["contents"], "fixture weights");
 }
 
+TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto user =
+        control->create_user({"taap:1:ed25519:hf-owner", "hf-owner@example.test", "Hub Owner"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = control->create_customer({"individual", user->id, "", "ada"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository =
+        control->create_repository({customer->id, "fixture-model", "Hub fixture", "public"});
+    ASSERT_TRUE(repository) << repository.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "hub-test";
+    options.admin_token = "hub-admin";
+    options.instance_kek = "hub-test-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string authorization = "Bearer hub-admin";
+
+    const std::string preupload = http_request(server.port(),
+                                               "POST",
+                                               "/api/models/ada/fixture-model/preupload/main",
+                                               R"({"files":[{"path":"config.json","size":12}]})",
+                                               "application/json",
+                                               {},
+                                               authorization);
+    EXPECT_NE(preupload.find(" 200 "), std::string::npos) << preupload;
+    EXPECT_EQ(response_json(preupload)["files"][0]["uploadMode"], "regular");
+
+    const std::string config = "{\"hidden\":8}";
+    const std::string commit_body = R"({"key":"header","value":{"summary":"initial model"}})"
+                                    "\n" +
+                                    nlohmann::json({{"key", "file"},
+                                                    {"value",
+                                                     {{"path", "config.json"},
+                                                      {"content", base64_bytes(bytes(config))},
+                                                      {"encoding", "base64"}}}})
+                                        .dump() +
+                                    "\n";
+    const std::string committed = http_request(server.port(),
+                                               "POST",
+                                               "/api/models/ada/fixture-model/commit/main",
+                                               commit_body,
+                                               "application/x-ndjson",
+                                               {},
+                                               authorization);
+    EXPECT_NE(committed.find(" 200 "), std::string::npos) << committed;
+    const std::string revision = response_json(committed).value("commitOid", "");
+    EXPECT_FALSE(revision.empty());
+
+    const std::string info = http_request(server.port(),
+                                          "GET",
+                                          "/api/models/ada/fixture-model/revision/" + revision,
+                                          "",
+                                          "application/json");
+    EXPECT_NE(info.find(" 200 "), std::string::npos) << info;
+    EXPECT_EQ(response_json(info)["siblings"][0]["rfilename"], "config.json");
+    const std::string dataset_info = http_request(
+        server.port(), "GET", "/api/datasets/ada/fixture-model", "", "application/json");
+    EXPECT_NE(dataset_info.find(" 200 "), std::string::npos) << dataset_info;
+    const std::string tree = http_request(server.port(),
+                                          "GET",
+                                          "/api/models/ada/fixture-model/tree/main?recursive=true",
+                                          "",
+                                          "application/json");
+    EXPECT_EQ(response_json(tree)[0]["path"], "config.json") << tree;
+    const std::string download = http_request(server.port(),
+                                              "GET",
+                                              "/ada/fixture-model/resolve/main/config.json",
+                                              "",
+                                              "application/octet-stream");
+    EXPECT_NE(download.find(config), std::string::npos) << download;
+    const std::string head = http_request(server.port(),
+                                          "HEAD",
+                                          "/ada/fixture-model/resolve/main/config.json",
+                                          "",
+                                          "application/octet-stream");
+    EXPECT_NE(head.find("X-Repo-Commit: " + revision), std::string::npos) << head;
+
+    const std::string large(6U * 1024U * 1024U, 'w');
+    const std::string oid = lake::control::identity_crypto::sha256_hex(large);
+    const std::string batch = http_request(
+        server.port(),
+        "POST",
+        "/ada/fixture-model.git/info/lfs/objects/batch",
+        nlohmann::json(
+            {{"operation", "upload"},
+             {"transfers", nlohmann::json::array({"basic"})},
+             {"objects", nlohmann::json::array({{{"oid", oid}, {"size", large.size()}}})}})
+            .dump(),
+        "application/vnd.git-lfs+json",
+        {},
+        authorization);
+    EXPECT_NE(batch.find(" 200 "), std::string::npos) << batch;
+    const std::string href = response_json(batch)["objects"][0]["actions"]["upload"]["href"];
+    const std::size_t path_offset = href.find('/', href.find("//") + 2);
+    ASSERT_NE(path_offset, std::string::npos);
+    const std::string uploaded = http_request(
+        server.port(), "PUT", href.substr(path_offset), large, "application/octet-stream");
+    EXPECT_NE(uploaded.find(" 200 "), std::string::npos) << uploaded;
+    const std::string lfs_commit =
+        R"({"key":"header","value":{"summary":"weights"}})"
+        "\n" +
+        nlohmann::json({{"key", "lfsFile"},
+                        {"value", {{"path", "weights.bin"}, {"oid", oid}, {"size", large.size()}}}})
+            .dump() +
+        "\n";
+    const std::string lfs_committed = http_request(server.port(),
+                                                   "POST",
+                                                   "/api/models/ada/fixture-model/commit/main",
+                                                   lfs_commit,
+                                                   "application/x-ndjson",
+                                                   {},
+                                                   authorization);
+    EXPECT_NE(lfs_committed.find(" 200 "), std::string::npos) << lfs_committed;
+    const std::string model_page =
+        http_request(server.port(), "GET", "/models/ada/fixture-model", "", "text/html");
+    EXPECT_NE(model_page.find("Training provenance"), std::string::npos) << model_page;
+    EXPECT_NE(model_page.find("weights.bin"), std::string::npos) << model_page;
+
+    const std::string created = http_request(
+        server.port(),
+        "POST",
+        "/api/repos/create",
+        R"({"name":"new-dataset","organization":"ada","type":"dataset","private":false})",
+        "application/json",
+        {},
+        authorization);
+    EXPECT_NE(created.find(" 200 "), std::string::npos) << created;
+    EXPECT_EQ(response_json(created)["repo_id"], "ada/new-dataset");
+    const std::string yaml = http_request(server.port(),
+                                          "POST",
+                                          "/api/validate-yaml",
+                                          R"({"content":"---\n---\n","repoType":"model"})",
+                                          "application/json",
+                                          {},
+                                          authorization);
+    EXPECT_NE(yaml.find(" 200 "), std::string::npos) << yaml;
+    EXPECT_TRUE(response_json(yaml)["errors"].empty());
+    server.stop();
+}
+
+TEST(HuggingFaceClient, CommonFlowsRunWhenPythonClientIsInstalled) {
+    if (std::system("python3 -c 'import huggingface_hub' >/dev/null 2>&1") != 0) {
+        GTEST_SKIP() << "huggingface_hub is not installed; direct HTTP coverage remains active";
+    }
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = control->create_user(
+        {"taap:1:ed25519:client-owner", "client-owner@example.test", "Client Owner"});
+    ASSERT_TRUE(user);
+    const auto customer = control->create_customer({"individual", user->id, "", "ada"});
+    ASSERT_TRUE(customer);
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "huggingface-client-test";
+    options.admin_token = "hub-admin";
+    options.instance_kek = "huggingface-client-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::filesystem::path script = temporary.path() / "huggingface_client_test.py";
+    {
+        std::ofstream output(script);
+        output << R"py(import os
+import pathlib
+import sys
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+
+endpoint = sys.argv[1]
+root = pathlib.Path(sys.argv[2])
+api = HfApi(endpoint=endpoint, token="hub-admin")
+api.create_repo("ada/client-model", repo_type="model", private=False)
+api.upload_file(
+    path_or_fileobj=b"model card",
+    path_in_repo="README.md",
+    repo_id="ada/client-model",
+    repo_type="model",
+)
+folder = root / "folder"
+folder.mkdir()
+(folder / "config.json").write_text('{"layers": 2}')
+(folder / "tokenizer.json").write_text('{"tokens": []}')
+api.upload_folder(
+    folder_path=folder,
+    repo_id="ada/client-model",
+    repo_type="model",
+)
+files = api.list_repo_files("ada/client-model", repo_type="model")
+assert set(files) == {"README.md", "config.json", "tokenizer.json"}, files
+info = api.model_info("ada/client-model")
+assert info.sha
+download = hf_hub_download(
+    repo_id="ada/client-model",
+    filename="config.json",
+    endpoint=endpoint,
+    token="hub-admin",
+)
+assert pathlib.Path(download).read_text() == '{"layers": 2}'
+immutable = hf_hub_download(
+    repo_id="ada/client-model",
+    filename="tokenizer.json",
+    revision=info.sha,
+    endpoint=endpoint,
+    token="hub-admin",
+)
+assert pathlib.Path(immutable).read_text() == '{"tokens": []}'
+snapshot = snapshot_download(
+    repo_id="ada/client-model",
+    endpoint=endpoint,
+    token="hub-admin",
+)
+assert (pathlib.Path(snapshot) / "README.md").read_bytes() == b"model card"
+api.create_repo("ada/client-dataset", repo_type="dataset", private=False)
+api.upload_file(
+    path_or_fileobj=b'{"row": 1}\n',
+    path_in_repo="data.jsonl",
+    repo_id="ada/client-dataset",
+    repo_type="dataset",
+)
+assert api.list_repo_files("ada/client-dataset", repo_type="dataset") == ["data.jsonl"]
+dataset_download = hf_hub_download(
+    repo_id="ada/client-dataset",
+    filename="data.jsonl",
+    repo_type="dataset",
+    endpoint=endpoint,
+    token="hub-admin",
+)
+assert pathlib.Path(dataset_download).read_bytes() == b'{"row": 1}\n'
+dataset_snapshot = snapshot_download(
+    repo_id="ada/client-dataset",
+    repo_type="dataset",
+    endpoint=endpoint,
+    token="hub-admin",
+)
+assert (pathlib.Path(dataset_snapshot) / "data.jsonl").read_bytes() == b'{"row": 1}\n'
+)py";
+    }
+    const std::string endpoint = "http://127.0.0.1:" + std::to_string(server.port());
+    const std::string command = "HF_HUB_DISABLE_XET=1 HF_HUB_DISABLE_TELEMETRY=1 "
+                                "python3 '" +
+                                script.string() + "' '" + endpoint + "' '" +
+                                temporary.path().string() + "'";
+    EXPECT_EQ(std::system(command.c_str()), 0);
+    server.stop();
+}
+
+TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto user =
+        control->create_user({"taap:1:ed25519:trainer", "trainer@example.test", "Trainer"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = control->create_customer({"individual", user->id, "", "training"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto dataset =
+        control->create_repository({customer->id, "dataset", "Training data", "private"});
+    const auto model =
+        control->create_repository({customer->id, "model", "Trained model", "private"});
+    ASSERT_TRUE(dataset);
+    ASSERT_TRUE(model);
+
+    auto dataset_source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "dataset"));
+    auto model_source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "model"));
+    ASSERT_TRUE(dataset_source);
+    ASSERT_TRUE(model_source);
+    ASSERT_TRUE(liquid::runtime::block_on(
+        dataset_source->write("training.jsonl", bytes("{\"example\":1}\n"))));
+    const auto dataset_change = liquid::runtime::block_on(dataset_source->cut("dataset"));
+    ASSERT_TRUE(dataset_change);
+    ASSERT_TRUE(
+        liquid::runtime::block_on(model_source->write("weights.bin", bytes("trained weights"))));
+    const auto model_change = liquid::runtime::block_on(model_source->cut("model"));
+    ASSERT_TRUE(model_change);
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "provenance-test";
+    options.admin_token = "provenance-admin";
+    options.instance_kek = "provenance-test-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+    liquid::sync_endpoint dataset_endpoint(
+        origin + "/v1/repositories/" + dataset->id,
+        liquid::sync_endpoint_options{.bearer_token = "provenance-admin"});
+    liquid::sync_endpoint model_endpoint(
+        origin + "/v1/repositories/" + model->id,
+        liquid::sync_endpoint_options{.bearer_token = "provenance-admin"});
+    ASSERT_TRUE(liquid::runtime::block_on(dataset_endpoint.push(*dataset_source)));
+    ASSERT_TRUE(liquid::runtime::block_on(model_endpoint.push(*model_source)));
+
+    const auto at = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    liquid::attestation model_statement{
+        .subject = model_change->value,
+        .profile = "model_provenance/1",
+        .at = at,
+        .subject_kind = liquid::attestation_subject_kind::model,
+        .attributes = {{"training_dataset", liquid::to_string(dataset_change->value)},
+                       {"training_code", liquid::to_string(dataset_change->value)}}};
+    model_statement = sign_attestation(std::move(model_statement));
+    const liquid::slsa_resource_descriptor resource{
+        "liquid:training", {{"blake3", liquid::to_string(dataset_change->value)}}, std::nullopt};
+    liquid::attestation run_statement{
+        .subject = model_change->value,
+        .profile = "slsa_provenance/1",
+        .at = at,
+        .subject_kind = liquid::attestation_subject_kind::artifact,
+        .slsa_provenance = liquid::slsa_provenance_v1{
+            .build_definition = {.build_type = "https://lake.orama.com/training/v1",
+                                 .external_parameters = {{"train", "--epochs", "3"},
+                                                         "/workspace",
+                                                         {{"CUDA", "12.8"}}},
+                                 .internal_parameters = {.toolchain = resource,
+                                                         .sandbox = resource,
+                                                         .platform = {{"os", "linux"}}},
+                                 .resolved_dependencies = {resource}},
+            .run_details = {.builder = {"taap:1:ed25519:trainer"},
+                            .metadata = {"run-7", "2026-09-05T00:00:00Z", "2026-09-05T00:01:00Z"},
+                            .byproducts = {resource}}}};
+    run_statement = sign_attestation(std::move(run_statement));
+    const auto model_verification = liquid::verify_attestation(model_statement);
+    const auto run_verification = liquid::verify_attestation(run_statement);
+    ASSERT_TRUE(model_verification);
+    ASSERT_TRUE(run_verification);
+    EXPECT_TRUE(model_verification->verified);
+    EXPECT_TRUE(run_verification->verified);
+    const auto model_encoded = liquid::encode_attestation(model_statement);
+    const auto run_encoded = liquid::encode_attestation(run_statement);
+    ASSERT_TRUE(model_encoded);
+    ASSERT_TRUE(run_encoded);
+
+    const nlohmann::json request{{"id", model->id},
+                                 {"revision", "main"},
+                                 {"dataset_repository_id", dataset->id},
+                                 {"dataset_revision", "main"},
+                                 {"model_attestation", base64_bytes(*model_encoded)},
+                                 {"run_attestation", base64_bytes(*run_encoded)}};
+    const std::string attached = http_request(server.port(),
+                                              "POST",
+                                              "/v1/attach_model_provenance",
+                                              request.dump(),
+                                              "application/json",
+                                              {},
+                                              "Bearer provenance-admin");
+    EXPECT_NE(attached.find(" 200 "), std::string::npos) << attached;
+    EXPECT_TRUE(response_json(attached)["ok"]);
+    EXPECT_TRUE(response_json(attached)["value"]["verified"]);
+    const std::string verified =
+        http_request(server.port(),
+                     "POST",
+                     "/v1/verify_model_provenance",
+                     nlohmann::json({{"id", model->id}, {"revision", "main"}}).dump(),
+                     "application/json",
+                     {},
+                     "Bearer provenance-admin");
+    EXPECT_NE(verified.find(" 200 "), std::string::npos) << verified;
+    EXPECT_TRUE(response_json(verified)["value"]["verified"]);
+    EXPECT_EQ(response_json(verified)["value"]["dataset_revision"],
+              liquid::to_string(dataset_change->value));
+    const std::string model_page = http_request(server.port(),
+                                                "GET",
+                                                "/models/" + model->id,
+                                                "",
+                                                "text/html",
+                                                {},
+                                                "Bearer provenance-admin");
+    EXPECT_NE(model_page.find("run-7"), std::string::npos) << model_page;
+    EXPECT_NE(model_page.find(liquid::to_string(dataset_change->value)), std::string::npos)
+        << model_page;
+
+    std::vector<std::byte> tampered = *model_encoded;
+    tampered.back() ^= std::byte{1};
+    nlohmann::json tampered_request = request;
+    tampered_request["model_attestation"] = base64_bytes(tampered);
+    const std::string refused = http_request(server.port(),
+                                             "POST",
+                                             "/v1/attach_model_provenance",
+                                             tampered_request.dump(),
+                                             "application/json",
+                                             {},
+                                             "Bearer provenance-admin");
+    EXPECT_NE(refused.find(" 400 "), std::string::npos) << refused;
+    server.stop();
+}
+
 TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     TemporaryRepositoryRoot root;
     const auto store = std::make_shared<lake::control::InMemoryStore>();
@@ -2342,6 +2777,110 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
     EXPECT_EQ(
         surface.call("rename_repository", {{"id", repository_id}, {"name", "denied"}}).error.code,
         "unauthorized");
+}
+
+TEST(ModelSync, MultiGigabyteRevisionsDeduplicateAndResumePull) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = control->create_user(
+        {"taap:1:ed25519:model-owner", "model-owner@example.test", "Model Owner"});
+    ASSERT_TRUE(user);
+    const auto customer = control->create_customer({"individual", user->id, "", "models"});
+    ASSERT_TRUE(customer);
+    const auto repository =
+        control->create_repository({customer->id, "large-model", "Large model", "private"});
+    ASSERT_TRUE(repository);
+
+    const std::filesystem::path weights = temporary.path() / "weights.bin";
+    constexpr std::uint64_t logical_size = std::uint64_t{2} * 1024 * 1024 * 1024;
+    {
+        std::ofstream output(weights, std::ios::binary);
+        ASSERT_TRUE(output);
+    }
+    std::filesystem::resize_file(weights, logical_size);
+    const std::string block(1024 * 1024, 'm');
+    {
+        std::fstream file(weights, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(file);
+        file.seekp(64 * 1024 * 1024);
+        file.write(block.data(), static_cast<std::streamsize>(block.size()));
+        file.seekp(std::streamoff{1024} * 1024 * 1024);
+        file.write(block.data(), static_cast<std::streamsize>(block.size()));
+    }
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "source-large"));
+    ASSERT_TRUE(source);
+    ASSERT_TRUE(liquid::runtime::block_on(source->write_file("weights.bin", weights)));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("model revision one")));
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "model-sync-test";
+    options.admin_token = "model-sync-admin";
+    options.instance_kek = "model-sync-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string origin = "http://127.0.0.1:" + std::to_string(server.port());
+    liquid::sync_endpoint endpoint(
+        origin + "/v1/repositories/" + repository->id,
+        liquid::sync_endpoint_options{.bearer_token = "model-sync-admin"});
+    const auto first_push = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(first_push) << first_push.error().message;
+    const std::filesystem::path packs =
+        temporary.path() / "lake" / customer->id / "store" / "packs";
+    const std::uint64_t first_unique = unique_pack_raw_bytes(packs);
+
+    {
+        std::fstream file(weights, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(file);
+        const std::string zeros(block.size(), '\0');
+        file.seekp(64 * 1024 * 1024);
+        file.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+        file.seekp(68 * 1024 * 1024);
+        file.write(block.data(), static_cast<std::streamsize>(block.size()));
+    }
+    ASSERT_TRUE(liquid::runtime::block_on(source->write_file("weights.bin", weights)));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("model revision two")));
+    const auto second_push = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(second_push) << second_push.error().message;
+    const std::uint64_t second_unique = unique_pack_raw_bytes(packs);
+    const std::uint64_t logical_revisions = logical_size * 2;
+    const double dedup_ratio =
+        1.0 - static_cast<double>(second_unique) / static_cast<double>(logical_revisions);
+    std::cout << "multi-gigabyte model dedup ratio: " << dedup_ratio << '\n';
+    EXPECT_GT(dedup_ratio, 0.99);
+    EXPECT_LT(second_unique - first_unique, 16U * 1024U * 1024U);
+    EXPECT_LT(second_push->sent.bytes, first_push->sent.bytes);
+
+    auto destination = liquid::runtime::block_on(
+        liquid::repository::create(temporary.path() / "destination-large"));
+    ASSERT_TRUE(destination);
+    const auto pulled = liquid::runtime::block_on(endpoint.pull(*destination));
+    ASSERT_TRUE(pulled) << pulled.error().message;
+    const auto resumed = liquid::runtime::block_on(endpoint.pull(*destination));
+    ASSERT_TRUE(resumed) << resumed.error().message;
+    EXPECT_EQ(resumed->received.bytes, 0U);
+    const auto source_tree = liquid::runtime::block_on(source->root());
+    const auto destination_tree = liquid::runtime::block_on(destination->root());
+    ASSERT_TRUE(source_tree);
+    ASSERT_TRUE(destination_tree);
+    EXPECT_EQ(tree_fingerprint(*source_tree), tree_fingerprint(*destination_tree));
+
+    const std::string info = http_request(server.port(),
+                                          "GET",
+                                          "/api/models/" + repository->id,
+                                          "",
+                                          "application/json",
+                                          {},
+                                          "Bearer model-sync-admin");
+    EXPECT_NE(info.find(" 200 "), std::string::npos) << info;
+    const nlohmann::json storage = response_json(info).at("storage");
+    EXPECT_EQ(storage["logical_bytes"], logical_revisions);
+    EXPECT_GT(storage["dedup_ratio"].get<double>(), 0.99);
+    EXPECT_EQ(storage["revisions"].size(), 2U);
+    server.stop();
 }
 
 TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {

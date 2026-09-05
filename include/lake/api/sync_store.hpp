@@ -59,6 +59,8 @@ struct RepositoryTreeEntry {
     std::string blob;
     std::uint32_t mode = 0;
     std::string node_id;
+    std::uint64_t size = 0;
+    std::uint64_t stored_size = 0;
 };
 
 struct RepositoryFile {
@@ -168,6 +170,49 @@ struct RepositoryArtifactPage {
     bool done = false;
 };
 
+enum class RepositoryWriteKind { File, LfsFile, DeletedFile, DeletedFolder };
+
+struct RepositoryWriteOperation {
+    RepositoryWriteKind kind = RepositoryWriteKind::File;
+    std::string path;
+    std::vector<std::byte> contents;
+    std::string oid;
+    std::uint64_t size = 0;
+};
+
+struct RepositoryRevisionStorage {
+    std::string revision;
+    std::uint64_t logical_bytes = 0;
+    std::uint64_t unique_bytes = 0;
+    std::uint64_t deduplicated_bytes = 0;
+    double dedup_ratio = 0.0;
+};
+
+struct RepositoryStorageSummary {
+    std::uint64_t logical_bytes = 0;
+    std::uint64_t unique_bytes = 0;
+    std::uint64_t deduplicated_bytes = 0;
+    double dedup_ratio = 0.0;
+    std::vector<RepositoryRevisionStorage> revisions;
+};
+
+struct RepositoryModelProvenance {
+    std::string model_revision;
+    std::string dataset_repository_id;
+    std::string dataset_revision;
+    std::string code_revision;
+    std::string model_attestation;
+    std::string run_attestation;
+    std::vector<std::string> parameters;
+    nlohmann::json environment = nlohmann::json::object();
+    std::string environment_digest;
+    std::string runner;
+    std::string builder;
+    std::string invocation_id;
+    bool verified = false;
+    std::string reason;
+};
+
 // The portable portion of a lake export. `history` is liquid's signed sync
 // data plus every referenced object. `artifacts` is the public #166
 // enumeration used to check the reconstructed store. `git` is present only
@@ -227,6 +272,39 @@ public:
                         const std::string& result_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id, const std::string& repository_id) = 0;
+    virtual SyncStoreResult<RepositoryStorageSummary> repository_storage(const std::string&,
+                                                                         const std::string&) {
+        return std::unexpected(SyncStoreError{"unsupported", "repository storage is unavailable"});
+    }
+    virtual SyncStoreResult<std::string>
+    commit_repository_files(const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            std::vector<RepositoryWriteOperation>) {
+        return std::unexpected(SyncStoreError{"unsupported", "repository writes are unavailable"});
+    }
+    virtual SyncStoreResult<std::uint64_t> stage_repository_file(const std::string&,
+                                                                 const std::string&,
+                                                                 const std::string&,
+                                                                 std::vector<std::byte>,
+                                                                 std::uint64_t = 0) {
+        return std::unexpected(SyncStoreError{"unsupported", "repository uploads are unavailable"});
+    }
+    virtual SyncStoreResult<RepositoryModelProvenance>
+    attach_model_provenance(const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            std::vector<std::byte>,
+                            std::vector<std::byte>) {
+        return std::unexpected(SyncStoreError{"unsupported", "model provenance is unavailable"});
+    }
+    virtual SyncStoreResult<std::optional<RepositoryModelProvenance>>
+    model_provenance(const std::string&, const std::string&, const std::string&) {
+        return std::optional<RepositoryModelProvenance>{};
+    }
     virtual SyncStoreResult<RepositoryChange>
     restore_repository_file(const std::string& customer_id,
                             const std::string& repository_id,

@@ -61,8 +61,7 @@
 #include <boost/json.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
-
-#include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 #include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
@@ -297,14 +296,30 @@ boost::http::route_task send_text(boost::http::route_params& route,
 boost::http::route_task send_bytes(boost::http::route_params& route,
                                    boost::http::status status,
                                    std::string_view content_type,
-                                   std::span<const std::byte> body) {
+                                   std::span<const std::byte> body,
+                                   std::string_view etag = {},
+                                   std::string_view revision = {},
+                                   bool head = false) {
     namespace http = boost::http;
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, "no-store");
     route.res.erase(http::field::etag);
     route.res.erase(http::field::content_length);
+    if (!etag.empty()) {
+        route.res.set(http::field::etag, etag);
+    }
+    if (!revision.empty()) {
+        route.res.set("X-Repo-Commit", revision);
+    }
     route.res.set_payload_size(body.size());
+    if (head) {
+        auto [send_error] = co_await route.res_body.commit_eof(0);
+        if (send_error) {
+            co_return http::route_error(send_error);
+        }
+        co_return http::route_done;
+    }
     std::size_t offset = 0;
     for (;;) {
         auto buffers = std::array<boost::capy::mutable_buffer, 16>{};
@@ -1365,7 +1380,8 @@ public:
             return std::unexpected(tree.error());
         }
         std::vector<RepositoryTreeEntry> output;
-        const auto walked = walk_tree(*(*repository)->subject, *tree, "", output);
+        const auto walked =
+            walk_tree(*(*repository)->subject, *(*repository)->objects, *tree, "", output);
         if (!walked) {
             return std::unexpected(walked.error());
         }
@@ -1695,6 +1711,272 @@ public:
             output.push_back({conflict.path, std::move(blobs)});
         }
         return output;
+    }
+
+    SyncStoreResult<RepositoryStorageSummary>
+    repository_storage(const std::string& customer_id, const std::string& repository_id) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        const auto changes = liquid::runtime::block_on((*state)->subject->log());
+        if (!changes) {
+            return std::unexpected(error_of(changes.error()));
+        }
+        RepositoryStorageSummary output;
+        StorageAccumulator all_revisions;
+        for (const liquid::change& change : *changes) {
+            const auto snapshot = liquid::runtime::block_on((*state)->subject->at(change.id));
+            if (!snapshot) {
+                return std::unexpected(error_of(snapshot.error()));
+            }
+            StorageAccumulator revision;
+            std::vector<RepositoryTreeEntry> entries;
+            const auto walked = walk_tree(*(*state)->subject,
+                                          *(*state)->objects,
+                                          snapshot->root,
+                                          "",
+                                          entries,
+                                          &revision,
+                                          &all_revisions);
+            if (!walked) {
+                return std::unexpected(walked.error());
+            }
+            output.revisions.push_back(storage_revision(
+                liquid::to_string(change.id.value), revision.logical_bytes, revision.unique_bytes));
+            output.logical_bytes += revision.logical_bytes;
+        }
+        output.unique_bytes = all_revisions.unique_bytes;
+        output.deduplicated_bytes = output.logical_bytes > output.unique_bytes
+                                        ? output.logical_bytes - output.unique_bytes
+                                        : 0;
+        output.dedup_ratio = ratio(output.deduplicated_bytes, output.logical_bytes);
+        return output;
+    }
+
+    SyncStoreResult<std::uint64_t>
+    stage_repository_file(const std::string& customer_id,
+                          const std::string& repository_id,
+                          const std::string& oid,
+                          std::vector<std::byte> contents,
+                          std::uint64_t storage_quota_bytes) override {
+        std::lock_guard lock(mutex_);
+        if (!valid_lfs_oid(oid)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid LFS SHA-256 oid"});
+        }
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        if (!stored_bytes) {
+            return std::unexpected(stored_bytes.error());
+        }
+        if (storage_quota_bytes != 0 && *stored_bytes >= storage_quota_bytes) {
+            return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
+        }
+        const auto written = liquid::runtime::block_on(
+            (*state)->subject->write(staged_upload_path(oid), std::move(contents)));
+        if (!written) {
+            return std::unexpected(error_of(written.error()));
+        }
+        return unique_stored_bytes_locked(customer_id);
+    }
+
+    SyncStoreResult<std::string>
+    commit_repository_files(const std::string& customer_id,
+                            const std::string& repository_id,
+                            const std::string& revision,
+                            const std::string& message,
+                            std::vector<RepositoryWriteOperation> operations) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        if (revision.empty() || message.empty()) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "revision and commit message are required"});
+        }
+        if (revision != "main") {
+            return std::unexpected(
+                SyncStoreError{"conflict", "Hub-compatible commits currently update main only"});
+        }
+        std::set<std::string> target_paths;
+        std::set<std::string> staged_uploads;
+        for (const RepositoryWriteOperation& operation : operations) {
+            if (!valid_repository_path(operation.path)) {
+                return std::unexpected(
+                    SyncStoreError{"invalid_input", "invalid repository path", operation.path});
+            }
+            if (!target_paths.insert(operation.path).second) {
+                return std::unexpected(SyncStoreError{
+                    "invalid_input", "each commit operation must have a distinct path"});
+            }
+            if (operation.kind != RepositoryWriteKind::LfsFile) {
+                continue;
+            }
+            if (!valid_lfs_oid(operation.oid) || !staged_uploads.insert(operation.oid).second) {
+                return std::unexpected(SyncStoreError{
+                    "invalid_input", "each LFS oid must name one staged file", operation.oid});
+            }
+            const auto staged = liquid::runtime::block_on(
+                (*state)->subject->read(staged_upload_path(operation.oid)));
+            if (!staged) {
+                return std::unexpected(error_of(staged.error()));
+            }
+            if (staged->size() != operation.size) {
+                return std::unexpected(
+                    SyncStoreError{"invalid_input", "staged LFS size does not match commit"});
+            }
+        }
+        for (RepositoryWriteOperation& operation : operations) {
+            if (operation.kind == RepositoryWriteKind::DeletedFile ||
+                operation.kind == RepositoryWriteKind::DeletedFolder) {
+                const auto removed =
+                    liquid::runtime::block_on((*state)->subject->remove(operation.path));
+                if (!removed && removed.error().code != liquid::errc::not_found) {
+                    return std::unexpected(error_of(removed.error()));
+                }
+                continue;
+            }
+            const auto removed =
+                liquid::runtime::block_on((*state)->subject->remove(operation.path));
+            if (!removed && removed.error().code != liquid::errc::not_found) {
+                return std::unexpected(error_of(removed.error()));
+            }
+            if (operation.kind == RepositoryWriteKind::File) {
+                const auto written = liquid::runtime::block_on(
+                    (*state)->subject->write(operation.path, std::move(operation.contents)));
+                if (!written) {
+                    return std::unexpected(error_of(written.error()));
+                }
+                continue;
+            }
+            const auto moved = liquid::runtime::block_on(
+                (*state)->subject->move(staged_upload_path(operation.oid), operation.path));
+            if (!moved) {
+                return std::unexpected(error_of(moved.error()));
+            }
+        }
+        const auto change = liquid::runtime::block_on((*state)->subject->cut(message));
+        if (!change) {
+            return std::unexpected(error_of(change.error()));
+        }
+        return liquid::to_string(change->value);
+    }
+
+    SyncStoreResult<RepositoryModelProvenance>
+    attach_model_provenance(const std::string& customer_id,
+                            const std::string& repository_id,
+                            const std::string& revision,
+                            const std::string& dataset_repository_id,
+                            const std::string& dataset_revision,
+                            std::vector<std::byte> model_bytes,
+                            std::vector<std::byte> run_bytes) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        const auto model_revision = resolve_revision(*(*state)->subject, revision);
+        if (!model_revision) {
+            return std::unexpected(model_revision.error());
+        }
+        const auto model = liquid::decode_attestation(model_bytes);
+        const auto run = liquid::decode_attestation(run_bytes);
+        if (!model || !run) {
+            return std::unexpected(SyncStoreError{
+                "invalid_input", "provenance attestations are not canonical liquid records"});
+        }
+        const auto validated = validate_model_attestations(*model_revision, *model, *run);
+        if (!validated) {
+            return std::unexpected(validated.error());
+        }
+        if (text_attribute(*model, "training_dataset") != dataset_revision) {
+            return std::unexpected(SyncStoreError{
+                "invalid_input", "the model attestation names a different dataset revision"});
+        }
+        const auto model_id =
+            liquid::runtime::block_on((*state)->subject->store_attestation(*model));
+        if (!model_id) {
+            return std::unexpected(error_of(model_id.error()));
+        }
+        const auto run_id = liquid::runtime::block_on((*state)->subject->store_attestation(*run));
+        if (!run_id) {
+            return std::unexpected(error_of(run_id.error()));
+        }
+        const nlohmann::json index{{"dataset_repository_id", dataset_repository_id},
+                                   {"dataset_revision", dataset_revision},
+                                   {"model_attestation", liquid::to_string(*model_id)},
+                                   {"run_attestation", liquid::to_string(*run_id)}};
+        const std::string serialized = index.dump();
+        std::vector<std::byte> metadata;
+        metadata.reserve(serialized.size());
+        for (const char value : serialized) {
+            metadata.push_back(std::byte{static_cast<unsigned char>(value)});
+        }
+        const auto saved = liquid::runtime::block_on(
+            (*state)->subject->set_metadata(provenance_key(*model_revision), std::move(metadata)));
+        if (!saved) {
+            return std::unexpected(error_of(saved.error()));
+        }
+        return provenance_record(
+            *model_revision, dataset_repository_id, *model_id, *run_id, *model, *run);
+    }
+
+    SyncStoreResult<std::optional<RepositoryModelProvenance>>
+    model_provenance(const std::string& customer_id,
+                     const std::string& repository_id,
+                     const std::string& revision) override {
+        std::lock_guard lock(mutex_);
+        auto state = open_repository(customer_id, repository_id);
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        const auto model_revision = resolve_revision(*(*state)->subject, revision);
+        if (!model_revision) {
+            return std::unexpected(model_revision.error());
+        }
+        const auto metadata =
+            liquid::runtime::block_on((*state)->subject->metadata(provenance_key(*model_revision)));
+        if (!metadata) {
+            return std::unexpected(error_of(metadata.error()));
+        }
+        if (!*metadata) {
+            return std::optional<RepositoryModelProvenance>{};
+        }
+        const std::string serialized(reinterpret_cast<const char*>((*metadata)->data()),
+                                     (*metadata)->size());
+        const nlohmann::json index = nlohmann::json::parse(serialized, nullptr, false);
+        if (index.is_discarded() || !index.is_object()) {
+            return std::unexpected(SyncStoreError{"corrupt", "model provenance index is invalid"});
+        }
+        const auto model_id = liquid::parse_digest(index.value("model_attestation", ""));
+        const auto run_id = liquid::parse_digest(index.value("run_attestation", ""));
+        if (!model_id || !run_id) {
+            return std::unexpected(
+                SyncStoreError{"corrupt", "model provenance attestation digest is invalid"});
+        }
+        const auto model_page = liquid::runtime::block_on(
+            (*state)->subject->attestations({.id = *model_id, .page = {.limit = 1}}));
+        const auto run_page = liquid::runtime::block_on(
+            (*state)->subject->attestations({.id = *run_id, .page = {.limit = 1}}));
+        if (!model_page || !run_page) {
+            return std::unexpected(error_of((!model_page ? model_page.error() : run_page.error())));
+        }
+        if (model_page->records.empty() || run_page->records.empty()) {
+            return std::unexpected(
+                SyncStoreError{"corrupt", "model provenance attestation is missing"});
+        }
+        return std::optional<RepositoryModelProvenance>{
+            provenance_record(*model_revision,
+                              index.value("dataset_repository_id", ""),
+                              *model_id,
+                              *run_id,
+                              model_page->records.front().value,
+                              run_page->records.front().value)};
     }
 
     SyncStoreResult<RepositoryChange> restore_repository_file(const std::string& customer_id,
@@ -2289,20 +2571,246 @@ private:
                value.find_first_of("/\\\\") == std::string::npos;
     }
 
-    static SyncStoreResult<liquid::tree> tree_at_ref(liquid::repository& repository,
-                                                     const std::string& ref_name) {
-        if (ref_name.empty()) {
-            return std::unexpected(SyncStoreError{"invalid_input", "ref is required"});
+    struct BlobDescriptor {
+        std::uint64_t size = 0;
+        std::vector<std::pair<std::string, std::uint64_t>> chunks;
+    };
+
+    struct StorageAccumulator {
+        std::uint64_t logical_bytes = 0;
+        std::uint64_t unique_bytes = 0;
+        std::set<std::string> chunks;
+
+        void add(const BlobDescriptor& value) {
+            logical_bytes += value.size;
+            for (const auto& [chunk, size] : value.chunks) {
+                if (chunks.insert(chunk).second) {
+                    unique_bytes += size;
+                }
+            }
+        }
+    };
+
+    static double ratio(std::uint64_t numerator, std::uint64_t denominator) {
+        return denominator == 0 ? 0.0
+                                : static_cast<double>(numerator) / static_cast<double>(denominator);
+    }
+
+    static RepositoryRevisionStorage storage_revision(const std::string& revision,
+                                                      std::uint64_t logical_bytes,
+                                                      std::uint64_t unique_bytes) {
+        const std::uint64_t saved = logical_bytes > unique_bytes ? logical_bytes - unique_bytes : 0;
+        return {revision, logical_bytes, unique_bytes, saved, ratio(saved, logical_bytes)};
+    }
+
+    static SyncStoreResult<BlobDescriptor> blob_descriptor(liquid::store& store,
+                                                           const liquid::digest& id) {
+        const auto encoded = liquid::runtime::block_on(store.get(id));
+        if (!encoded) {
+            return std::unexpected(error_of(encoded.error()));
+        }
+        std::vector<unsigned char> cbor;
+        cbor.reserve(encoded->size());
+        for (const std::byte value : *encoded) {
+            cbor.push_back(static_cast<unsigned char>(value));
+        }
+        const nlohmann::json record = nlohmann::json::from_cbor(cbor, true, false);
+        if (record.is_discarded() || !record.is_object() || record.value("kind", "") != "blob" ||
+            !record.contains("size") || !record.at("size").is_number_unsigned() ||
+            !record.contains("chunks") || !record.at("chunks").is_array() ||
+            !record.contains("chunk_sizes") || !record.at("chunk_sizes").is_array() ||
+            record.at("chunks").size() != record.at("chunk_sizes").size()) {
+            return std::unexpected(
+                SyncStoreError{"corrupt", "invalid liquid blob record", liquid::to_string(id)});
+        }
+        BlobDescriptor output;
+        output.size = record.at("size").get<std::uint64_t>();
+        std::uint64_t total = 0;
+        for (std::size_t index = 0; index < record.at("chunks").size(); ++index) {
+            const nlohmann::json& chunk = record.at("chunks").at(index);
+            const nlohmann::json& size = record.at("chunk_sizes").at(index);
+            if (!chunk.is_object() || !chunk.contains("alg") ||
+                !chunk.at("alg").is_number_unsigned() || !chunk.contains("bytes") ||
+                !chunk.at("bytes").is_binary() || !size.is_number_unsigned()) {
+                return std::unexpected(SyncStoreError{
+                    "corrupt", "invalid liquid blob chunk record", liquid::to_string(id)});
+            }
+            const auto& bytes = chunk.at("bytes").get_binary();
+            if (bytes.size() != 32 || chunk.at("alg").get<std::uint64_t>() > 255) {
+                return std::unexpected(SyncStoreError{
+                    "corrupt", "invalid liquid blob chunk digest", liquid::to_string(id)});
+            }
+            std::string key(1, static_cast<char>(chunk.at("alg").get<std::uint64_t>()));
+            key.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            const std::uint64_t chunk_size = size.get<std::uint64_t>();
+            output.chunks.emplace_back(key, chunk_size);
+            total += chunk_size;
+        }
+        if (total != output.size) {
+            return std::unexpected(SyncStoreError{
+                "corrupt", "liquid blob chunk sizes do not match", liquid::to_string(id)});
+        }
+        return output;
+    }
+
+    static SyncStoreResult<liquid::change_id> resolve_revision(liquid::repository& repository,
+                                                               const std::string& revision) {
+        if (revision.empty()) {
+            return std::unexpected(SyncStoreError{"invalid_input", "revision is required"});
         }
         const auto refs = liquid::runtime::block_on(repository.refs());
         if (!refs) {
             return std::unexpected(error_of(refs.error()));
         }
-        const auto found = std::ranges::find(*refs, ref_name, &liquid::ref::name);
-        if (found == refs->end()) {
-            return std::unexpected(SyncStoreError{"not_found", "no ref " + ref_name});
+        const auto named = std::ranges::find(*refs, revision, &liquid::ref::name);
+        if (named != refs->end()) {
+            return named->id;
         }
-        const auto snapshot = liquid::runtime::block_on(repository.at(found->id));
+        const auto parsed = liquid::parse_digest(revision);
+        if (!parsed) {
+            return std::unexpected(SyncStoreError{"not_found", "no revision " + revision});
+        }
+        const liquid::change_id id{*parsed};
+        const auto snapshot = liquid::runtime::block_on(repository.at(id));
+        if (!snapshot) {
+            return std::unexpected(SyncStoreError{"not_found", "no revision " + revision});
+        }
+        return id;
+    }
+
+    static bool valid_repository_path(std::string_view path) {
+        if (path.empty() || path.front() == '/' || path.back() == '/' ||
+            path.starts_with(".lake-hub-upload/")) {
+            return false;
+        }
+        std::size_t offset = 0;
+        while (offset < path.size()) {
+            const std::size_t slash = path.find('/', offset);
+            const std::string_view component = path.substr(
+                offset, slash == std::string_view::npos ? path.size() - offset : slash - offset);
+            if (component.empty() || component == "." || component == ".." ||
+                component.find('\\') != std::string_view::npos) {
+                return false;
+            }
+            if (slash == std::string_view::npos) {
+                break;
+            }
+            offset = slash + 1;
+        }
+        return true;
+    }
+
+    static bool valid_lfs_oid(std::string_view oid) {
+        return oid.size() == 64 && std::ranges::all_of(oid, [](unsigned char value) {
+                   return std::isdigit(value) != 0 || (value >= 'a' && value <= 'f');
+               });
+    }
+
+    static std::string staged_upload_path(std::string_view oid) {
+        return ".lake-hub-upload/" + std::string(oid);
+    }
+
+    static std::string provenance_key(const liquid::change_id& revision) {
+        return "lake.model.provenance." + liquid::to_string(revision.value);
+    }
+
+    static std::string text_attribute(const liquid::attestation& value, std::string_view name) {
+        const auto found = std::ranges::find_if(
+            value.attributes, [name](const auto& attribute) { return attribute.name == name; });
+        if (found == value.attributes.end()) {
+            return {};
+        }
+        const auto* text = std::get_if<std::string>(&found->value);
+        return text == nullptr ? std::string{} : *text;
+    }
+
+    static SyncStoreResult<void> validate_model_attestations(const liquid::change_id& revision,
+                                                             const liquid::attestation& model,
+                                                             const liquid::attestation& run) {
+        if (model.profile != "model_provenance/1" ||
+            model.subject_kind != liquid::attestation_subject_kind::model ||
+            liquid::to_string(model.subject) != liquid::to_string(revision.value)) {
+            return std::unexpected(SyncStoreError{
+                "invalid_input", "the model provenance attestation has the wrong subject"});
+        }
+        if (run.profile != "slsa_provenance/1" ||
+            run.subject_kind != liquid::attestation_subject_kind::artifact ||
+            liquid::to_string(run.subject) != liquid::to_string(revision.value)) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "the run attestation has the wrong subject"});
+        }
+        const auto model_verification = liquid::verify_attestation(model);
+        const auto run_verification = liquid::verify_attestation(run);
+        if (!model_verification || !run_verification) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "a provenance attestation could not be verified"});
+        }
+        if (!model_verification->verified || !run_verification->verified) {
+            const std::string reason = !model_verification->verified ? model_verification->reason
+                                                                     : run_verification->reason;
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "a provenance attestation was refused", reason});
+        }
+        const auto dataset = liquid::parse_digest(text_attribute(model, "training_dataset"));
+        const auto code = liquid::parse_digest(text_attribute(model, "training_code"));
+        if (!dataset || !code || !run.slsa_provenance) {
+            return std::unexpected(
+                SyncStoreError{"invalid_input", "the provenance chain is incomplete"});
+        }
+        return {};
+    }
+
+    static RepositoryModelProvenance provenance_record(const liquid::change_id& revision,
+                                                       const std::string& dataset_repository_id,
+                                                       const liquid::digest& model_id,
+                                                       const liquid::digest& run_id,
+                                                       const liquid::attestation& model,
+                                                       const liquid::attestation& run) {
+        RepositoryModelProvenance output;
+        output.model_revision = liquid::to_string(revision.value);
+        output.dataset_repository_id = dataset_repository_id;
+        output.dataset_revision = text_attribute(model, "training_dataset");
+        output.code_revision = text_attribute(model, "training_code");
+        output.model_attestation = liquid::to_string(model_id);
+        output.run_attestation = liquid::to_string(run_id);
+        output.runner = std::string(run.issuer.identifier());
+        const auto model_verification = liquid::verify_attestation(model);
+        const auto run_verification = liquid::verify_attestation(run);
+        output.verified = model_verification && run_verification && model_verification->verified &&
+                          run_verification->verified;
+        if (!output.verified) {
+            if (!model_verification || !run_verification) {
+                output.reason = "an attestation could not be verified";
+            } else {
+                output.reason = !model_verification->verified ? model_verification->reason
+                                                              : run_verification->reason;
+            }
+        }
+        if (!run.slsa_provenance) {
+            output.verified = false;
+            output.reason = "the run predicate is missing";
+            return output;
+        }
+        const auto& predicate = *run.slsa_provenance;
+        output.parameters = predicate.build_definition.external_parameters.command;
+        output.environment = predicate.build_definition.external_parameters.environment;
+        const auto& environment = predicate.build_definition.internal_parameters.sandbox.digest;
+        if (!environment.empty()) {
+            output.environment_digest =
+                environment.begin()->first + ":" + environment.begin()->second;
+        }
+        output.builder = predicate.run_details.builder.id;
+        output.invocation_id = predicate.run_details.metadata.invocation_id;
+        return output;
+    }
+
+    static SyncStoreResult<liquid::tree> tree_at_ref(liquid::repository& repository,
+                                                     const std::string& ref_name) {
+        const auto revision = resolve_revision(repository, ref_name);
+        if (!revision) {
+            return std::unexpected(revision.error());
+        }
+        const auto snapshot = liquid::runtime::block_on(repository.at(*revision));
         if (!snapshot) {
             return std::unexpected(error_of(snapshot.error()));
         }
@@ -2392,16 +2900,36 @@ private:
     }
 
     static SyncStoreResult<void> walk_tree(liquid::repository& repository,
+                                           liquid::store& objects,
                                            const liquid::tree& tree,
                                            const std::string& prefix,
-                                           std::vector<RepositoryTreeEntry>& output) {
+                                           std::vector<RepositoryTreeEntry>& output,
+                                           StorageAccumulator* revision = nullptr,
+                                           StorageAccumulator* all_revisions = nullptr) {
         for (const liquid::tree_entry& entry : tree.entries) {
             const std::string path = prefix.empty() ? entry.name : prefix + "/" + entry.name;
-            output.push_back({path,
-                              node_kind_name(entry.kind),
-                              liquid::to_string(entry.ref),
-                              entry.mode,
-                              node_id_text(entry.node)});
+            RepositoryTreeEntry item{path,
+                                     node_kind_name(entry.kind),
+                                     liquid::to_string(entry.ref),
+                                     entry.mode,
+                                     node_id_text(entry.node)};
+            if (entry.kind == liquid::node_kind::blob) {
+                const auto descriptor = blob_descriptor(objects, entry.ref);
+                if (!descriptor) {
+                    return std::unexpected(descriptor.error());
+                }
+                StorageAccumulator file;
+                file.add(*descriptor);
+                item.size = descriptor->size;
+                item.stored_size = file.unique_bytes;
+                if (revision != nullptr) {
+                    revision->add(*descriptor);
+                }
+                if (all_revisions != nullptr) {
+                    all_revisions->add(*descriptor);
+                }
+            }
+            output.push_back(std::move(item));
             if (entry.kind != liquid::node_kind::tree) {
                 continue;
             }
@@ -2409,7 +2937,8 @@ private:
             if (!child) {
                 return std::unexpected(error_of(child.error()));
             }
-            const auto walked = walk_tree(repository, *child, path, output);
+            const auto walked =
+                walk_tree(repository, objects, *child, path, output, revision, all_revisions);
             if (!walked) {
                 return walked;
             }
@@ -5389,51 +5918,544 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
-    boost::http::route_task serve_model(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const ApiResult result = registry.call(
-            "get_model", {{"id", route_value(route, "id")}, {"revision", "main"}}, context);
+    control::Result<control::Repository> hub_repository(std::string_view hub_id) {
+        if (!options.store) {
+            return std::unexpected(
+                control::StoreError{"store_unavailable", "no control-plane store is configured"});
+        }
+        if (const auto direct = options.store->get_repository(std::string(hub_id))) {
+            return *direct;
+        }
+        if (hub_id.starts_with("models/") || hub_id.starts_with("datasets/")) {
+            const std::size_t prefix = hub_id.find('/') + 1;
+            if (const auto direct =
+                    options.store->get_repository(std::string(hub_id.substr(prefix)))) {
+                return *direct;
+            }
+        }
+        std::string_view customer_name;
+        std::string_view repository_name = hub_id;
+        const std::size_t slash = hub_id.find('/');
+        if (slash != std::string_view::npos) {
+            customer_name = hub_id.substr(0, slash);
+            repository_name = hub_id.substr(slash + 1);
+        }
+        const auto customers = options.store->list_customers(1'000);
+        if (!customers) {
+            return std::unexpected(customers.error());
+        }
+        std::optional<control::Repository> match;
+        for (const control::Customer& customer : *customers) {
+            if (!customer_name.empty() && customer.name != customer_name) {
+                continue;
+            }
+            const auto repositories = options.store->list_repositories(customer.id, 1'000);
+            if (!repositories) {
+                return std::unexpected(repositories.error());
+            }
+            for (const control::Repository& repository : *repositories) {
+                if (repository.name != repository_name || !repository.deleted_at.empty()) {
+                    continue;
+                }
+                if (match) {
+                    return std::unexpected(control::StoreError{
+                        "conflict", "repository name is ambiguous without its customer"});
+                }
+                match = repository;
+            }
+        }
+        if (!match) {
+            return std::unexpected(control::StoreError{"not_found", "repository does not exist"});
+        }
+        return *match;
+    }
+
+    std::string hub_id(const boost::http::route_params& route, bool git = false) const {
+        std::string name = route_value(route, "id");
+        if (git) {
+            name = route_value(route, "repo_git");
+            if (name.ends_with(".git")) {
+                name.resize(name.size() - 4);
+            }
+        }
+        const std::string customer = route_value(route, "namespace");
+        return customer.empty() ? name : customer + "/" + name;
+    }
+
+    std::string hub_origin(const boost::http::route_params& route) const {
+        if (!options.public_host.empty()) {
+            return options.public_host.ends_with('/')
+                       ? options.public_host.substr(0, options.public_host.size() - 1)
+                       : options.public_host;
+        }
+        const std::string host = route.req.count(boost::http::field::host) == 0
+                                     ? "127.0.0.1"
+                                     : std::string(route.req.at(boost::http::field::host));
+        return (request_is_https(route) ? "https://" : "http://") + host;
+    }
+
+    boost::http::route_task send_hub_result(boost::http::route_params& route,
+                                            const ApiResult& result,
+                                            boost::http::status success = boost::http::status::ok) {
         if (!result.ok) {
-            const boost::http::status status =
-                result.error.code == "not_found"      ? boost::http::status::not_found
-                : result.error.code == "unauthorized" ? boost::http::status::forbidden
-                : result.error.code == "conflict"     ? boost::http::status::conflict
-                                                      : boost::http::status::bad_request;
             return send_text(route,
-                             status,
+                             boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
                              error_body(result.error.code, result.error.message),
                              "application/json; charset=utf-8",
                              "no-store");
         }
+        return send_text(
+            route, success, result.value.dump(), "application/json; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_hub_info(boost::http::route_params& route,
+                                           std::string_view kind) {
+        const auto repository = hub_repository(hub_id(route));
+        if (!repository) {
+            return send_text(route,
+                             boost::http::status::not_found,
+                             error_body(repository.error().code, repository.error().message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        ApiContext context = context_for(route);
+        const std::string revision =
+            route_value(route, "revision").empty() ? "main" : route_value(route, "revision");
+        const ApiResult result = registry.call(kind == "model" ? "get_model" : "get_dataset",
+                                               {{"id", repository->id}, {"revision", revision}},
+                                               context);
+        return send_hub_result(route, result);
+    }
+
+    boost::http::route_task serve_hub_tree(boost::http::route_params& route,
+                                           std::string_view kind) {
+        const auto repository = hub_repository(hub_id(route));
+        if (!repository) {
+            return send_text(route,
+                             boost::http::status::not_found,
+                             error_body(repository.error().code, repository.error().message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result =
+            registry.call(kind == "model" ? "get_model" : "get_dataset",
+                          {{"id", repository->id}, {"revision", route_value(route, "revision")}},
+                          context);
+        if (!result.ok) {
+            return send_text(route,
+                             boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                             error_body(result.error.code, result.error.message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        nlohmann::json entries = nlohmann::json::array();
+        for (const nlohmann::json& file : result.value.at("siblings")) {
+            entries.push_back({{"type", "file"},
+                               {"path", file.at("rfilename")},
+                               {"size", file.at("size")},
+                               {"oid", file.at("blobId")}});
+        }
         return send_text(route,
                          boost::http::status::ok,
-                         result.value.dump(),
+                         entries.dump(),
                          "application/json; charset=utf-8",
                          "no-store");
     }
 
-    boost::http::route_task serve_model_file(boost::http::route_params& route) {
+    boost::http::route_task serve_hub_file(boost::http::route_params& route,
+                                           std::string_view kind) {
+        const auto repository = hub_repository(hub_id(route));
+        if (!repository) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::not_found,
+                error_body(repository.error().code, repository.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("resolve_model_file",
-                                               {{"id", route_value(route, "id")},
-                                                {"revision", route_value(route, "revision")},
-                                                {"path", route_value(route, "file")}},
-                                               context);
+        const ApiResult result =
+            registry.call(kind == "model" ? "resolve_model_file" : "resolve_dataset_file",
+                          {{"id", repository->id},
+                           {"revision", route_value(route, "revision")},
+                           {"path", route_value(route, "file")}},
+                          context);
         if (!result.ok) {
-            const boost::http::status status = result.error.code == "not_found"
-                                                   ? boost::http::status::not_found
-                                                   : boost::http::status::forbidden;
+            co_return co_await send_text(
+                route,
+                boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                error_body(result.error.code, result.error.message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        const std::string etag = "\"" + json_string(result.value, "blob") + "\"";
+        co_return co_await send_bytes(route,
+                                      boost::http::status::ok,
+                                      "application/octet-stream",
+                                      context.sync_response,
+                                      etag,
+                                      json_string(result.value, "revision"),
+                                      route.req.method() == boost::http::method::head);
+    }
+
+    boost::http::route_task serve_model_page(boost::http::route_params& route) {
+        const auto repository = hub_repository(hub_id(route));
+        if (!repository) {
             return send_text(route,
-                             status,
-                             error_body(result.error.code, result.error.message),
-                             "application/json; charset=utf-8",
+                             boost::http::status::not_found,
+                             web_ui_shell("lake — model", "not found", "<h1>Model not found</h1>"),
+                             "text/html; charset=utf-8",
+                             "no-store");
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result =
+            registry.call("get_model", {{"id", repository->id}, {"revision", "main"}}, context);
+        if (!result.ok) {
+            return send_text(route,
+                             boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                             web_ui_shell("lake — model",
+                                          "error",
+                                          "<h1>Model unavailable</h1><p class=\"error\">" +
+                                              web_ui_escape(result.error.message) + "</p>"),
+                             "text/html; charset=utf-8",
                              "no-store");
         }
         return send_text(route,
                          boost::http::status::ok,
-                         json_string(result.value, "contents"),
-                         "application/octet-stream",
+                         web_ui_model(result.value, context.authorized),
+                         "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    boost::http::route_task serve_hub_preupload(boost::http::route_params& route) {
+        const auto repository = hub_repository(hub_id(route));
+        if (!repository) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::not_found,
+                error_body(repository.error().code, repository.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
+        if (request.is_discarded() || !request.is_object()) {
+            co_return co_await send_text(route,
+                                         boost::http::status::bad_request,
+                                         error_body("invalid_input", "invalid preupload body"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        request["id"] = repository->id;
+        request["revision"] = route_value(route, "revision");
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call("prepare_repository_upload", request, context);
+        co_return co_await send_hub_result(route, result);
+    }
+
+    boost::http::route_task serve_hub_commit(boost::http::route_params& route) {
+        const auto repository = hub_repository(hub_id(route));
+        if (!repository) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::not_found,
+                error_body(repository.error().code, repository.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        nlohmann::json operations = nlohmann::json::array();
+        std::string message = "Hugging Face upload";
+        std::size_t offset = 0;
+        while (offset < body.size()) {
+            const std::size_t newline = body.find('\n', offset);
+            const std::string_view line(body.data() + offset,
+                                        newline == std::string::npos ? body.size() - offset
+                                                                     : newline - offset);
+            if (!line.empty()) {
+                const nlohmann::json item = nlohmann::json::parse(line, nullptr, false);
+                if (item.is_discarded() || !item.is_object()) {
+                    co_return co_await send_text(
+                        route,
+                        boost::http::status::bad_request,
+                        error_body("invalid_input", "invalid commit NDJSON"),
+                        "application/json; charset=utf-8",
+                        "no-store");
+                }
+                const std::string key = item.value("key", "");
+                const nlohmann::json value = item.value("value", nlohmann::json::object());
+                if (key == "header") {
+                    message = value.value("summary", message);
+                } else if (key == "file") {
+                    operations.push_back({{"type", "file"},
+                                          {"path", value.value("path", "")},
+                                          {"content", value.value("content", "")}});
+                } else if (key == "lfsFile") {
+                    operations.push_back({{"type", "lfsFile"},
+                                          {"path", value.value("path", "")},
+                                          {"oid", value.value("oid", "")},
+                                          {"size", value.value("size", std::uint64_t{0})}});
+                } else if (key == "deletedFile" || key == "deletedFolder") {
+                    operations.push_back({{"type", key}, {"path", value.value("path", "")}});
+                }
+            }
+            if (newline == std::string::npos) {
+                break;
+            }
+            offset = newline + 1;
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call("commit_repository_files",
+                                               {{"id", repository->id},
+                                                {"revision", route_value(route, "revision")},
+                                                {"message", message},
+                                                {"operations", std::move(operations)}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await send_hub_result(route, result);
+        }
+        nlohmann::json response{{"commitOid", result.value.at("commitOid")},
+                                {"commitUrl",
+                                 hub_origin(route) + "/" + hub_id(route) + "/commit/" +
+                                     json_string(result.value, "commitOid")}};
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     response.dump(),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_hub_create(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
+        if (request.is_discarded() || !request.is_object()) {
+            co_return co_await send_text(route,
+                                         boost::http::status::bad_request,
+                                         error_body("invalid_input", "invalid create body"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        ApiContext context = context_for(route);
+        const auto customers =
+            options.store ? options.store->list_customers(1'000)
+                          : control::Result<std::vector<control::Customer>>(
+                                std::unexpected(control::StoreError{
+                                    "store_unavailable", "no control-plane store is configured"}));
+        if (!customers) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::service_unavailable,
+                error_body(customers.error().code, customers.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        std::string name = request.value("name", "");
+        std::string customer_name = request.value("organization", "");
+        const std::size_t slash = name.find('/');
+        if (slash != std::string::npos) {
+            customer_name = name.substr(0, slash);
+            name = name.substr(slash + 1);
+        }
+        std::optional<control::Customer> owner;
+        for (const control::Customer& customer : *customers) {
+            const bool named = !customer_name.empty() && customer.name == customer_name;
+            const bool personal = customer_name.empty() && !context.acting_user_id.empty() &&
+                                  customer.user_id == context.acting_user_id;
+            const bool operator_default = customer_name.empty() &&
+                                          context.acting_identity == "admin" &&
+                                          customers->size() == 1;
+            if (named || personal || operator_default) {
+                if (owner) {
+                    co_return co_await send_text(
+                        route,
+                        boost::http::status::conflict,
+                        error_body("conflict", "repository owner is ambiguous"),
+                        "application/json; charset=utf-8",
+                        "no-store");
+                }
+                owner = customer;
+            }
+        }
+        if (!owner || name.empty()) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::bad_request,
+                error_body("invalid_input", "name and a resolvable repository owner are required"),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        const std::string visibility = request.value("private", true) ? "private" : "public";
+        const ApiResult result = registry.call("create_repository",
+                                               {{"customer_id", owner->id},
+                                                {"name", name},
+                                                {"description", ""},
+                                                {"visibility", visibility}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await send_hub_result(route, result);
+        }
+        const std::string repo_id = owner->name + "/" + name;
+        co_return co_await send_text(
+            route,
+            boost::http::status::ok,
+            nlohmann::json({{"url", hub_origin(route) + "/" + repo_id}, {"repo_id", repo_id}})
+                .dump(),
+            "application/json; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_hub_validate_yaml(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
+        if (request.is_discarded() || !request.is_object() || !request.contains("content") ||
+            !request.at("content").is_string() || !request.contains("repoType") ||
+            !request.at("repoType").is_string()) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::bad_request,
+                error_body("invalid_input", "content and repoType are required"),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     nlohmann::json({{"warnings", nlohmann::json::array()},
+                                                     {"errors", nlohmann::json::array()}})
+                                         .dump(),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
+    std::string hub_upload_signature(std::string_view repository_id,
+                                     std::string_view oid,
+                                     std::uint64_t size,
+                                     std::uint64_t expires) const {
+        const std::string payload = std::string(repository_id) + "\n" + std::string(oid) + "\n" +
+                                    std::to_string(size) + "\n" + std::to_string(expires);
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+        unsigned int digest_size = 0;
+        if (HMAC(EVP_sha256(),
+                 options.instance_kek.data(),
+                 static_cast<int>(options.instance_kek.size()),
+                 reinterpret_cast<const unsigned char*>(payload.data()),
+                 payload.size(),
+                 digest.data(),
+                 &digest_size) == nullptr) {
+            return {};
+        }
+        return control::identity_crypto::base64url_encode(
+            std::string_view(reinterpret_cast<const char*>(digest.data()), digest_size));
+    }
+
+    boost::http::route_task serve_hub_lfs_batch(boost::http::route_params& route) {
+        const auto repository = hub_repository(hub_id(route, true));
+        if (!repository) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::not_found,
+                error_body(repository.error().code, repository.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        ApiContext context = context_for(route);
+        const ApiResult authorized =
+            registry.call("prepare_repository_upload",
+                          {{"id", repository->id}, {"files", nlohmann::json::array()}},
+                          context);
+        if (!authorized.ok) {
+            co_return co_await send_hub_result(route, authorized);
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
+        if (request.is_discarded() || !request.is_object() ||
+            request.value("operation", "") != "upload" || !request.contains("objects") ||
+            !request.at("objects").is_array() || options.instance_kek.empty()) {
+            co_return co_await send_text(route,
+                                         boost::http::status::bad_request,
+                                         error_body("invalid_input", "invalid LFS batch request"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        const std::uint64_t expires =
+            static_cast<std::uint64_t>(
+                std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())) +
+            900;
+        nlohmann::json objects = nlohmann::json::array();
+        for (const nlohmann::json& object : request.at("objects")) {
+            const std::string oid = object.value("oid", "");
+            const std::uint64_t size = object.value("size", std::uint64_t{0});
+            const std::string signature = hub_upload_signature(repository->id, oid, size, expires);
+            const std::string href = hub_origin(route) + "/api/lfs/" + repository->id + "/" + oid +
+                                     "?size=" + std::to_string(size) +
+                                     "&expires=" + std::to_string(expires) +
+                                     "&signature=" + signature;
+            objects.push_back({{"oid", oid},
+                               {"size", size},
+                               {"authenticated", true},
+                               {"actions", {{"upload", {{"href", href}}}}}});
+        }
+        co_return co_await send_text(
+            route,
+            boost::http::status::ok,
+            nlohmann::json({{"transfer", "basic"}, {"objects", std::move(objects)}}).dump(),
+            "application/vnd.git-lfs+json",
+            "no-store");
+    }
+
+    boost::http::route_task serve_hub_lfs_upload(boost::http::route_params& route) {
+        const std::string repository_id = route_value(route, "repository");
+        const std::string oid = route_value(route, "oid");
+        const auto size = decimal_value(query_value(route, "size"));
+        const auto expires = decimal_value(query_value(route, "expires"));
+        const std::string signature = query_value(route, "signature");
+        const std::uint64_t now = static_cast<std::uint64_t>(
+            std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+        if (!size || !expires || *expires < now || options.instance_kek.empty() ||
+            !constant_time_equal(signature,
+                                 hub_upload_signature(repository_id, oid, *size, *expires))) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::forbidden,
+                error_body("unauthorized", "invalid or expired upload URL"),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        auto body = co_await read_sync_body(route);
+        if (!body) {
+            co_return co_await send_text(route,
+                                         boost::http::status::bad_request,
+                                         error_body("invalid_input", "could not read LFS upload"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        ApiContext context = context_for(route);
+        context.authorized = true;
+        context.operator_credential = true;
+        context.acting_identity = "admin";
+        context.authentication_method = "signed-upload";
+        context.sync_wire_request = true;
+        context.sync_request = as_bytes(*body);
+        const ApiResult result =
+            registry.call("stage_repository_file",
+                          {{"id", repository_id}, {"oid", oid}, {"size", *size}},
+                          context);
+        co_return co_await send_hub_result(route, result);
     }
 
     boost::http::route_task serve_search_page(boost::http::route_params& route) {
@@ -6416,17 +7438,125 @@ bool ApiServer::start() {
         http::method::get, "/share/:token", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/share/:token", impl.serve_drive_share_link(route));
         });
-    router.add(http::method::get,
-               "/api/models/:id",
+    router.add(http::method::post,
+               "/api/repos/create",
                [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route, "/api/models/:id", impl.serve_model(route));
+                   return impl.observe_request(
+                       route, "/api/repos/create", impl.serve_hub_create(route));
+               });
+    router.add(http::method::post,
+               "/api/validate-yaml",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/api/validate-yaml", impl.serve_hub_validate_yaml(route));
                });
     router.add(http::method::get,
                "/models/:id/resolve/:revision/*file",
                [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/models/:id/resolve/:revision/*file", impl.serve_model_file(route));
+                   return impl.observe_request(route,
+                                               "/models/:id/resolve/:revision/*file",
+                                               impl.serve_hub_file(route, "model"));
                });
+    router.add(http::method::head,
+               "/models/:id/resolve/:revision/*file",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/models/:id/resolve/:revision/*file",
+                                               impl.serve_hub_file(route, "model"));
+               });
+    const auto add_hub_info = [&router, &impl](std::string_view pattern, std::string_view kind) {
+        router.add(http::method::get,
+                   pattern,
+                   [&impl, pattern, kind](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, std::string(pattern), impl.serve_hub_info(route, kind));
+                   });
+    };
+    const auto add_hub_tree = [&router, &impl](std::string_view pattern, std::string_view kind) {
+        router.add(http::method::get,
+                   pattern,
+                   [&impl, pattern, kind](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, std::string(pattern), impl.serve_hub_tree(route, kind));
+                   });
+    };
+    const auto add_hub_file =
+        [&router, &impl](http::method method, std::string_view pattern, std::string_view kind) {
+            router.add(method,
+                       pattern,
+                       [&impl, pattern, kind](http::route_params& route) -> http::route_task {
+                           return impl.observe_request(
+                               route, std::string(pattern), impl.serve_hub_file(route, kind));
+                       });
+        };
+    add_hub_info("/api/models/:namespace/:id/revision/:revision", "model");
+    add_hub_info("/api/models/:namespace/:id", "model");
+    add_hub_info("/api/models/:id/revision/:revision", "model");
+    add_hub_info("/api/models/:id", "model");
+    add_hub_info("/api/datasets/:namespace/:id/revision/:revision", "dataset");
+    add_hub_info("/api/datasets/:namespace/:id", "dataset");
+    add_hub_info("/api/datasets/:id/revision/:revision", "dataset");
+    add_hub_info("/api/datasets/:id", "dataset");
+    add_hub_tree("/api/models/:namespace/:id/tree/:revision", "model");
+    add_hub_tree("/api/models/:id/tree/:revision", "model");
+    add_hub_tree("/api/datasets/:namespace/:id/tree/:revision", "dataset");
+    add_hub_tree("/api/datasets/:id/tree/:revision", "dataset");
+    add_hub_file(http::method::get, "/models/:namespace/:id/resolve/:revision/*file", "model");
+    add_hub_file(http::method::head, "/models/:namespace/:id/resolve/:revision/*file", "model");
+    add_hub_file(http::method::get, "/datasets/:namespace/:id/resolve/:revision/*file", "dataset");
+    add_hub_file(http::method::head, "/datasets/:namespace/:id/resolve/:revision/*file", "dataset");
+    add_hub_file(http::method::get, "/datasets/:id/resolve/:revision/*file", "dataset");
+    add_hub_file(http::method::head, "/datasets/:id/resolve/:revision/*file", "dataset");
+    add_hub_file(http::method::get, "/:namespace/:id/resolve/:revision/*file", "model");
+    add_hub_file(http::method::head, "/:namespace/:id/resolve/:revision/*file", "model");
+    add_hub_file(http::method::get, "/:id/resolve/:revision/*file", "model");
+    add_hub_file(http::method::head, "/:id/resolve/:revision/*file", "model");
+    const auto add_hub_post = [&router, &impl](std::string_view pattern, bool commit) {
+        router.add(http::method::post,
+                   pattern,
+                   [&impl, pattern, commit](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route,
+                                                   std::string(pattern),
+                                                   commit ? impl.serve_hub_commit(route)
+                                                          : impl.serve_hub_preupload(route));
+                   });
+    };
+    add_hub_post("/api/models/:namespace/:id/preupload/:revision", false);
+    add_hub_post("/api/models/:id/preupload/:revision", false);
+    add_hub_post("/api/datasets/:namespace/:id/preupload/:revision", false);
+    add_hub_post("/api/datasets/:id/preupload/:revision", false);
+    add_hub_post("/api/models/:namespace/:id/commit/:revision", true);
+    add_hub_post("/api/models/:id/commit/:revision", true);
+    add_hub_post("/api/datasets/:namespace/:id/commit/:revision", true);
+    add_hub_post("/api/datasets/:id/commit/:revision", true);
+    const auto add_lfs_batch = [&router, &impl](std::string_view pattern) {
+        router.add(http::method::post,
+                   pattern,
+                   [&impl, pattern](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, std::string(pattern), impl.serve_hub_lfs_batch(route));
+                   });
+    };
+    add_lfs_batch("/datasets/:namespace/:repo_git/info/lfs/objects/batch");
+    add_lfs_batch("/datasets/:repo_git/info/lfs/objects/batch");
+    add_lfs_batch("/:namespace/:repo_git/info/lfs/objects/batch");
+    add_lfs_batch("/:repo_git/info/lfs/objects/batch");
+    router.add(http::method::put,
+               "/api/lfs/:repository/:oid",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/api/lfs/:repository/:oid", impl.serve_hub_lfs_upload(route));
+               });
+    router.add(http::method::get,
+               "/models/:namespace/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/models/:namespace/:id", impl.serve_model_page(route));
+               });
+    router.add(
+        http::method::get, "/models/:id", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/models/:id", impl.serve_model_page(route));
+        });
     router.add(
         http::method::get, "/search", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/search", impl.serve_search_page(route));

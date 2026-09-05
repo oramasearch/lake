@@ -60,7 +60,9 @@ fidelity report.
 | `restore_drive_version` | action | repository id, ref, path, change id | new restoring change | [drive.md](drive.md) |
 | `share_drive_folder`, `drive_effective_access` | action/read | folder, recipient, role and evidence; or folder | live grant or direct/inherited access panel | [sharing.md](sharing.md) |
 | `create_drive_share_link`, `resolve_drive_share_link`, `revoke_drive_share_link` | action/read | folder, role, expiry; token; or link id | scoped link, folder contents, or revoked link | [sharing.md](sharing.md) |
-| `get_model`, `resolve_model_file` | read | repository id, revision, and file path where required | compatible model metadata/provenance or exact file | [models.md](models.md) |
+| `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id, revision, and file path where required | compatible model/dataset metadata, storage/provenance, or exact file | [models.md](models.md) |
+| `prepare_repository_upload`, `stage_repository_file`, `commit_repository_files` | action | repository id plus upload plan, verified staged bytes, or file operations | upload modes, unique stored bytes, or immutable committed revision | [models.md](models.md) |
+| `attach_model_provenance`, `verify_model_provenance` | action | model and dataset revisions plus canonical liquid attestations, or model revision | attached or re-verified dataset-to-model training chain | [models.md](models.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |
 | `rename_repository`, `transfer_repository`, `set_repository_visibility`, `delete_repository` | action | repository id plus the lifecycle field where applicable | repository | [repositories.md](repositories.md) |
 | `refs` | read | `repository_id` | `{items: [repository ref]}` | [sync.md](sync.md) |

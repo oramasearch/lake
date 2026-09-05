@@ -150,5 +150,6 @@ std::string web_ui_drive_share(const control::Repository& repository,
 std::string web_ui_drive_link(std::string_view path,
                               const std::vector<RepositoryTreeEntry>& entries,
                               std::string_view error);
+std::string web_ui_model(const nlohmann::json& model, bool signed_in);
 
 } // namespace lake::api
