@@ -3739,6 +3739,10 @@ struct ApiServer::Impl {
             "/change",
             "/issues",
             "/issue",
+            "/releases",
+            "/webhooks",
+            "/webhooks/retry",
+            "/protection",
             "/conflicts",
             "/artifact",
             "/drive",
@@ -6068,6 +6072,128 @@ struct ApiServer::Impl {
             "no-store");
     }
 
+    boost::http::route_task serve_releases_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        if (id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult releases_result =
+            registry.call("list_releases", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!releases_result.ok) {
+            return serve_repository_page_error(route, ctx, releases_result);
+        }
+        std::vector<control::ForgeRecord> releases;
+        for (const nlohmann::json& value : releases_result.value.at("items")) {
+            releases.push_back(forge_record_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_releases(repository_from_json(repository_result.value),
+                                         releases,
+                                         ctx.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_webhooks_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        if (id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult webhooks_result =
+            registry.call("list_webhooks", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!webhooks_result.ok) {
+            return serve_repository_page_error(route, ctx, webhooks_result);
+        }
+        const ApiResult deliveries_result =
+            registry.call("list_webhook_deliveries", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!deliveries_result.ok) {
+            return serve_repository_page_error(route, ctx, deliveries_result);
+        }
+        std::vector<control::ForgeRecord> webhooks;
+        std::vector<control::ForgeRecord> deliveries;
+        for (const nlohmann::json& value : webhooks_result.value.at("items")) {
+            webhooks.push_back(forge_record_from_json(value));
+        }
+        for (const nlohmann::json& value : deliveries_result.value.at("items")) {
+            deliveries.push_back(forge_record_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_webhooks(repository_from_json(repository_result.value),
+                                         webhooks,
+                                         deliveries,
+                                         ctx.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_webhook_retry(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext ctx = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const ApiResult result = registry.call(
+            "retry_webhook_delivery",
+            {{"repository_id", repository_id}, {"delivery_id", form_field(body, "delivery_id")}},
+            ctx);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, ctx, result);
+        }
+        co_return co_await redirect(route,
+                                    "/webhooks?repository_id=" + oauth_url_encode(repository_id));
+    }
+
+    boost::http::route_task serve_branch_protection_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        const std::string id = query_value(route, "repository_id");
+        if (id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        if (!repository_result.ok) {
+            return serve_repository_page_error(route, ctx, repository_result);
+        }
+        const ApiResult rules_result =
+            registry.call("list_branch_protections", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!rules_result.ok) {
+            return serve_repository_page_error(route, ctx, rules_result);
+        }
+        const ApiResult audit_result = registry.call("audit", {{"limit", 500}}, ctx);
+        if (!audit_result.ok) {
+            return serve_repository_page_error(route, ctx, audit_result);
+        }
+        std::vector<control::ForgeRecord> rules;
+        std::vector<audit::Event> events;
+        for (const nlohmann::json& value : rules_result.value.at("items")) {
+            rules.push_back(forge_record_from_json(value));
+        }
+        for (const nlohmann::json& value :
+             audit_result.value.value("items", nlohmann::json::array())) {
+            events.push_back(audit::event_from_json(value));
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_branch_protection(
+                repository_from_json(repository_result.value), rules, events, ctx.authorized),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
     boost::http::route_task serve_conflicts_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "repository_id");
@@ -7946,6 +8072,25 @@ bool ApiServer::start() {
     router.add(http::method::get, "/issue", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/issue", impl.serve_issue_page(route));
     });
+    router.add(
+        http::method::get, "/releases", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/releases", impl.serve_releases_page(route));
+        });
+    router.add(
+        http::method::get, "/webhooks", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/webhooks", impl.serve_webhooks_page(route));
+        });
+    router.add(http::method::post,
+               "/webhooks/retry",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/webhooks/retry", impl.serve_webhook_retry(route));
+               });
+    router.add(
+        http::method::get, "/protection", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/protection", impl.serve_branch_protection_page(route));
+        });
     router.add(
         http::method::get, "/conflicts", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/conflicts", impl.serve_conflicts_page(route));

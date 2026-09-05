@@ -843,6 +843,47 @@ dd {
 .issue-details .badge {
   margin: 0 var(--lake-space-1) var(--lake-space-1) 0;
 }
+.release-card,
+.webhook-card,
+.protection-rule,
+.protection-event {
+  margin-bottom: var(--lake-space-4);
+}
+.release-card > header,
+.webhook-card > header,
+.protection-rule > header,
+.protection-event > header,
+.delivery-row,
+.release-artifacts li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--lake-space-4);
+}
+.release-card h2,
+.webhook-card h2,
+.protection-rule h3 {
+  margin-bottom: var(--lake-space-1);
+}
+.release-artifacts {
+  padding: 0;
+  list-style: none;
+}
+.release-artifacts li,
+.delivery-row {
+  padding: var(--lake-space-3) 0;
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+.compact-empty {
+  padding: var(--lake-space-4);
+}
+.delivery-row {
+  align-items: center;
+  flex-wrap: wrap;
+}
+.delivery-row .sub {
+  margin: var(--lake-space-1) 0 0;
+}
 .image-preview {
   max-width: 100%;
   max-height: 40rem;

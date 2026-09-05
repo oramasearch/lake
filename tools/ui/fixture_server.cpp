@@ -21,6 +21,7 @@
 #include <liquid/liquid.hpp>
 
 #include "lake/api/server.hpp"
+#include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/search/index.hpp"
@@ -375,6 +376,81 @@ int main(int argc, char** argv) {
                  {{"issue_id", fixture_issue.id},
                   {"body", "Confirmed with keyboard navigation and a **fresh** source view."}}}),
             "create issue comment");
+    const auto fixture_review =
+        require(store->create_forge_record({repository.id,
+                                            "review",
+                                            {{"change_id", change_id},
+                                             {"state", "approved"},
+                                             {"reviewers", {principal.taap_id}}}}),
+                "create review record");
+    require(store->create_forge_record(
+                {repository.id,
+                 "review_comment",
+                 {{"review_id", fixture_review.id},
+                  {"body", "The updated wording is clear and the line anchor remains stable."},
+                  {"anchor",
+                   {{"change", change_id}, {"path", "README.md"}, {"line", 3}, {"column", 1}}}}}),
+            "create review comment");
+    require(store->create_forge_record(
+                {repository.id,
+                 "release",
+                 {{"tag", "v1.0.0"},
+                  {"change_id", change_id},
+                  {"notes", "## Forge release\n\nIncludes repository and review pages."},
+                  {"artifacts",
+                   {{{"id", liquid::to_string(artifact.value)},
+                     {"action", "cmake --build build"},
+                     {"outputs", 1},
+                     {"attestations",
+                      {{{"id", "ui-fixture-attestation"},
+                        {"profile", "slsa_provenance/1"},
+                        {"subject", liquid::to_string(artifact.value)},
+                        {"issuer", "ui-fixture"}}}}}}}}}),
+            "create release record");
+    const auto fixture_webhook =
+        require(store->create_forge_record({repository.id,
+                                            "webhook",
+                                            {{"url", "https://hooks.example.test/lake"},
+                                             {"events", {"review", "release"}},
+                                             {"secret", "fixture-webhook-secret"}}}),
+                "create webhook record");
+    require(store->create_forge_record({repository.id,
+                                        "webhook_delivery",
+                                        {{"webhook_id", fixture_webhook.id},
+                                         {"event", "review"},
+                                         {"payload", {{"change_id", change_id}}},
+                                         {"signature", "sha256=fixture"},
+                                         {"attempt", 2},
+                                         {"status", 503},
+                                         {"error", "fixture receiver unavailable"},
+                                         {"delivered", false}}}),
+            "create webhook delivery record");
+    require(store->create_forge_record({repository.id,
+                                        "branch_protection",
+                                        {{"ref", "main"},
+                                         {"required_review", true},
+                                         {"required_verification", true},
+                                         {"fast_forward_only", true},
+                                         {"allowed_pushers", {principal.taap_id}},
+                                         {"policy_object_id", repository_object.id}}}),
+            "create branch protection record");
+    require(lake::audit::record(*store,
+                                {.customer_id = organization_customer.id,
+                                 .kind = "forge.branch_protection.refused",
+                                 .principal = "taap:1:ed25519:untrusted",
+                                 .object = "repository/" + repository.id + "/ref/main",
+                                 .action = "reference_update",
+                                 .outcome = "denied",
+                                 .request_id = "ui-fixture-refusal",
+                                 .method = "bearer",
+                                 .device = "fixture client",
+                                 .details = {{"repository", repository.id},
+                                             {"reference", "main"},
+                                             {"caller", "taap:1:ed25519:untrusted"},
+                                             {"rule", "required_review"},
+                                             {"reason", "an approved review is required"}}},
+                                {.instance_kek = instance_kek}),
+            "create branch protection audit event");
 
     const std::string operator_token = admin_token;
     const std::vector<std::tuple<std::string, std::string, std::string>> pages = {
@@ -433,6 +509,9 @@ int main(int argc, char** argv) {
         {"issue",
          operator_token,
          std::format("/issue?repository_id={}&id={}", repository.id, fixture_issue.id)},
+        {"releases", operator_token, std::format("/releases?repository_id={}", repository.id)},
+        {"webhooks", operator_token, std::format("/webhooks?repository_id={}", repository.id)},
+        {"protection", operator_token, std::format("/protection?repository_id={}", repository.id)},
         {"conflicts", operator_token, std::format("/conflicts?repository_id={}", repository.id)},
         {"artifacts", operator_token, std::format("/artifacts?repository_id={}", repository.id)},
         {"artifact",

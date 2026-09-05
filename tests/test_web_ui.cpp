@@ -589,6 +589,96 @@ TEST(WebUi, IssueTrackerRendersFiltersDiscussionAndLinkedChangesSafely) {
     expect_theme_scripts(detail);
 }
 
+TEST(WebUi, ReleaseWebhookAndProtectionPagesRenderForgeEvidenceSafely) {
+    const lake::control::Repository repository{
+        "r1", "c1", "forge", "description", "private", "", "", "created", "updated"};
+    const lake::control::ForgeRecord release{
+        "release-1",
+        "r1",
+        "release",
+        "created",
+        "updated",
+        {{"tag", "v1.0 <stable>"},
+         {"change_id", "blake3:change-0123456789"},
+         {"notes", "## Notes\n\nShips **forge pages**. <script>x</script>"},
+         {"artifacts",
+          {{{"id", "artifact-1"},
+            {"action", "build"},
+            {"outputs", 2},
+            {"attestations", {{{"id", "attestation-1"}, {"profile", "slsa"}}}}}}}}};
+    const std::string releases = lake::api::web_ui_releases(repository, {release}, true);
+    EXPECT_NE(releases.find("v1.0 &lt;stable&gt;"), std::string::npos);
+    EXPECT_NE(releases.find("Ships <strong>forge pages</strong>. &lt;script&gt;x&lt;/script&gt;"),
+              std::string::npos);
+    EXPECT_NE(releases.find("2 outputs"), std::string::npos);
+    EXPECT_NE(releases.find("1 attestations"), std::string::npos);
+    expect_theme_scripts(releases);
+
+    const lake::control::ForgeRecord webhook{"webhook-1",
+                                             "r1",
+                                             "webhook",
+                                             "created",
+                                             "updated",
+                                             {{"url", "https://example.test/<hook>"},
+                                              {"events", {"review", "release"}},
+                                              {"secret", "x"}}};
+    const lake::control::ForgeRecord delivery{"delivery-1",
+                                              "r1",
+                                              "webhook_delivery",
+                                              "created",
+                                              "updated",
+                                              {{"webhook_id", "webhook-1"},
+                                               {"event", "review"},
+                                               {"attempt", 2},
+                                               {"status", 503},
+                                               {"error", "connection <failed>"},
+                                               {"delivered", false}}};
+    const std::string webhooks =
+        lake::api::web_ui_webhooks(repository, {webhook}, {delivery}, true);
+    EXPECT_NE(webhooks.find("https://example.test/&lt;hook&gt;"), std::string::npos);
+    EXPECT_NE(webhooks.find("attempt 2 · status 503"), std::string::npos);
+    EXPECT_NE(webhooks.find("connection &lt;failed&gt;"), std::string::npos);
+    EXPECT_NE(webhooks.find("action=\"/webhooks/retry\""), std::string::npos);
+    EXPECT_EQ(webhooks.find("name=\"secret\""), std::string::npos);
+    expect_theme_scripts(webhooks);
+
+    const lake::control::ForgeRecord rule{"rule-1",
+                                          "r1",
+                                          "branch_protection",
+                                          "created",
+                                          "updated",
+                                          {{"ref", "main"},
+                                           {"required_review", true},
+                                           {"required_verification", true},
+                                           {"fast_forward_only", true},
+                                           {"allowed_pushers", {"taap:1:maintainer"}},
+                                           {"policy_object_id", "policy-1"}}};
+    const lake::audit::Event refused{"event-1",
+                                     "2026-09-05",
+                                     {.customer_id = "c1",
+                                      .kind = "forge.branch_protection.refused",
+                                      .principal = "taap:1:outsider",
+                                      .object = "repository/r1/ref/main",
+                                      .action = "reference_update",
+                                      .outcome = "denied",
+                                      .details = {{"repository", "r1"},
+                                                  {"reference", "main"},
+                                                  {"caller", "taap:1:outsider"},
+                                                  {"rule", "required_review"},
+                                                  {"reason", "review <required>"}}},
+                                     "previous",
+                                     "signer",
+                                     "signature",
+                                     "digest"};
+    const std::string protection =
+        lake::api::web_ui_branch_protection(repository, {rule}, {refused}, true);
+    EXPECT_NE(protection.find("fast-forward only"), std::string::npos);
+    EXPECT_NE(protection.find("taap:1:maintainer"), std::string::npos);
+    EXPECT_NE(protection.find("review &lt;required&gt;"), std::string::npos);
+    EXPECT_NE(protection.find("Refused updates"), std::string::npos);
+    expect_theme_scripts(protection);
+}
+
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     lake::audit::Event event{
         .id = "event-1",

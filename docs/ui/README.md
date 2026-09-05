@@ -35,6 +35,9 @@ exports, SSO, repository content, and drive views.
 | Change | `GET /change?repository_id=<uuid>&id=<change>` | title and rendered message, compact identities, review state, file stats, unified/side-by-side text hunks, anchored comments, conflicts, checks, and attestations |
 | Issues | `GET /issues?repository_id=<uuid>[&state=<state>&label=<label>&assignee=<identity>]` | filterable issue list with state, labels, assignees, and compact identities |
 | Issue | `GET /issue?repository_id=<uuid>&id=<issue>` | sanitized Markdown body and discussion, labels, assignees, and linked changes |
+| Releases | `GET /releases?repository_id=<uuid>` | sanitized release notes, change identity, artifacts, output counts, and verified attestations |
+| Webhooks | `GET /webhooks?repository_id=<uuid>` | sanitized endpoints and events with delivery status, attempts, errors, and failed-delivery retry |
+| Branch protection | `GET /protection?repository_id=<uuid>` | ref rules, required review and verification, update mode, pushers, and signed refusal audit |
 | Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |
 | Artifacts | `GET /artifacts?repository_id=<uuid>[&action=<digest>&output=<path>&content=<digest>&cursor=<cursor>&limit=<n>]` | filtered cursor pages of build results |
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |

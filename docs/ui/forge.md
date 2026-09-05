@@ -72,6 +72,25 @@ server, followed by labels, assignees, and linked change identities. Raw HTML in
 escaped before Markdown markup is introduced. The page has no local script: links, filters,
 discussion, and supporting details follow document order and work unchanged without JavaScript.
 
+## Releases, webhooks, and branch protection
+
+`GET /releases?repository_id=<id>` renders release notes through the safe Markdown path and keeps
+the tag, change identity, artifacts, output counts, and verified attestation counts together. It
+shows an explicit release-level artifact empty state when older records have none.
+
+`GET /webhooks?repository_id=<id>` groups each sanitized webhook configuration with its durable
+delivery attempts: event, attempt number, status, error, and delivery outcome. Secrets are removed
+by `list_webhooks` and are never renderer input. Failed attempts expose an ordinary POST retry form
+to `/webhooks/retry`; successful deliveries and signed-out views do not. The POST calls
+`retry_webhook_delivery`, whose redirect returns to the history page and leaves every attempt
+visible.
+
+`GET /protection?repository_id=<id>` shows each ref pattern with its review, verification,
+fast-forward, allowed-pusher, and policy-object values. It also reads the signed audit capability
+and selects denied `forge.branch_protection.refused` events for that repository, retaining the
+reference, caller, matching rule, reason, and event date. Rules and the refusal audit each have a
+separate empty state. All three pages are server-rendered and add no local script.
+
 ## Keyboard and no-script behavior
 
 Source order is skip link, primary navigation, top-bar controls, breadcrumbs, repository tabs,

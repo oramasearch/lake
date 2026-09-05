@@ -1426,6 +1426,163 @@ std::string web_ui_issue(const control::Repository& repository,
     return web_ui_shell("lake — issue", repository_name(repository), content, signed_in);
 }
 
+std::string web_ui_releases(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& releases,
+                            bool signed_in) {
+    std::string content =
+        std::format("<p class=\"eyebrow\">repository releases</p><h1>Releases</h1>"
+                    "<p class=\"sub\">{}</p>{}",
+                    web_ui_escape(repository_name(repository)),
+                    forge_tabs(repository, "releases"));
+    if (releases.empty()) {
+        content += "<div class=\"panel empty\">No releases have been published.</div>";
+    }
+    for (const control::ForgeRecord& release : releases) {
+        content += std::format(
+            "<article class=\"panel release-card\"><header><div><p class=\"eyebrow\">{}</p>"
+            "<h2>{}</h2></div><span>{}</span></header><p class=\"sub\">Published {} at {}</p>{}",
+            identifier_markup(release.id),
+            web_ui_escape(release.value.value("tag", "Untitled release")),
+            identifier_markup(release.value.value("change_id", "")),
+            web_ui_escape(release.created_at),
+            web_ui_escape(release.updated_at),
+            web_ui_markdown(release.value.value("notes", "")));
+        const nlohmann::json artifacts = release.value.value("artifacts", nlohmann::json::array());
+        if (artifacts.empty()) {
+            content += "<div class=\"empty compact-empty\">No release artifacts.</div>";
+        } else {
+            content += "<h3>Artifacts and attestations</h3><ul class=\"release-artifacts\">";
+            for (const nlohmann::json& artifact : artifacts) {
+                const nlohmann::json attestations =
+                    artifact.value("attestations", nlohmann::json::array());
+                content += std::format("<li><span><strong>{}</strong> · {} outputs</span><span>{} "
+                                       "· {} attestations</span></li>",
+                                       web_ui_escape(artifact.value("action", "artifact")),
+                                       artifact.value("outputs", 0),
+                                       identifier_markup(artifact.value("id", "")),
+                                       attestations.size());
+            }
+            content += "</ul>";
+        }
+        content += "</article>";
+    }
+    return web_ui_shell("lake — releases", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_webhooks(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& webhooks,
+                            const std::vector<control::ForgeRecord>& deliveries,
+                            bool signed_in) {
+    std::string content =
+        std::format("<p class=\"eyebrow\">repository automation</p><h1>Webhooks</h1>"
+                    "<p class=\"sub\">{} · signed delivery history</p>{}",
+                    web_ui_escape(repository_name(repository)),
+                    forge_tabs(repository, "webhooks"));
+    if (webhooks.empty()) {
+        content += "<div class=\"panel empty\">No webhooks are configured.</div>";
+    }
+    for (const control::ForgeRecord& webhook : webhooks) {
+        const std::vector<std::string> events =
+            webhook.value.value("events", std::vector<std::string>{});
+        content += std::format(
+            "<section class=\"panel webhook-card\"><header><div><h2>{}</h2><p class=\"sub\">{}</p>"
+            "</div>{}</header><p>Events: {}</p><h3>Deliveries</h3>",
+            web_ui_escape(webhook.value.value("url", "")),
+            web_ui_escape(webhook.created_at),
+            identifier_markup(webhook.id),
+            web_ui_escape(joined(events)));
+        std::size_t count = 0;
+        for (const control::ForgeRecord& delivery : deliveries) {
+            if (delivery.value.value("webhook_id", "") != webhook.id) {
+                continue;
+            }
+            ++count;
+            const bool delivered = delivery.value.value("delivered", false);
+            content += std::format(
+                "<article class=\"delivery-row\"><div><strong>{}</strong>{}<p class=\"sub\">"
+                "attempt {} · status {} · {}</p></div>{}",
+                web_ui_escape(delivery.value.value("event", "event")),
+                badge_markup(delivered ? "delivered" : "failed"),
+                delivery.value.value("attempt", 0),
+                delivery.value.value("status", 0),
+                web_ui_escape(delivery.value.value("error", "no error")),
+                identifier_markup(delivery.id));
+            if (!delivered && signed_in) {
+                content += std::format(
+                    "<form method=\"post\" action=\"/webhooks/retry\"><input type=\"hidden\" "
+                    "name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
+                    "name=\"delivery_id\" "
+                    "value=\"{}\"><button class=\"secondary\" "
+                    "type=\"submit\">Retry</button></form>",
+                    web_ui_escape(repository.id),
+                    web_ui_escape(delivery.id));
+            }
+            content += "</article>";
+        }
+        if (count == 0) {
+            content += "<div class=\"empty compact-empty\">No delivery attempts.</div>";
+        }
+        content += "</section>";
+    }
+    return web_ui_shell("lake — webhooks", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_branch_protection(const control::Repository& repository,
+                                     const std::vector<control::ForgeRecord>& rules,
+                                     const std::vector<audit::Event>& events,
+                                     bool signed_in) {
+    std::string content =
+        std::format("<p class=\"eyebrow\">repository policy</p><h1>Branch protection</h1>"
+                    "<p class=\"sub\">{}</p>{}<section><h2>Rules</h2>",
+                    web_ui_escape(repository_name(repository)),
+                    forge_tabs(repository, "protection"));
+    if (rules.empty()) {
+        content += "<div class=\"panel empty\">No branch protection rules.</div>";
+    }
+    for (const control::ForgeRecord& rule : rules) {
+        const std::vector<std::string> pushers =
+            rule.value.value("allowed_pushers", std::vector<std::string>{});
+        content += std::format(
+            "<article class=\"panel protection-rule\"><header><h3><code>{}</code></h3>{}</header>"
+            "<dl><dt>review</dt><dd>{}</dd><dt>verification</dt><dd>{}</dd>"
+            "<dt>updates</dt><dd>{}</dd><dt>allowed pushers</dt><dd>{}</dd>"
+            "<dt>policy object</dt><dd>{}</dd></dl></article>",
+            web_ui_escape(rule.value.value("ref", "")),
+            identifier_markup(rule.id),
+            badge_markup(rule.value.value("required_review", false) ? "required" : "optional"),
+            badge_markup(rule.value.value("required_verification", false) ? "required"
+                                                                          : "optional"),
+            badge_markup(rule.value.value("fast_forward_only", false) ? "fast-forward only"
+                                                                      : "any"),
+            web_ui_escape(joined(pushers)),
+            identifier_markup(rule.value.value("policy_object_id", "")));
+    }
+    content += "</section><section><h2>Refused updates</h2>";
+    std::size_t refused = 0;
+    for (const audit::Event& event : events) {
+        if (event.draft.kind != "forge.branch_protection.refused" ||
+            event.draft.details.value("repository", "") != repository.id) {
+            continue;
+        }
+        ++refused;
+        content += std::format(
+            "<article class=\"panel protection-event\"><header><strong>{}</strong>{}</header>"
+            "<p>{}</p><p class=\"sub\">{} · {} · {}</p></article>",
+            web_ui_escape(event.draft.details.value("reference", "reference")),
+            badge_markup("refused"),
+            web_ui_escape(event.draft.details.value("reason", "update refused")),
+            identifier_markup(event.draft.details.value("caller", event.draft.principal)),
+            web_ui_escape(event.draft.details.value("rule", "rule")),
+            web_ui_escape(event.occurred_at));
+    }
+    if (refused == 0) {
+        content += "<div class=\"panel empty\">No protected updates have been refused.</div>";
+    }
+    content += "</section>";
+    return web_ui_shell(
+        "lake — branch protection", repository_name(repository), content, signed_in);
+}
+
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
                                         bool signed_in) {

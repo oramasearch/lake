@@ -142,6 +142,17 @@ std::string web_ui_issue(const control::Repository& repository,
                          const control::ForgeRecord& issue,
                          const std::vector<control::ForgeRecord>& comments,
                          bool signed_in);
+std::string web_ui_releases(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& releases,
+                            bool signed_in);
+std::string web_ui_webhooks(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& webhooks,
+                            const std::vector<control::ForgeRecord>& deliveries,
+                            bool signed_in);
+std::string web_ui_branch_protection(const control::Repository& repository,
+                                     const std::vector<control::ForgeRecord>& rules,
+                                     const std::vector<audit::Event>& events,
+                                     bool signed_in);
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
                                         bool signed_in);
