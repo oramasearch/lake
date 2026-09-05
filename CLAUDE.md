@@ -128,6 +128,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   and are the unit-tested surface. The two passkey pages contain the documented single inline
   script required to call `navigator.credentials`; every other page has no script. Data pages call
   capabilities through `Registry::call` and can never do what the API cannot.
+- Static visual-direction references live under `docs/design/ui/mocks/`; they do not change the
+  served renderers or `/style.css`. `tools/ui/screenshot.sh` reproduces their 1440×900 review images.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`

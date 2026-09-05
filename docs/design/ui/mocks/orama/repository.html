@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>lake repository direction mock</title>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="components.css">
+</head>
+<body class="repository-page">
+    <header class="topbar">
+        <div class="brand">
+            <span class="mark" aria-hidden="true"></span>
+            <span>lake</span>
+            <span class="workspace-switcher">Orama / engineering</span>
+        </div>
+        <div class="toolbar">
+            <div class="search">Search lake <kbd>⌘ K</kbd></div>
+            <button class="icon-button" type="button" aria-label="Notifications">○</button>
+            <span class="avatar">SS</span>
+        </div>
+    </header>
+    <div class="shell">
+        <aside class="sidebar" aria-label="Application navigation">
+            <p class="sidebar-title">Workspace</p>
+            <nav aria-label="Primary navigation">
+                <a class="nav-item" href="#"><span class="nav-icon">⌂</span>Overview</a>
+                <a class="nav-item active" href="#"><span class="nav-icon">◇</span>Repositories</a>
+                <a class="nav-item" href="#"><span class="nav-icon">⌕</span>Search</a>
+                <a class="nav-item" href="#"><span class="nav-icon">▱</span>Artifacts</a>
+                <a class="nav-item" href="#"><span class="nav-icon">↗</span>Exports</a>
+            </nav>
+            <p class="sidebar-title">Organization</p>
+            <nav aria-label="Organization navigation">
+                <a class="nav-item" href="#"><span class="nav-icon">◎</span>People</a>
+                <a class="nav-item" href="#"><span class="nav-icon">◫</span>Teams</a>
+                <a class="nav-item" href="#"><span class="nav-icon">◉</span>Access</a>
+                <a class="nav-item" href="#"><span class="nav-icon">◌</span>Audit</a>
+            </nav>
+            <div class="sidebar-foot">
+                <strong>Lake/prod</strong><br>
+                <span class="mono">westus3 · healthy</span>
+            </div>
+        </aside>
+        <main class="page">
+            <div class="breadcrumb">
+                <span>Orama</span><span>/</span><strong>lake</strong>
+                <span class="badge">public</span>
+            </div>
+            <header class="page-header">
+                <div>
+                    <p class="eyebrow">Repository home</p>
+                    <h1 class="page-title">lake</h1>
+                    <p class="subhead">The hosted service: forge, drive, platform, identity, secrets,
+                        PKI, artifact registry and search over one content-addressed store.</p>
+                </div>
+                <div class="actions">
+                    <button class="button" type="button">Copy clone URL</button>
+                    <button class="button primary" type="button">New change</button>
+                </div>
+            </header>
+            <nav class="tabs" aria-label="Repository sections">
+                <a class="tab active" href="#">Overview</a>
+                <a class="tab" href="#">Changes <span class="badge">184</span></a>
+                <a class="tab" href="#">Artifacts</a>
+                <a class="tab" href="#">Access</a>
+                <a class="tab" href="#">Settings</a>
+            </nav>
+            <div class="layout-three">
+                <section class="panel">
+                    <header class="panel-heading">
+                        <h2 class="panel-title">Tree</h2>
+                        <span class="badge">main</span>
+                    </header>
+                    <table class="table">
+                        <thead>
+                            <tr><th>Path</th><th>Last change</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td class="tree-name"><span class="file-icon">▾</span>docs</td><td class="mono muted">7d6a9b8</td></tr>
+                            <tr><td class="tree-name indent-1"><span class="file-icon">▾</span>design</td><td class="mono muted">1f40a2c</td></tr>
+                            <tr><td class="tree-name indent-2"><span class="file-icon">□</span>phase-6.md</td><td class="mono muted">1f40a2c</td></tr>
+                            <tr><td class="tree-name indent-1"><span class="file-icon">▾</span>ui</td><td class="mono muted">7d6a9b8</td></tr>
+                            <tr><td class="tree-name indent-2"><span class="file-icon">□</span>README.md</td><td class="mono muted">7d6a9b8</td></tr>
+                            <tr><td class="tree-name"><span class="file-icon">▾</span>src</td><td class="mono muted">7d6a9b8</td></tr>
+                            <tr><td class="tree-name indent-1"><span class="file-icon">▾</span>api</td><td class="mono muted">7d6a9b8</td></tr>
+                            <tr><td class="tree-name indent-2"><span class="file-icon">□</span>web_ui.cpp</td><td class="mono muted">7d6a9b8</td></tr>
+                            <tr><td class="tree-name"><span class="file-icon">□</span>CMakeLists.txt</td><td class="mono muted">be622ef</td></tr>
+                            <tr><td class="tree-name"><span class="file-icon">□</span>README.md</td><td class="mono muted">7d6a9b8</td></tr>
+                        </tbody>
+                    </table>
+                </section>
+                <article class="panel">
+                    <header class="panel-heading">
+                        <h2 class="panel-title">README.md</h2>
+                        <span class="mono muted">blake3:774a9ca463bb…ae18</span>
+                    </header>
+                    <div class="panel-body readme">
+                        <h2>lake</h2>
+                        <p><strong>The lake binary.</strong> The hosted service at lake.live — forge,
+                            drive, platform, identity, secrets, PKI, artifact registry and search —
+                            over one content-addressed store.</p>
+                        <p>liquid is the tool. lake is where it collects.</p>
+                        <h3>Build and run</h3>
+                        <pre><code>cmake -S . -B build -G Ninja
+cmake --build build
+ctest --test-dir build
+./build/lake --listen 127.0.0.1:4900</code></pre>
+                        <h3>What this is</h3>
+                        <p>One C++26 binary. Enterprise control plane on Postgres, repository data
+                            through libliquid, and server-rendered pages using one capability registry.</p>
+                    </div>
+                </article>
+                <aside class="stack" aria-label="Repository details">
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">References</h2></header>
+                        <div class="panel-body stat-list">
+                            <div class="stat-row"><span><strong>main</strong><br><span class="muted">branch</span></span><span class="badge success">default</span></div>
+                            <div class="stat-row"><span><strong>v0.18.0</strong><br><span class="muted">release</span></span><span class="mono">a41ec09</span></div>
+                            <div class="stat-row"><span><strong>prod/20260902c</strong><br><span class="muted">deployment</span></span><span class="mono">53bc817</span></div>
+                        </div>
+                    </section>
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">Recent changes</h2></header>
+                        <div class="panel-body recent-list">
+                            <div class="recent-item"><span><strong>Clarify repository access states</strong><br><span class="muted">Maya · 18m</span></span><span class="mono">7d6a9b8</span></div>
+                            <div class="recent-item"><span><strong>Verify signed export manifests</strong><br><span class="muted">Jon · 2h</span></span><span class="mono">be622ef</span></div>
+                            <div class="recent-item"><span><strong>Bound change history reads</strong><br><span class="muted">Steve · 1d</span></span><span class="mono">1f40a2c</span></div>
+                        </div>
+                    </section>
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">Effective access</h2><a class="muted" href="#">View all</a></header>
+                        <div class="panel-body access-list">
+                            <div class="access-item"><span><strong>Platform</strong><br><span class="muted">team · maintain</span></span><span class="avatar">PL</span></div>
+                            <div class="access-item"><span><strong>Search</strong><br><span class="muted">team · read</span></span><span class="avatar">SE</span></div>
+                            <div class="access-item"><span class="truncate mono">urn:taap:actor:01K4C7Y7K8QKM4…B1E2</span><span class="badge">admin</span></div>
+                        </div>
+                    </section>
+                </aside>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

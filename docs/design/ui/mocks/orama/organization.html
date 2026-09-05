@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>lake organization direction mock</title>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="components.css">
+</head>
+<body class="organization-page">
+    <header class="topbar">
+        <div class="brand">
+            <span class="mark" aria-hidden="true"></span><span>lake</span>
+            <span class="workspace-switcher">Orama / engineering</span>
+        </div>
+        <div class="toolbar">
+            <div class="search">Search lake <kbd>⌘ K</kbd></div>
+            <button class="icon-button" type="button" aria-label="Notifications">○</button>
+            <span class="avatar">SS</span>
+        </div>
+    </header>
+    <div class="shell">
+        <aside class="sidebar" aria-label="Application navigation">
+            <p class="sidebar-title">Workspace</p>
+            <nav aria-label="Primary navigation">
+                <a class="nav-item" href="#"><span class="nav-icon">⌂</span>Overview</a>
+                <a class="nav-item" href="#"><span class="nav-icon">◇</span>Repositories</a>
+                <a class="nav-item" href="#"><span class="nav-icon">⌕</span>Search</a>
+                <a class="nav-item" href="#"><span class="nav-icon">▱</span>Artifacts</a>
+            </nav>
+            <p class="sidebar-title">Organization</p>
+            <nav aria-label="Organization navigation">
+                <a class="nav-item active" href="#"><span class="nav-icon">◎</span>Overview</a>
+                <a class="nav-item" href="#"><span class="nav-icon">◫</span>Teams</a>
+                <a class="nav-item" href="#"><span class="nav-icon">◉</span>Members</a>
+                <a class="nav-item" href="#"><span class="nav-icon">↗</span>Invitations</a>
+                <a class="nav-item" href="#"><span class="nav-icon">⌁</span>SSO</a>
+                <a class="nav-item" href="#"><span class="nav-icon">◌</span>Audit</a>
+            </nav>
+            <div class="sidebar-foot">
+                <strong>Customer</strong><br>
+                <span class="truncate mono">d71e188a-6a30-4d6d-8c37-3e20f3b2bc42</span>
+            </div>
+        </aside>
+        <main class="page">
+            <div class="breadcrumb"><span>Organizations</span><span>/</span><strong>Orama</strong></div>
+            <header class="page-header">
+                <div>
+                    <p class="eyebrow">Organization · verified domain</p>
+                    <h1 class="page-title">Orama</h1>
+                    <p class="subhead">Search and AI infrastructure. Two teams manage 18 repositories
+                        and production access for Lake/prod.</p>
+                    <div class="badge-row">
+                        <span class="badge success">orama.com verified</span>
+                        <span class="mono muted">urn:taap:organization:01K4C6RNMZTF5X8WVA82DQT4YQ</span>
+                    </div>
+                </div>
+                <div class="actions">
+                    <button class="button" type="button">Audit access</button>
+                    <button class="button primary" type="button">Invite member</button>
+                </div>
+            </header>
+            <nav class="tabs" aria-label="Organization sections">
+                <a class="tab active" href="#">Overview</a>
+                <a class="tab" href="#">Teams <span class="badge">2</span></a>
+                <a class="tab" href="#">Members <span class="badge">14</span></a>
+                <a class="tab" href="#">Invitations <span class="badge warning">1</span></a>
+                <a class="tab" href="#">SSO</a>
+                <a class="tab" href="#">Access</a>
+            </nav>
+            <section class="metric-grid" aria-label="Organization metrics">
+                <div class="metric"><span class="muted">Members</span><strong>14</strong><span class="mono">12 active · 2 guests</span></div>
+                <div class="metric"><span class="muted">Teams</span><strong>2</strong><span class="mono">platform · search</span></div>
+                <div class="metric"><span class="muted">Repositories</span><strong>18</strong><span class="mono">6 public · 12 private</span></div>
+                <div class="metric"><span class="muted">Pending</span><strong>1</strong><span class="mono">expires 2026-09-12</span></div>
+            </section>
+            <div class="organization-layout">
+                <div class="stack">
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">Teams</h2><a class="muted" href="#">Manage teams</a></header>
+                        <div class="panel-body team-grid">
+                            <article class="team-card">
+                                <div class="badge-row"><span class="badge success">production access</span><span class="mono muted">team_01K4C73X…B90</span></div>
+                                <h3>Platform</h3>
+                                <p class="muted">Runs Lake, identity, deployment and the shared control plane.</p>
+                                <div class="stat-row"><span>8 members</span><span>12 repositories</span></div>
+                            </article>
+                            <article class="team-card">
+                                <div class="badge-row"><span class="badge">read + build</span><span class="mono muted">team_01K4C746…VF4</span></div>
+                                <h3>Search</h3>
+                                <p class="muted">Owns OramaJS, indexing, retrieval quality and evaluation.</p>
+                                <div class="stat-row"><span>6 members</span><span>9 repositories</span></div>
+                            </article>
+                        </div>
+                    </section>
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">Members</h2><a class="muted" href="#">View all 14</a></header>
+                        <table class="table">
+                            <thead><tr><th>Member</th><th>Teams</th><th>Role</th><th>Last active</th></tr></thead>
+                            <tbody>
+                                <tr><td><strong>Steve Sperandeo</strong><br><span class="mono muted">urn:taap:actor:01K4C7Y7K8QKM4J58Y5NZ7B1E2</span></td><td>Platform, Search</td><td><span class="badge">owner</span></td><td>now</td></tr>
+                                <tr><td><strong>Maya Kim</strong><br><span class="mono muted">urn:taap:actor:01K4CXA2NDGK6P7M4Z11M1RBR4</span></td><td>Platform</td><td><span class="badge">maintainer</span></td><td>18m ago</td></tr>
+                                <tr><td><strong>Jon Diaz</strong><br><span class="mono muted">urn:taap:actor:01K4CXSYN0T2NQ9GKT5H2C5X61</span></td><td>Search</td><td><span class="badge">member</span></td><td>2h ago</td></tr>
+                            </tbody>
+                        </table>
+                    </section>
+                </div>
+                <aside class="stack" aria-label="Organization details">
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">Pending invitation</h2><span class="badge warning">1</span></header>
+                        <div class="panel-body invitation">
+                            <strong>alex.morgan@example.com</strong>
+                            <p class="muted">Platform · member<br>Invited by Maya Kim</p>
+                            <div class="stat-row"><span class="mono">inv_3e9f1d7a…b842</span><span>7 days</span></div>
+                        </div>
+                    </section>
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">Single sign-on</h2><span class="badge success">enforced</span></header>
+                        <div class="panel-body stat-list">
+                            <div><strong>Okta Workforce</strong><br><span class="muted">OIDC · active</span></div>
+                            <div><span class="muted">Issuer</span><span class="truncate mono">https://orama.okta.com/oauth2/aus9m4v2xz3q0N7cA697</span></div>
+                            <div class="stat-row"><span>SCIM provisioning</span><span class="badge success">healthy</span></div>
+                        </div>
+                    </section>
+                    <section class="panel">
+                        <header class="panel-heading"><h2 class="panel-title">Effective access</h2><a class="muted" href="#">Inspect</a></header>
+                        <div class="panel-body access-list">
+                            <div class="access-item"><span><strong>Organization owners</strong><br><span class="muted">all organization objects</span></span><span class="badge">admin</span></div>
+                            <div class="access-item"><span><strong>Platform</strong><br><span class="muted">Lake/prod + 12 repositories</span></span><span class="badge">maintain</span></div>
+                            <div class="access-item"><span><strong>Search</strong><br><span class="muted">9 repositories</span></span><span class="badge">build</span></div>
+                        </div>
+                    </section>
+                </aside>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

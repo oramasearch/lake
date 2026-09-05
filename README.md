@@ -152,6 +152,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, and root rotation |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
+| `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
 | `db/schema.sql` | **the control-plane schema, source of truth.** Identity, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
@@ -175,8 +176,9 @@ by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator)
 
 ## Internal documentation
 
-[`docs/`](docs/) — one folder per topic: [serving](docs/serving/), [control-plane](docs/control-plane/),
-[deployment](docs/deployment/), [build](docs/build/), [api](docs/api/), [ui](docs/ui/). Every change to the system lands
+[`docs/`](docs/) — one folder per topic: [design](docs/design/), [serving](docs/serving/),
+[control-plane](docs/control-plane/), [deployment](docs/deployment/), [build](docs/build/),
+[api](docs/api/), [ui](docs/ui/). Every change to the system lands
 its doc there in the same change; this README is the summary.
 
 ## Where this sits
