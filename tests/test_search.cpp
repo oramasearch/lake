@@ -17,6 +17,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/search/index.hpp"
+#include "temporary_directory.hpp"
 
 namespace {
 
@@ -24,7 +25,7 @@ class TemporaryStore {
 public:
     TemporaryStore() {
         static std::atomic<unsigned long> next{0};
-        path_ = std::filesystem::temp_directory_path() / ("lake-search-" + std::to_string(++next));
+        path_ = lake::test::fixture_path("search-" + std::to_string(++next));
         std::filesystem::create_directories(path_);
     }
 
