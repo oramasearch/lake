@@ -1,0 +1,8 @@
+{
+  "repository": "octo/example",
+  "issues": [{"number": 7, "title": "Fix parser", "body": "Recorded response.", "state": "open", "labels": [{"name": "bug"}], "assignees": [{"login": "octo"}]}],
+  "issue_comments": [{"issue_number": 7, "body": "I can reproduce it.", "user": {"login": "hubot"}}],
+  "pulls": [{"number": 8, "state": "open", "head": {"sha": "deadbeef"}}],
+  "review_comments": [{"pull_number": 8, "commit_id": "deadbeef", "path": "src/parser.cpp", "line": 12, "body": "Please cover this case.", "user": {"login": "reviewer"}}],
+  "workflows": [{"path": ".github/workflows/build.yml", "document": "jobs: {}", "jobs": {"build": {"steps": [{"name": "Build", "run": "cmake --build build"}]}}}]
+}

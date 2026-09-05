@@ -9,5 +9,7 @@ void register_core_capabilities(Registry& registry, std::string_view version);
 void register_secret_capabilities(Registry& registry);
 void register_offline_recovery_capabilities(Registry& registry);
 void register_forge_capabilities(Registry& registry);
+void register_export_capabilities(Registry& registry);
+void register_github_import_capabilities(Registry& registry);
 
 } // namespace lake::api

@@ -64,7 +64,7 @@ std::string nav(bool signed_in) {
                       "href=\"/organizations\">Organizations</a><a "
                       "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
                       "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>"
-                      "<a href=\"/sso\">SSO</a>";
+                      "<a href=\"/sso\">SSO</a><a href=\"/exports\">Exports</a>";
     if (signed_in) {
         out += "<a href=\"/sessions\">Sessions</a><a "
                "href=\"/passkeys\">Passkeys</a><a href=\"/tokens\">Tokens</a>";
@@ -1232,6 +1232,34 @@ std::string web_ui_tokens(const std::vector<control::Session>& sessions,
         content += "<tr><td colspan=\"6\" class=\"empty\">No API tokens.</td></tr>";
     content += "</tbody></table>";
     return web_ui_shell("lake — tokens", "identity", content, true);
+}
+
+std::string web_ui_exports(const control::Repository& repository,
+                           const std::vector<control::ForgeRecord>& exports) {
+    std::string content = std::format(
+        "<p class=\"eyebrow\">portability</p><h1>Repository export</h1><p class=\"sub\">"
+        "Download a signed archive for <code>{}</code>.</p><div class=\"panel\"><form "
+        "class=\"stack\" method=\"get\" action=\"/exports/download\"><input type=\"hidden\" "
+        "name=\"repository_id\" value=\"{}\"><label><span><input type=\"checkbox\" "
+        "name=\"include_git\" value=\"true\"> Include Git projection</span></label><button "
+        "class=\"primary\" type=\"submit\">Request and download export</button></form></div>",
+        web_ui_escape(repository_name(repository)),
+        web_ui_escape(repository.id));
+    content += "<h2>Prior exports</h2><table><thead><tr><th>Created</th><th>Git</th>"
+               "<th>Manifest</th></tr></thead><tbody>";
+    for (const control::ForgeRecord& record : exports) {
+        content +=
+            std::format("<tr><td>{}</td><td>{}</td><td><code>{}</code></td></tr>",
+                        web_ui_escape(record.created_at),
+                        record.value.value("include_git", false) ? "requested" : "omitted",
+                        web_ui_escape(record.value.value("manifest", nlohmann::json::object())
+                                          .value("format", "lake_export_manifest/1")));
+    }
+    if (exports.empty()) {
+        content += "<tr><td colspan=\"3\" class=\"empty\">No exports requested.</td></tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell("lake — exports", repository_name(repository), content, true);
 }
 
 } // namespace lake::api

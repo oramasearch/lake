@@ -99,6 +99,8 @@ add_library(lake-core STATIC
   src/api/mcp.cpp
   src/api/capabilities.cpp
   src/api/forge_capabilities.cpp
+  src/api/export_capabilities.cpp
+  src/api/github_import_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp

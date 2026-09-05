@@ -18,6 +18,7 @@ namespace {
 
 constexpr std::string_view audit_signature_domain = "TAAP/1 audit_event/1";
 constexpr std::string_view attestation_signature_domain = "TAAP/1 attestation";
+constexpr std::string_view export_signature_domain = "TAAP/1 lake_export/1";
 
 struct PkeyDeleter {
     void operator()(EVP_PKEY* key) const {
@@ -395,6 +396,15 @@ std::vector<std::uint8_t> attestation_signed_bytes(const nlohmann::json& body) {
                                      attestation_signature_domain.end());
     output.push_back(0);
     const auto encoded = cbor(body);
+    output.insert(output.end(), encoded.begin(), encoded.end());
+    return output;
+}
+
+std::vector<std::uint8_t> export_manifest_signed_bytes(const nlohmann::json& manifest) {
+    std::vector<std::uint8_t> output(export_signature_domain.begin(),
+                                     export_signature_domain.end());
+    output.push_back(0);
+    const auto encoded = cbor(manifest);
     output.insert(output.end(), encoded.begin(), encoded.end());
     return output;
 }
@@ -879,6 +889,52 @@ Result<Identity> rotate_identity(control::Store& store, const IdentityOptions& o
         return std::unexpected(Error{rotated.error().code, rotated.error().message});
     }
     return *replacement;
+}
+
+Result<nlohmann::json> sign_export_manifest(control::Store& store,
+                                            const nlohmann::json& manifest,
+                                            const IdentityOptions& options) {
+    const IdentityOptions effective_options = options_for_store(store, options);
+    const auto current = identity(store, effective_options);
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    const auto seed = seed_for(*current, effective_options);
+    if (!seed) {
+        return std::unexpected(seed.error());
+    }
+    const auto key = pkey_from_seed(*seed);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    const auto signed_bytes = export_manifest_signed_bytes(manifest);
+    const auto signature = sign(key->get(), signed_bytes);
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    return nlohmann::json{{"identity", identity_document(*current)}, {"signature", *signature}};
+}
+
+Result<void> verify_export_manifest(const nlohmann::json& manifest,
+                                    const nlohmann::json& signature) {
+    if (!signature.is_object() || !signature.contains("identity") ||
+        !signature.contains("signature") || !signature.at("identity").is_object() ||
+        !signature.at("signature").is_string()) {
+        return std::unexpected(Error{"invalid_input", "export manifest signature is malformed"});
+    }
+    const auto& identity = signature.at("identity");
+    if (!identity.contains("version") || identity.value("version", "") != "taap_identity/1" ||
+        !identity.contains("taap_id") || !identity.at("taap_id").is_string() ||
+        !identity.contains("public_key") || !identity.at("public_key").is_string()) {
+        return std::unexpected(Error{"invalid_input", "export signer identity is malformed"});
+    }
+    const auto public_key = base64_decode(identity.at("public_key").get<std::string>());
+    if (!public_key || public_key->size() != 32) {
+        return std::unexpected(Error{"invalid_input", "export signer public key is malformed"});
+    }
+    return verify_signature(*public_key,
+                            export_manifest_signed_bytes(manifest),
+                            signature.at("signature").get<std::string>());
 }
 
 Result<void> validate_retention_days(int days) {

@@ -3823,6 +3823,8 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_secret_capabilities(registry);
     register_offline_recovery_capabilities(registry);
     register_forge_capabilities(registry);
+    register_export_capabilities(registry);
+    register_github_import_capabilities(registry);
 }
 
 } // namespace lake::api

@@ -798,6 +798,7 @@ void register_forge_capabilities(Registry& registry) {
                    .resolve_object = repository_object,
                    .handler = retry_webhook_delivery});
     add_list(registry, "list_webhook_deliveries", "List webhook deliveries", "webhook_delivery");
+    add_list(registry, "list_exports", "List exports", "export");
 
     registry.add(Capability{
         .name = "set_branch_protection",

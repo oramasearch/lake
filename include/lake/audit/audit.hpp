@@ -117,6 +117,15 @@ Result<void> verify_offline_grant(control::Store& store,
                                   const std::string& scope,
                                   std::int64_t now_unix);
 
+// Signs the canonical CBOR form of a portable-export manifest with the lake
+// identity. The verification input carries the source identity document, so a
+// destination lake does not need the source control-plane database.
+Result<nlohmann::json> sign_export_manifest(control::Store& store,
+                                            const nlohmann::json& manifest,
+                                            const IdentityOptions& options);
+Result<void> verify_export_manifest(const nlohmann::json& manifest,
+                                    const nlohmann::json& signature);
+
 Result<void> validate_retention_days(int days);
 
 } // namespace lake::audit
