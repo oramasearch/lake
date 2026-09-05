@@ -12,6 +12,7 @@
 
 #include "lake/audit/audit.hpp"
 
+#include "lake/api/apps.hpp"
 #include "lake/api/forge.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/sync_store.hpp"
@@ -44,6 +45,56 @@ ApiResult no_search() {
 ApiResult no_repository_store() {
     return ApiResult::failure("store_unavailable",
                               "no repository store is configured (LAKE_STORE_ROOT)");
+}
+
+std::expected<std::pair<std::string, std::string>, ApiResult>
+webauthn_relying_party(ApiContext& context, const std::string& pool_id) {
+    std::string origin =
+        context.request_origin.empty() ? "https://" + context.public_host : context.request_origin;
+    std::string host = context.public_host;
+    const std::size_t scheme = origin.find("://");
+    if (scheme != std::string::npos) {
+        host = origin.substr(scheme + 3);
+    }
+    const std::size_t port = host.find(':');
+    if (port != std::string::npos) {
+        host.resize(port);
+    }
+    if (pool_id == "lake") {
+        return std::pair{host, origin};
+    }
+    auto application = context.store->get_application_by_pool(pool_id);
+    if (!application) {
+        return std::unexpected(from_store_error(application.error()));
+    }
+    const std::string custom_origin = application->custom_sign_in_domain.empty()
+                                          ? std::string{}
+                                          : "https://" + application->custom_sign_in_domain;
+    const bool hosted_on_lake = host == context.public_host;
+    const bool hosted_on_custom = !custom_origin.empty() && origin == custom_origin;
+    const bool configured_origin = std::ranges::find(application->allowed_origins, origin) !=
+                                   application->allowed_origins.end();
+    if (!hosted_on_lake && !hosted_on_custom && !configured_origin) {
+        return std::unexpected(
+            ApiResult::failure("unauthorized", "origin is not allowed for this application"));
+    }
+    return std::pair{host, origin};
+}
+
+ApiResult authorize_application_origin(ApiContext& context, const std::string& pool_id) {
+    if (pool_id == "lake" || context.caller_origin.empty() ||
+        context.caller_origin == context.request_origin) {
+        return ApiResult::success(nullptr);
+    }
+    auto application = context.store->get_application_by_pool(pool_id);
+    if (!application) {
+        return from_store_error(application.error());
+    }
+    if (std::ranges::find(application->allowed_origins, context.caller_origin) ==
+        application->allowed_origins.end()) {
+        return ApiResult::failure("unauthorized", "origin is not allowed for this application");
+    }
+    return ApiResult::success(nullptr);
 }
 
 ApiResult from_sync_store_error(const SyncStoreError& error) {
@@ -1224,11 +1275,10 @@ template <class T> ApiResult one_result(control::Result<T> row) {
     return ApiResult::success(control::to_json(*row));
 }
 
-ApiResult issued_result(control::Result<control::IssuedSession> issued) {
-    if (!issued)
-        return from_store_error(issued.error());
-    return ApiResult::success(
-        {{"session", control::to_json(issued->session)}, {"secret", issued->secret}});
+ApiResult issued_result(control::Result<control::IssuedSession> issued,
+                        ApiContext& context,
+                        std::string_view lifecycle_event = "session.started") {
+    return application_session_result(std::move(issued), context, lifecycle_event);
 }
 
 ApiResult authorized_object_list_result(control::Result<std::vector<control::PolicyObject>> rows,
@@ -1474,13 +1524,17 @@ void register_identity_capabilities(Registry& registry) {
             return ApiResult::failure("conflict",
                                       "could not find a free generated handle; pass name");
         }});
-    const json session_issue_schema = {
-        {"type", "object"},
-        {"properties", {{"session", session_schema()}, {"secret", {{"type", "string"}}}}}};
+    const json session_issue_schema = {{"type", "object"},
+                                       {"properties",
+                                        {{"session", session_schema()},
+                                         {"secret", {{"type", "string"}}},
+                                         {"access_token", {{"type", "string"}}},
+                                         {"token_type", {{"type", "string"}}},
+                                         {"expires_in", {{"type", "integer"}}}}}};
     registry.add(Capability{
         .name = "sign_up_password",
         .title = "Sign up with password",
-        .description = "Create a lake-pool user with an Argon2id password "
+        .description = "Create a pool-scoped user with an Argon2id password "
                        "credential and issue a browser session.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -1501,42 +1555,56 @@ void register_identity_capabilities(Registry& registry) {
         .handler = [](const json& input, ApiContext& context) {
             if (!context.store)
                 return no_store();
+            const std::string pool_id = input.value("pool_id", "lake");
+            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                !origin.ok) {
+                return origin;
+            }
             return issued_result(
-                context.store->sign_up_password({input.value("pool_id", "lake"),
+                context.store->sign_up_password({pool_id,
                                                  input.value("email", ""),
                                                  input.value("password", ""),
                                                  input.value("display_name", ""),
                                                  input.value("device_name", "browser"),
-                                                 input.value("identity_document", "")}));
+                                                 input.value("identity_document", "")}),
+                context,
+                "user.created");
         }});
-    registry.add(Capability{.name = "sign_in_password",
-                            .title = "Sign in with password",
-                            .description = "Verify a password credential. A user with enrolled MFA "
-                                           "receives mfa_required until TOTP is verified.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties",
-                                              {{"pool_id", {{"type", "string"}}},
-                                               {"email", {{"type", "string"}}},
-                                               {"password", {{"type", "string"}}},
-                                               {"device_name", {{"type", "string"}}}}},
-                                             {"required", json::array({"email", "password"})},
-                                             {"additionalProperties", false}},
-                            .output_schema = session_issue_schema,
-                            .kind = CapabilityKind::Action,
-                            .requires_auth = false,
-                            .object = "authentication",
-                            .action = "write",
-                            .resolve_object = global_object,
-                            .handler = [](const json& input, ApiContext& context) {
-                                if (!context.store)
-                                    return no_store();
-                                return issued_result(context.store->sign_in_password(
-                                    {input.value("pool_id", "lake"),
-                                     input.value("email", ""),
-                                     input.value("password", ""),
-                                     "",
-                                     input.value("device_name", "browser")}));
-                            }});
+    registry.add(
+        Capability{.name = "sign_in_password",
+                   .title = "Sign in with password",
+                   .description = "Verify a password credential. A user with enrolled MFA "
+                                  "receives mfa_required until TOTP is verified.",
+                   .input_schema = {{"type", "object"},
+                                    {"properties",
+                                     {{"pool_id", {{"type", "string"}}},
+                                      {"email", {{"type", "string"}}},
+                                      {"password", {{"type", "string"}}},
+                                      {"device_name", {{"type", "string"}}}}},
+                                    {"required", json::array({"email", "password"})},
+                                    {"additionalProperties", false}},
+                   .output_schema = session_issue_schema,
+                   .kind = CapabilityKind::Action,
+                   .requires_auth = false,
+                   .object = "authentication",
+                   .action = "write",
+                   .resolve_object = global_object,
+                   .handler = [](const json& input, ApiContext& context) {
+                       if (!context.store)
+                           return no_store();
+                       const std::string pool_id = input.value("pool_id", "lake");
+                       if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                           !origin.ok) {
+                           return origin;
+                       }
+                       return issued_result(
+                           context.store->sign_in_password({pool_id,
+                                                            input.value("email", ""),
+                                                            input.value("password", ""),
+                                                            "",
+                                                            input.value("device_name", "browser")}),
+                           context);
+                   }});
     registry.add(
         Capability{.name = "verify_mfa",
                    .title = "Verify TOTP",
@@ -1560,12 +1628,18 @@ void register_identity_capabilities(Registry& registry) {
                    .handler = [](const json& input, ApiContext& context) {
                        if (!context.store)
                            return no_store();
+                       const std::string pool_id = input.value("pool_id", "lake");
+                       if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                           !origin.ok) {
+                           return origin;
+                       }
                        return issued_result(
-                           context.store->sign_in_totp({input.value("pool_id", "lake"),
+                           context.store->sign_in_totp({pool_id,
                                                         input.value("email", ""),
                                                         input.value("password", ""),
                                                         input.value("code", ""),
-                                                        input.value("device_name", "browser")}));
+                                                        input.value("device_name", "browser")}),
+                           context);
                    }});
     registry.add(Capability{
         .name = "enroll_mfa",
@@ -1589,6 +1663,11 @@ void register_identity_capabilities(Registry& registry) {
             auto result = context.store->enroll_mfa(context.acting_user_id, context.pool_id);
             if (!result)
                 return from_store_error(result.error());
+            const ApiResult event =
+                emit_application_mfa_change(context, context.pool_id, "totp", true);
+            if (!event.ok) {
+                return event;
+            }
             return ApiResult::success({{"otpauth_uri",
                                         "otpauth://totp/lake:" + context.acting_user_id +
                                             "?secret=" + result->secret + "&issuer=lake"},
@@ -1613,8 +1692,12 @@ void register_identity_capabilities(Registry& registry) {
             }
             const auto result = context.store->disable_mfa(
                 context.acting_user_id, context.pool_id, input.value("code", ""));
-            return result ? ApiResult::success({{"disabled", true}})
-                          : from_store_error(result.error());
+            if (!result) {
+                return from_store_error(result.error());
+            }
+            const ApiResult event =
+                emit_application_mfa_change(context, context.pool_id, "totp", false);
+            return event.ok ? ApiResult::success({{"disabled", true}}) : event;
         }});
     registry.add(Capability{
         .name = "begin_passkey_registration",
@@ -1643,9 +1726,12 @@ void register_identity_capabilities(Registry& registry) {
             if (!user) {
                 return from_store_error(user.error());
             }
-            const std::string origin = "https://" + context.public_host;
+            auto relying_party = webauthn_relying_party(context, pool_id);
+            if (!relying_party) {
+                return relying_party.error();
+            }
             const auto challenge = context.store->begin_passkey_registration(
-                context.acting_user_id, pool_id, context.public_host, origin);
+                context.acting_user_id, pool_id, relying_party->first, relying_party->second);
             if (!challenge) {
                 return from_store_error(challenge.error());
             }
@@ -1693,8 +1779,11 @@ void register_identity_capabilities(Registry& registry) {
                                                            input.value("attestation_object", ""),
                                                            input.value("name", "passkey"),
                                                            identity_options(context)});
-            return result ? ApiResult::success({{"registered", true}})
-                          : from_store_error(result.error());
+            if (!result) {
+                return from_store_error(result.error());
+            }
+            const ApiResult event = emit_application_mfa_change(context, pool_id, "passkey", true);
+            return event.ok ? ApiResult::success({{"registered", true}}) : event;
         }});
     registry.add(Capability{
         .name = "begin_passkey_sign_in",
@@ -1718,9 +1807,16 @@ void register_identity_capabilities(Registry& registry) {
                                           "LAKE_PUBLIC_HOST is required for passkey sign-in");
             }
             const std::string pool_id = input.value("pool_id", "lake");
-            const std::string origin = "https://" + context.public_host;
-            const auto challenge =
-                context.store->begin_passkey_sign_in(pool_id, context.public_host, origin);
+            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                !origin.ok) {
+                return origin;
+            }
+            auto relying_party = webauthn_relying_party(context, pool_id);
+            if (!relying_party) {
+                return relying_party.error();
+            }
+            const auto challenge = context.store->begin_passkey_sign_in(
+                pool_id, relying_party->first, relying_party->second);
             if (!challenge) {
                 return from_store_error(challenge.error());
             }
@@ -1757,15 +1853,23 @@ void register_identity_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = global_object,
         .handler = [](const json& input, ApiContext& context) {
-            return context.store ? issued_result(context.store->sign_in_passkey(
-                                       {input.value("pool_id", "lake"),
-                                        input.value("challenge", ""),
-                                        input.value("credential_id", ""),
-                                        input.value("client_data_json", ""),
-                                        input.value("authenticator_data", ""),
-                                        input.value("signature", ""),
-                                        input.value("device_name", "browser")}))
-                                 : no_store();
+            if (!context.store) {
+                return no_store();
+            }
+            const std::string pool_id = input.value("pool_id", "lake");
+            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                !origin.ok) {
+                return origin;
+            }
+            return issued_result(
+                context.store->sign_in_passkey({pool_id,
+                                                input.value("challenge", ""),
+                                                input.value("credential_id", ""),
+                                                input.value("client_data_json", ""),
+                                                input.value("authenticator_data", ""),
+                                                input.value("signature", ""),
+                                                input.value("device_name", "browser")}),
+                context);
         }});
     registry.add(Capability{
         .name = "register_oauth_provider",
@@ -1831,6 +1935,10 @@ void register_identity_capabilities(Registry& registry) {
                                           "LAKE_PUBLIC_HOST is required for OAuth sign-in");
             }
             const std::string pool_id = input.value("pool_id", "lake");
+            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                !origin.ok) {
+                return origin;
+            }
             const std::string provider_name = input.value("provider", "");
             const auto provider = context.store->get_oauth_provider(pool_id, provider_name);
             if (!provider) {
@@ -1907,39 +2015,41 @@ void register_identity_capabilities(Registry& registry) {
                 {{"authorization_url",
                   oauth_authorization_url(*provider, flow, context.public_host)}});
         }});
-    registry.add(Capability{.name = "create_token",
-                            .title = "Create API token",
-                            .description = "Issue a named, scoped API-token session. Static tokens "
-                                           "require a reason and are audited.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties",
-                                              {{"name", {{"type", "string"}}},
-                                               {"scopes", {{"type", "array"}}},
-                                               {"expires_in_seconds", {{"type", "integer"}}},
-                                               {"static", {{"type", "boolean"}}},
-                                               {"reason", {{"type", "string"}}}}},
-                                             {"required", json::array({"name", "scopes"})},
-                                             {"additionalProperties", false}},
-                            .output_schema = session_issue_schema,
-                            .kind = CapabilityKind::Action,
-                            .object = "principal",
-                            .action = "write",
-                            .resolve_object = self_object,
-                            .handler = [](const json& input, ApiContext& context) {
-                                const bool is_static = input.value("static", false);
-                                const int expires_in_seconds = input.value(
-                                    "expires_in_seconds", is_static ? 0 : 60 * 60 * 24 * 30);
-                                return context.store
-                                           ? issued_result(context.store->create_token(
-                                                 {context.acting_user_id,
-                                                  context.pool_id,
-                                                  input.value("name", ""),
-                                                  input.value("reason", ""),
-                                                  input.value("scopes", std::vector<std::string>{}),
-                                                  expires_in_seconds,
-                                                  is_static}))
-                                           : no_store();
-                            }});
+    registry.add(Capability{
+        .name = "create_token",
+        .title = "Create API token",
+        .description = "Issue a named, scoped API-token session. Static tokens "
+                       "require a reason and are audited.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"name", {{"type", "string"}}},
+                           {"scopes", {{"type", "array"}}},
+                           {"expires_in_seconds", {{"type", "integer"}}},
+                           {"static", {{"type", "boolean"}}},
+                           {"reason", {{"type", "string"}}}}},
+                         {"required", json::array({"name", "scopes"})},
+                         {"additionalProperties", false}},
+        .output_schema = session_issue_schema,
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const bool is_static = input.value("static", false);
+            const int expires_in_seconds =
+                input.value("expires_in_seconds", is_static ? 0 : 60 * 60 * 24 * 30);
+            return context.store
+                       ? issued_result(context.store->create_token(
+                                           {context.acting_user_id,
+                                            context.pool_id,
+                                            input.value("name", ""),
+                                            input.value("reason", ""),
+                                            input.value("scopes", std::vector<std::string>{}),
+                                            expires_in_seconds,
+                                            is_static}),
+                                       context)
+                       : no_store();
+        }});
     registry.add(Capability{.name = "list_sessions",
                             .title = "List sessions",
                             .description = "List the authenticated user's sessions and tokens.",
@@ -2180,14 +2290,15 @@ void register_sso_capabilities(Registry& registry) {
         .resolve_object = global_object,
         .handler = [](const json& input, ApiContext& context) {
             return context.store ? issued_result(context.store->sign_in_sso(
-                                       {input.value("provider_id", ""),
-                                        input.value("issuer", ""),
-                                        input.value("subject", ""),
-                                        input.value("email", ""),
-                                        input.value("display_name", ""),
-                                        input.value("taap_id", ""),
-                                        input.value("device_name", "browser"),
-                                        input.value("claims", json::object())}))
+                                                     {input.value("provider_id", ""),
+                                                      input.value("issuer", ""),
+                                                      input.value("subject", ""),
+                                                      input.value("email", ""),
+                                                      input.value("display_name", ""),
+                                                      input.value("taap_id", ""),
+                                                      input.value("device_name", "browser"),
+                                                      input.value("claims", json::object())}),
+                                                 context)
                                  : no_store();
         }});
     registry.add(Capability{
@@ -2233,7 +2344,8 @@ void register_sso_capabilities(Registry& registry) {
                                                              assertion->display_name,
                                                              input.value("taap_id", ""),
                                                              input.value("device_name", "browser"),
-                                                             assertion->claims}));
+                                                             assertion->claims}),
+                                 context);
         }});
     registry.add(Capability{
         .name = "upsert_scim_user",
@@ -4008,6 +4120,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_drive_capabilities(registry);
     register_model_capabilities(registry);
     register_transparency_capabilities(registry);
+    register_application_capabilities(registry);
 }
 
 } // namespace lake::api

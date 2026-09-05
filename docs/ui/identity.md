@@ -26,6 +26,20 @@ The sessions page resolves session and device rows by the authenticated user ID.
 carry the credential ID and lake-signed TAAP binding on the `list_devices` API response; revoking
 one invalidates both its sessions and its linked passkey credential.
 
+## Application identity
+
+An operator registers applications at `/applications` and follows the application detail page to
+pool users, application organizations, lifecycle events, and webhook registration. Those pages
+call the application capabilities through the registry and use the application policy object for
+authorization. Protected application mutations are recorded by the same signed audit path.
+
+End users enter through `/apps/<application-id>/sign-up`, `/sign-in`, `/mfa`, or
+`/passkey-sign-in`. A configured custom host serves the corresponding root entry paths and lake
+selects the application from the request host. Each form supplies the application's pool to the
+ordinary identity capability. Browser origins must match the hosted origin or an allowed origin;
+OAuth redirects must match a registered redirect URI. Successful sign-up and sign-in return the
+application access token as well as the HttpOnly session cookie.
+
 ## Browser sessions
 
 Successful password, TOTP, OAuth, and passkey sign-in sets
@@ -38,21 +52,24 @@ user-only identity pages.
 
 ## Passkey script exception
 
-`/passkeys` and `/passkey-sign-in` each contain exactly one inline script. The script converts
+`/passkeys`, lake's `/passkey-sign-in`, and each application passkey sign-in page contain exactly
+one inline script. The script converts
 base64url fields to browser byte arrays, calls `navigator.credentials.create` or
 `navigator.credentials.get`, and posts the result to the registered REST capabilities. It does
 not write the session cookie; the REST response sets an `HttpOnly` cookie. Every other identity
-page has no script.
+page has no script. Application themes change validated CSS colors and escaped text only.
 
 ## How to verify
 
 ```sh
 cmake --build build
-ctest --test-dir build --output-on-failure -R 'WebUi|IdentityHttp|WebAuthn'
+ctest --test-dir build --output-on-failure -R 'WebUi|IdentityHttp|WebAuthn|Application'
 ```
 
 The renderer tests cover MFA enrollment, challenge and disable forms, one-use value escaping,
-absence of scripts, and the one-script passkey exception.
+absence of scripts, and the one-script passkey exception. Application tests cover themed hosted
+forms, the raw JWKS route, pool isolation, JWT audience verification, webhook retry history, and
+operator user suspension.
 `IdentityHttp.PagesIssueAndResolveHttpOnlySessions` submits the sign-up form, checks the
 cookie attributes, loads the authenticated session row on the sessions page, and checks that a
 REST sign-up response also sets an HttpOnly cookie.
@@ -61,5 +78,5 @@ REST sign-up response also sets an HttpOnly cookie.
 
 Add behavior to the registry first. Keep HTML generation in the pure `web_ui` renderers and make
 the HTTP form adapter call that capability. Add its route to request metrics, renderer tests, this
-table, and the route tables in `README.md` and `docs/serving/http.md`. Do not add another script
-outside the two passkey pages.
+table, and the route tables in `README.md` and `docs/serving/http.md`. Do not add a script outside
+a documented passkey WebAuthn page.

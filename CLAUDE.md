@@ -92,6 +92,10 @@ TUF repository metadata adds immutable root, targets, snapshot, and timestamp ob
 `LAKE_STORE_ROOT/<instance>/log/tuf/`, distinct-key threshold verification, version/expiry and
 cross-role binding checks, dual-threshold root rotation, and a rehearsed compromised-key
 replacement. Its four capabilities use policy metadata and the signed registry audit stream.
+Application authentication adds migration `0016_auth_apps`, isolated identity pools, themed
+hosted and custom-domain entry pages, per-application Ed25519 JWTs and JWKS, signed lifecycle
+webhooks with retained attempts, and authorized operator management for users and organizations.
+Its contract is `docs/api/apps.md`.
 
 ## Where to read Zetta
 
@@ -156,7 +160,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `drive_guard` today, versioned by content hash).
+  `auth_app_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

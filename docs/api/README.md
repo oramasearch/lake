@@ -90,6 +90,11 @@ fidelity report.
 | `rotate_tuf_root` | action | next root signed by old and new thresholds | immutable successor root | [transparency.md](transparency.md) |
 | `tuf_metadata` | read | role and optional version | exact encoded and parsed role metadata | [transparency.md](transparency.md) |
 | `sign_up_password`, `sign_in_password`, `verify_mfa` | action, public entry | password credentials; verify also takes a TOTP or recovery code | browser session + secret | [identity.md](identity.md) |
+| `register_application`, `list_applications`, `get_application`, `update_application_theme`, `rotate_application_signing_key` | action/read | customer, application registration, theme, or application id | isolated pool registration and key metadata | [apps.md](apps.md) |
+| `application_jwks`, `issue_application_jwt` | public read / protected action | application and active user ids | Ed25519 JWKS or short-lived audience-bound JWT | [apps.md](apps.md) |
+| `list_application_users`, `suspend_application_user`, `delete_application_user`, `export_application_user` | read/action | application and user ids | pool profiles, suspension, deletion, or export | [apps.md](apps.md) |
+| `list_application_organizations`, `create_application_organization`, `update_application_organization`, `delete_application_organization` | read/action | application, organization, TAAP identity, name, metadata | application organization lifecycle | [apps.md](apps.md) |
+| `create_application_webhook`, `list_application_webhooks`, `list_application_webhook_events`, `retry_application_webhook` | action/read | application, endpoint, subscriptions, event and webhook ids | signed lifecycle delivery log | [apps.md](apps.md) |
 | `enroll_mfa`, `disable_mfa` | action | authenticated user; disable takes a fresh TOTP or recovery code | one-use setup URI and recovery codes, or confirmation | [identity.md](identity.md) |
 | `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation with a lake-signed TAAP binding stored on the device | [identity.md](identity.md) |
 | `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |

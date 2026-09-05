@@ -64,6 +64,7 @@
 
 #include <openssl/evp.h>
 
+#include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/oauth.hpp"
@@ -596,6 +597,56 @@ std::string request_origin(const boost::http::route_params& route) {
     return scheme + "://" + host;
 }
 
+std::string request_host(const boost::http::route_params& route) {
+    if (route.req.count(boost::http::field::host) == 0) {
+        return "localhost";
+    }
+    std::string host(route.req.at(boost::http::field::host));
+    const std::size_t port = host.find(':');
+    if (port != std::string::npos) {
+        host.resize(port);
+    }
+    return host;
+}
+
+std::string application_redirect_location(const control::Application& application,
+                                          const ApiResult& result) {
+    if (application.redirect_uris.empty()) {
+        return "/apps/" + application.id + "/sign-in";
+    }
+    std::string location = application.redirect_uris.front();
+    const std::string token = result.value.value("access_token", "");
+    if (token.empty()) {
+        return location;
+    }
+    location += location.contains('#') ? "&" : "#";
+    location += "access_token=" + oauth_url_encode(token);
+    location += "&token_type=Bearer";
+    location += "&expires_in=" + std::to_string(result.value.value("expires_in", 900));
+    return location;
+}
+
+std::vector<std::string> form_lines(std::string_view value) {
+    std::vector<std::string> output;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t end = value.find('\n', start);
+        std::string line(value.substr(
+            start, end == std::string_view::npos ? value.size() - start : end - start));
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (!line.empty()) {
+            output.push_back(std::move(line));
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return output;
+}
+
 std::optional<std::uint64_t> decimal_value(std::string_view value) {
     std::uint64_t output = 0;
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), output);
@@ -753,6 +804,48 @@ control::Customer customer_from_json(const nlohmann::json& value) {
             json_string(value, "name"),
             json_string(value, "created_at"),
             json_string(value, "updated_at")};
+}
+
+control::Application application_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "customer_id"),
+            json_string(value, "pool_id"),
+            json_string(value, "name"),
+            value.value("allowed_origins", std::vector<std::string>{}),
+            value.value("redirect_uris", std::vector<std::string>{}),
+            json_string(value, "custom_sign_in_domain"),
+            value.value("theme", nlohmann::json::object()),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
+control::ApplicationUser application_user_from_json(const nlohmann::json& value) {
+    return {json_string(value, "application_id"),
+            json_string(value, "user_id"),
+            json_string(value, "taap_id"),
+            json_string(value, "email"),
+            json_string(value, "display_name"),
+            json_string(value, "status"),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
+control::ApplicationOrganization application_organization_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "application_id"),
+            json_string(value, "taap_id"),
+            json_string(value, "name"),
+            value.value("metadata", nlohmann::json::object()),
+            json_string(value, "created_at"),
+            json_string(value, "updated_at")};
+}
+
+control::ApplicationWebhookEvent application_event_from_json(const nlohmann::json& value) {
+    return {json_string(value, "id"),
+            json_string(value, "application_id"),
+            json_string(value, "event"),
+            value.value("payload", nlohmann::json::object()),
+            json_string(value, "created_at")};
 }
 
 control::Repository repository_from_json(const nlohmann::json& value) {
@@ -2567,7 +2660,7 @@ boost::capy::io_task<std::string> exchange_outbound(Stream& stream,
     auto [write_error, written] =
         co_await request_sink.write_eof(boost::capy::make_buffer(std::string_view(request.body)));
     if (write_error) {
-        co_return {{}, "could not send OAuth provider request: " + write_error.message()};
+        co_return {{}, "could not send outbound request: " + write_error.message()};
     }
 
     http::parser_config limits(false);
@@ -2577,7 +2670,7 @@ boost::capy::io_task<std::string> exchange_outbound(Stream& stream,
     parser.start();
     auto [header_error] = co_await parser.read_header(stream);
     if (header_error) {
-        co_return {{}, "could not read OAuth provider response: " + header_error.message()};
+        co_return {{}, "could not read outbound response: " + header_error.message()};
     }
     response.status = static_cast<int>(parser.get().status_int());
     auto body = parser.source_for(stream);
@@ -2588,7 +2681,7 @@ boost::capy::io_task<std::string> exchange_outbound(Stream& stream,
             break;
         }
         if (read_error) {
-            co_return {{}, "could not read OAuth provider body: " + read_error.message()};
+            co_return {{}, "could not read outbound response body: " + read_error.message()};
         }
         std::size_t consumed = 0;
         for (const boost::capy::const_buffer& buffer : buffers) {
@@ -2668,30 +2761,28 @@ private:
     boost::capy::task<> perform(std::shared_ptr<Pending> pending) {
         OutboundTarget target;
         if (!parse_outbound_url(pending->request.url, target)) {
-            pending->response.error =
-                "OAuth provider URL must use HTTPS, except for loopback tests";
+            pending->response.error = "outbound URL must use HTTPS, except for loopback tests";
             finish(pending);
             co_return;
         }
         boost::corosio::resolver resolver(io_context_);
         auto [resolve_error, results] = co_await resolver.resolve(target.host, target.port);
         if (resolve_error) {
-            pending->response.error =
-                "could not resolve OAuth provider: " + resolve_error.message();
+            pending->response.error = "could not resolve outbound host: " + resolve_error.message();
             finish(pending);
             co_return;
         }
         boost::corosio::tcp_socket socket(io_context_);
         socket.open();
         bool connected = false;
-        std::string connect_error = "OAuth provider resolved no addresses";
+        std::string connect_error = "outbound host resolved no addresses";
         for (const auto& entry : results) {
             auto [error] = co_await socket.connect(entry.get_endpoint());
             if (!error) {
                 connected = true;
                 break;
             }
-            connect_error = "could not connect to OAuth provider: " + error.message();
+            connect_error = "could not connect to outbound host: " + error.message();
         }
         if (!connected) {
             pending->response.error = connect_error;
@@ -2712,20 +2803,20 @@ private:
             auto [handshake_error] = co_await secure.handshake(boost::corosio::tls_stream::client);
             if (handshake_error) {
                 pending->response.error =
-                    "OAuth provider TLS handshake failed: " + handshake_error.message();
+                    "outbound TLS handshake failed: " + handshake_error.message();
                 finish(pending);
                 co_return;
             }
             auto [timeout_error, reason] = co_await boost::capy::timeout(
                 exchange_outbound(secure, pending->request, target, pending->response),
                 std::chrono::seconds(30));
-            exchange_error = timeout_error ? "OAuth provider request timed out" : std::move(reason);
+            exchange_error = timeout_error ? "outbound request timed out" : std::move(reason);
             [[maybe_unused]] auto shutdown = co_await secure.shutdown();
         } else {
             auto [timeout_error, reason] = co_await boost::capy::timeout(
                 exchange_outbound(socket, pending->request, target, pending->response),
                 std::chrono::seconds(30));
-            exchange_error = timeout_error ? "OAuth provider request timed out" : std::move(reason);
+            exchange_error = timeout_error ? "outbound request timed out" : std::move(reason);
         }
         pending->response.error = std::move(exchange_error);
         finish(pending);
@@ -2756,7 +2847,7 @@ struct ApiServer::Impl {
     std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
-    OutboundHttpClient outbound_http;
+    mutable OutboundHttpClient outbound_http;
     struct CachedJwks {
         std::string document;
         std::chrono::steady_clock::time_point fetched_at;
@@ -2924,6 +3015,23 @@ struct ApiServer::Impl {
         ctx.sync_store = &sync_store;
         ctx.metering = options.metering;
         ctx.public_host = options.public_host;
+        ctx.request_origin = request_origin(route);
+        if (route.req.count(boost::http::field::origin) != 0) {
+            ctx.caller_origin = std::string(route.req.at(boost::http::field::origin));
+        }
+        ctx.webhook_sender = [this](const std::string& url,
+                                    const nlohmann::json& headers,
+                                    const std::string& payload) {
+            std::vector<std::pair<std::string, std::string>> outbound_headers;
+            for (const auto& [name, value] : headers.items()) {
+                if (value.is_string()) {
+                    outbound_headers.emplace_back(name, value.get<std::string>());
+                }
+            }
+            const OutboundResponse response =
+                outbound_http.request({"POST", url, payload, std::move(outbound_headers)});
+            return WebhookDeliveryResult{response.status, response.error};
+        };
         if (route.req.count(boost::http::field::user_agent) != 0) {
             ctx.device = std::string(route.req.at(boost::http::field::user_agent));
         }
@@ -3626,10 +3734,435 @@ struct ApiServer::Impl {
         return redirect(route, "/", "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     }
 
+    control::Result<control::Application>
+    application_for_route(const boost::http::route_params& route) const {
+        if (!options.store) {
+            return std::unexpected(
+                control::StoreError{"store_unavailable", "control-plane store is unavailable"});
+        }
+        return options.store->get_application(route_value(route, "id"));
+    }
+
+    control::Result<control::Application>
+    application_for_domain(const boost::http::route_params& route) const {
+        if (!options.store) {
+            return std::unexpected(
+                control::StoreError{"store_unavailable", "control-plane store is unavailable"});
+        }
+        return options.store->get_application_by_domain(request_host(route));
+    }
+
+    boost::http::route_task serve_applications_page(boost::http::route_params& route,
+                                                    std::string error = {}) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const ApiResult customer_rows = registry.call("list_customers", {{"limit", 500}}, context);
+        if (!customer_rows.ok) {
+            return serve_page_error(route, customer_rows);
+        }
+        std::vector<control::Customer> customers;
+        std::vector<control::Application> applications;
+        for (const auto& value : customer_rows.value.at("items")) {
+            const control::Customer customer = customer_from_json(value);
+            customers.push_back(customer);
+            const ApiResult application_rows = registry.call(
+                "list_applications", {{"customer_id", customer.id}, {"limit", 500}}, context);
+            if (!application_rows.ok) {
+                return serve_page_error(route, application_rows);
+            }
+            for (const auto& application : application_rows.value.at("items")) {
+                applications.push_back(application_from_json(application));
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_applications(applications, customers, error),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_application_register(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result =
+            registry.call("register_application",
+                          {{"customer_id", form_field(body, "customer_id")},
+                           {"name", form_field(body, "name")},
+                           {"allowed_origins", form_lines(form_field(body, "allowed_origins"))},
+                           {"redirect_uris", form_lines(form_field(body, "redirect_uris"))},
+                           {"custom_sign_in_domain", form_field(body, "custom_sign_in_domain")},
+                           {"theme", {{"accent_color", form_field(body, "accent_color")}}}},
+                          context);
+        if (!result.ok) {
+            co_return co_await serve_applications_page(route, result.error.message);
+        }
+        co_return co_await redirect(route, "/application?id=" + json_string(result.value, "id"));
+    }
+
+    boost::http::route_task serve_application_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string id = query_value(route, "id");
+        const ApiResult result = registry.call("get_application", {{"id", id}}, context);
+        if (!result.ok) {
+            return serve_page_error(route, result);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_application(application_from_json(result.value)),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_application_users_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string id = query_value(route, "id");
+        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
+        const ApiResult rows = registry.call(
+            "list_application_users", {{"application_id", id}, {"limit", 500}}, context);
+        if (!application.ok) {
+            return serve_page_error(route, application);
+        }
+        if (!rows.ok) {
+            return serve_page_error(route, rows);
+        }
+        std::vector<control::ApplicationUser> users;
+        for (const auto& value : rows.value.at("items")) {
+            users.push_back(application_user_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_application_users(application_from_json(application.value), users),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_application_user_suspend(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string application_id = form_field(body, "application_id");
+        const ApiResult result = registry.call(
+            "suspend_application_user",
+            {{"application_id", application_id}, {"user_id", form_field(body, "user_id")}},
+            context);
+        if (!result.ok) {
+            co_return co_await serve_page_error(route, result);
+        }
+        co_return co_await redirect(route, "/application/users?id=" + application_id);
+    }
+
+    boost::http::route_task serve_application_organizations_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string id = query_value(route, "id");
+        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
+        const ApiResult rows = registry.call(
+            "list_application_organizations", {{"application_id", id}, {"limit", 500}}, context);
+        if (!application.ok) {
+            return serve_page_error(route, application);
+        }
+        if (!rows.ok) {
+            return serve_page_error(route, rows);
+        }
+        std::vector<control::ApplicationOrganization> organizations;
+        for (const auto& value : rows.value.at("items")) {
+            organizations.push_back(application_organization_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_application_organizations(application_from_json(application.value),
+                                                          organizations),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task
+    serve_application_organization_create(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string application_id = form_field(body, "application_id");
+        const ApiResult result = registry.call("create_application_organization",
+                                               {{"application_id", application_id},
+                                                {"name", form_field(body, "name")},
+                                                {"taap_id", form_field(body, "taap_id")}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_page_error(route, result);
+        }
+        co_return co_await redirect(route, "/application/organizations?id=" + application_id);
+    }
+
+    boost::http::route_task
+    serve_application_organization_delete(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string application_id = form_field(body, "application_id");
+        const ApiResult result =
+            registry.call("delete_application_organization",
+                          {{"application_id", application_id},
+                           {"organization_id", form_field(body, "organization_id")}},
+                          context);
+        if (!result.ok) {
+            co_return co_await serve_page_error(route, result);
+        }
+        co_return co_await redirect(route, "/application/organizations?id=" + application_id);
+    }
+
+    boost::http::route_task serve_application_events_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string id = query_value(route, "id");
+        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
+        const ApiResult rows = registry.call(
+            "list_application_webhook_events", {{"application_id", id}, {"limit", 500}}, context);
+        if (!application.ok) {
+            return serve_page_error(route, application);
+        }
+        if (!rows.ok) {
+            return serve_page_error(route, rows);
+        }
+        std::vector<control::ApplicationWebhookEvent> events;
+        for (const auto& value : rows.value.at("items")) {
+            events.push_back(application_event_from_json(value));
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_application_events(application_from_json(application.value), events),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_application_webhook_create(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string application_id = form_field(body, "application_id");
+        const ApiResult result =
+            registry.call("create_application_webhook",
+                          {{"application_id", application_id},
+                           {"url", form_field(body, "url")},
+                           {"events", comma_separated(form_field(body, "events"))}},
+                          context);
+        if (!result.ok) {
+            co_return co_await serve_page_error(route, result);
+        }
+        auto application = options.store->get_application(application_id);
+        auto rows = options.store->list_application_webhook_events(application_id, 500);
+        if (!application || !rows) {
+            co_return co_await send_text(route,
+                                         http::status::internal_server_error,
+                                         error_body("store_error", "could not render webhook page"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        co_return co_await send_text(
+            route,
+            http::status::ok,
+            web_ui_application_events(*application, *rows, result.value.value("secret", "")),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_application_identity_page(boost::http::route_params& route,
+                                                            std::string_view page,
+                                                            std::string_view error = {}) {
+        auto application = application_for_route(route);
+        if (!application) {
+            return send_text(route,
+                             boost::http::status::not_found,
+                             error_body(application.error().code, application.error().message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        std::string body;
+        if (page == "sign-up") {
+            body = web_ui_application_sign_up(*application, error);
+        } else if (page == "sign-in") {
+            body = web_ui_application_sign_in(*application, error);
+        } else if (page == "mfa") {
+            body = web_ui_application_mfa(*application, error);
+        } else {
+            body = web_ui_application_passkey_sign_in(*application, error);
+        }
+        return send_text(
+            route, boost::http::status::ok, body, "text/html; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_application_password(boost::http::route_params& route,
+                                                       std::string_view capability) {
+        namespace http = boost::http;
+        auto application = application_for_route(route);
+        if (!application) {
+            co_return co_await send_text(
+                route,
+                http::status::not_found,
+                error_body(application.error().code, application.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        context.public_host = request_host(route);
+        nlohmann::json input = {{"pool_id", application->pool_id},
+                                {"email", form_field(body, "email")},
+                                {"password", form_field(body, "password")},
+                                {"device_name", form_field(body, "device_name")}};
+        if (capability == "sign_up_password") {
+            input["display_name"] = form_field(body, "display_name");
+            input["identity_document"] = form_field(body, "identity_document");
+        }
+        if (capability == "verify_mfa") {
+            input["code"] = form_field(body, "code");
+        }
+        const ApiResult result = registry.call(std::string(capability), input, context);
+        if (!result.ok && result.error.code == "mfa_required") {
+            co_return co_await redirect(route, "/apps/" + application->id + "/mfa");
+        }
+        if (!result.ok) {
+            const std::string page = capability == "sign_up_password"
+                                         ? "sign-up"
+                                         : (capability == "verify_mfa" ? "mfa" : "sign-in");
+            co_return co_await serve_application_identity_page(route, page, result.error.message);
+        }
+        const std::string destination = application_redirect_location(*application, result);
+        co_return co_await redirect(
+            route, destination, browser_session_cookie(route, result.value.value("secret", "")));
+    }
+
+    boost::http::route_task serve_application_passkey(boost::http::route_params& route,
+                                                      std::string_view capability) {
+        namespace http = boost::http;
+        auto application = application_for_route(route);
+        if (!application) {
+            co_return co_await send_text(
+                route,
+                http::status::not_found,
+                error_body(application.error().code, application.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        nlohmann::json input = {{"pool_id", application->pool_id}};
+        if (capability == "sign_in_passkey") {
+            http::json_sink sink;
+            auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+            if (read_error || bytes_read == 0) {
+                co_return co_await send_text(route,
+                                             http::status::bad_request,
+                                             error_body("invalid_input", "JSON body is required"),
+                                             "application/json; charset=utf-8",
+                                             "no-store");
+            }
+            input.update(to_nlohmann(sink.release()));
+            input["pool_id"] = application->pool_id;
+        }
+        ApiContext context = context_for(route);
+        context.public_host = request_host(route);
+        const ApiResult result = registry.call(std::string(capability), input, context);
+        const std::string body = rest_envelope(result).dump();
+        route.status(http::int_to_status(static_cast<unsigned>(rest_status(result))));
+        route.res.set(http::field::content_type, "application/json; charset=utf-8");
+        route.res.set(http::field::cache_control, "no-store");
+        if (result.ok && result.value.contains("secret")) {
+            route.res.set(http::field::set_cookie,
+                          browser_session_cookie(route, result.value.value("secret", "")));
+        }
+        stamp_response_headers(route, body);
+        auto [send_error] = co_await route.send(body);
+        if (send_error) {
+            co_return http::route_error(send_error);
+        }
+        co_return http::route_done;
+    }
+
+    boost::http::route_task serve_application_oauth(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto application = application_for_route(route);
+        if (!application) {
+            co_return co_await send_text(
+                route,
+                http::status::not_found,
+                error_body(application.error().code, application.error().message),
+                "application/json; charset=utf-8",
+                "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        context.public_host = request_host(route);
+        const ApiResult result =
+            registry.call("start_oauth",
+                          {{"pool_id", application->pool_id},
+                           {"provider", form_field(body, "provider")},
+                           {"device_name", form_field(body, "device_name")},
+                           {"identity_document", form_field(body, "identity_document")}},
+                          context);
+        if (!result.ok) {
+            co_return co_await serve_application_identity_page(
+                route, "sign-in", result.error.message);
+        }
+        co_return co_await redirect(
+            route,
+            result.value.value("authorization_url", "/apps/" + application->id + "/sign-in"));
+    }
+
+    boost::http::route_task serve_application_jwks(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call(
+            "application_jwks", {{"application_id", route_value(route, "id")}}, context);
+        return send_text(route,
+                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                         result.ok ? result.value.dump() : rest_envelope(result).dump(),
+                         "application/json; charset=utf-8",
+                         result.ok ? "public, max-age=300" : "no-store");
+    }
+
     boost::http::route_task serve_sign_up(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.authorized) {
             return redirect(route, context.operator_credential ? "/repositories" : "/sessions");
+        }
+        if (auto application = application_for_domain(route)) {
+            return send_text(route,
+                             boost::http::status::ok,
+                             web_ui_application_sign_up(*application, ""),
+                             "text/html; charset=utf-8",
+                             "no-store");
         }
         return send_text(route,
                          boost::http::status::ok,
@@ -3643,6 +4176,13 @@ struct ApiServer::Impl {
         if (context.authorized) {
             return redirect(route, context.operator_credential ? "/repositories" : "/sessions");
         }
+        if (auto application = application_for_domain(route)) {
+            return send_text(route,
+                             boost::http::status::ok,
+                             web_ui_application_sign_in(*application, ""),
+                             "text/html; charset=utf-8",
+                             "no-store");
+        }
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_sign_in(""),
@@ -3654,6 +4194,13 @@ struct ApiServer::Impl {
         const ApiContext context = context_for(route);
         if (context.operator_credential) {
             return redirect(route, "/repositories");
+        }
+        if (auto application = application_for_domain(route)) {
+            return send_text(route,
+                             boost::http::status::ok,
+                             web_ui_application_mfa(*application, ""),
+                             "text/html; charset=utf-8",
+                             "no-store");
         }
         return send_text(route,
                          boost::http::status::ok,
@@ -3681,6 +4228,13 @@ struct ApiServer::Impl {
         const ApiContext context = context_for(route);
         if (context.authorized) {
             return redirect(route, context.operator_credential ? "/repositories" : "/sessions");
+        }
+        if (auto application = application_for_domain(route)) {
+            return send_text(route,
+                             boost::http::status::ok,
+                             web_ui_application_passkey_sign_in(*application, ""),
+                             "text/html; charset=utf-8",
+                             "no-store");
         }
         return send_text(route,
                          boost::http::status::ok,
@@ -4143,6 +4697,13 @@ struct ApiServer::Impl {
             context.acting_user_id = principal->user_id;
             context.acting_identity = principal->taap_id;
         }
+        const std::string issued_pool = issued->session.pool_id;
+        const ApiResult application_result =
+            application_session_result(std::move(issued), context, "session.started");
+        if (!application_result.ok) {
+            co_return co_await oauth_error(
+                route, http::status::service_unavailable, application_result.error.message);
+        }
         if (!record_direct_event(
                 context,
                 audit::EventDraft{
@@ -4156,11 +4717,18 @@ struct ApiServer::Impl {
             co_return co_await oauth_error(
                 route, http::status::service_unavailable, "OAuth audit recording failed");
         }
-        std::string cookie = "lake_session=" + issued->secret + "; HttpOnly; SameSite=Lax; Path=/";
+        std::string cookie = "lake_session=" + application_result.value.value("secret", "") +
+                             "; HttpOnly; SameSite=Lax; Path=/";
         if (request_is_https(route)) {
             cookie += "; Secure";
         }
-        co_return co_await redirect(route, "/repositories", cookie);
+        std::string destination = "/repositories";
+        if (issued_pool != "lake") {
+            if (auto application = options.store->get_application_by_pool(issued_pool)) {
+                destination = application_redirect_location(*application, application_result);
+            }
+        }
+        co_return co_await redirect(route, destination, cookie);
     }
 
     boost::http::route_task serve_entity_access_page(boost::http::route_params& route,
@@ -5430,6 +5998,68 @@ bool ApiServer::start() {
         http::method::get, "/customers", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/customers", impl.serve_customers_page(route));
         });
+    router.add(
+        http::method::get, "/applications", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/applications", impl.serve_applications_page(route));
+        });
+    router.add(http::method::post,
+               "/applications",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/applications", impl.serve_application_register(route));
+               });
+    router.add(
+        http::method::get, "/application", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/application", impl.serve_application_page(route));
+        });
+    router.add(http::method::get,
+               "/application/users",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/application/users", impl.serve_application_users_page(route));
+               });
+    router.add(http::method::post,
+               "/application/users/suspend",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/application/users/suspend",
+                                               impl.serve_application_user_suspend(route));
+               });
+    router.add(http::method::get,
+               "/application/organizations",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/application/organizations",
+                                               impl.serve_application_organizations_page(route));
+               });
+    router.add(http::method::post,
+               "/application/organizations",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/application/organizations",
+                                               impl.serve_application_organization_create(route));
+               });
+    router.add(http::method::post,
+               "/application/organizations/delete",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/application/organizations/delete",
+                                               impl.serve_application_organization_delete(route));
+               });
+    router.add(http::method::get,
+               "/application/events",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/application/events", impl.serve_application_events_page(route));
+               });
+    router.add(http::method::post,
+               "/application/webhooks",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/application/webhooks",
+                                               impl.serve_application_webhook_create(route));
+               });
     router.add(http::method::get,
                "/organizations",
                [&impl](http::route_params& route) -> http::route_task {
@@ -5482,6 +6112,86 @@ bool ApiServer::start() {
         http::method::get, "/sign-up", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/sign-up", impl.serve_sign_up(route));
         });
+    router.add(
+        http::method::get,
+        "/apps/:id/sign-up",
+        [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/apps/:id/sign-up", impl.serve_application_identity_page(route, "sign-up"));
+        });
+    router.add(
+        http::method::get,
+        "/apps/:id/sign-in",
+        [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/apps/:id/sign-in", impl.serve_application_identity_page(route, "sign-in"));
+        });
+    router.add(
+        http::method::get, "/apps/:id/mfa", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/apps/:id/mfa", impl.serve_application_identity_page(route, "mfa"));
+        });
+    router.add(http::method::get,
+               "/apps/:id/passkey-sign-in",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/apps/:id/passkey-sign-in",
+                       impl.serve_application_identity_page(route, "passkey"));
+               });
+    router.add(http::method::post,
+               "/apps/:id/identity/sign-up",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/apps/:id/identity/sign-up",
+                       impl.serve_application_password(route, "sign_up_password"));
+               });
+    router.add(http::method::post,
+               "/apps/:id/identity/sign-in",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/apps/:id/identity/sign-in",
+                       impl.serve_application_password(route, "sign_in_password"));
+               });
+    router.add(http::method::post,
+               "/apps/:id/identity/mfa/verify",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/apps/:id/identity/mfa/verify",
+                       impl.serve_application_password(route, "verify_mfa"));
+               });
+    router.add(http::method::post,
+               "/apps/:id/identity/passkey/begin",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/apps/:id/identity/passkey/begin",
+                       impl.serve_application_passkey(route, "begin_passkey_sign_in"));
+               });
+    router.add(http::method::post,
+               "/apps/:id/identity/passkey/sign-in",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/apps/:id/identity/passkey/sign-in",
+                       impl.serve_application_passkey(route, "sign_in_passkey"));
+               });
+    router.add(http::method::post,
+               "/apps/:id/identity/oauth",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/apps/:id/identity/oauth", impl.serve_application_oauth(route));
+               });
+    router.add(http::method::get,
+               "/v1/apps/:id/.well-known/jwks.json",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/v1/apps/:id/.well-known/jwks.json",
+                                               impl.serve_application_jwks(route));
+               });
     router.add(
         http::method::get, "/sign-in", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/sign-in", impl.serve_sign_in(route));

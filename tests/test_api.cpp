@@ -34,6 +34,7 @@
 #include "lake/api/server.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/apps.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/policy.hpp"
@@ -639,7 +640,8 @@ std::string http_request(unsigned short port,
                          std::string_view body,
                          std::string_view content_type,
                          std::string_view cookie = {},
-                         std::string_view authorization = {}) {
+                         std::string_view authorization = {},
+                         std::string_view host = "localhost") {
     const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0)
         return {};
@@ -652,7 +654,7 @@ std::string http_request(unsigned short port,
         return {};
     }
     std::string request = std::string(method) + " " + std::string(path) +
-                          " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
+                          " HTTP/1.1\r\nHost: " + std::string(host) + "\r\nConnection: close\r\n";
     request += "Content-Type: " + std::string(content_type) + "\r\n";
     request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     if (!cookie.empty())
@@ -851,6 +853,102 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
         "application/json");
     EXPECT_NE(rest_signup.find(" 200 "), std::string::npos) << rest_signup;
     EXPECT_NE(response_header(rest_signup, "Set-Cookie").find("HttpOnly"), std::string::npos);
+    server.stop();
+}
+
+TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto owner = store->create_user(
+        {"taap:1:ed25519:http-app-owner", "http-app-owner@example.test", "HTTP owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto customer =
+        store->create_customer({"individual", owner->id, "", "http-application-owner"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const std::string application_id = lake::control::new_uuid_v4();
+    const auto key = lake::control::apps::generate_signing_key(application_id, 1);
+    ASSERT_TRUE(key) << key.error();
+    const auto application =
+        store->create_application({.id = application_id,
+                                   .customer_id = customer->id,
+                                   .pool_id = "app:" + application_id,
+                                   .name = "Hosted product",
+                                   .allowed_origins = {"https://product.example.test"},
+                                   .redirect_uris = {"https://product.example.test/callback"},
+                                   .custom_sign_in_domain = "login.product.example.test",
+                                   .theme = {{"accent_color", "#123456"}},
+                                   .signing_key = *key});
+    ASSERT_TRUE(application) << application.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.public_host = "lake.example.test";
+    options.store = store;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::string hosted = http_request(
+        server.port(), "GET", "/apps/" + application_id + "/sign-up", "", "text/plain");
+    EXPECT_NE(hosted.find(" 200 "), std::string::npos) << hosted;
+    EXPECT_NE(hosted.find("Hosted product"), std::string::npos);
+    EXPECT_NE(hosted.find("--accent:#123456"), std::string::npos);
+    EXPECT_EQ(hosted.find("<script"), std::string::npos);
+
+    const std::string custom = http_request(
+        server.port(), "GET", "/sign-in", "", "text/plain", "", "", "login.product.example.test");
+    EXPECT_NE(custom.find(" 200 "), std::string::npos) << custom;
+    EXPECT_NE(custom.find("Hosted product"), std::string::npos);
+    EXPECT_NE(custom.find("/apps/" + application_id + "/identity/sign-in"), std::string::npos);
+
+    const std::string custom_mfa = http_request(
+        server.port(), "GET", "/mfa", "", "text/plain", "", "", "login.product.example.test");
+    EXPECT_NE(custom_mfa.find(" 200 "), std::string::npos) << custom_mfa;
+    EXPECT_NE(custom_mfa.find("Hosted product"), std::string::npos);
+    EXPECT_NE(custom_mfa.find("/apps/" + application_id + "/identity/mfa/verify"),
+              std::string::npos);
+
+    const std::string custom_passkey = http_request(server.port(),
+                                                    "GET",
+                                                    "/passkey-sign-in",
+                                                    "",
+                                                    "text/plain",
+                                                    "",
+                                                    "",
+                                                    "login.product.example.test");
+    EXPECT_NE(custom_passkey.find(" 200 "), std::string::npos) << custom_passkey;
+    EXPECT_NE(custom_passkey.find("Hosted product"), std::string::npos);
+    EXPECT_NE(custom_passkey.find("navigator.credentials.get"), std::string::npos);
+
+    const std::string created = http_request(
+        server.port(),
+        "POST",
+        "/apps/" + application_id + "/identity/sign-up",
+        "email=hosted%40example.test&display_name=Hosted+User&password=correct+horse+battery+"
+        "staple&device_name=browser&identity_document=%7B%7D",
+        "application/x-www-form-urlencoded");
+    EXPECT_NE(created.find(" 302 "), std::string::npos) << created;
+    EXPECT_TRUE(response_header(created, "Location")
+                    .starts_with("https://product.example.test/callback#access_token="));
+    EXPECT_NE(response_header(created, "Location").find("&token_type=Bearer&expires_in=900"),
+              std::string::npos);
+    EXPECT_NE(response_header(created, "Set-Cookie").find("HttpOnly"), std::string::npos);
+
+    const std::string signed_in = http_request(
+        server.port(),
+        "POST",
+        "/apps/" + application_id + "/identity/sign-in",
+        "email=hosted%40example.test&password=correct+horse+battery+staple&device_name=browser",
+        "application/x-www-form-urlencoded");
+    EXPECT_NE(signed_in.find(" 302 "), std::string::npos) << signed_in;
+
+    const std::string jwks = http_request(server.port(),
+                                          "GET",
+                                          "/v1/apps/" + application_id + "/.well-known/jwks.json",
+                                          "",
+                                          "application/json");
+    EXPECT_NE(jwks.find(" 200 "), std::string::npos) << jwks;
+    const json keys = response_json(jwks);
+    ASSERT_EQ(keys.at("keys").size(), 1);
+    EXPECT_EQ(keys.at("keys").at(0).at("kid"), key->kid);
     server.stop();
 }
 
