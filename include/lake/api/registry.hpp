@@ -28,6 +28,9 @@ class Service;
 namespace lake::control::callers {
 class Service;
 }
+namespace lake::control::agents {
+class Service;
+}
 namespace lake::transparency {
 class Service;
 class CheckpointService;
@@ -101,6 +104,7 @@ struct ApiContext {
     search::Service* search = nullptr;
     control::pki::Service* pki = nullptr;
     control::callers::Service* callers = nullptr;
+    control::agents::Service* agents = nullptr;
     transparency::Service* transparency = nullptr;
     transparency::CheckpointService* checkpoints = nullptr;
     transparency::TiledLog* transparency_log = nullptr;

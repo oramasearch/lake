@@ -156,6 +156,9 @@ public:
     Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& value) override;
     Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
                                                           int limit) override;
+    Result<AgentSession> create_agent_session(const NewAgentSession& value) override;
+    Result<AgentSession> get_agent_session(const std::string& customer_id,
+                                           const std::string& id) override;
     Result<PkiRecoveryCeremonyRecord>
     create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& value) override;
     Result<PkiRecoveryCeremonyRecord>
@@ -350,6 +353,7 @@ private:
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;
+    std::vector<AgentSession> agent_sessions_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {

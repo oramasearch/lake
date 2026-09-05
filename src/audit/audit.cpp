@@ -147,7 +147,7 @@ Result<std::vector<std::uint8_t>> public_key_of(EVP_PKEY* key) {
     return public_key;
 }
 
-Result<std::string> sign(EVP_PKEY* key, const std::vector<std::uint8_t>& value) {
+Result<std::vector<std::uint8_t>> sign_raw(EVP_PKEY* key, std::span<const std::uint8_t> value) {
     EVP_MD_CTX* raw_context = EVP_MD_CTX_new();
     if (raw_context == nullptr) {
         return std::unexpected(Error{"crypto_error", "could not allocate a signing context"});
@@ -165,7 +165,15 @@ Result<std::string> sign(EVP_PKEY* key, const std::vector<std::uint8_t>& value) 
         return std::unexpected(Error{"crypto_error", "could not sign audit event"});
     }
     signature.resize(size);
-    return base64_encode(signature);
+    return signature;
+}
+
+Result<std::string> sign(EVP_PKEY* key, const std::vector<std::uint8_t>& value) {
+    auto signature = sign_raw(key, value);
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    return base64_encode(*signature);
 }
 
 Result<void> verify_signature(const std::vector<std::uint8_t>& public_key,
@@ -899,6 +907,50 @@ Result<Identity> rotate_identity(control::Store& store, const IdentityOptions& o
         return std::unexpected(Error{rotated.error().code, rotated.error().message});
     }
     return *replacement;
+}
+
+Result<std::vector<std::byte>> sign_taap(control::Store& store,
+                                         const std::string& expected_signer,
+                                         std::string_view artifact_type,
+                                         std::span<const std::byte> canonical_body,
+                                         const IdentityOptions& options) {
+    if (expected_signer.empty() || artifact_type.empty() || canonical_body.empty()) {
+        return std::unexpected(Error{"invalid_input", "TAAP signing fields are required"});
+    }
+    const IdentityOptions effective_options = options_for_store(store, options);
+    const auto current = identity(store, effective_options);
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    if (current->taap_id != expected_signer) {
+        return std::unexpected(Error{"conflict", "lake identity rotated before TAAP signing"});
+    }
+    const auto seed = seed_for(*current, effective_options);
+    if (!seed) {
+        return std::unexpected(seed.error());
+    }
+    const auto key = pkey_from_seed(*seed);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    std::vector<std::uint8_t> input;
+    const std::string domain = "TAAP/1 " + std::string(artifact_type);
+    input.reserve(domain.size() + 1 + canonical_body.size());
+    input.insert(input.end(), domain.begin(), domain.end());
+    input.push_back(0);
+    for (const std::byte value : canonical_body) {
+        input.push_back(std::to_integer<std::uint8_t>(value));
+    }
+    const auto signature = sign_raw(key->get(), input);
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    std::vector<std::byte> output;
+    output.reserve(signature->size());
+    for (const std::uint8_t value : *signature) {
+        output.push_back(std::byte{value});
+    }
+    return output;
 }
 
 Result<nlohmann::json> sign_transparency_checkpoint(control::Store& store,

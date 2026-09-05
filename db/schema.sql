@@ -1086,3 +1086,32 @@ CREATE TABLE IF NOT EXISTS auth_app_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0016_auth_apps') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Agent sessions (migration 0017): short-lived per-session signing identities delegated to a
+-- durable agent identity. Private key material is returned once and never enters this table.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id                       uuid        PRIMARY KEY,
+    customer_id              uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    durable_agent_taap_id    text        NOT NULL,
+    dispatcher_taap_id       text        NOT NULL,
+    session_taap_id          text        NOT NULL UNIQUE,
+    public_key               text        NOT NULL,
+    scopes                   text[]      NOT NULL,
+    attestation              text        NOT NULL,
+    transparency_index       bigint      NOT NULL CHECK (transparency_index >= 0),
+    transparency_root        text        NOT NULL,
+    issued_at                timestamptz NOT NULL,
+    expires_at               timestamptz NOT NULL,
+    CONSTRAINT agent_sessions_scopes_check CHECK (cardinality(scopes) > 0),
+    CONSTRAINT agent_sessions_expiry_check CHECK (expires_at > issued_at)
+);
+CREATE INDEX IF NOT EXISTS agent_sessions_customer_agent_idx
+    ON agent_sessions (customer_id, durable_agent_taap_id, issued_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0017_agent_sessions') ON CONFLICT DO NOTHING;

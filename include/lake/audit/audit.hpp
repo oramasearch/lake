@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -92,6 +93,14 @@ Result<Identity> identity(control::Store& store, const IdentityOptions& options)
 // Creates a dual-signed TAAP rotation document and makes the new identity
 // current.
 Result<Identity> rotate_identity(control::Store& store, const IdentityOptions& options);
+
+// Signs one domain-separated TAAP artifact with the current lake identity. The caller supplies
+// the expected signer so a concurrent identity rotation cannot bind a body to the wrong key.
+Result<std::vector<std::byte>> sign_taap(control::Store& store,
+                                         const std::string& expected_signer,
+                                         std::string_view artifact_type,
+                                         std::span<const std::byte> canonical_body,
+                                         const IdentityOptions& options);
 
 // Signs and verifies the TAAP identity binding stored with a passkey credential.
 Result<nlohmann::json> sign_passkey_binding(control::Store& store,

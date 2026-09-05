@@ -4132,6 +4132,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_timestamp_capabilities(registry);
     register_replication_capabilities(registry);
     register_application_capabilities(registry);
+    register_agent_capabilities(registry);
 }
 
 } // namespace lake::api

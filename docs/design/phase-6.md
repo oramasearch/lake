@@ -334,7 +334,13 @@ repository journals with durable per-source cursors and pull transparency-log su
 their current Merkle prefix. Entries and signed checkpoints are verified before adoption; a
 different prefix is a hard failure. The active/standby consistency and operator mapping contracts
 are [`../api/replication.md`](../api/replication.md) and
-[`../control-plane/replication.md`](../control-plane/replication.md). Agent session keys remain #39.
+[`../control-plane/replication.md`](../control-plane/replication.md). **Agent-session key status
+(#39): implemented on the lake side.** Lake mints a response-only Ed25519 seed with a maximum
+15-minute lifetime, signs a `delegation/1` attestation from its instance identity to the session
+actor, appends that delegation to the tiled log, and persists only public verification material
+in migration `0017_agent_sessions`. Drip verification rejects modified bodies and expired keys
+and returns the durable agent identity, dispatcher, and scopes through the signed audit path. The
+contract is [`../api/agents.md`](../api/agents.md); client proof verification remains liquid #207.
 
 ## Waves
 
