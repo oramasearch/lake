@@ -36,62 +36,133 @@ std::string web_ui_stylesheet() {
     static constexpr std::string_view tokens =
 #include "web_ui_tokens.inc"
         ;
-    return std::string(tokens) +
-           R"css(@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/ibm-plex-sans-400.woff2') format('woff2')}
-@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:500;font-display:swap;src:url('/fonts/ibm-plex-sans-500.woff2') format('woff2')}
-@font-face{font-family:'IBM Plex Sans';font-style:normal;font-weight:600;font-display:swap;src:url('/fonts/ibm-plex-sans-600.woff2') format('woff2')}
-@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/ibm-plex-mono-400.woff2') format('woff2')}
-@font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;src:url('/fonts/ibm-plex-mono-500.woff2') format('woff2')}
-:root{--ink:#1b1f24;--muted:#5b6570;--line:#d9dee3;--paper:#fafaf8;--accent:#0b6e99;--accent-ink:#fff}
-*{box-sizing:border-box}body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:var(--ink);background:var(--paper)}
-header{display:flex;align-items:center;gap:1.5rem;padding:.75rem 1.5rem;border-bottom:1px solid var(--line);background:#fff}
-header .brand{font-weight:700;letter-spacing:.02em;text-decoration:none;color:var(--ink)}header nav{display:flex;gap:1rem;flex:1}
-header nav a{color:var(--muted);text-decoration:none}header nav a:hover,header nav a[aria-current]{color:var(--accent)}
-header .meta,header .session{color:var(--muted);font-size:.9rem}header .session a{color:var(--accent);text-decoration:none}
-main{max-width:64rem;margin:2rem auto;padding:0 1.5rem}.eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:.75rem;color:var(--muted);margin:0}
-h1{margin:.25rem 0 .5rem;font-size:1.75rem}.sub{color:var(--muted);margin:0 0 1.5rem}.panel{background:#fff;border:1px solid var(--line);border-radius:8px;padding:1rem 1.25rem}
-code{background:#eef1f4;padding:.1rem .3rem;border-radius:4px;font-size:.9em}table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:8px}
-th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid var(--line)}th{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
-tr:last-child td{border-bottom:0}td a{color:var(--accent);text-decoration:none}.badge{display:inline-block;padding:.05rem .45rem;border-radius:999px;font-size:.75rem;border:1px solid var(--line);color:var(--muted)}
-.empty{color:var(--muted);padding:1.5rem;text-align:center}form.login{display:grid;gap:.75rem;max-width:26rem}form.search{display:flex;gap:.5rem;margin:0 0 1.5rem}
-form.login input,.filters input,form.search input{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px}form.search input{flex:1}form.login button,form.inline button,.filters button,form.search button{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
-form.inline{display:inline}form.inline button{background:transparent;color:var(--accent);padding:0}.error{color:#a12a2a;margin:0 0 .5rem}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}dt{color:var(--muted)}dd{margin:0}
-.filters{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:0 0 1.5rem}.filters label{display:grid;gap:.2rem;color:var(--muted);font-size:.8rem}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef1f4;padding:1rem;border-radius:6px}
-.image-preview{display:block;max-width:100%;max-height:40rem;margin:auto}.table-wrap{overflow:auto}.file-preview{max-height:40rem;overflow:auto}
-.diff-entry{margin-top:1rem}.diff-entry h2{font-size:1rem;margin:0 0 .75rem}.diff-entry .badge{margin-left:.35rem}.diff-hunk{margin:.75rem 0 0}.diff-hunk span{display:block}.diff-remove{color:#8b1a1a}.diff-add{color:#176b35}
-form.stack{display:grid;gap:.75rem;max-width:36rem}form.stack label{display:grid;gap:.25rem;color:var(--muted)}
-form.stack input,form.stack textarea,form.stack select{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
-form.stack textarea{min-height:8rem}button.primary{font:inherit;padding:.5rem .9rem;border:0;border-radius:6px;background:var(--accent);color:var(--accent-ink);cursor:pointer;width:max-content}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:1rem}.actions{display:flex;gap:1rem;align-items:center;flex-wrap:wrap}.notice{border-left:3px solid var(--accent);padding:.65rem .85rem;background:#eef7fb;margin:0 0 1rem}.muted{color:var(--muted)}
-)css";
+    static constexpr std::string_view styles =
+#include "web_ui_styles.inc"
+        ;
+    return std::string(tokens) + std::string(styles);
+}
+
+std::string web_ui_icon(std::string_view name) {
+    std::string_view body;
+    if (name == "lake") {
+        body = R"(<path d="M4 3h8v2H6v6h6v2H4z"/><path d="M8 7h4v2H8z"/>)";
+    } else if (name == "home") {
+        body =
+            R"(<path d="M8 1.4 1.5 7v7.5h5V10h3v4.5h5V7L8 1.4Zm4.5 11.1h-1V8h-7v4.5h-1V7.9L8 4l4.5 3.9v4.6Z"/>)";
+    } else if (name == "repository") {
+        body =
+            R"(<path d="M3 1h9.5A1.5 1.5 0 0 1 14 2.5V14H3a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2Zm0 2v7h9V3H3Zm0 9a.5.5 0 0 0 0 1h9v-1H3Z"/>)";
+    } else if (name == "search") {
+        body =
+            R"(<path d="m14.7 13.3-3.1-3.1a5.5 5.5 0 1 0-1.4 1.4l3.1 3.1 1.4-1.4ZM3 7.5A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1-9 0Z"/>)";
+    } else if (name == "customers") {
+        body =
+            R"(<path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0-2a1 1 0 1 1 0-2 1 1 0 0 1 0 2Zm0 3c-3.3 0-6 1.8-6 4v1h12v-1c0-2.2-2.7-4-6-4Zm-3.5 3c.7-.6 2-1 3.5-1s2.8.4 3.5 1h-7Z"/>)";
+    } else if (name == "organization") {
+        body =
+            R"(<path d="M2 1h9v4h3v10H2V1Zm2 2v10h2v-2h2v2h1V3H4Zm7 4v6h1V7h-1Z"/><path d="M5 5h1v1H5zm2 0h1v1H7zM5 8h1v1H5zm2 0h1v1H7z"/>)";
+    } else if (name == "metering") {
+        body = R"(<path d="M2 2h12v12H2V2Zm2 2v8h8V4H4Zm1 6h1V8H5v2Zm2 0h1V5H7v5Zm2 0h1V7H9v3Z"/>)";
+    } else if (name == "secrets") {
+        body =
+            R"(<path d="M4 7V5a4 4 0 0 1 8 0v2h2v8H2V7h2Zm2 0h4V5a2 2 0 0 0-4 0v2Zm-2 2v4h8V9H4Z"/>)";
+    } else if (name == "audit") {
+        body =
+            R"(<path d="M3 1h7l3 3v11H3V1Zm2 2v10h6V5H9V3H5Zm1 5 1.4 1.4L10.8 6 12 7.2 7.4 12 4.8 9.4 6 8Z"/>)";
+    } else if (name == "identity") {
+        body =
+            R"(<path d="M8 1a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm0 7c-3.3 0-6 1.8-6 4v1h12v-1c0-2.2-2.7-4-6-4Zm-3.5 3c.7-.6 2-1 3.5-1s2.8.4 3.5 1h-7Z"/>)";
+    } else if (name == "api") {
+        body =
+            R"(<path d="M1 2h14v12H1V2Zm2 2v8h10V4H3Zm1 2 2 2-2 2 1.4 1.4L8.8 8 5.4 4.6 4 6Zm5 4h3V8H9v2Z"/>)";
+    } else if (name == "theme") {
+        body = R"(<path d="M8 1a7 7 0 1 0 7 7 7 7 0 0 0-7-7Zm0 12V3a5 5 0 0 1 0 10Z"/>)";
+    } else {
+        return {};
+    }
+    return std::format("<svg class=\"icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" "
+                       "focusable=\"false\">{}</svg>",
+                       body);
 }
 
 namespace {
 
-std::string nav(bool signed_in) {
-    std::string out = "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
-                      "href=\"/organizations\">Organizations</a><a "
-                      "href=\"/applications\">Applications</a><a "
-                      "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
-                      "<a href=\"/metering\">Metering</a>"
-                      "<a href=\"/secret-mounts\">Secrets</a>"
-                      "<a href=\"/transparency\">Transparency</a><a href=\"/audit\">Audit</a>"
-                      "<a href=\"/sso\">SSO</a><a href=\"/exports\">Exports</a>";
-    if (signed_in) {
-        out += "<a href=\"/sessions\">Sessions</a><a "
-               "href=\"/passkeys\">Passkeys</a><a href=\"/tokens\">Tokens</a>";
+bool navigation_is_current(std::string_view title, std::string_view key) {
+    if (key == "home") {
+        return title == "lake — hello";
     }
-    out += "<a href=\"/v1/openapi.json\">API</a></nav>";
-    if (signed_in) {
-        out += "<span class=\"session\"><form class=\"inline\" method=\"post\" "
-               "action=\"/logout\"><button type=\"submit\">Sign "
-               "out</button></form></span>";
-    } else {
-        out += "<span class=\"session\"><a href=\"/sign-in\">Sign in</a> · <a "
-               "href=\"/sign-up\">Sign up</a></span>";
+    if (key == "repositories") {
+        return title == "lake — repositories" || title == "lake — tree" || title == "lake — file" ||
+               title == "lake — changes" || title == "lake — change" ||
+               title == "lake — artifacts" || title == "lake — artifact" ||
+               title == "lake — conflicts" || title == "lake — exports" ||
+               title == "lake — drive" || title == "lake — preview" ||
+               title == "lake — drive history" || title == "lake — drive sharing" ||
+               title == "lake — shared drive folder" ||
+               title.starts_with("lake — ") && title.find('/') != std::string_view::npos;
     }
+    if (key == "organizations") {
+        return title == "lake — organizations" || title == "lake — teams" ||
+               title == "lake — members" || title == "lake — invitations" ||
+               title == "lake — grants" || title == "lake — effective access" ||
+               title == "lake — enterprise SSO";
+    }
+    if (key == "secret") {
+        return title == "lake — secret mounts" || title == "lake — secrets" ||
+               title == "lake — encryption keys";
+    }
+    if (key == "applications") {
+        return title == "lake — applications" || title == "lake — application users" ||
+               title == "lake — application organizations" ||
+               title == "lake — application events" || title.starts_with("lake — application:");
+    }
+    return title == std::format("lake — {}", key);
+}
+
+std::string nav_link(std::string_view href,
+                     std::string_view label,
+                     std::string_view icon,
+                     std::string_view key,
+                     std::string_view title) {
+    return std::format("<a class=\"nav-link\" href=\"{}\"{}>{}<span>{}</span></a>",
+                       href,
+                       navigation_is_current(title, key) ? " aria-current=\"page\"" : "",
+                       web_ui_icon(icon),
+                       label);
+}
+
+std::string nav(bool signed_in, std::string_view title) {
+    std::string out = "<nav class=\"primary-nav\" aria-label=\"Primary\">"
+                      "<p class=\"nav-label\">Workspace</p>";
+    out += nav_link("/", "Home", "home", "home", title);
+    out += nav_link("/repositories", "Repositories", "repository", "repositories", title);
+    out += nav_link("/search", "Search", "search", "search", title);
+    out += "<p class=\"nav-label\">Administration</p>";
+    out += nav_link("/customers", "Customers", "customers", "customers", title);
+    out += nav_link("/organizations", "Organizations", "organization", "organizations", title);
+    out += nav_link("/applications", "Applications", "api", "applications", title);
+    out += nav_link("/metering", "Metering", "metering", "metering", title);
+    out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", title);
+    out += nav_link("/audit", "Audit", "audit", "audit", title);
+    if (signed_in) {
+        out += "<p class=\"nav-label\">Identity</p>";
+        out += nav_link("/sessions", "Sessions", "identity", "session", title);
+        out += nav_link("/passkeys", "Passkeys", "identity", "passkey", title);
+        out += nav_link("/tokens", "Tokens", "identity", "token", title);
+    }
+    out += "<p class=\"nav-label\">Developer</p>";
+    out += nav_link("/v1/openapi.json", "API", "api", "api", title);
+    out += "</nav>";
     return out;
+}
+
+std::string session_control(bool signed_in) {
+    if (signed_in) {
+        return "<span class=\"session\"><form class=\"inline\" method=\"post\" "
+               "action=\"/logout\"><button type=\"submit\">Sign out</button></form></span>";
+    }
+    return "<span class=\"session\"><a href=\"/sign-in\">Sign in</a><a "
+           "href=\"/sign-up\">Sign up</a></span>";
 }
 
 std::string row_link(std::string_view href, std::string_view text) {
@@ -119,8 +190,24 @@ std::string error_markup(std::string_view error) {
                          : std::format("<p class=\"error\">{}</p>", web_ui_escape(error));
 }
 
+std::string badge_markup(std::string_view value) {
+    std::string_view modifier;
+    if (value == "active" || value == "success" || value == "verified" || value == "hit" ||
+        value == "added") {
+        modifier = " status-success";
+    } else if (value == "revoked" || value == "denied" || value == "failed" ||
+               value == "divergent" || value == "removed" || value == "conflicted") {
+        modifier = " status-danger";
+    } else if (value == "pending" || value == "warning" || value == "miss") {
+        modifier = " status-warning";
+    } else if (value == "model" || value == "agent" || value == "modified") {
+        modifier = " status-ai";
+    }
+    return std::format("<span class=\"badge{}\">{}</span>", modifier, web_ui_escape(value));
+}
+
 std::string state_badge(bool active) {
-    return std::format("<span class=\"badge\">{}</span>", active ? "active" : "revoked");
+    return badge_markup(active ? "active" : "revoked");
 }
 
 std::string joined(const std::vector<std::string>& values) {
@@ -186,16 +273,34 @@ std::string web_ui_shell(std::string_view title,
                          std::string_view meta,
                          std::string_view content,
                          bool signed_in) {
-    return std::format("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-                       "<meta name=\"viewport\" "
-                       "content=\"width=device-width,initial-scale=1\"><title>{}</title>"
-                       "<link rel=\"stylesheet\" href=\"/style.css\"></head><body><header><a "
-                       "class=\"brand\" href=\"/\">lake</a>{}"
-                       "<span class=\"meta\">{}</span></header><main>{}</main></body></html>",
-                       web_ui_escape(title),
-                       nav(signed_in),
-                       web_ui_escape(meta),
-                       content);
+    static constexpr std::string_view theme_preference =
+        R"(<script id="theme-preference">(()=>{try{const t=localStorage.getItem('lake-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch{}})();</script>)";
+    static constexpr std::string_view theme_toggle =
+        R"(<script id="theme-toggle-script">(()=>{const b=document.querySelector('[data-theme-toggle]');if(!b)return;const current=()=>document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');const label=()=>{const t=current();b.setAttribute('aria-label',`Use ${t==='dark'?'light':'dark'} theme`);b.setAttribute('aria-pressed',String(t==='dark'));};b.addEventListener('click',()=>{const t=current()==='dark'?'light':'dark';document.documentElement.dataset.theme=t;try{localStorage.setItem('lake-theme',t);}catch{}label();});label();})();</script>)";
+    return std::format(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>{}"
+        "<link rel=\"stylesheet\" href=\"/style.css\"></head><body>"
+        "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
+        "<div class=\"app-shell\"><aside class=\"sidebar\"><a class=\"brand\" href=\"/\">"
+        "<span class=\"brand-mark\">{}</span><span>lake</span></a>{}"
+        "<div class=\"sidebar-footer\">Orama data plane</div></aside>"
+        "<div class=\"app-frame\"><header class=\"topbar\"><div class=\"topbar-context\">{}</div>"
+        "<div class=\"topbar-actions\"><button class=\"theme-toggle\" type=\"button\" "
+        "data-theme-toggle aria-label=\"Toggle theme\">{}<span class=\"sr-only\">Toggle "
+        "theme</span>"
+        "</button>{}</div></header><main id=\"main-content\" tabindex=\"-1\">"
+        "<div class=\"page-container\">{}</div></main></div></div>{}</body></html>",
+        web_ui_escape(title),
+        theme_preference,
+        web_ui_icon("lake"),
+        nav(signed_in, title),
+        web_ui_escape(meta),
+        web_ui_icon("theme"),
+        session_control(signed_in),
+        content,
+        theme_toggle);
 }
 
 std::string web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in) {
@@ -221,11 +326,11 @@ std::string web_ui_login(std::string_view error) {
                           "the Lake's admin token.</p>";
     if (!error.empty())
         content += std::format("<p class=\"error\">{}</p>", web_ui_escape(error));
-    content += "<form class=\"login\" method=\"post\" action=\"/session\"><input "
+    content += "<form class=\"login\" method=\"post\" action=\"/session\"><label>Admin token<input "
                "type=\"password\" "
                "name=\"token\" "
                "placeholder=\"admin token\" autocomplete=\"current-password\" "
-               "required><button "
+               "required></label><button "
                "type=\"submit\">Sign in</button></form>";
     return web_ui_shell("lake — sign in", "sign in", content, false);
 }
@@ -455,7 +560,7 @@ std::string web_ui_change(const control::Repository& repository,
         ++visible;
         std::string badges;
         for (const std::string& status : entry.changes) {
-            badges += std::format("<span class=\"badge\">{}</span>", web_ui_escape(status));
+            badges += badge_markup(status);
         }
         content += std::format("<section class=\"panel diff-entry\"><h2><code>{}</code>{}</h2><dl>"
                                "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
@@ -558,16 +663,15 @@ std::string web_ui_artifacts(const control::Repository& repository,
             for (const RepositoryArtifactOutput& output : artifact.outputs) {
                 paths.push_back(output.path);
             }
-            content +=
-                std::format("<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td><span "
-                            "class=\"badge\">{}</span></td><td>{}</td></tr>",
-                            row_link("/artifact?repository_id=" + repository.id +
-                                         "&id=" + url_component(artifact.id),
-                                     artifact.id),
-                            web_ui_escape(artifact.action),
-                            web_ui_escape(joined(paths)),
-                            web_ui_escape(artifact.divergent ? "divergent" : artifact.cache_status),
-                            web_ui_escape(artifact.observed_at));
+            content += std::format(
+                "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                row_link("/artifact?repository_id=" + repository.id +
+                             "&id=" + url_component(artifact.id),
+                         artifact.id),
+                web_ui_escape(artifact.action),
+                web_ui_escape(joined(paths)),
+                badge_markup(artifact.divergent ? "divergent" : artifact.cache_status),
+                web_ui_escape(artifact.observed_at));
         }
         content += "</tbody></table>";
     }
@@ -597,7 +701,7 @@ std::string web_ui_artifact(const control::Repository& repository,
     std::string content =
         std::format("<p class=\"eyebrow\">artifact result</p><h1>{}</h1><p class=\"sub\">{}</p>"
                     "<div class=\"panel\"><dl><dt>action</dt><dd><code>{}</code></dd>"
-                    "<dt>exit</dt><dd>{}</dd><dt>cache</dt><dd><span class=\"badge\">{}</span></dd>"
+                    "<dt>exit</dt><dd>{}</dd><dt>cache</dt><dd>{}</dd>"
                     "<dt>divergent</dt><dd>{}</dd><dt>worker</dt><dd>{}</dd>"
                     "<dt>observed</dt><dd>{}</dd><dt>started</dt><dd>{}</dd>"
                     "<dt>finished</dt><dd>{}</dd></dl></div>",
@@ -605,7 +709,7 @@ std::string web_ui_artifact(const control::Repository& repository,
                     web_ui_escape(repository_name(repository)),
                     web_ui_escape(artifact.action),
                     artifact.exit_code,
-                    web_ui_escape(artifact.cache_status),
+                    badge_markup(artifact.cache_status),
                     artifact.divergent ? "yes" : "no",
                     web_ui_escape(artifact.worker),
                     web_ui_escape(artifact.observed_at),
@@ -647,14 +751,14 @@ std::string web_ui_artifact(const control::Repository& repository,
                     ? "verified"
                     : "unverified" +
                           (attestation.reason.empty() ? std::string() : ": " + attestation.reason);
-            content +=
-                std::format("<tr><td><span class=\"badge\">{}</span><br><code>{}</code></td>"
-                            "<td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
-                            web_ui_escape(attestation.profile),
-                            web_ui_escape(attestation.id),
-                            web_ui_escape(attestation.subject),
-                            web_ui_escape(attestation.issuer),
-                            web_ui_escape(verification));
+            content += std::format(
+                "<tr><td><span class=\"badge status-ai\">{}</span><br><code>{}</code></td>"
+                "<td><code>{}</code></td><td><code>{}</code></td><td>{}</td></tr>",
+                web_ui_escape(attestation.profile),
+                web_ui_escape(attestation.id),
+                web_ui_escape(attestation.subject),
+                web_ui_escape(attestation.issuer),
+                web_ui_escape(verification));
         }
         content += "</tbody></table>";
     }
@@ -850,7 +954,7 @@ std::string web_ui_invitations(std::string_view organization_id,
                                    web_ui_escape(invitation.invitee_type),
                                    web_ui_escape(invitation.invitee),
                                    web_ui_escape(invitation.role),
-                                   web_ui_escape(invitation.status),
+                                   badge_markup(invitation.status),
                                    web_ui_escape(invitation.expires_at));
         }
         content += "</tbody></table>";
@@ -1059,13 +1163,13 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
                    "<th>Outcome</th><th>Digest</th></tr></thead><tbody>";
         for (const audit::Event& event : events) {
             content += std::format("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td>"
-                                   "<td>{}</td><td><span class=\"badge\">{}</span></td>"
+                                   "<td>{}</td><td>{}</td>"
                                    "<td><code>{}</code></td></tr>",
                                    web_ui_escape(event.occurred_at),
                                    web_ui_escape(event.draft.principal),
                                    web_ui_escape(event.draft.object),
                                    web_ui_escape(event.draft.action),
-                                   web_ui_escape(event.draft.outcome),
+                                   badge_markup(event.draft.outcome),
                                    web_ui_escape(event.digest));
         }
         content += "</tbody></table>";

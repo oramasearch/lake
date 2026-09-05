@@ -25,3 +25,7 @@ gtest_discover_tests(lake-postgres-tests)
 add_test(
   NAME lake-ui-token-gates
   COMMAND ${CMAKE_SOURCE_DIR}/tools/ui/test-token-gates.sh)
+
+add_test(
+  NAME lake-ui-contrast
+  COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/ui/check-contrast.mjs)

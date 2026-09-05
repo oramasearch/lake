@@ -19,4 +19,6 @@ tools/ui/screenshot.sh --base-url http://127.0.0.1:4902 \
 
 `sync-design-system.mjs` refreshes or verifies the stamped DTCG snapshot. `build-tokens.mjs`
 compiles the committed token layer used by `/style.css`. `test-token-gates.sh` proves both gates
-reject local changes. See [`docs/ui/design-system.md`](../../docs/ui/design-system.md).
+reject local changes. `check-contrast.mjs` resolves the generated theme roles, calculates the WCAG
+contrast ratio for every governed text, status, focus, and boundary pair, and fails below the
+documented threshold. See [`docs/ui/design-system.md`](../../docs/ui/design-system.md).

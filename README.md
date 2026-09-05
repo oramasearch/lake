@@ -105,8 +105,8 @@ ctest --test-dir build
 
 | Route | Serves |
 |---|---|
-| `GET /` | the hello page — server-rendered, self-contained, no script |
-| `GET /style.css` | the stylesheet (`public, max-age=86400`) |
+| `GET /` | the hello page in the server-rendered Orama application shell |
+| `GET /style.css` | the token-driven light and dark stylesheet (`public, max-age=86400`) |
 | `GET /fonts/<IBM Plex face>.woff2` | embedded Sans and Mono faces (`public, max-age=31536000, immutable`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |

@@ -43,9 +43,89 @@ swap`. No browser request reaches a third-party origin.
 
 ## Components and pages
 
-The shell, component catalog, page recipe, accessibility checks, and screenshot workflow are
-recorded here as they are introduced. Lake keeps pure C++ renderers; the generated token layer is
-committed, so neither deployment nor request handling invokes Node.
+Lake follows the design system's high-density, low-variance product direction: flat surfaces,
+hairline boundaries, blue action and focus, green/yellow/red status, violet model and agent
+context, and restrained motion. `src/api/web_ui_styles.inc` is the hand-authored component layer;
+it consumes only the governed `--lake-*` roles from the generated token include.
+
+Every renderer uses the same application recipe:
+
+1. A skip link enters the focusable main landmark.
+2. A sticky sidebar groups workspace, administration, identity, and developer navigation and marks
+   the current page with `aria-current="page"`.
+3. A sticky top bar carries page context, session controls, and the theme control.
+4. A bounded content area presents the eyebrow, one `h1`, supporting copy, actions, panels, and
+   dense data regions.
+
+The component contract covers panels and cards; primary, secondary, and destructive buttons;
+text, select, checkbox, and textarea controls; compact tables with sticky headers, hover rows,
+sort indicators, and expandable identifiers; neutral and semantic badges with status dots; tabs,
+empty states, notices, toasts, code blocks, diffs, pagination, breadcrumbs, and inline SVG icons.
+Existing page markup uses these shared selectors, so all 38 routes move together without adding
+renderer-side CSS.
+
+`web_ui_icon(name)` returns decorative, focus-disabled SVG for the approved navigation and theme
+names. Accessible names stay on the surrounding link or button. Unknown names return an empty
+string so an unreviewed icon cannot silently enter the interface.
+
+## Themes and responsive behavior
+
+The light theme is the default and `prefers-color-scheme` selects dark when there is no explicit
+choice. The theme button stores `light` or `dark` in `localStorage["lake-theme"]`; a short script in
+the document head applies that preference before CSS loads, avoiding a wrong-theme flash. The
+second shared script owns the button and its changing accessible label. No page data is read or
+mutated by either script.
+
+Below 58rem, the sidebar becomes a horizontally scrollable navigation region above the page. At
+40rem, gutters and headings compact, definition lists stack, and filters fill the available width.
+Wide tables remain horizontally scrollable rather than clipping identifiers. Reduced-motion users
+get effectively immediate transitions and no smooth scrolling.
+
+## Accessibility contract
+
+- Page structure uses labeled navigation plus `header`, `main`, and supporting `aside` landmarks.
+- The skip link, visible focus rings, and source-ordered navigation support keyboard-only use.
+- Visible controls have associated labels; icon-only controls carry an accessible label.
+- Color is never the only status signal: semantic badges retain text and a dot.
+- Action, danger, focus, and status colors keep their governed meanings in both themes.
+- Native controls and shared buttons use at least the design system's small control height.
+
+Lake keeps pure C++ renderers; the generated token layer is committed, so neither deployment nor
+request handling invokes Node.
+
+### Contrast proof
+
+`node tools/ui/check-contrast.mjs` resolves the committed generated tokens and fails if normal text
+or semantic status text is below 4.5:1, or if a focus indicator or strong boundary is below 3:1.
+The current output is:
+
+```text
+theme  pair                 foreground  background  ratio  min  result
+light  primary/canvas       #161616     #f8f8fa     17.06  4.5  PASS
+light  secondary/canvas     #525252     #f8f8fa      7.37  4.5  PASS
+light  tertiary/canvas      #6f6f6f     #f8f8fa      4.74  4.5  PASS
+light  primary/surface      #161616     #ffffff     18.10  4.5  PASS
+light  action/canvas        #0f62fe     #f8f8fa      4.72  4.5  PASS
+light  on-action/action     #ffffff     #0f62fe      5.00  4.5  PASS
+light  success/soft         #198038     #defbe6      4.55  4.5  PASS
+light  warning/soft         #8e6a00     #fcf4d6      4.52  4.5  PASS
+light  danger/soft          #ba1b23     #fff1f1      5.84  4.5  PASS
+light  ai/soft              #6548d8     #f1edff      5.27  4.5  PASS
+light  focus/canvas         #0f62fe     #f8f8fa      4.72  3.0  PASS
+light  border/surface       #8d8d8d     #ffffff      3.32  3.0  PASS
+dark   primary/canvas       #f7f7fa     #0d0d10     18.15  4.5  PASS
+dark   secondary/canvas     #b7b8c2     #0d0d10      9.84  4.5  PASS
+dark   tertiary/canvas      #9597a3     #0d0d10      6.68  4.5  PASS
+dark   primary/surface      #f7f7fa     #151519     17.03  4.5  PASS
+dark   action/canvas        #4c82ff     #0d0d10      5.49  4.5  PASS
+dark   on-action/action     #ffffff     #0f62fe      5.00  4.5  PASS
+dark   success/soft         #46d39a     #123b2d      6.54  4.5  PASS
+dark   warning/soft         #f4c84b     #3d3217      7.92  4.5  PASS
+dark   danger/soft          #ff6874     #471d25      5.09  4.5  PASS
+dark   ai/soft              #9c8cff     #2b234f      5.23  4.5  PASS
+dark   focus/canvas         #6b98ff     #0d0d10      6.99  3.0  PASS
+dark   border/surface       #606270     #151519      3.02  3.0  PASS
+```
 
 ## Seeded screenshot fixture
 

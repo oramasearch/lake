@@ -4,11 +4,10 @@ Drive browsing, preview, history, sharing, and documented Linux client states ar
 [`drive.md`](drive.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
-`src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on passkey pages
-that call `navigator.credentials`, unit-tested as strings. The navigation is on every operator page:
-Home, Customers, Organizations, Repositories, Applications, Exports, Search, Secrets,
-Transparency, Audit, SSO, API
-(`/v1/openapi.json`), and Sign in / Sign out.
+`src/api/web_ui.cpp`): one token-driven stylesheet at `/style.css`, an accessible shared shell,
+and a persisted light/dark theme control, unit-tested as strings. The grouped navigation covers
+workspace, administration, applications, identity, and developer pages; contextual links lead to
+exports, SSO, repository content, and drive views.
 
 | Page | Route | Shows |
 |---|---|---|
