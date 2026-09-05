@@ -884,6 +884,40 @@ dd {
 .delivery-row .sub {
   margin: var(--lake-space-1) 0 0;
 }
+.state-page {
+  max-width: 42rem;
+  margin: var(--lake-space-8) auto;
+  padding: var(--lake-space-8);
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: var(--lake-radius-card);
+  background: var(--lake-surface);
+  text-align: center;
+}
+.error-state {
+  border-top: 0.1875rem solid var(--lake-danger);
+}
+.loading-bars {
+  display: grid;
+  gap: var(--lake-space-2);
+  margin-top: var(--lake-space-5);
+}
+.loading-bars span {
+  height: var(--lake-space-3);
+  border-radius: var(--lake-radius-control);
+  background: var(--lake-border-subtle);
+  animation: lake-loading var(--lake-motion-deliberate) var(--lake-motion-ease) infinite alternate;
+}
+.loading-bars span:nth-child(2) {
+  width: 78%;
+}
+.loading-bars span:nth-child(3) {
+  width: 56%;
+}
+@keyframes lake-loading {
+  to {
+    opacity: 0.35;
+  }
+}
 .image-preview {
   max-width: 100%;
   max-height: 40rem;

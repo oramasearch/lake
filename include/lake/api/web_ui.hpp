@@ -20,6 +20,8 @@ namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
 std::string web_ui_markdown(std::string_view markdown);
+std::string web_ui_error(std::string_view code, std::string_view message, bool signed_in = false);
+std::string web_ui_loading(std::string_view subject, bool signed_in = false);
 std::string web_ui_stylesheet();
 std::string web_ui_icon(std::string_view name);
 

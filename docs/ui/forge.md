@@ -91,6 +91,23 @@ and selects denied `forge.branch_protection.refused` events for that repository,
 reference, caller, matching rule, reason, and event date. Rules and the refusal audit each have a
 separate empty state. All three pages are server-rendered and add no local script.
 
+## Empty, loading, and error states
+
+Every forge collection and supporting section names its empty state in place: repositories,
+trees, recent changes, README content, refs, access, diffs, reviews, comments, checks, issues,
+releases, artifacts, deliveries, rules, and refused updates never collapse into an unexplained
+blank region.
+
+The shared loading renderer uses `role="status"`, polite announcements, and `aria-busy="true"`.
+Its animation uses governed motion tokens and is reduced by the global reduced-motion rule. The
+HTTP adapter waits for capability reads before sending forge pages, so this state is intended for
+hosts that choose to display a pending server navigation; no client data loader is introduced.
+
+Repository capability errors render through the shared forge error page with the real HTTP status,
+an alert role, escaped error detail, and a keyboard-accessible route back to repositories.
+Anonymous authorization failures continue to redirect to sign-in without disclosing repository
+existence.
+
 ## Keyboard and no-script behavior
 
 Source order is skip link, primary navigation, top-bar controls, breadcrumbs, repository tabs,
@@ -99,6 +116,8 @@ theme controls are keyboard focusable. Without JavaScript the repository, tree, 
 remain readable and navigable. The file-range island only adds shift-click range selection and
 range highlighting; individual line anchors remain ordinary links without it. Change review uses
 one further island for its view toggle and copy control; unified review remains the default.
+Issue filters precede results, issue discussion precedes supporting metadata, and forge state pages
+place their primary recovery action after the state message.
 
 ## Verify
 

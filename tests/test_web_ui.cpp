@@ -679,6 +679,50 @@ TEST(WebUi, ReleaseWebhookAndProtectionPagesRenderForgeEvidenceSafely) {
     expect_theme_scripts(protection);
 }
 
+TEST(WebUi, ForgeStatesAndFocusOrderRemainAccessible) {
+    const std::string error = lake::api::web_ui_error("not_<found>", "Missing <repository>", true);
+    EXPECT_NE(error.find("role=\"alert\""), std::string::npos);
+    EXPECT_NE(error.find("not_&lt;found&gt;"), std::string::npos);
+    EXPECT_NE(error.find("Missing &lt;repository&gt;"), std::string::npos);
+    EXPECT_NE(error.find("Back to repositories"), std::string::npos);
+    expect_theme_scripts(error);
+
+    const std::string loading = lake::api::web_ui_loading("Change <review>", false);
+    EXPECT_NE(loading.find("role=\"status\""), std::string::npos);
+    EXPECT_NE(loading.find("aria-live=\"polite\""), std::string::npos);
+    EXPECT_NE(loading.find("aria-busy=\"true\""), std::string::npos);
+    EXPECT_NE(loading.find("Change &lt;review&gt;"), std::string::npos);
+    expect_theme_scripts(loading);
+
+    const lake::control::Repository repository{
+        "r1", "c1", "forge", "description", "public", "", "", "created", "updated"};
+    const std::string empty_issues = lake::api::web_ui_issues(repository, {}, "", "", "", false);
+    EXPECT_NE(empty_issues.find("No issues match these filters."), std::string::npos);
+    const std::string empty_releases = lake::api::web_ui_releases(repository, {}, false);
+    EXPECT_NE(empty_releases.find("No releases have been published."), std::string::npos);
+    const std::string empty_webhooks = lake::api::web_ui_webhooks(repository, {}, {}, false);
+    EXPECT_NE(empty_webhooks.find("No webhooks are configured."), std::string::npos);
+    const std::string empty_protection =
+        lake::api::web_ui_branch_protection(repository, {}, {}, false);
+    EXPECT_NE(empty_protection.find("No branch protection rules."), std::string::npos);
+    EXPECT_NE(empty_protection.find("No protected updates have been refused."), std::string::npos);
+
+    const std::size_t skip = empty_issues.find("class=\"skip-link\"");
+    const std::size_t navigation = empty_issues.find("class=\"sidebar\"");
+    const std::size_t topbar = empty_issues.find("class=\"topbar\"");
+    const std::size_t main = empty_issues.find("id=\"main-content\"");
+    const std::size_t filters = empty_issues.find("class=\"filters\"");
+    ASSERT_NE(skip, std::string::npos);
+    ASSERT_NE(navigation, std::string::npos);
+    ASSERT_NE(topbar, std::string::npos);
+    ASSERT_NE(main, std::string::npos);
+    ASSERT_NE(filters, std::string::npos);
+    EXPECT_LT(skip, navigation);
+    EXPECT_LT(navigation, topbar);
+    EXPECT_LT(topbar, main);
+    EXPECT_LT(main, filters);
+}
+
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     lake::audit::Event event{
         .id = "event-1",

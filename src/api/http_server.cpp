@@ -4324,7 +4324,11 @@ struct ApiServer::Impl {
         if (!context.authorized && result.error.code == "unauthorized") {
             return redirect(route, "/login");
         }
-        return serve_page_error(route, result);
+        return send_text(route,
+                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                         web_ui_error(result.error.code, result.error.message, context.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
     }
 
     boost::http::route_task serve_customers_page(boost::http::route_params& route) {
@@ -6044,12 +6048,11 @@ struct ApiServer::Impl {
             }
         }
         if (!issue) {
-            return send_text(
-                route,
-                boost::http::status::not_found,
-                nlohmann::json{{"error", "not_found"}, {"message", "issue not found"}}.dump(),
-                "application/json; charset=utf-8",
-                "no-store");
+            return send_text(route,
+                             boost::http::status::not_found,
+                             web_ui_error("not_found", "issue not found", ctx.authorized),
+                             "text/html; charset=utf-8",
+                             "no-store");
         }
         const ApiResult comments_result =
             registry.call("list_issue_comments", {{"repository_id", id}, {"limit", 1000}}, ctx);

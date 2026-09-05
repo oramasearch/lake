@@ -68,6 +68,9 @@ page-specific script. File pages add one local script for line-range selection. 
 readable, and each individual line anchor works, when that script does not run. Change pages add
 one local script for the diff-layout toggle and full-identity copy control; unified review and
 hover disclosure remain available without it.
+Forge empty states name the absent record type. The shared pending state is a polite busy status,
+and repository errors are alerts with an ordinary recovery link; both use the same shell, focus
+order, tokens, and reduced-motion rule as completed pages.
 
 Hosted application identity pages use a compact version of the same token, font, form, focus,
 theme, and motion contracts. Their validated application accent is a decorative rule and their

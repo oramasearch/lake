@@ -710,6 +710,26 @@ std::string web_ui_shell(std::string_view title,
         theme_toggle_script);
 }
 
+std::string web_ui_error(std::string_view code, std::string_view message, bool signed_in) {
+    const std::string content = std::format(
+        "<div class=\"state-page error-state\" role=\"alert\"><p class=\"eyebrow\">{}</p>"
+        "<h1>We could not load this forge page</h1><p class=\"sub\">{}</p>"
+        "<p><a class=\"button primary\" href=\"/repositories\">Back to repositories</a></p></div>",
+        web_ui_escape(code),
+        web_ui_escape(message));
+    return web_ui_shell("lake — forge error", code, content, signed_in);
+}
+
+std::string web_ui_loading(std::string_view subject, bool signed_in) {
+    const std::string content = std::format(
+        "<div class=\"state-page loading-state\" role=\"status\" aria-live=\"polite\" "
+        "aria-busy=\"true\"><p class=\"eyebrow\">loading</p><h1>{}</h1>"
+        "<p class=\"sub\">Reading authorized forge data.</p><div class=\"loading-bars\" "
+        "aria-hidden=\"true\"><span></span><span></span><span></span></div></div>",
+        web_ui_escape(subject));
+    return web_ui_shell("lake — loading", subject, content, signed_in);
+}
+
 std::string web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in) {
     const std::string content =
         std::format("<p class=\"eyebrow\">hello world</p><h1>hello from lake</h1>"

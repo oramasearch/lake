@@ -10,7 +10,8 @@ liquid is the tool. lake is where it collects.
 > identity, organization SAML/OIDC providers, federation policy and SCIM 2.0 user/group
 > provisioning; row-resolved sessions, devices and scoped tokens; tenants, repositories,
 > organization administration and policy over the Postgres control plane), public repository
-> reading through libliquid, the pages to explore them, the OpenAPI
+> reading through libliquid, forge-designed repository, source, review, issue, release, webhook,
+> and branch-protection pages, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
 > Prometheus metrics and JSON request logs. Protected operations accept the operator bearer or a
 > row-resolved user credential; probes and documented identity and transparency-monitoring reads
@@ -44,7 +45,9 @@ liquid is the tool. lake is where it collects.
 > `LAKE_STORE_ROOT/<customer>/index/`, reports `hot`, `snapshot`, or `scan` mode, publishes through
 > atomic manifest replacement, filters candidates with the batched policy engine, and records the
 > signed query outcome through the registry. Change pages render libliquid's per-path structural
-> diff, text hunks, modes, blob identities, moves, and conflict values. Artifact pages provide filtered cursor pages of results
+> review with safe Markdown, text hunks, line comments, modes, blob identities, file statistics,
+> conflict values, checks, and attestations. Issue, release, webhook, and branch-protection pages
+> expose their existing forge and signed-audit records. Artifact pages provide filtered cursor pages of results
 > plus result outputs, timing, cache state, verified attestations, and retained trace summaries.
 > Metering migration `0014_metering` aggregates hourly unique stored bytes, sync transfer, and
 > build compute. The `metering_usage` capability and `/metering` page apply configured integer
@@ -127,7 +130,7 @@ ctest --test-dir build
 | `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /transparency?identity=<taap-id>` | public hosted identity monitor over checkpoint-verified bulk tiles |
-| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
+| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/issues`, `/issue`, `/releases`, `/webhooks`, `/protection`, `/conflicts`, `/artifacts`, `/artifact` | forge pages over authorized repository, review, issue, release, webhook, policy, signed-audit, and libliquid records; file pages include highlighted line anchors and blame, and change pages include review discussion, diff views, checks, and attestations. |
 | `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
