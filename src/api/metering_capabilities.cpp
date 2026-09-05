@@ -136,6 +136,46 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
 
 void register_metering_capabilities(Registry& registry) {
     registry.add(Capability{
+        .name = "set_storage_quota",
+        .title = "Set customer storage quota",
+        .description =
+            "Set the customer byte quota enforced for new repository writes; zero disables it.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"quota_bytes", {{"type", "integer"}, {"minimum", 0}}}}},
+                         {"required", json::array({"customer_id", "quota_bytes"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"customer_id", {{"type", "string"}}},
+                            {"quota_bytes", {{"type", "integer"}}}}},
+                          {"required", json::array({"customer_id", "quota_bytes"})}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .resolves_operator_audit_target = true,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return ApiResult::failure("store_unavailable",
+                                          "no control-plane store is configured");
+            }
+            const std::uint64_t quota_bytes = input.at("quota_bytes");
+            const auto quota =
+                context.store->set_storage_quota(input.at("customer_id"), quota_bytes);
+            if (!quota) {
+                return store_error(quota.error());
+            }
+            context.audit_customer_id = input.at("customer_id");
+            context.audit_kind = "metering.quota.set";
+            context.audit_object =
+                "customer/" + input.at("customer_id").get<std::string>() + "/metering";
+            context.audit_details = {{"quota_bytes", *quota}};
+            return ApiResult::success(
+                {{"customer_id", input.at("customer_id")}, {"quota_bytes", *quota}});
+        }});
+    registry.add(Capability{
         .name = "metering_usage",
         .title = "Customer metering usage",
         .description = "Return hourly storage, transfer, compute, quota, and configured pricing.",
@@ -178,6 +218,12 @@ void register_metering_capabilities(Registry& registry) {
                 return ApiResult::failure("store_unavailable", "no repository store is configured");
             }
             const std::string customer_id = input.at("customer_id");
+            const auto configured_quota = context.store->storage_quota(customer_id);
+            if (!configured_quota) {
+                return store_error(configured_quota.error());
+            }
+            const std::uint64_t quota_bytes =
+                configured_quota->value_or(context.metering.storage_quota_bytes);
             const auto stored_bytes = context.sync_store->unique_stored_bytes(customer_id);
             if (!stored_bytes) {
                 return sync_error(stored_bytes.error());
@@ -211,8 +257,7 @@ void register_metering_capabilities(Registry& registry) {
                                  {"compute_seconds", row.compute_seconds},
                                  {"cost_micros", row_cost}});
             }
-            const bool over_quota = context.metering.storage_quota_bytes != 0 &&
-                                    *stored_bytes >= context.metering.storage_quota_bytes;
+            const bool over_quota = quota_bytes != 0 && *stored_bytes >= quota_bytes;
             context.audit_customer_id = customer_id;
             context.audit_kind = "metering.usage.read";
             context.audit_object = "customer/" + customer_id + "/metering";
@@ -220,7 +265,7 @@ void register_metering_capabilities(Registry& registry) {
             return ApiResult::success(
                 {{"customer_id", customer_id},
                  {"currency", context.metering.currency},
-                 {"quota_bytes", context.metering.storage_quota_bytes},
+                 {"quota_bytes", quota_bytes},
                  {"over_quota", over_quota},
                  {"warning",
                   over_quota

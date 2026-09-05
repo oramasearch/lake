@@ -487,8 +487,12 @@ public:
     virtual Result<Team> get_team(const std::string& id) = 0;
 
     virtual Result<Membership> create_membership(const NewMembership&) = 0;
+    virtual Result<Membership> get_membership(const std::string& id) = 0;
     virtual Result<std::vector<Membership>>
     list_memberships(const std::string& organization_id, const std::string& team_id, int limit) = 0;
+    virtual Result<Membership>
+    set_member_role(const std::string& id, const std::string& role, const std::string& actor) = 0;
+    virtual Result<void> remove_member(const std::string& id, const std::string& actor) = 0;
     virtual Result<Membership> accept_invitation(const AcceptInvitation&) = 0;
 
     virtual Result<Invitation> create_invitation(const NewInvitation&) = 0;
@@ -580,6 +584,9 @@ public:
                                                                    const std::string& from_hour,
                                                                    const std::string& to_hour,
                                                                    int limit) = 0;
+    virtual Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) = 0;
+    virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
+                                                    std::uint64_t quota_bytes) = 0;
 
     virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                             const std::string& instance_kek) = 0;

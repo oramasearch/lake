@@ -1115,3 +1115,18 @@ CREATE TABLE IF NOT EXISTS agent_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0017_agent_sessions') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Settings mutations (migration 0018): customer-specific storage quota overrides.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS customer_storage_quotas (
+    customer_id uuid        PRIMARY KEY REFERENCES customers(id) ON DELETE CASCADE,
+    quota_bytes bigint      NOT NULL CHECK (quota_bytes >= 0),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS settings_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0018_settings_surface') ON CONFLICT DO NOTHING;

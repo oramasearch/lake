@@ -562,6 +562,23 @@ std::expected<std::string, ApiError> invitation_object(const json& input, ApiCon
     return object->id;
 }
 
+std::expected<std::string, ApiError> membership_scope_object(const json& input,
+                                                             ApiContext& context) {
+    const auto membership = context.store->get_membership(input.at("id"));
+    if (!membership) {
+        return std::unexpected(
+            ApiError{membership.error().code, membership.error().message, "/id"});
+    }
+    const std::string type = membership->team_id.empty() ? "organization" : "team";
+    const std::string external_id =
+        membership->team_id.empty() ? membership->organization_id : membership->team_id;
+    const auto object = context.store->find_policy_object(type, external_id);
+    if (!object) {
+        return std::unexpected(ApiError{object.error().code, object.error().message, "/id"});
+    }
+    return object->id;
+}
+
 std::expected<std::string, ApiError> sso_provider_object(const json& input, ApiContext& context) {
     const auto provider = context.store->get_sso_provider(input.at("provider_id"));
     if (!provider) {
@@ -1259,6 +1276,15 @@ std::expected<control::Repository, ApiResult> live_sync_repository(const json& i
         return std::unexpected(ApiResult::failure("conflict", "repository is tombstoned"));
     }
     return *repository;
+}
+
+std::expected<std::uint64_t, ApiResult> storage_quota_for(const std::string& customer_id,
+                                                          ApiContext& context) {
+    const auto quota = context.store->storage_quota(customer_id);
+    if (!quota) {
+        return std::unexpected(from_store_error(quota.error()));
+    }
+    return quota->value_or(context.metering.storage_quota_bytes);
 }
 
 ApiResult require_sync_wire(ApiContext& context) {
@@ -3325,17 +3351,20 @@ void register_repository_capabilities(Registry& registry) {
             if (!repository) {
                 return repository.error();
             }
+            const auto quota = storage_quota_for(repository->customer_id, context);
+            if (!quota) {
+                return quota.error();
+            }
             auto response = context.sync_store->push(
                 repository->customer_id,
                 repository->id,
                 context.sync_request,
                 sync_change_authorizer(context, repository->customer_id, repository->id),
-                context.metering.storage_quota_bytes);
+                *quota);
             if (!response) {
                 if (response.error().rule == "storage_quota") {
-                    context.audit_details["quota"] = {
-                        {"status", "throttled"},
-                        {"quota_bytes", context.metering.storage_quota_bytes}};
+                    context.audit_details["quota"] = {{"status", "throttled"},
+                                                      {"quota_bytes", *quota}};
                 }
                 return from_sync_error(context, response.error());
             }
@@ -3415,15 +3444,16 @@ void register_repository_capabilities(Registry& registry) {
             if (!repository) {
                 return repository.error();
             }
-            auto stored = context.sync_store->upload_chunks(repository->customer_id,
-                                                            repository->id,
-                                                            context.sync_request,
-                                                            context.metering.storage_quota_bytes);
+            const auto quota = storage_quota_for(repository->customer_id, context);
+            if (!quota) {
+                return quota.error();
+            }
+            auto stored = context.sync_store->upload_chunks(
+                repository->customer_id, repository->id, context.sync_request, *quota);
             if (!stored) {
                 if (stored.error().rule == "storage_quota") {
-                    context.audit_details["quota"] = {
-                        {"status", "throttled"},
-                        {"quota_bytes", context.metering.storage_quota_bytes}};
+                    context.audit_details["quota"] = {{"status", "throttled"},
+                                                      {"quota_bytes", *quota}};
                 }
                 return from_sync_error(context, stored.error());
             }
@@ -3618,6 +3648,58 @@ void register_organization_capabilities(Registry& registry) {
                                                                     in.at("attestation_digest"),
                                                                     ctx.acting_identity,
                                                                     ctx.request_id}));
+        }});
+    registry.add(
+        Capability{.name = "get_membership",
+                   .title = "Get membership",
+                   .description = "Read one organization or team membership and its TAAP evidence.",
+                   .input_schema = id_input(),
+                   .output_schema = membership_schema(),
+                   .kind = CapabilityKind::Read,
+                   .object = "organization or team",
+                   .action = "read",
+                   .resolve_object = membership_scope_object,
+                   .handler = [](const json& in, ApiContext& ctx) {
+                       return one_result(ctx.store->get_membership(in.at("id")));
+                   }});
+    registry.add(Capability{
+        .name = "set_member_role",
+        .title = "Set member role",
+        .description = "Change an organization or team membership role while preserving an owner.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}},
+                           {"role",
+                            {{"type", "string"},
+                             {"enum", json::array({"owner", "admin", "member"})}}}}},
+                         {"required", json::array({"id", "role"})},
+                         {"additionalProperties", false}},
+        .output_schema = membership_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "organization or team",
+        .action = "admin",
+        .resolve_object = membership_scope_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(
+                ctx.store->set_member_role(in.at("id"), in.at("role"), ctx.acting_identity));
+        }});
+    registry.add(Capability{
+        .name = "remove_member",
+        .title = "Remove member",
+        .description =
+            "Remove a membership and its derived access grant while preserving an owner.",
+        .input_schema = id_input(),
+        .output_schema = {{"type", "object"},
+                          {"properties", {{"removed", {{"type", "boolean"}}}}},
+                          {"required", json::array({"removed"})}},
+        .kind = CapabilityKind::Action,
+        .object = "organization or team",
+        .action = "admin",
+        .resolve_object = membership_scope_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto removed = ctx.store->remove_member(in.at("id"), ctx.acting_identity);
+            return removed ? ApiResult::success({{"removed", true}})
+                           : from_store_error(removed.error());
         }});
 
     // ---- invitations ----

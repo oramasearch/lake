@@ -151,25 +151,24 @@ The live mode of `tools/ui/screenshot.sh` then fetches every page in the generat
 renders both themes at 1440 by 900. Session values and generated identifiers remain under
 `.cache`; only the PNG evidence is checked in.
 
-The historical baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. The current
-fixture manifest covers all 56 pages below in light and dark:
+The baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. The fixture manifest covers
+all 57 pages below in light and dark:
 
 ```text
-home login sign-up sign-in mfa passkey-sign-in sessions passkeys tokens
-customers organizations teams sso members invitations grants access
+home login sign-up sign-in mfa passkey-sign-in settings sessions passkeys tokens
+customers organizations organization teams team sso members member invitations grants access
 applications application application-users application-organizations application-events
 application-sign-up application-sign-in application-mfa application-passkey
 repositories repository exports repository-tree file changes change issues issue releases webhooks
 protection conflicts
 artifacts artifact search secret-mounts secrets encryption-keys metering audit transparency
-drive drive-grid drive-preview drive-history drive-version-diff drive-conflict drive-share shared-link
+drive drive-preview drive-history drive-share shared-link
 ```
 
-The after set uses the same names under `docs/ui/screenshots/after/` and contains 112 PNG files;
-the 106-image baseline predates the three new drive states. Every capture is 1440 by 900.
-The five routes introduced with the forge work had no old response; their baseline slot uses the
-closest prior record-list or record-detail page so the comparison still records the layout that
-preceded the new forge page.
+The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
+path-for-path pair. Both directories contain 114 PNG files, and every capture is 1440 by 900.
+The routes introduced after a baseline use the closest prior list or detail page in that baseline
+slot, so the comparison still records the layout that preceded the new page.
 The three primary review screens are the
 [repository](screenshots/after/repository-light.png),
 [change](screenshots/after/change-light.png), and

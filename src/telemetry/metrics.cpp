@@ -290,10 +290,21 @@ public:
     create_membership(const control::NewMembership& value) override {
         return call("create_membership", [&] { return store_->create_membership(value); });
     }
+    control::Result<control::Membership> get_membership(const std::string& id) override {
+        return call("get_membership", [&] { return store_->get_membership(id); });
+    }
     control::Result<std::vector<control::Membership>> list_memberships(
         const std::string& organization_id, const std::string& team_id, int limit) override {
         return call("list_memberships",
                     [&] { return store_->list_memberships(organization_id, team_id, limit); });
+    }
+    control::Result<control::Membership> set_member_role(const std::string& id,
+                                                         const std::string& role,
+                                                         const std::string& actor) override {
+        return call("set_member_role", [&] { return store_->set_member_role(id, role, actor); });
+    }
+    control::Result<void> remove_member(const std::string& id, const std::string& actor) override {
+        return call("remove_member", [&] { return store_->remove_member(id, actor); });
     }
     control::Result<control::Membership>
     accept_invitation(const control::AcceptInvitation& value) override {
@@ -542,6 +553,15 @@ public:
         return call("list_metering_usage", [&] {
             return store_->list_metering_usage(customer_id, from_hour, to_hour, limit);
         });
+    }
+    control::Result<std::optional<std::uint64_t>>
+    storage_quota(const std::string& customer_id) override {
+        return call("storage_quota", [&] { return store_->storage_quota(customer_id); });
+    }
+    control::Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
+                                                     std::uint64_t quota_bytes) override {
+        return call("set_storage_quota",
+                    [&] { return store_->set_storage_quota(customer_id, quota_bytes); });
     }
     control::Result<control::PkiAuthorityRecord>
     create_pki_authority(const control::NewPkiAuthorityRecord& value,

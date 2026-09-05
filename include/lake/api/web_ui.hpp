@@ -166,6 +166,32 @@ std::string web_ui_artifact(const control::Repository& repository,
                             const RepositoryArtifact& artifact,
                             bool signed_in);
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations);
+struct OrganizationSettingsData {
+    std::vector<control::Team> teams;
+    std::vector<control::Membership> memberships;
+    std::vector<control::Invitation> invitations;
+    std::vector<control::EffectiveAccessEntry> access;
+    std::vector<control::SsoProvider> providers;
+    std::vector<control::Application> applications;
+    nlohmann::json metering;
+    std::vector<audit::Event> audit_events;
+};
+std::string web_ui_organization(const control::Organization& organization,
+                                const OrganizationSettingsData& data,
+                                std::string_view tab,
+                                std::string_view error = {});
+std::string web_ui_team(const control::Team& team,
+                        const std::vector<control::Membership>& memberships,
+                        const std::vector<control::EffectiveAccessEntry>& access);
+std::string web_ui_member(const control::Membership& membership,
+                          const std::vector<control::EffectiveAccessEntry>& access,
+                          std::string_view error = {},
+                          bool confirm_removal = false);
+std::string web_ui_settings(std::string_view identity,
+                            const std::vector<control::Session>& sessions,
+                            const std::vector<control::Device>& devices,
+                            std::string_view tab,
+                            std::string_view error = {});
 std::string web_ui_teams(std::string_view organization_id, const std::vector<control::Team>& teams);
 std::string web_ui_memberships(std::string_view organization_id,
                                std::string_view team_id,
