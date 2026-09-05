@@ -1007,7 +1007,9 @@ std::string web_ui_metering(const nlohmann::json& usage) {
     return web_ui_shell("lake — metering", customer_id, content, true);
 }
 
-std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter) {
+std::string web_ui_audit(const std::vector<audit::Event>& events,
+                         const audit::Filter& filter,
+                         const nlohmann::json& log_configuration) {
     std::string content = "<p class=\"eyebrow\">control plane</p><h1>Audit log</h1><p "
                           "class=\"sub\">Signed, "
                           "hash-linked events. Use the filters to narrow the evidence view.</p>"
@@ -1028,6 +1030,17 @@ std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::F
                           web_ui_escape(filter.to) +
                           "\"></label>"
                           "<button type=\"submit\">Filter</button></form>";
+    if (!log_configuration.empty()) {
+        content += std::format(
+            "<div class=\"panel\"><h2>Transparency log</h2><p class=\"sub\">Effective mode: "
+            "<code>{}</code>; witness quorum: {} of {}{}.</p><p class=\"sub\">API: "
+            "<code>GET /v1/transparency_log_configuration</code>.</p></div>",
+            web_ui_escape(log_configuration.value("mode", "")),
+            log_configuration.value("witness_threshold", std::size_t{0}),
+            log_configuration.value("witnesses", nlohmann::json::array()).size(),
+            log_configuration.contains("aggregator_endpoint") ? "; aggregation endpoint configured"
+                                                              : "");
+    }
     if (events.empty()) {
         content += "<div class=\"panel empty\">No audit events match these filters.</div>";
     } else {

@@ -92,6 +92,12 @@ TUF repository metadata adds immutable root, targets, snapshot, and timestamp ob
 `LAKE_STORE_ROOT/<instance>/log/tuf/`, distinct-key threshold verification, version/expiry and
 cross-role binding checks, dual-threshold root rotation, and a rehearsed compromised-key
 replacement. Its four capabilities use policy metadata and the signed registry audit stream.
+Transparency checkpoints read `LAKE_LOG_MODE`, witness endpoints and public keys, quorum, and an
+optional aggregation endpoint at startup. Air-gapped checkpoints make no outbound call; witnessed
+and anchored checkpoints require the configured distinct witness quorum before they become current;
+anchored checkpoints retain an aggregation proof. The effective configuration is a read capability
+and appears on `/audit`; the Lake-CR environment mapping is `docs/control-plane/log.md`.
+
 Application authentication adds migration `0016_auth_apps`, isolated identity pools, themed
 hosted and custom-domain entry pages, per-application Ed25519 JWTs and JWKS, signed lifecycle
 webhooks with retained attempts, and authorized operator management for users and organizations.

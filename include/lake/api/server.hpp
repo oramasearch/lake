@@ -4,6 +4,7 @@
 #include <string>
 
 #include "lake/api/registry.hpp"
+#include "lake/transparency/checkpoint.hpp"
 
 namespace lake::search {
 class Service;
@@ -61,6 +62,10 @@ struct ServerOptions {
     // <root>/<customer id>/store and instance log objects at
     // <root>/<node name>/log. Empty disables data-plane storage.
     std::string store_root;
+    // Transparency-log runtime configuration. The executable obtains this from
+    // LAKE_LOG_* environment variables and defaults the deployed mode to
+    // witnessed.
+    transparency::LogConfiguration log_configuration;
     MeteringConfig metering;
 };
 

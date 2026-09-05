@@ -57,6 +57,11 @@ int usage() {
                  "(default $LAKE_IDENTITY_SEED)");
     std::println("  --instance-kek key-encryption key for a generated identity "
                  "(default $LAKE_INSTANCE_KEK)");
+    std::println("  LAKE_LOG_MODE air-gapped, witnessed (default), or anchored when "
+                 "LAKE_STORE_ROOT is set");
+    std::println("  LAKE_LOG_WITNESSES JSON witness endpoint/public_key records; "
+                 "LAKE_LOG_WITNESS_THRESHOLD selects their quorum");
+    std::println("  LAKE_LOG_AGGREGATOR endpoint required by anchored mode");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -77,6 +82,20 @@ int main(int argc, char** argv) {
     opts.metering.transfer_in_gib_micros = env_u64("LAKE_PRICE_TRANSFER_IN_GIB_MICROS");
     opts.metering.transfer_out_gib_micros = env_u64("LAKE_PRICE_TRANSFER_OUT_GIB_MICROS");
     opts.metering.compute_second_micros = env_u64("LAKE_PRICE_COMPUTE_SECOND_MICROS");
+    if (!opts.store_root.empty()) {
+        const auto log_configuration = lake::transparency::log_configuration_from_environment(
+            env_or("LAKE_LOG_MODE", "witnessed"),
+            env_or("LAKE_LOG_WITNESSES", "[]"),
+            env_u64("LAKE_LOG_WITNESS_THRESHOLD"),
+            env_or("LAKE_LOG_AGGREGATOR", ""));
+        if (!log_configuration) {
+            std::println(stderr,
+                         "lake: invalid transparency log configuration: {}",
+                         log_configuration.error().message);
+            return 2;
+        }
+        opts.log_configuration = *log_configuration;
+    }
     bool memory_store = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -166,6 +185,7 @@ int main(int argc, char** argv) {
             {"node", opts.node_name},
             {"store", store_kind},
             {"store_root_configured", opts.store_root.empty() ? "no" : "yes"},
+            {"log_mode", lake::transparency::to_string(opts.log_configuration.mode)},
             {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}

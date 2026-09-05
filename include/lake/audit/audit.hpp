@@ -117,6 +117,12 @@ Result<void> verify_offline_grant(control::Store& store,
                                   const std::string& scope,
                                   std::int64_t now_unix);
 
+// Signs the canonical checkpoint body with the current lake identity. The
+// returned signer and signature are retained with the immutable checkpoint.
+Result<nlohmann::json> sign_transparency_checkpoint(control::Store& store,
+                                                    const nlohmann::json& checkpoint,
+                                                    const IdentityOptions& options);
+
 // Signs the canonical CBOR form of a portable-export manifest with the lake
 // identity. The verification input carries the source identity document, so a
 // destination lake does not need the source control-plane database.

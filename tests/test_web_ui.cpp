@@ -364,13 +364,19 @@ TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
         .digest = "abcdef",
     };
     lake::audit::Filter filter{.principal = "<admin>", .outcome = "success"};
-    const std::string page = lake::api::web_ui_audit({event}, filter);
+    const std::string page = lake::api::web_ui_audit(
+        {event},
+        filter,
+        {{"mode", "witnessed"},
+         {"witness_threshold", 2},
+         {"witnesses", nlohmann::json::array({{{"endpoint", "https://witness.example"}}})}});
     EXPECT_NE(page.find("action=\"/audit\""), std::string::npos);
     EXPECT_NE(page.find("name=\"principal\""), std::string::npos);
     EXPECT_NE(page.find("&lt;admin&gt;"), std::string::npos);
     EXPECT_EQ(page.find("<admin>"), std::string::npos);
     EXPECT_NE(page.find("capability/list_users"), std::string::npos);
     EXPECT_NE(page.find("GET /v1/verify_audit"), std::string::npos);
+    EXPECT_NE(page.find("Effective mode: <code>witnessed</code>"), std::string::npos);
 }
 
 TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {

@@ -13,6 +13,7 @@
 
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
+#include "lake/transparency/checkpoint.hpp"
 
 namespace lake::control {
 class Store;
@@ -28,7 +29,8 @@ class Service;
 }
 namespace lake::transparency {
 class Service;
-}
+class CheckpointService;
+} // namespace lake::transparency
 
 // The capability registry — lake's control surface in Zetta's shape: one
 // registry rendered as HTTP and OpenAPI. JSON capabilities are also MCP tools;
@@ -96,6 +98,8 @@ struct ApiContext {
     control::pki::Service* pki = nullptr;
     control::callers::Service* callers = nullptr;
     transparency::Service* transparency = nullptr;
+    transparency::CheckpointService* checkpoints = nullptr;
+    transparency::TransparencySubmitter transparency_submitter;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;

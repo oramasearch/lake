@@ -5,6 +5,8 @@
 #include <optional>
 #include <string>
 
+#include "lake/audit/audit.hpp"
+#include "lake/transparency/checkpoint.hpp"
 #include "lake/transparency/tuf.hpp"
 
 namespace lake::api {
@@ -19,6 +21,11 @@ ApiResult from_transparency_error(const transparency::Error& error) {
 ApiResult no_transparency() {
     return ApiResult::failure("store_unavailable",
                               "no transparency store is configured (LAKE_STORE_ROOT)");
+}
+
+ApiResult no_checkpoint_service() {
+    return ApiResult::failure("store_unavailable",
+                              "no transparency checkpoint service is configured (LAKE_STORE_ROOT)");
 }
 
 std::expected<std::string, ApiError> instance_object(const json&, ApiContext&) {
@@ -45,6 +52,27 @@ json metadata_output_schema() {
               {"version", {{"type", "integer"}}},
               {"encoded", {{"type", "string"}}},
               {"metadata", {{"type", "object"}}}}}};
+}
+
+json checkpoint_output_schema() {
+    return {{"type", "object"}};
+}
+
+std::expected<nlohmann::json, transparency::Error> sign_checkpoint(const nlohmann::json& checkpoint,
+                                                                   ApiContext& context) {
+    if (!context.store) {
+        return std::unexpected(
+            transparency::Error{"store_unavailable", "no control store is configured"});
+    }
+    const auto signed_checkpoint = audit::sign_transparency_checkpoint(
+        *context.store,
+        checkpoint,
+        {.configured_seed = context.identity_seed, .instance_kek = context.instance_kek});
+    if (!signed_checkpoint) {
+        return std::unexpected(
+            transparency::Error{signed_checkpoint.error().code, signed_checkpoint.error().message});
+    }
+    return *signed_checkpoint;
 }
 
 } // namespace
@@ -171,6 +199,95 @@ void register_transparency_capabilities(Registry& registry) {
             context.audit_details["role"] = role;
             context.audit_details["version"] = metadata->version;
             return ApiResult::success(metadata_value(*metadata));
+        }});
+    registry.add(Capability{
+        .name = "transparency_log_configuration",
+        .title = "Read transparency-log configuration",
+        .description =
+            "Read the effective transparency log mode, witness quorum, and anchoring endpoint.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = checkpoint_output_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "transparency log",
+        .action = "read",
+        .resolve_object = instance_object,
+        .handler = [](const json&, ApiContext& context) {
+            set_audit_fields(context, "configuration");
+            if (!context.checkpoints) {
+                return no_checkpoint_service();
+            }
+            return ApiResult::success(context.checkpoints->configuration());
+        }});
+    registry.add(Capability{
+        .name = "publish_transparency_checkpoint",
+        .title = "Publish transparency checkpoint",
+        .description =
+            "Sign the current TUF metadata state and publish it after witness and anchor checks.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = checkpoint_output_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "transparency log",
+        .action = "admin",
+        .resolve_object = instance_object,
+        .handler = [](const json&, ApiContext& context) {
+            set_audit_fields(context, "publish_checkpoint");
+            if (!context.transparency) {
+                return no_transparency();
+            }
+            if (!context.checkpoints) {
+                return no_checkpoint_service();
+            }
+            const auto root = context.transparency->metadata("root");
+            if (!root) {
+                return from_transparency_error(root.error());
+            }
+            const auto timestamp = context.transparency->metadata("timestamp");
+            if (!timestamp) {
+                return from_transparency_error(timestamp.error());
+            }
+            const json checkpoint{{"root", root->document},
+                                  {"root_version", root->version},
+                                  {"timestamp", timestamp->document},
+                                  {"timestamp_version", timestamp->version},
+                                  {"version", "lake_checkpoint/1"}};
+            const auto published = context.checkpoints->publish(
+                checkpoint,
+                [&context](const json& value) { return sign_checkpoint(value, context); },
+                context.transparency_submitter);
+            if (!published) {
+                return from_transparency_error(published.error());
+            }
+            context.audit_details["checkpoint_sequence"] = published->at("sequence");
+            context.audit_details["mode"] = context.checkpoints->configuration().at("mode");
+            return ApiResult::success(*published);
+        }});
+    registry.add(Capability{
+        .name = "transparency_checkpoint",
+        .title = "Read current transparency checkpoint",
+        .description =
+            "Read the latest checkpoint that met the configured witness and anchor requirements.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = checkpoint_output_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "transparency log",
+        .action = "read",
+        .resolve_object = instance_object,
+        .handler = [](const json&, ApiContext& context) {
+            set_audit_fields(context, "read_checkpoint");
+            if (!context.checkpoints) {
+                return no_checkpoint_service();
+            }
+            const auto checkpoint = context.checkpoints->current();
+            if (!checkpoint) {
+                return from_transparency_error(checkpoint.error());
+            }
+            return ApiResult::success(*checkpoint);
         }});
 }
 

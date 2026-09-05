@@ -68,6 +68,11 @@ liquid is the tool. lake is where it collects.
 > from immutable instance-local objects under `LAKE_STORE_ROOT/<instance>/log/tuf/`. Publication
 > refuses expired, rolled-back, mixed, or under-threshold metadata; root rotation requires both the
 > trusted and replacement root thresholds, and every outcome is signed in the audit stream.
+> Transparency checkpoints use `LAKE_LOG_MODE`: air-gapped makes no outbound call; witnessed
+> (the runtime default) requires configured witness cosignatures; anchored additionally retains
+> an aggregation proof. `/v1/transparency_log_configuration` and `/audit` expose the effective
+> public configuration. The operator handoff is [`docs/control-plane/log.md`](docs/control-plane/log.md).
+
 > Application authentication migration `0016_auth_apps` adds isolated user pools, hosted and
 > custom-domain identity pages, per-application JWT signing and JWKS, lifecycle webhooks, and
 > operator pages for application users and organizations. The registry authorizes and audits its

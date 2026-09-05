@@ -2844,6 +2844,7 @@ struct ApiServer::Impl {
     Registry registry;
     mutable control::pki::Service pki;
     std::unique_ptr<transparency::Service> transparency;
+    std::unique_ptr<transparency::CheckpointService> checkpoints;
     std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
@@ -2864,8 +2865,14 @@ struct ApiServer::Impl {
 
     explicit Impl(ServerOptions opts) : options(std::move(opts)), sync_store(options.store_root) {
         if (!options.store_root.empty()) {
+            const auto valid = transparency::validate_log_configuration(options.log_configuration);
+            if (!valid) {
+                failure_reason = "invalid transparency log configuration: " + valid.error().message;
+            }
             transparency =
                 std::make_unique<transparency::Service>(options.store_root, options.node_name);
+            checkpoints = std::make_unique<transparency::CheckpointService>(
+                options.store_root, options.node_name, options.log_configuration);
         }
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
@@ -2883,6 +2890,32 @@ struct ApiServer::Impl {
                                                               options.jwt_verifier,
                                                               options.cloud_identity_verifier,
                                                               issuer_policy);
+    }
+
+    transparency::Result<nlohmann::json> submit_transparency(const std::string& endpoint,
+                                                             const nlohmann::json& request) const {
+        const OutboundResponse response =
+            outbound_http.request({"POST",
+                                   endpoint,
+                                   request.dump(),
+                                   {{"Accept", "application/json"},
+                                    {"Content-Type", "application/json"},
+                                    {"User-Agent", "lake-transparency/1"}}});
+        if (!response.error.empty()) {
+            return std::unexpected(transparency::Error{
+                "store_unavailable", "transparency endpoint request failed: " + response.error});
+        }
+        if (response.status < 200 || response.status >= 300) {
+            return std::unexpected(transparency::Error{"store_unavailable",
+                                                       "transparency endpoint returned HTTP " +
+                                                           std::to_string(response.status)});
+        }
+        const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
+        if (body.is_discarded()) {
+            return std::unexpected(
+                transparency::Error{"store_error", "transparency endpoint returned invalid JSON"});
+        }
+        return body;
     }
 
     void record_request(const boost::http::route_params& route,
@@ -3009,6 +3042,11 @@ struct ApiServer::Impl {
         ctx.pki = &pki;
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
+        ctx.checkpoints = checkpoints.get();
+        ctx.transparency_submitter = [this](const std::string& endpoint,
+                                            const nlohmann::json& request) {
+            return submit_transparency(endpoint, request);
+        };
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
@@ -5508,9 +5546,18 @@ struct ApiServer::Impl {
         for (const nlohmann::json& item : result.value.value("items", nlohmann::json::array())) {
             events.push_back(audit::event_from_json(item));
         }
+        nlohmann::json log_configuration;
+        if (ctx.checkpoints) {
+            const ApiResult configuration =
+                registry.call("transparency_log_configuration", nlohmann::json::object(), ctx);
+            if (!configuration.ok) {
+                return serve_page_error(route, configuration);
+            }
+            log_configuration = configuration.value;
+        }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_audit(events, filter),
+                         web_ui_audit(events, filter, log_configuration),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5941,7 +5988,9 @@ bool ApiServer::start() {
     Impl& impl = *impl_;
     if (impl.is_running.load())
         return true;
-    impl.failure_reason.clear();
+    if (!impl.failure_reason.empty()) {
+        return false;
+    }
 
     if (impl.options.store) {
         const audit::IdentityOptions identity_options{

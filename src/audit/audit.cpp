@@ -19,6 +19,7 @@ namespace {
 constexpr std::string_view audit_signature_domain = "TAAP/1 audit_event/1";
 constexpr std::string_view attestation_signature_domain = "TAAP/1 attestation";
 constexpr std::string_view export_signature_domain = "TAAP/1 lake_export/1";
+constexpr std::string_view checkpoint_signature_domain = "TAAP/1 lake_checkpoint/1";
 
 struct PkeyDeleter {
     void operator()(EVP_PKEY* key) const {
@@ -405,6 +406,15 @@ std::vector<std::uint8_t> export_manifest_signed_bytes(const nlohmann::json& man
                                      export_signature_domain.end());
     output.push_back(0);
     const auto encoded = cbor(manifest);
+    output.insert(output.end(), encoded.begin(), encoded.end());
+    return output;
+}
+
+std::vector<std::uint8_t> checkpoint_signed_bytes(const nlohmann::json& checkpoint) {
+    std::vector<std::uint8_t> output(checkpoint_signature_domain.begin(),
+                                     checkpoint_signature_domain.end());
+    output.push_back(0);
+    const auto encoded = cbor(checkpoint);
     output.insert(output.end(), encoded.begin(), encoded.end());
     return output;
 }
@@ -889,6 +899,30 @@ Result<Identity> rotate_identity(control::Store& store, const IdentityOptions& o
         return std::unexpected(Error{rotated.error().code, rotated.error().message});
     }
     return *replacement;
+}
+
+Result<nlohmann::json> sign_transparency_checkpoint(control::Store& store,
+                                                    const nlohmann::json& checkpoint,
+                                                    const IdentityOptions& options) {
+    const IdentityOptions effective_options = options_for_store(store, options);
+    const auto current = identity(store, effective_options);
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    const auto seed = seed_for(*current, effective_options);
+    if (!seed) {
+        return std::unexpected(seed.error());
+    }
+    const auto key = pkey_from_seed(*seed);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    const auto signature = sign(key->get(), checkpoint_signed_bytes(checkpoint));
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    return nlohmann::json{
+        {"algorithm", "ed25519"}, {"signer", current->taap_id}, {"signature", *signature}};
 }
 
 Result<nlohmann::json> sign_export_manifest(control::Store& store,
