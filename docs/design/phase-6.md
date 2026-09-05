@@ -299,8 +299,15 @@ rotation requires the trusted old-root threshold and the candidate new-root thre
 registry exposes initialize, publish, rotate, and immutable fetch capabilities, and records every
 outcome in the signed audit stream. The recovery rehearsal replaces root and targets keys and
 proves removed keys cannot publish. Complete client enforcement is tracked in liquid #186.
-Witnessing, anchoring, trusted timestamps, tile monitoring, replication, and agent session keys
-remain #35–#39.
+**Transparency-log configuration status (#35): implemented on the lake side.** Lake reads
+`LAKE_LOG_MODE`, witness endpoints/public keys with a threshold, and an optional anchoring
+aggregator at startup. Air-gapped checkpoints make no outbound call; witnessed and anchored
+checkpoints become current only after valid distinct witness cosignatures meet the configured
+quorum; anchored checkpoints additionally retain an OpenTimestamps-style aggregation proof.
+`transparency_log_configuration` exposes the effective public configuration and `/audit` renders
+it through that capability. The operator maps Lake CR fields under the contract in
+[`../control-plane/log.md`](../control-plane/log.md). Trusted timestamps, tile monitoring,
+replication, and agent session keys remain #36–#39.
 
 ## Waves
 

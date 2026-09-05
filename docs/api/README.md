@@ -89,6 +89,9 @@ fidelity report.
 | `publish_tuf_metadata` | action | signed targets, snapshot, and timestamp metadata | appended role versions | [transparency.md](transparency.md) |
 | `rotate_tuf_root` | action | next root signed by old and new thresholds | immutable successor root | [transparency.md](transparency.md) |
 | `tuf_metadata` | read | role and optional version | exact encoded and parsed role metadata | [transparency.md](transparency.md) |
+| `transparency_log_configuration` | read | — | effective mode, witnesses, quorum, and aggregator | [transparency.md](transparency.md) |
+| `publish_transparency_checkpoint` | action | — | signed current checkpoint after mode requirements | [transparency.md](transparency.md) |
+| `transparency_checkpoint` | read | — | current signed checkpoint | [transparency.md](transparency.md) |
 | `sign_up_password`, `sign_in_password`, `verify_mfa` | action, public entry | password credentials; verify also takes a TOTP or recovery code | browser session + secret | [identity.md](identity.md) |
 | `enroll_mfa`, `disable_mfa` | action | authenticated user; disable takes a fresh TOTP or recovery code | one-use setup URI and recovery codes, or confirmation | [identity.md](identity.md) |
 | `begin_passkey_registration`, `register_passkey` | action | WebAuthn client data and attestation object | creation options, then confirmation with a lake-signed TAAP binding stored on the device | [identity.md](identity.md) |

@@ -14,9 +14,11 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/transparency/checkpoint.hpp"
 #include "lake/transparency/tuf.hpp"
 
 using nlohmann::json;
@@ -256,7 +258,153 @@ struct Keys {
     }
 };
 
+json checkpoint_body() {
+    return {{"root", "3b4f65a38e54aef7153fa97dbf4325d57f0d6d08712fdb3a8db8f06fe9ba6bde"},
+            {"tree_size", 12},
+            {"version", "lake_checkpoint/1"}};
+}
+
+lake::transparency::CheckpointSigner checkpoint_signer() {
+    return [](const json&) -> lake::transparency::Result<json> {
+        return json{{"algorithm", "ed25519"},
+                    {"signer", "taap:1:ed25519:lake"},
+                    {"signature", "local-signature"}};
+    };
+}
+
+lake::transparency::LogConfiguration air_gapped_configuration() {
+    return {.mode = lake::transparency::LogMode::AirGapped};
+}
+
 } // namespace
+
+TEST(TransparencyCheckpoint, ValidatesRuntimeConfiguration) {
+    const auto default_configuration =
+        lake::transparency::log_configuration_from_environment("witnessed", "[]", 0, "");
+    EXPECT_FALSE(default_configuration);
+    EXPECT_NE(default_configuration.error().message.find("quorum-satisfiable"), std::string::npos);
+
+    const auto anchored_without_aggregator = lake::transparency::log_configuration_from_environment(
+        "anchored",
+        R"([{"endpoint":"https://witness.example/checkpoint","public_key":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}])",
+        1,
+        "");
+    EXPECT_FALSE(anchored_without_aggregator);
+    EXPECT_NE(anchored_without_aggregator.error().message.find("aggregation endpoint"),
+              std::string::npos);
+
+    const auto non_loopback_http = lake::transparency::log_configuration_from_environment(
+        "witnessed",
+        R"([{"endpoint":"http://localhost.example/checkpoint","public_key":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}])",
+        1,
+        "");
+    EXPECT_FALSE(non_loopback_http);
+    EXPECT_NE(non_loopback_http.error().message.find("loopback"), std::string::npos);
+}
+
+TEST(TransparencyCheckpoint, ServerRefusesInvalidConfigurationAtStartup) {
+    TemporaryRoot temporary;
+    lake::api::ServerOptions options;
+    options.store_root = temporary.path();
+    options.node_name = "test-lake";
+    options.log_configuration = {.mode = lake::transparency::LogMode::Witnessed};
+
+    lake::api::ApiServer server(std::move(options));
+
+    EXPECT_FALSE(server.start());
+    EXPECT_NE(server.reason().find("quorum-satisfiable"), std::string::npos);
+}
+
+TEST(TransparencyCheckpoint, AirGappedSignsAndServesWithoutOutboundCalls) {
+    TemporaryRoot temporary;
+    lake::transparency::CheckpointService service(
+        temporary.path(), "air-gapped", air_gapped_configuration());
+    std::size_t calls = 0;
+    const auto published = service.publish(
+        checkpoint_body(), checkpoint_signer(), [&calls](const std::string&, const json&) {
+            ++calls;
+            return lake::transparency::Result<json>(json::object());
+        });
+    ASSERT_TRUE(published) << published.error().message;
+    EXPECT_EQ(calls, 0U);
+    EXPECT_EQ(published->at("sequence"), 1);
+    EXPECT_TRUE(published->at("witness_signatures").empty());
+    EXPECT_EQ(published->at("signature").at("signer"), "taap:1:ed25519:lake");
+    const auto current = service.current();
+    ASSERT_TRUE(current) << current.error().message;
+    EXPECT_EQ(*current, *published);
+    EXPECT_FALSE(std::filesystem::exists(service.directory() / "1.ots.json"));
+}
+
+TEST(TransparencyCheckpoint, WitnessedRequiresThresholdAndAnchoredStoresAggregationProof) {
+    TemporaryRoot temporary;
+    TestKey first{7};
+    TestKey second{39};
+    TestKey third{71};
+    lake::transparency::LogConfiguration witnessed{
+        .mode = lake::transparency::LogMode::Witnessed,
+        .witnesses = {{"http://localhost:4901/witness",
+                       first.value.at("keyval").at("public").get<std::string>()},
+                      {"http://localhost:4902/witness",
+                       second.value.at("keyval").at("public").get<std::string>()},
+                      {"http://localhost:4903/witness",
+                       third.value.at("keyval").at("public").get<std::string>()}},
+        .witness_threshold = 2,
+    };
+    lake::transparency::CheckpointService witnessed_service(
+        temporary.path(), "witnessed", witnessed);
+    const auto witnessed_checkpoint = witnessed_service.publish(
+        checkpoint_body(),
+        checkpoint_signer(),
+        [&first, &second](const std::string& endpoint,
+                          const json& request) -> lake::transparency::Result<json> {
+            const std::string body = request.at("checkpoint").dump();
+            if (endpoint.ends_with("4901/witness")) {
+                return json{{"signature", sign(first, body)}};
+            }
+            if (endpoint.ends_with("4902/witness")) {
+                return json{{"signature", sign(second, body)}};
+            }
+            return json{{"signature", "not-a-signature"}};
+        });
+    ASSERT_TRUE(witnessed_checkpoint) << witnessed_checkpoint.error().message;
+    EXPECT_EQ(witnessed_checkpoint->at("witness_signatures").size(), 2U);
+
+    lake::transparency::CheckpointService refused_service(temporary.path(), "refused", witnessed);
+    const auto refused = refused_service.publish(
+        checkpoint_body(),
+        checkpoint_signer(),
+        [&first](const std::string&, const json& request) -> lake::transparency::Result<json> {
+            return json{{"signature", sign(first, request.at("checkpoint").dump())}};
+        });
+    EXPECT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "unrecoverable");
+    EXPECT_FALSE(refused_service.current());
+
+    lake::transparency::LogConfiguration anchored = witnessed;
+    anchored.mode = lake::transparency::LogMode::Anchored;
+    anchored.aggregator_endpoint = "http://localhost:4904/aggregate";
+    lake::transparency::CheckpointService anchored_service(temporary.path(), "anchored", anchored);
+    const auto anchored_checkpoint = anchored_service.publish(
+        checkpoint_body(),
+        checkpoint_signer(),
+        [&first, &second](const std::string& endpoint,
+                          const json& request) -> lake::transparency::Result<json> {
+            if (endpoint.ends_with("aggregate")) {
+                return json{{"proof",
+                             {{"calendar", "https://calendar.example"},
+                              {"checkpoint_hash", request.at("hash")}}}};
+            }
+            const std::string body = request.at("checkpoint").dump();
+            if (endpoint.ends_with("4901/witness")) {
+                return json{{"signature", sign(first, body)}};
+            }
+            return json{{"signature", sign(second, body)}};
+        });
+    ASSERT_TRUE(anchored_checkpoint) << anchored_checkpoint.error().message;
+    EXPECT_TRUE(anchored_checkpoint->contains("anchor"));
+    EXPECT_TRUE(std::filesystem::exists(anchored_service.directory() / "1.ots.json"));
+}
 
 TEST(TransparencyTuf, AppendsThresholdSignedMetadataAndRejectsRepositoryAttacks) {
     TemporaryRoot temporary;
@@ -368,12 +516,15 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
     TemporaryRoot temporary;
     Keys keys;
     lake::transparency::Service service(temporary.path(), "registry-instance");
+    lake::transparency::CheckpointService checkpoints(
+        temporary.path(), "registry-instance", air_gapped_configuration());
     lake::control::InMemoryStore store;
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
     lake::api::ApiContext context;
     context.store = &store;
     context.transparency = &service;
+    context.checkpoints = &checkpoints;
     context.authorized = true;
     context.operator_credential = true;
     context.acting_identity = "admin";
@@ -389,6 +540,16 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
         {{"targets", first.targets}, {"snapshot", first.snapshot}, {"timestamp", first.timestamp}},
         context);
     ASSERT_TRUE(published.ok) << published.error.message;
+    context.request_id.clear();
+    const auto configuration =
+        registry.call("transparency_log_configuration", nlohmann::json::object(), context);
+    ASSERT_TRUE(configuration.ok) << configuration.error.message;
+    EXPECT_EQ(configuration.value.at("mode"), "air-gapped");
+    context.request_id.clear();
+    const auto checkpoint =
+        registry.call("publish_transparency_checkpoint", nlohmann::json::object(), context);
+    ASSERT_TRUE(checkpoint.ok) << checkpoint.error.message;
+    EXPECT_EQ(checkpoint.value.at("sequence"), 1);
     context.request_id.clear();
     const auto fetched = registry.call("tuf_metadata", {{"role", "timestamp"}}, context);
     ASSERT_TRUE(fetched.ok) << fetched.error.message;
@@ -411,6 +572,8 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     TemporaryRoot temporary;
     Keys keys;
     lake::transparency::Service service(temporary.path(), "postgres-instance");
+    lake::transparency::CheckpointService checkpoints(
+        temporary.path(), "postgres-instance", air_gapped_configuration());
     auto store = lake::control::make_postgres_store(
         database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     const auto ready = store->ping();
@@ -420,6 +583,7 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     lake::api::ApiContext context;
     context.store = store.get();
     context.transparency = &service;
+    context.checkpoints = &checkpoints;
     context.authorized = true;
     context.operator_credential = true;
     context.acting_identity = "admin";
@@ -444,6 +608,14 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     context.request_id = "postgres-transparency-read";
     const auto fetched = registry.call("tuf_metadata", {{"role", "root"}}, context);
     ASSERT_TRUE(fetched.ok) << fetched.error.message;
+    context.request_id = "postgres-transparency-configuration";
+    const auto configuration =
+        registry.call("transparency_log_configuration", nlohmann::json::object(), context);
+    ASSERT_TRUE(configuration.ok) << configuration.error.message;
+    context.request_id = "postgres-transparency-checkpoint";
+    const auto checkpoint =
+        registry.call("publish_transparency_checkpoint", nlohmann::json::object(), context);
+    ASSERT_TRUE(checkpoint.ok) << checkpoint.error.message;
 
     const auto events = store->list_audit_events({.limit = 1000000});
     ASSERT_TRUE(events) << events.error().message;
@@ -453,8 +625,12 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     ASSERT_NE(event, events->end());
     EXPECT_EQ(event->draft.kind, "transparency");
     EXPECT_EQ(event->draft.outcome, "success");
-    for (const std::string_view action :
-         {"initialize_tuf", "publish_tuf_metadata", "rotate_tuf_root", "tuf_metadata"}) {
+    for (const std::string_view action : {"initialize_tuf",
+                                          "publish_tuf_metadata",
+                                          "rotate_tuf_root",
+                                          "tuf_metadata",
+                                          "transparency_log_configuration",
+                                          "publish_transparency_checkpoint"}) {
         EXPECT_TRUE(std::ranges::any_of(*events, [action](const lake::audit::Event& candidate) {
             return candidate.draft.kind == "transparency" && candidate.draft.action == action;
         }));

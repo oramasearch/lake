@@ -113,6 +113,7 @@ add_library(lake-core STATIC
   src/control/handles.cpp
   src/control/policy.cpp
   src/search/index.cpp
+  src/transparency/checkpoint.cpp
   src/transparency/tuf.cpp
   src/telemetry/metrics.cpp
 )

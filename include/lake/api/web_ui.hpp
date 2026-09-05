@@ -4,6 +4,8 @@
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "lake/api/drive.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
@@ -99,7 +101,9 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
                                     const std::vector<control::EffectiveAccessEntry>& entries);
 std::string web_ui_search(const search::Query& query, const search::QueryResult& result);
 std::string web_ui_metering(const nlohmann::json& usage);
-std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter);
+std::string web_ui_audit(const std::vector<audit::Event>& events,
+                         const audit::Filter& filter,
+                         const nlohmann::json& log_configuration = nlohmann::json::object());
 std::string web_ui_exports(const control::Repository& repository,
                            const std::vector<control::ForgeRecord>& exports);
 std::string web_ui_drive_folder(const control::Repository& repository,
