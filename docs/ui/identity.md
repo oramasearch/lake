@@ -52,12 +52,13 @@ user-only identity pages.
 
 ## Passkey script exception
 
-`/passkeys`, lake's `/passkey-sign-in`, and each application passkey sign-in page contain exactly
-one inline script. The script converts
+Every page includes the shared pre-paint theme preference and theme-toggle scripts described in
+[`design-system.md`](design-system.md). `/passkeys`, lake's `/passkey-sign-in`, and each application
+passkey sign-in page add exactly one inline script. The passkey script converts
 base64url fields to browser byte arrays, calls `navigator.credentials.create` or
 `navigator.credentials.get`, and posts the result to the registered REST capabilities. It does
-not write the session cookie; the REST response sets an `HttpOnly` cookie. Every other identity
-page has no script. Application themes change validated CSS colors and escaped text only.
+not write the session cookie; the REST response sets an `HttpOnly` cookie. Application themes
+change validated CSS colors and escaped text only.
 
 ## How to verify
 
@@ -67,9 +68,9 @@ ctest --test-dir build --output-on-failure -R 'WebUi|IdentityHttp|WebAuthn|Appli
 ```
 
 The renderer tests cover MFA enrollment, challenge and disable forms, one-use value escaping,
-absence of scripts, and the one-script passkey exception. Application tests cover themed hosted
-forms, the raw JWKS route, pool isolation, JWT audience verification, webhook retry history, and
-operator user suspension.
+the two shared theme scripts, and the additional passkey script. Application tests cover themed
+hosted forms, the raw JWKS route, pool isolation, JWT audience verification, webhook retry
+history, and operator user suspension.
 `IdentityHttp.PagesIssueAndResolveHttpOnlySessions` submits the sign-up form, checks the
 cookie attributes, loads the authenticated session row on the sessions page, and checks that a
 REST sign-up response also sets an HttpOnly cookie.
@@ -78,5 +79,5 @@ REST sign-up response also sets an HttpOnly cookie.
 
 Add behavior to the registry first. Keep HTML generation in the pure `web_ui` renderers and make
 the HTTP form adapter call that capability. Add its route to request metrics, renderer tests, this
-table, and the route tables in `README.md` and `docs/serving/http.md`. Do not add a script outside
-a documented passkey WebAuthn page.
+table, and the route tables in `README.md` and `docs/serving/http.md`. Theme behavior belongs in
+the shared shell; credential behavior belongs only on documented passkey pages.

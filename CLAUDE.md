@@ -142,11 +142,14 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
   placeholders until lake has a node to marshal onto.
 - Pages are **server-rendered and self-contained**; renderers in `web_ui.cpp` are pure functions
-  and are the unit-tested surface. The two passkey pages contain the documented single inline
-  script required to call `navigator.credentials`; every other page has no script. Data pages call
+  and are the unit-tested surface. Every page has the two documented theme scripts; the two
+  passkey pages each add one script required to call `navigator.credentials`. Data pages call
   capabilities through `Registry::call` and can never do what the API cannot.
-- Static visual-direction references live under `docs/design/ui/mocks/`; they do not change the
-  served renderers or `/style.css`. `tools/ui/screenshot.sh` reproduces their 1440×900 review images.
+- IBM Plex Sans and Mono are self-hosted WOFF2 assets embedded into the binary and served below
+  `/fonts/` with immutable cache headers; the browser never needs a third-party font origin.
+- Static visual-direction references live under `docs/design/ui/mocks/`. The served design system
+  and its complete before/after screenshots are documented in `docs/ui/design-system.md`;
+  `tools/ui/screenshot.sh` reproduces the 1440×900 review images.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`

@@ -37,6 +37,22 @@ option(LAKE_BUILD_TESTS "Build the test suite" ON)
 
 include(FetchContent)
 
+set(LAKE_FONT_FILES
+  assets/fonts/ibm-plex-sans-400.woff2
+  assets/fonts/ibm-plex-sans-500.woff2
+  assets/fonts/ibm-plex-sans-600.woff2
+  assets/fonts/ibm-plex-mono-400.woff2
+  assets/fonts/ibm-plex-mono-500.woff2)
+set(LAKE_EMBEDDED_FONTS_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/web_ui_fonts.cpp")
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_FONTS_CPP}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts"
+    "-DOUTPUT_FILE=${LAKE_EMBEDDED_FONTS_CPP}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_fonts.cmake"
+  DEPENDS ${LAKE_FONT_FILES} cmake/embed_fonts.cmake
+  VERBATIM)
+
 # -----------------------------------------------------------------------------
 # Vendored modules — libliquid is library-only and provides Capy, Corosio and
 # HTTP to its consumers. Beast2 remains lake's Zetta-shaped serving stack.
@@ -88,6 +104,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
   src/control/apps.cpp
+  ${LAKE_EMBEDDED_FONTS_CPP}
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/callers.cpp
@@ -143,7 +160,12 @@ target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boo
 add_executable(lake src/main.cpp)
 target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
 
+add_executable(lake-ui-fixture tools/ui/fixture_server.cpp)
+target_compile_features(lake-ui-fixture PRIVATE cxx_std_26)
+target_link_libraries(lake-ui-fixture PRIVATE lake-api lake-core lake-control-postgres OpenSSL::Crypto)
+
 if(LAKE_BUILD_TESTS)
+  find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG        v1.17.0)

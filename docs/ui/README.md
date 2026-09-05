@@ -4,11 +4,10 @@ Drive browsing, preview, history, sharing, and documented Linux client states ar
 [`drive.md`](drive.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
-`src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on passkey pages
-that call `navigator.credentials`, unit-tested as strings. The navigation is on every operator page:
-Home, Customers, Organizations, Repositories, Applications, Exports, Search, Secrets,
-Transparency, Audit, SSO, API
-(`/v1/openapi.json`), and Sign in / Sign out.
+`src/api/web_ui.cpp`): one token-driven stylesheet at `/style.css`, an accessible shared shell,
+and a persisted light/dark theme control, unit-tested as strings. The grouped navigation covers
+workspace, administration, applications, identity, and developer pages; contextual links lead to
+exports, SSO, repository content, and drive views.
 
 | Page | Route | Shows |
 |---|---|---|
@@ -64,6 +63,10 @@ Lifecycle mutations remain capability-only; the page has no mutation form.
 
 Repository-page details and the liquid #166 deferrals are recorded in
 [`repositories.md`](repositories.md).
+
+The reproducible seeded screenshot workflow and complete before/after page inventory are recorded
+in [`design-system.md`](design-system.md). The fixture uses the production HTTP and renderer paths;
+it does not add a fixture route to the server.
 
 Secret mutations and cryptographic operations are also capability-only. The secrets page renders
 metadata and lifecycle timestamps, while the encryption page renders key metadata. Neither page

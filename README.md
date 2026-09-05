@@ -105,8 +105,9 @@ ctest --test-dir build
 
 | Route | Serves |
 |---|---|
-| `GET /` | the hello page — server-rendered, self-contained, no script |
-| `GET /style.css` | the stylesheet (`public, max-age=86400`) |
+| `GET /` | the hello page in the server-rendered Orama application shell |
+| `GET /style.css` | the token-driven light and dark stylesheet (`public, max-age=86400`) |
+| `GET /fonts/<IBM Plex face>.woff2` | embedded Sans and Mono faces (`public, max-age=31536000, immutable`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
@@ -176,6 +177,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |
+| `assets/fonts/`, `cmake/embed_fonts.cmake` | OFL-licensed IBM Plex WOFF2 sources and their binary embed step |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
 | `db/schema.sql` | **the control-plane schema, source of truth.** Identity and application user pools, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |

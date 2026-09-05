@@ -3487,6 +3487,11 @@ struct ApiServer::Impl {
         static constexpr std::string_view fixed_routes[] = {
             "/",
             "/style.css",
+            "/fonts/ibm-plex-sans-400.woff2",
+            "/fonts/ibm-plex-sans-500.woff2",
+            "/fonts/ibm-plex-sans-600.woff2",
+            "/fonts/ibm-plex-mono-400.woff2",
+            "/fonts/ibm-plex-mono-500.woff2",
             "/healthz",
             "/readyz",
             "/metrics",
@@ -6709,6 +6714,14 @@ struct ApiServer::Impl {
                          "public, max-age=86400");
     }
 
+    boost::http::route_task serve_font(boost::http::route_params& route, std::string_view name) {
+        return send_text(route,
+                         boost::http::status::ok,
+                         std::string(web_ui_font(name)),
+                         "font/woff2",
+                         "public, max-age=31536000, immutable");
+    }
+
     boost::http::route_task serve_openapi(boost::http::route_params& route) {
         return send_text(route,
                          boost::http::status::ok,
@@ -7067,6 +7080,18 @@ bool ApiServer::start() {
         http::method::get, "/style.css", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/style.css", impl.serve_style(route));
         });
+    for (const std::string_view font : {"ibm-plex-sans-400.woff2",
+                                        "ibm-plex-sans-500.woff2",
+                                        "ibm-plex-sans-600.woff2",
+                                        "ibm-plex-mono-400.woff2",
+                                        "ibm-plex-mono-500.woff2"}) {
+        const std::string route_path = "/fonts/" + std::string(font);
+        router.add(http::method::get,
+                   route_path,
+                   [&impl, font, route_path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route, route_path, impl.serve_font(route, font));
+                   });
+    }
     router.add(
         http::method::get, "/healthz", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/healthz", impl.serve_healthz(route));

@@ -922,7 +922,8 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
     EXPECT_NE(hosted.find(" 200 "), std::string::npos) << hosted;
     EXPECT_NE(hosted.find("Hosted product"), std::string::npos);
     EXPECT_NE(hosted.find("--accent:#123456"), std::string::npos);
-    EXPECT_EQ(hosted.find("<script"), std::string::npos);
+    EXPECT_NE(hosted.find("id=\"theme-preference\""), std::string::npos);
+    EXPECT_NE(hosted.find("id=\"theme-toggle-script\""), std::string::npos);
 
     const std::string custom = http_request(
         server.port(), "GET", "/sign-in", "", "text/plain", "", "", "login.product.example.test");

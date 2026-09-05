@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <openssl/evp.h>
@@ -19,6 +20,16 @@ using lake::api::ApiContext;
 using lake::api::ApiResult;
 using lake::api::Registry;
 using nlohmann::json;
+
+std::size_t occurrences(std::string_view text, std::string_view needle) {
+    std::size_t count = 0;
+    std::size_t offset = 0;
+    while ((offset = text.find(needle, offset)) != std::string_view::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
 
 std::vector<unsigned char> decode_base64url(std::string value) {
     std::replace(value.begin(), value.end(), '-', '+');
@@ -247,10 +258,13 @@ TEST(ApplicationAuth, HostedRenderersApplyThemeAndLimitScriptsToWebAuthn) {
     EXPECT_NE(sign_up.find("Example product"), std::string::npos);
     EXPECT_NE(sign_up.find("--accent:#123456"), std::string::npos);
     EXPECT_NE(sign_up.find("--paper:#abcdef"), std::string::npos);
-    EXPECT_EQ(sign_up.find("<script"), std::string::npos);
-    EXPECT_EQ(sign_in.find("<script"), std::string::npos);
-    EXPECT_EQ(mfa.find("<script"), std::string::npos);
-    EXPECT_EQ(passkey.find("<script"), passkey.rfind("<script"));
+    EXPECT_NE(sign_up.find("class=\"hosted-shell\""), std::string::npos);
+    EXPECT_NE(sign_up.find("id=\"theme-preference\""), std::string::npos);
+    EXPECT_NE(sign_up.find("id=\"theme-toggle-script\""), std::string::npos);
+    EXPECT_EQ(occurrences(sign_up, "<script"), 2);
+    EXPECT_EQ(occurrences(sign_in, "<script"), 2);
+    EXPECT_EQ(occurrences(mfa, "<script"), 2);
+    EXPECT_EQ(occurrences(passkey, "<script"), 3);
     EXPECT_NE(passkey.find("navigator.credentials.get"), std::string::npos);
 }
 

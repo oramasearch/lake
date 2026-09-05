@@ -4,9 +4,85 @@
 #include "lake/api/web_ui.hpp"
 #include "lake/version.hpp"
 
+namespace {
+
+std::size_t occurrences(std::string_view text, std::string_view needle) {
+    std::size_t count = 0;
+    std::size_t offset = 0;
+    while ((offset = text.find(needle, offset)) != std::string_view::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
+
+void expect_theme_scripts(std::string_view html, std::size_t page_scripts = 0) {
+    EXPECT_NE(html.find("id=\"theme-preference\""), std::string_view::npos);
+    EXPECT_NE(html.find("id=\"theme-toggle-script\""), std::string_view::npos);
+    EXPECT_EQ(occurrences(html, "<script"), 2 + page_scripts);
+}
+
+} // namespace
+
 TEST(WebUi, EscapesHtml) {
     EXPECT_EQ(lake::api::web_ui_escape("<a href=\"x\">&'"),
               "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
+}
+
+TEST(WebUi, EmbedsEveryDesignSystemFont) {
+    for (const std::string_view name : {"ibm-plex-sans-400.woff2",
+                                        "ibm-plex-sans-500.woff2",
+                                        "ibm-plex-sans-600.woff2",
+                                        "ibm-plex-mono-400.woff2",
+                                        "ibm-plex-mono-500.woff2"}) {
+        const std::string_view font = lake::api::web_ui_font(name);
+        ASSERT_GE(font.size(), 4);
+        EXPECT_EQ(font.substr(0, 4), "wOF2");
+    }
+    EXPECT_TRUE(lake::api::web_ui_font("unknown.woff2").empty());
+}
+
+TEST(WebUi, ApprovedIconsAreDecorativeInlineSvg) {
+    for (const std::string_view name : {"lake",
+                                        "home",
+                                        "repository",
+                                        "search",
+                                        "customers",
+                                        "organization",
+                                        "metering",
+                                        "secrets",
+                                        "audit",
+                                        "identity",
+                                        "api",
+                                        "theme"}) {
+        const std::string icon = lake::api::web_ui_icon(name);
+        EXPECT_NE(icon.find("<svg"), std::string::npos) << name;
+        EXPECT_NE(icon.find("aria-hidden=\"true\""), std::string::npos) << name;
+        EXPECT_EQ(icon.find("<script"), std::string::npos) << name;
+    }
+    EXPECT_TRUE(lake::api::web_ui_icon("unknown").empty());
+}
+
+TEST(WebUi, StylesheetDefinesTheGovernedComponentSet) {
+    const std::string css = lake::api::web_ui_stylesheet();
+    for (const std::string_view selector : {".app-shell",
+                                            ".sidebar",
+                                            ".topbar",
+                                            ".panel",
+                                            ".card",
+                                            ".badge",
+                                            ".status-success",
+                                            ".tabs",
+                                            ".pagination",
+                                            ".breadcrumbs",
+                                            ".toast",
+                                            ".diff-entry",
+                                            "th[aria-sort]",
+                                            "prefers-reduced-motion"}) {
+        EXPECT_NE(css.find(selector), std::string::npos) << selector;
+    }
+    EXPECT_NE(css.find("font-family: var(--lake-font-sans)"), std::string::npos);
+    EXPECT_NE(css.find("color: var(--lake-text-primary)"), std::string::npos);
 }
 
 TEST(DrivePreview, DefaultRegistryRendersEveryFormat) {
@@ -41,7 +117,12 @@ TEST(WebUi, HelloIsASelfContainedDocument) {
     EXPECT_NE(html.find("hello from lake"), std::string::npos);
     EXPECT_NE(html.find("node-1"), std::string::npos);
     EXPECT_NE(html.find("/style.css"), std::string::npos);
-    EXPECT_EQ(html.find("<script"), std::string::npos);
+    EXPECT_NE(html.find("class=\"skip-link\""), std::string::npos);
+    EXPECT_NE(html.find("<aside class=\"sidebar\""), std::string::npos);
+    EXPECT_NE(html.find("<nav class=\"primary-nav\" aria-label=\"Primary\""), std::string::npos);
+    EXPECT_NE(html.find("<header class=\"topbar\""), std::string::npos);
+    EXPECT_NE(html.find("<main id=\"main-content\""), std::string::npos);
+    expect_theme_scripts(html);
 }
 
 TEST(WebUi, HelloEscapesNodeName) {
@@ -59,7 +140,8 @@ TEST(WebUi, NavigationAndSession) {
     EXPECT_NE(out.find("href=\"/sign-in\""), std::string::npos);
     const std::string in = lake::api::web_ui_hello("n", "0.0.1", true);
     EXPECT_NE(in.find("action=\"/logout\""), std::string::npos);
-    EXPECT_EQ(in.find("<script"), std::string::npos);
+    EXPECT_NE(in.find("aria-current=\"page\""), std::string::npos);
+    expect_theme_scripts(in);
 }
 
 TEST(WebUi, MeteringRendersQuotaWarningAndHourlyUsage) {
@@ -90,7 +172,7 @@ TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
     EXPECT_NE(organizations.find("&lt;Orama&gt;"), std::string::npos);
     EXPECT_NE(organizations.find("/teams?organization_id=o1"), std::string::npos);
     EXPECT_NE(organizations.find("/organization/access?id=o1"), std::string::npos);
-    EXPECT_EQ(organizations.find("<script"), std::string::npos);
+    expect_theme_scripts(organizations);
 
     const lake::control::Team team{
         "t1", "o1", "reviewers", "Reviewers", "2026-09-04T00:00:00Z", "2026-09-04T00:00:00Z"};
@@ -103,7 +185,7 @@ TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
     const std::string access = lake::api::web_ui_effective_access(object, {entry});
     EXPECT_NE(access.find("inherited from"), std::string::npos);
     EXPECT_NE(access.find("read, write"), std::string::npos);
-    EXPECT_EQ(access.find("<script"), std::string::npos);
+    expect_theme_scripts(access);
 }
 
 TEST(WebUi, SsoPageEscapesProviderAndProvisioningValues) {
@@ -130,7 +212,7 @@ TEST(WebUi, SsoPageEscapesProviderAndProvisioningValues) {
     EXPECT_NE(page.find("/v1/register_sso_provider"), std::string::npos);
     EXPECT_NE(page.find("&lt;provider&gt;"), std::string::npos);
     EXPECT_NE(page.find("&lt;external&gt;"), std::string::npos);
-    EXPECT_EQ(page.find("<script"), std::string::npos);
+    expect_theme_scripts(page);
 }
 
 TEST(WebUi, SearchEscapesHitsAndOffersTheQueryForm) {
@@ -151,12 +233,12 @@ TEST(WebUi, IdentityFormsUseCapabilityBackedActions) {
     const std::string sign_up = lake::api::web_ui_sign_up("bad <identity>");
     EXPECT_NE(sign_up.find("action=\"/identity/sign-up\""), std::string::npos);
     EXPECT_NE(sign_up.find("bad &lt;identity&gt;"), std::string::npos);
-    EXPECT_EQ(sign_up.find("<script"), std::string::npos);
+    expect_theme_scripts(sign_up);
 
     const std::string sign_in = lake::api::web_ui_sign_in("");
     EXPECT_NE(sign_in.find("action=\"/identity/sign-in\""), std::string::npos);
     EXPECT_NE(sign_in.find("action=\"/identity/oauth\""), std::string::npos);
-    EXPECT_EQ(sign_in.find("<script"), std::string::npos);
+    expect_theme_scripts(sign_in);
 
     const std::string verify = lake::api::web_ui_mfa("", "", {}, false);
     EXPECT_NE(verify.find("action=\"/identity/mfa/verify\""), std::string::npos);
@@ -165,16 +247,16 @@ TEST(WebUi, IdentityFormsUseCapabilityBackedActions) {
     EXPECT_NE(enroll.find("action=\"/identity/mfa/disable\""), std::string::npos);
     EXPECT_NE(enroll.find("otpauth://secret&lt;&amp;"), std::string::npos);
     EXPECT_NE(enroll.find("recover&lt;&amp;"), std::string::npos);
-    EXPECT_EQ(enroll.find("<script"), std::string::npos);
+    expect_theme_scripts(enroll);
 }
 
 TEST(WebUi, PasskeyPagesCarryOnlyTheirDocumentedScript) {
     const std::string registration = lake::api::web_ui_passkeys("");
     EXPECT_NE(registration.find("navigator.credentials.create"), std::string::npos);
-    EXPECT_EQ(registration.find("<script"), registration.rfind("<script"));
+    expect_theme_scripts(registration, 1);
     const std::string assertion = lake::api::web_ui_passkey_sign_in("");
     EXPECT_NE(assertion.find("navigator.credentials.get"), std::string::npos);
-    EXPECT_EQ(assertion.find("<script"), assertion.rfind("<script"));
+    expect_theme_scripts(assertion, 1);
     EXPECT_EQ(assertion.find("document.cookie"), std::string::npos);
 }
 
@@ -214,7 +296,7 @@ TEST(WebUi, SessionsDevicesAndTokensEscapeStoredValues) {
     EXPECT_NE(tokens.find("token&lt;&amp;"), std::string::npos);
     EXPECT_NE(tokens.find("secret&lt;&amp;"), std::string::npos);
     EXPECT_NE(tokens.find("action=\"/identity/token/create\""), std::string::npos);
-    EXPECT_EQ(tokens.find("<script"), std::string::npos);
+    expect_theme_scripts(tokens);
 }
 
 TEST(WebUi, RepositoriesListEscapesAndLinks) {
@@ -232,6 +314,8 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     const std::string out = lake::api::web_ui_repositories({repo}, {{"c1", ada}});
     EXPECT_NE(out.find("ada/liquid"), std::string::npos);
     EXPECT_NE(out.find("href=\"/repository?id=r1\""), std::string::npos);
+    EXPECT_NE(out.find("href=\"/repositories\" aria-current=\"page\""), std::string::npos);
+    EXPECT_EQ(out.find("href=\"/search\" aria-current=\"page\""), std::string::npos);
     EXPECT_NE(out.find("&lt;b&gt;the tool&lt;/b&gt;"), std::string::npos);
     EXPECT_EQ(out.find("<b>the tool</b>"), std::string::npos);
     EXPECT_NE(lake::api::web_ui_repositories({}, {}).find("No repositories yet"),
@@ -253,7 +337,7 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
         lake::api::web_ui_repository_tree(repository, "main", {tree_entry}, false);
     EXPECT_NE(tree.find("&lt;readme&gt;.md"), std::string::npos);
     EXPECT_NE(tree.find("href=\"/file?repository_id=r1"), std::string::npos);
-    EXPECT_EQ(tree.find("<script"), std::string::npos);
+    expect_theme_scripts(tree);
 
     const lake::api::RepositoryFile file{"<readme>.md", "blob-1", "<source>", 8};
     const std::string contents = lake::api::web_ui_repository_file(repository, file, false);
@@ -288,7 +372,7 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     EXPECT_NE(change_page.find("-&lt;old&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("+&lt;new&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("Conflict values"), std::string::npos);
-    EXPECT_EQ(change_page.find("<script"), std::string::npos);
+    expect_theme_scripts(change_page);
 
     const lake::api::RepositoryDiffEntry reformatting{
         .path = "readme.md",
@@ -349,7 +433,7 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     EXPECT_NE(artifact_page.find("sbom/1"), std::string::npos);
     EXPECT_NE(artifact_page.find("unverified: signature mismatch"), std::string::npos);
     EXPECT_NE(artifact_page.find("trace-1"), std::string::npos);
-    EXPECT_EQ(artifact_page.find("<script"), std::string::npos);
+    expect_theme_scripts(artifact_page);
 }
 
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
@@ -397,7 +481,7 @@ TEST(WebUi, TransparencyPageRendersVerifiedIdentityMatches) {
     EXPECT_NE(page.find("authorship/1&lt;&amp;"), std::string::npos);
     EXPECT_NE(page.find("person&lt;&amp;"), std::string::npos);
     EXPECT_EQ(page.find("person<&"), std::string::npos);
-    EXPECT_EQ(page.find("<script"), std::string::npos);
+    expect_theme_scripts(page);
 }
 
 TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
@@ -413,7 +497,7 @@ TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
     EXPECT_NE(mounts.find("credentials&lt;&amp;"), std::string::npos);
     EXPECT_NE(mounts.find("/secrets?mount_id=mount-1"), std::string::npos);
     EXPECT_NE(mounts.find("/encryption-keys?mount_id=mount-1"), std::string::npos);
-    EXPECT_EQ(mounts.find("<script"), std::string::npos);
+    expect_theme_scripts(mounts);
 
     lake::control::SecretMetadata metadata{
         "mount-1",
@@ -429,7 +513,7 @@ TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
     EXPECT_NE(secrets.find("deleted&lt;&amp;"), std::string::npos);
     EXPECT_NE(secrets.find("Inspect version metadata"), std::string::npos);
     EXPECT_EQ(secrets.find("secret-value"), std::string::npos);
-    EXPECT_EQ(secrets.find("<script"), std::string::npos);
+    expect_theme_scripts(secrets);
 
     const lake::control::EncryptionKey key{
         "key-1", "mount-1", "orders<&", "parent<&", 3, "created", "updated"};
@@ -437,5 +521,5 @@ TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
     EXPECT_NE(keys.find("orders&lt;&amp;"), std::string::npos);
     EXPECT_NE(keys.find("parent&lt;&amp;"), std::string::npos);
     EXPECT_NE(keys.find("Key material is never returned"), std::string::npos);
-    EXPECT_EQ(keys.find("<script"), std::string::npos);
+    expect_theme_scripts(keys);
 }
