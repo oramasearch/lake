@@ -148,4 +148,9 @@ drive drive-preview drive-history drive-share shared-link
 ```
 
 The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
-path-for-path pair.
+path-for-path pair. Both directories contain 76 PNG files, and every after image is 1440 by 900.
+The three primary review screens are the
+[repository](screenshots/after/repository-light.png),
+[change](screenshots/after/change-light.png), and
+[organizations](screenshots/after/organizations-light.png) pages; each has a neighboring
+`-dark.png` capture from the same seeded run.
