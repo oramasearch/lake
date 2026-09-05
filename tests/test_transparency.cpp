@@ -15,6 +15,10 @@
 #include <vector>
 
 #include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/ts.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <liquid/attestation.hpp>
 #include <liquid/runtime.hpp>
@@ -25,10 +29,12 @@
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/transparency/checkpoint.hpp"
 #include "lake/transparency/log.hpp"
+#include "lake/transparency/timestamps.hpp"
 #include "lake/transparency/tuf.hpp"
 #include "temporary_directory.hpp"
 
@@ -51,6 +57,35 @@ struct ContextDeleter {
 using Pkey = std::unique_ptr<EVP_PKEY, PkeyDeleter>;
 using Context = std::unique_ptr<EVP_MD_CTX, ContextDeleter>;
 
+struct CertificateDeleter {
+    void operator()(X509* certificate) const {
+        X509_free(certificate);
+    }
+};
+
+struct ResponseContextDeleter {
+    void operator()(TS_RESP_CTX* context) const {
+        TS_RESP_CTX_free(context);
+    }
+};
+
+struct ResponseDeleter {
+    void operator()(TS_RESP* response) const {
+        TS_RESP_free(response);
+    }
+};
+
+struct BioDeleter {
+    void operator()(BIO* bio) const {
+        BIO_free(bio);
+    }
+};
+
+using Certificate = std::unique_ptr<X509, CertificateDeleter>;
+using ResponseContext = std::unique_ptr<TS_RESP_CTX, ResponseContextDeleter>;
+using Response = std::unique_ptr<TS_RESP, ResponseDeleter>;
+using Bio = std::unique_ptr<BIO, BioDeleter>;
+
 std::string hex(std::span<const unsigned char> value) {
     constexpr std::string_view alphabet = "0123456789abcdef";
     std::string output;
@@ -69,6 +104,140 @@ std::string sha256(std::string_view value) {
               1);
     return hex(std::span(digest.data(), size));
 }
+
+Pkey p256_key() {
+    EVP_PKEY_CTX* context = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+    EVP_PKEY* key = nullptr;
+    if (context == nullptr || EVP_PKEY_keygen_init(context) != 1 ||
+        EVP_PKEY_CTX_set_ec_paramgen_curve_nid(context, NID_X9_62_prime256v1) != 1 ||
+        EVP_PKEY_keygen(context, &key) != 1) {
+        EVP_PKEY_free(key);
+        key = nullptr;
+    }
+    EVP_PKEY_CTX_free(context);
+    return Pkey(key);
+}
+
+bool add_extension(X509* certificate, X509* issuer, int nid, const char* value) {
+    X509V3_CTX context{};
+    X509V3_set_ctx_nodb(&context);
+    X509V3_set_ctx(&context, issuer, certificate, nullptr, nullptr, 0);
+    X509_EXTENSION* extension =
+        X509V3_EXT_conf_nid(nullptr, &context, nid, const_cast<char*>(value));
+    if (extension == nullptr) {
+        return false;
+    }
+    const bool added = X509_add_ext(certificate, extension, -1) == 1;
+    X509_EXTENSION_free(extension);
+    return added;
+}
+
+Certificate certificate(EVP_PKEY* key,
+                        X509* issuer,
+                        EVP_PKEY* issuer_key,
+                        long serial,
+                        const char* common_name,
+                        bool authority) {
+    Certificate result(X509_new());
+    if (!result || X509_set_version(result.get(), 2) != 1 ||
+        ASN1_INTEGER_set(X509_get_serialNumber(result.get()), serial) != 1 ||
+        !X509_gmtime_adj(X509_getm_notBefore(result.get()), -60) ||
+        !X509_gmtime_adj(X509_getm_notAfter(result.get()), 400L * 24 * 60 * 60) ||
+        X509_set_pubkey(result.get(), key) != 1) {
+        return {};
+    }
+    X509_NAME* subject = X509_get_subject_name(result.get());
+    if (X509_NAME_add_entry_by_txt(subject,
+                                   "CN",
+                                   MBSTRING_ASC,
+                                   reinterpret_cast<const unsigned char*>(common_name),
+                                   -1,
+                                   -1,
+                                   0) != 1 ||
+        X509_set_issuer_name(result.get(),
+                             issuer == nullptr ? subject : X509_get_subject_name(issuer)) != 1) {
+        return {};
+    }
+    const bool extensions =
+        authority
+            ? add_extension(
+                  result.get(), result.get(), NID_basic_constraints, "critical,CA:TRUE") &&
+                  add_extension(
+                      result.get(), result.get(), NID_key_usage, "critical,keyCertSign,cRLSign")
+            : add_extension(result.get(), issuer, NID_basic_constraints, "critical,CA:FALSE") &&
+                  add_extension(result.get(), issuer, NID_key_usage, "critical,digitalSignature") &&
+                  add_extension(result.get(), issuer, NID_ext_key_usage, "critical,timeStamping");
+    if (!extensions || X509_sign(result.get(), issuer_key, EVP_sha256()) <= 0) {
+        return {};
+    }
+    return result;
+}
+
+class StubTsa {
+public:
+    StubTsa() {
+        root_key_ = p256_key();
+        signer_key_ = p256_key();
+        root_ =
+            certificate(root_key_.get(), nullptr, root_key_.get(), 1, "Lake test TSA root", true);
+        signer_ =
+            certificate(signer_key_.get(), root_.get(), root_key_.get(), 2, "Lake test TSA", false);
+        Bio output(BIO_new(BIO_s_mem()));
+        if (output && root_ && PEM_write_bio_X509(output.get(), root_.get()) == 1) {
+            BUF_MEM* memory = nullptr;
+            BIO_get_mem_ptr(output.get(), &memory);
+            trust_pem_.assign(memory->data, memory->length);
+        }
+    }
+
+    lake::transparency::TsaReply send(std::string_view endpoint, std::string_view request) {
+        EXPECT_EQ(endpoint, "https://tsa.example.test/rfc3161");
+        ++requests_;
+        ResponseContext context(TS_RESP_CTX_new());
+        ASN1_OBJECT* policy = OBJ_txt2obj("1.3.6.1.4.1.57264.1", 1);
+        Bio input(BIO_new_mem_buf(request.data(), static_cast<int>(request.size())));
+        if (!context || !policy || !input || !root_ || !signer_ ||
+            TS_RESP_CTX_set_signer_cert(context.get(), signer_.get()) != 1 ||
+            TS_RESP_CTX_set_signer_key(context.get(), signer_key_.get()) != 1 ||
+            TS_RESP_CTX_set_signer_digest(context.get(), EVP_sha256()) != 1 ||
+            TS_RESP_CTX_set_def_policy(context.get(), policy) != 1 ||
+            TS_RESP_CTX_add_md(context.get(), EVP_sha256()) != 1) {
+            ASN1_OBJECT_free(policy);
+            return {500, {}, "could not configure stub TSA"};
+        }
+        ASN1_OBJECT_free(policy);
+        Response response(TS_RESP_create_response(context.get(), input.get()));
+        if (!response) {
+            return {500, {}, "could not create stub TSA response"};
+        }
+        const int size = i2d_TS_RESP(response.get(), nullptr);
+        if (size <= 0) {
+            return {500, {}, "could not encode stub TSA response"};
+        }
+        std::string body(static_cast<std::size_t>(size), '\0');
+        unsigned char* cursor = reinterpret_cast<unsigned char*>(body.data());
+        if (i2d_TS_RESP(response.get(), &cursor) != size) {
+            return {500, {}, "could not encode stub TSA response"};
+        }
+        return {200, std::move(body), {}};
+    }
+
+    const std::string& trust_pem() const {
+        return trust_pem_;
+    }
+
+    int requests() const {
+        return requests_;
+    }
+
+private:
+    Pkey root_key_;
+    Pkey signer_key_;
+    Certificate root_;
+    Certificate signer_;
+    std::string trust_pem_;
+    int requests_ = 0;
+};
 
 struct TestKey {
     json value;
@@ -543,6 +712,198 @@ TEST(TransparencyCheckpoint, WitnessedRequiresThresholdAndAnchoredStoresAggregat
     EXPECT_TRUE(std::filesystem::exists(anchored_service.directory() / "1.ots.json"));
 }
 
+TEST(TransparencyTimestamp, CreatesAndRenewsRfc4998EvidenceFromStubTsa) {
+    TemporaryRoot temporary;
+    StubTsa tsa;
+    ASSERT_FALSE(tsa.trust_pem().empty());
+    lake::transparency::TimestampService service(temporary.path(), "timestamp-instance");
+    lake::transparency::TimestampPolicy policy;
+    policy.renewal_interval = std::chrono::seconds{1};
+    policy.renew_before_expiry = std::chrono::seconds::zero();
+    const auto sender = [&tsa](std::string_view endpoint, std::string_view request) {
+        return tsa.send(endpoint, request);
+    };
+    const std::string checkpoint_digest = sha256("signed checkpoint");
+    const std::string signature = "checkpoint signature value";
+    const auto created =
+        service.timestamp(checkpoint_digest,
+                          lake::control::identity_crypto::base64url_encode(signature),
+                          "https://tsa.example.test/rfc3161",
+                          tsa.trust_pem(),
+                          policy,
+                          sender);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->checkpoint_digest, checkpoint_digest);
+    EXPECT_EQ(created->signature_digest, sha256(signature));
+    EXPECT_EQ(created->digest_algorithm, "sha256");
+    ASSERT_EQ(created->archive_timestamps.size(), 1U);
+    EXPECT_FALSE(created->evidence_record.empty());
+    EXPECT_TRUE(std::filesystem::exists(service.directory() / (checkpoint_digest + ".ers")));
+
+    const auto due =
+        service.due(std::chrono::system_clock::now() + std::chrono::seconds{2}, policy);
+    ASSERT_TRUE(due) << due.error().message;
+    EXPECT_EQ(*due, std::vector<std::string>({checkpoint_digest}));
+
+    const auto renewed = service.renew(
+        checkpoint_digest, "https://tsa.example.test/rfc3161", tsa.trust_pem(), policy, sender);
+    ASSERT_TRUE(renewed) << renewed.error().message;
+    ASSERT_EQ(renewed->archive_timestamps.size(), 2U);
+    EXPECT_EQ(renewed->archive_timestamps.front().token_sha256,
+              created->archive_timestamps.front().token_sha256);
+    EXPECT_NE(renewed->archive_timestamps.back().token_sha256,
+              created->archive_timestamps.front().token_sha256);
+    EXPECT_EQ(tsa.requests(), 2);
+
+    const auto fetched = service.evidence(checkpoint_digest, policy);
+    ASSERT_TRUE(fetched) << fetched.error().message;
+    EXPECT_EQ(fetched->evidence_record, renewed->evidence_record);
+    EXPECT_EQ(fetched->archive_timestamps.size(), 2U);
+
+    const std::filesystem::path evidence_path = service.directory() / (checkpoint_digest + ".ers");
+    std::fstream evidence_file(evidence_path, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(evidence_file);
+    evidence_file.seekg(-1, std::ios::end);
+    char corrupt = '\0';
+    evidence_file.read(&corrupt, 1);
+    ASSERT_TRUE(evidence_file);
+    corrupt ^= 0x01;
+    evidence_file.seekp(-1, std::ios::end);
+    evidence_file.write(&corrupt, 1);
+    evidence_file.close();
+    const auto tampered = service.evidence(checkpoint_digest, policy);
+    EXPECT_FALSE(tampered);
+}
+
+TEST(TransparencyTimestamp, RejectsAnUntrustedTsaSigner) {
+    TemporaryRoot temporary;
+    StubTsa tsa;
+    StubTsa unrelated_authority;
+    lake::transparency::TimestampService service(temporary.path(), "untrusted-tsa");
+    const auto rejected = service.timestamp(
+        sha256("untrusted checkpoint"),
+        lake::control::identity_crypto::base64url_encode("untrusted checkpoint signature"),
+        "https://tsa.example.test/rfc3161",
+        unrelated_authority.trust_pem(),
+        {},
+        [&tsa](std::string_view endpoint, std::string_view request) {
+            return tsa.send(endpoint, request);
+        });
+
+    EXPECT_FALSE(rejected);
+    EXPECT_FALSE(std::filesystem::exists(service.directory()));
+}
+
+TEST(TransparencyTimestampRegistry, CapabilitiesTimestampRenewReadAndAudit) {
+    TemporaryRoot temporary;
+    StubTsa tsa;
+    lake::transparency::TimestampService service(temporary.path(), "timestamp-registry");
+    lake::transparency::CheckpointService checkpoints(
+        temporary.path(), "timestamp-registry", air_gapped_configuration());
+    const auto checkpoint = checkpoints.publish(
+        checkpoint_body(),
+        [](const json&) -> lake::transparency::Result<json> {
+            return json{
+                {"signer", "taap:1:ed25519:lake"},
+                {"signature",
+                 lake::control::identity_crypto::base64url_encode("registry checkpoint signature")},
+            };
+        },
+        {});
+    ASSERT_TRUE(checkpoint) << checkpoint.error().message;
+    lake::control::InMemoryStore store;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.timestamping = &service;
+    context.checkpoints = &checkpoints;
+    context.tsa_endpoint = "https://tsa.example.test/rfc3161";
+    context.tsa_trust_pem = tsa.trust_pem();
+    context.tsa_sender = [&tsa](std::string_view endpoint, std::string_view request) {
+        return tsa.send(endpoint, request);
+    };
+    context.authorized = true;
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    context.instance_kek = "timestamp-registry-instance-kek";
+    const std::string checkpoint_digest = checkpoint->at("checkpoint_hash_sha256");
+    const auto timestamped =
+        registry.call("timestamp_checkpoint", nlohmann::json::object(), context);
+    ASSERT_TRUE(timestamped.ok) << timestamped.error.message;
+    EXPECT_EQ(timestamped.value.at("archive_timestamps").size(), 1U);
+    EXPECT_EQ(timestamped.value.at("signature_digest"), sha256("registry checkpoint signature"));
+    context.request_id.clear();
+    const auto renewed = registry.call(
+        "renew_timestamp_evidence", {{"checkpoint_digest", checkpoint_digest}}, context);
+    ASSERT_TRUE(renewed.ok) << renewed.error.message;
+    EXPECT_EQ(renewed.value.at("archive_timestamps").size(), 2U);
+    context.request_id.clear();
+    const auto fetched =
+        registry.call("timestamp_evidence", {{"checkpoint_digest", checkpoint_digest}}, context);
+    ASSERT_TRUE(fetched.ok) << fetched.error.message;
+    EXPECT_EQ(fetched.value.at("evidence_record"), renewed.value.at("evidence_record"));
+
+    const auto events = store.list_audit_events({.limit = 100});
+    ASSERT_TRUE(events) << events.error().message;
+    for (const std::string_view action :
+         {"timestamp_checkpoint", "renew_timestamp_evidence", "timestamp_evidence"}) {
+        EXPECT_TRUE(std::ranges::any_of(*events, [action](const lake::audit::Event& event) {
+            return event.draft.kind == "transparency" && event.draft.action == action &&
+                   event.draft.object == "transparency/log";
+        }));
+    }
+    EXPECT_TRUE(lake::audit::verify(store, *events));
+}
+
+TEST(TransparencyTimestamp, OwnerLoopRenewsDueEvidenceThroughRegistry) {
+    TemporaryRoot temporary;
+    StubTsa tsa;
+    const std::string checkpoint_digest = sha256("owner loop checkpoint");
+    lake::transparency::TimestampPolicy policy;
+    policy.renew_before_expiry = std::chrono::days{500};
+    const auto sender = [&tsa](std::string_view endpoint, std::string_view request) {
+        return tsa.send(endpoint, request);
+    };
+    lake::transparency::TimestampService initial(temporary.path(), "owner-loop");
+    const auto created = initial.timestamp(
+        checkpoint_digest,
+        lake::control::identity_crypto::base64url_encode("owner loop checkpoint signature"),
+        "https://tsa.example.test/rfc3161",
+        tsa.trust_pem(),
+        policy,
+        sender);
+    ASSERT_TRUE(created) << created.error().message;
+    ASSERT_EQ(tsa.requests(), 1);
+
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ServerOptions options;
+    options.store = store;
+    options.store_root = temporary.path();
+    options.node_name = "owner-loop";
+    options.instance_kek = "owner-loop-instance-kek";
+    options.log_configuration = air_gapped_configuration();
+    options.tsa_endpoint = "https://tsa.example.test/rfc3161";
+    options.tsa_trust_pem = tsa.trust_pem();
+    options.timestamp_policy = policy;
+    options.tsa_sender = sender;
+    lake::api::ApiServer server(std::move(options));
+
+    server.drain();
+
+    EXPECT_EQ(tsa.requests(), 2);
+    const auto renewed = initial.evidence(checkpoint_digest, policy);
+    ASSERT_TRUE(renewed) << renewed.error().message;
+    EXPECT_EQ(renewed->archive_timestamps.size(), 2U);
+    const auto events = store->list_audit_events({.limit = 100});
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
+        return event.draft.action == "renew_timestamp_evidence" &&
+               event.draft.method == "scheduled_timestamp_renewal" &&
+               event.draft.outcome == "success";
+    }));
+}
+
 TEST(TransparencyTuf, AppendsThresholdSignedMetadataAndRejectsRepositoryAttacks) {
     TemporaryRoot temporary;
     Keys keys;
@@ -726,10 +1087,12 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     }
     TemporaryRoot temporary;
     Keys keys;
+    StubTsa tsa;
     lake::transparency::Service service(temporary.path(), "postgres-instance");
     lake::transparency::CheckpointService checkpoints(
         temporary.path(), "postgres-instance", air_gapped_configuration());
     lake::transparency::TiledLog log(temporary.path(), "postgres-instance");
+    lake::transparency::TimestampService timestamping(temporary.path(), "postgres-instance");
     auto store = lake::control::make_postgres_store(
         database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     const auto ready = store->ping();
@@ -741,6 +1104,12 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     context.transparency = &service;
     context.checkpoints = &checkpoints;
     context.transparency_log = &log;
+    context.timestamping = &timestamping;
+    context.tsa_endpoint = "https://tsa.example.test/rfc3161";
+    context.tsa_trust_pem = tsa.trust_pem();
+    context.tsa_sender = [&tsa](std::string_view endpoint, std::string_view request) {
+        return tsa.send(endpoint, request);
+    };
     context.authorized = true;
     context.operator_credential = true;
     context.acting_identity = "admin";
@@ -787,6 +1156,20 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
         registry.call("transparency_identity_scan", {{"identity", monitored_identity}}, context);
     ASSERT_TRUE(scan.ok) << scan.error.message;
     EXPECT_EQ(scan.value.at("matches").size(), 1U);
+    const std::string checkpoint_digest = checkpoint.value.at("checkpoint_hash_sha256");
+    context.request_id = "postgres-transparency-timestamp";
+    const auto timestamped =
+        registry.call("timestamp_checkpoint", nlohmann::json::object(), context);
+    ASSERT_TRUE(timestamped.ok) << timestamped.error.message;
+    context.request_id = "postgres-transparency-renew";
+    const auto renewed = registry.call(
+        "renew_timestamp_evidence", {{"checkpoint_digest", checkpoint_digest}}, context);
+    ASSERT_TRUE(renewed.ok) << renewed.error.message;
+    context.request_id = "postgres-transparency-evidence";
+    const auto timestamp_evidence =
+        registry.call("timestamp_evidence", {{"checkpoint_digest", checkpoint_digest}}, context);
+    ASSERT_TRUE(timestamp_evidence.ok) << timestamp_evidence.error.message;
+    EXPECT_EQ(timestamp_evidence.value.at("archive_timestamps").size(), 2U);
 
     const auto events = store->list_audit_events({.limit = 1000000});
     ASSERT_TRUE(events) << events.error().message;
@@ -804,7 +1187,10 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
                                           "transparency_log_configuration",
                                           "publish_transparency_checkpoint",
                                           "transparency_tile",
-                                          "transparency_identity_scan"}) {
+                                          "transparency_identity_scan",
+                                          "timestamp_checkpoint",
+                                          "renew_timestamp_evidence",
+                                          "timestamp_evidence"}) {
         EXPECT_TRUE(std::ranges::any_of(*events, [action](const lake::audit::Event& candidate) {
             return candidate.draft.kind == "transparency" && candidate.draft.action == action;
         }));

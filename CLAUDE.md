@@ -105,6 +105,12 @@ Canonical TAAP attestations append to immutable 1,024-entry bulk tiles, and chec
 Merkle root and tree size. Public tile fetches and the hosted `/transparency` identity monitor
 verify the complete checkpoint root before returning matches and refuse modified tiles.
 
+RFC 3161 timestamping hashes checkpoint signature values, verifies TSA responses and trust, and
+stores DER RFC 4998 evidence records at `LAKE_STORE_ROOT/<instance>/log/timestamps/`. The owner
+loop renews records by timestamping the preceding archive timestamp before the configured age or
+TSA certificate-expiry margin. Creation, renewal, and reads are registry capabilities on the
+signed audit path.
+
 Application authentication adds migration `0016_auth_apps`, isolated identity pools, themed
 hosted and custom-domain entry pages, per-application Ed25519 JWTs and JWKS, signed lifecycle
 webhooks with retained attempts, and authorized operator management for users and organizations.

@@ -82,6 +82,10 @@ liquid is the tool. lake is where it collects.
 > `/transparency` identity monitor recompute that root before returning matches, so a modified
 > tile is refused.
 
+> A configured RFC 3161 TSA timestamps checkpoint signature values into DER RFC 4998 evidence
+> records under `LAKE_STORE_ROOT/<instance>/log/timestamps/`. Lake verifies TSA trust, nonce, imprint
+> and signature, renews each record before its configured age or signer-certificate expiry margin,
+> and records timestamp creation, renewal, and reads through the registry audit path.
 > Application authentication migration `0016_auth_apps` adds isolated user pools, hosted and
 > custom-domain identity pages, per-application JWT signing and JWKS, lifecycle webhooks, and
 > operator pages for application users and organizations. The registry authorizes and audits its
@@ -138,6 +142,9 @@ Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-to
 (default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
 Metering and quota configuration uses the `LAKE_PRICE_*` and `LAKE_STORAGE_QUOTA_BYTES`
 environment variables documented in [`docs/api/metering.md`](docs/api/metering.md).
+Trusted timestamping uses `LAKE_TSA_URL`, optional PEM `LAKE_TSA_TRUST_CERT`, and the
+`LAKE_TSA_RENEWAL_SECONDS` / `LAKE_TSA_RENEW_BEFORE_SECONDS` policy documented in
+[`docs/api/transparency.md`](docs/api/transparency.md).
 SIGINT/SIGTERM stop it cleanly.
 
 ## Container image
@@ -173,7 +180,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
-| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata, threshold verification, checkpoint-bound Merkle entry tiles, and identity monitoring |
+| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, root rotation, checkpoint-bound Merkle entry tiles, identity monitoring, RFC 3161 timestamping, and RFC 4998 archive renewal |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |

@@ -8,7 +8,8 @@ metadata, rollback, and combinations of metadata from different publication stat
 checkpoint binds the current root and timestamp metadata together with the tiled attestation log's
 Merkle root and tree size. Its configured mode determines whether Lake may serve it immediately,
 must first obtain witness cosignatures, or must also retain an OpenTimestamps-style aggregation
-proof. Trusted timestamps, replication, and agent session keys remain lake #36, #38, and #39.
+proof. RFC 3161 trusted timestamps and RFC 4998 evidence renewal are implemented by lake #36.
+Replication and agent session keys remain lake #38 and #39.
 
 The log accepts batches of canonical-CBOR TAAP attestations encoded as base64url. Lake decodes each
 entry through libliquid, verifies its registered profile and TAAP signature, hashes it as an RFC
@@ -31,6 +32,8 @@ The liquid client verifier is tracked in
 [`oramasearch/liquid#186`](https://github.com/oramasearch/liquid/issues/186). Complete checkpoint,
 tile, inclusion, and consistency-proof verification is tracked in
 [`oramasearch/liquid#207`](https://github.com/oramasearch/liquid/issues/207).
+RFC 3161 and RFC 4998 evidence verification is tracked in
+[`oramasearch/liquid#210`](https://github.com/oramasearch/liquid/issues/210).
 
 ## Storage
 
@@ -44,6 +47,7 @@ LAKE_STORE_ROOT/<instance>/log/tuf/<version>.timestamp.json
 LAKE_STORE_ROOT/<instance>/log/append.lock
 LAKE_STORE_ROOT/<instance>/log/tree.json
 LAKE_STORE_ROOT/<instance>/log/tiles/entries/<tile-index>/<width>.tile
+LAKE_STORE_ROOT/<instance>/log/timestamps/<checkpoint-sha256>.ers
 ```
 
 The instance name must be one safe path component. A write uses a sibling temporary file and an
@@ -74,6 +78,48 @@ is retained in the adjacent `.ots.json` object.
 The API returns both the parsed `metadata` object and `encoded`, the exact compact JSON bytes that
 were signed, hashed, and stored. Clients use `encoded` for length and digest checks rather than
 serializing the parsed object with their own JSON settings.
+
+Timestamp evidence is binary DER. Each `.ers` object is an RFC 4998 `EvidenceRecord` version 1
+with one SHA-256 digest algorithm and one archive-timestamp chain. The first RFC 3161 token's
+message imprint is SHA-256 over the decoded checkpoint **signature value**, not the checkpoint
+document. A renewal token's imprint is SHA-256 over the complete DER encoding of the preceding
+`ArchiveTimeStamp`. That preserves the prior token, embedded TSA certificate, and signed
+attributes. A single checkpoint needs no reduced hash tree.
+
+Lake verifies the TSA response status, request nonce, message imprint, policy, CMS signature,
+timestamp-signing certificate purpose, and certificate chain before publishing the evidence
+record. Reads reparse the DER, verify every CMS signature without applying today's certificate
+expiry to a historical token, and recompute every predecessor imprint. Malformed tokens and broken
+renewal links are refused as stored-data corruption.
+
+## RFC 3161 endpoint and renewal
+
+`LAKE_TSA_URL` configures the RFC 3161 HTTP endpoint. Operators should use HTTPS outside controlled
+test networks. Requests use `application/timestamp-query`, responses use
+`application/timestamp-reply`, and both are DER. `LAKE_TSA_TRUST_CERT` may contain one or more PEM
+trust anchors for a private TSA; when it is empty, OpenSSL's system trust roots are used.
+
+The owner loop checks timestamp evidence each hour. It renews a record at the earlier of:
+
+- the last token's generation time plus `LAKE_TSA_RENEWAL_SECONDS` (default 31,536,000); or
+- the TSA signing certificate's expiry minus `LAKE_TSA_RENEW_BEFORE_SECONDS` (default 2,592,000).
+
+Each due renewal calls `renew_timestamp_evidence` as the operator principal through
+`Registry::call`. It consequently uses the same authorization metadata and creates the same signed
+audit event as a manual renewal. A failed TSA exchange leaves the prior immutable evidence record
+in place and writes a structured operational error. Operators must alert on that error and restore
+the TSA before `renew_after`.
+
+Air-gapped lakes leave `LAKE_TSA_URL` empty. They retain signed checkpoints but do not claim trusted
+UTC or long-term timestamp evidence.
+
+After `publish_transparency_checkpoint` succeeds, call `timestamp_checkpoint`. The capability reads
+the current immutable checkpoint hash and Lake signature from the checkpoint store; it does not
+accept caller-supplied signature bytes. This binds the evidence object to a checkpoint already
+accepted by the configured witness and anchoring mode.
+
+Complete client verification of the DER record, TSA trust, signature imprint, and renewal links is
+tracked in [`oramasearch/liquid#210`](https://github.com/oramasearch/liquid/issues/210).
 
 ## Metadata contract
 
@@ -199,11 +245,15 @@ authorization object and `authorize`. Public monitoring reads are deliberately u
 | `transparency_checkpoint` | read | `{}` | current signed checkpoint, or `not_found` before one has met the requirements |
 | `transparency_tile` | read | non-negative `index`, `width` from 1 through 1,024 | immutable binary tile as base64url with exact width and SHA-256 |
 | `transparency_identity_scan` | read | TAAP `identity` | verified checkpoint/root, scan measurements, and every matching attestation |
+| `timestamp_checkpoint` | action | `{}` | new RFC 4998 evidence record for the current checkpoint signature |
+| `renew_timestamp_evidence` | action | `checkpoint_digest` | evidence record with one appended archive timestamp |
+| `timestamp_evidence` | read | `checkpoint_digest` | verified DER evidence record, token summaries, signature digest, and `renew_after` |
 
-TUF initialization/publication/rotation, attestation append, and checkpoint publication require
-`admin` on the instance transparency log. TUF metadata reads require `read`. The operator credential
-follows the registry's existing explicit administrative bypass; row-resolved credentials go through
-`authorize`. Configuration, checkpoint, tile, and identity-scan reads are public.
+TUF initialization/publication/rotation, attestation append, checkpoint publication, timestamp
+creation, and timestamp renewal require `admin` on the instance transparency log. TUF metadata and
+timestamp-evidence reads require `read`. The operator credential follows the registry's existing
+explicit administrative bypass; row-resolved credentials go through `authorize`. Configuration,
+checkpoint, tile, and identity-scan reads are public.
 
 `GET /audit` displays the effective mode and witness quorum through
 `transparency_log_configuration`; it does not read configuration outside the registry. Every
@@ -260,8 +310,14 @@ publication does not invoke its outbound client. The witnessed and anchored test
 threshold of valid Ed25519 witness cosignatures, refuses a checkpoint below that threshold, and
 retains an aggregation proof beside the anchored checkpoint. The registry test proves configuration
 and checkpoint capability dispatch with signed audit. `PostgresTransparency` repeats TUF, append,
-tile fetch, identity scan, configuration, and checkpoint capabilities with the Postgres control
-store and verifies the resulting audit chain.
+tile fetch, identity scan, configuration, checkpoint, and timestamp capabilities with the Postgres
+control store and verifies the resulting audit chain.
+`TransparencyTimestamp.CreatesAndRenewsRfc4998EvidenceFromStubTsa` creates a signed RFC 3161 token
+from a stub TSA, verifies the signature-value imprint, finds the due record, appends a renewal that
+covers the prior archive timestamp, reloads the DER evidence record, and detects tampering.
+`TransparencyTimestampRegistry` proves all three timestamp capabilities and their audit events.
+`TransparencyTimestamp.OwnerLoopRenewsDueEvidenceThroughRegistry` proves a due record is renewed by
+the owner loop through the audited registry path.
 
 ## How to change
 
@@ -269,4 +325,6 @@ Keep private signing keys outside lake. A new key or hash algorithm updates the 
 attack fixtures, tile hashing, schema above, and liquid verifier issue together. A tile format or
 width change gets a new format version and retains readers for published tile objects. A new
 capability belongs in the single registry and this page. Do not add an unsigned recovery path or
-overwrite a stored metadata or tile version.
+overwrite a stored metadata or tile version. The current evidence policy accepts SHA-256 only. A
+future digest-policy change must add an RFC 4998 hash-renewal chain before the old algorithm is
+outside policy; it must never reinterpret or discard an existing archive timestamp.

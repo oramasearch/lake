@@ -4120,6 +4120,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_drive_capabilities(registry);
     register_model_capabilities(registry);
     register_transparency_capabilities(registry);
+    register_timestamp_capabilities(registry);
     register_application_capabilities(registry);
 }
 

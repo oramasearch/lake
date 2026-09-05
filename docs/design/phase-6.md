@@ -320,7 +320,13 @@ implemented on the lake side.** Each append decodes and verifies canonical TAAP 
 advances the RFC 6962-style Merkle root, and publishes immutable 1,024-entry tile versions. The
 public hosted monitor recomputes the checkpoint root from those tiles before returning identity
 matches and detects a changed tile. Complete client proof verification is tracked in liquid #207.
-Trusted timestamps, replication, and agent session keys remain #36, #38, and #39.
+**Trusted timestamp status (#36): implemented on the lake side.** Lake hashes each checkpoint
+signature value into an RFC 3161 request, verifies the TSA response and trust chain, and stores a
+DER RFC 4998 evidence record at `LAKE_STORE_ROOT/<instance>/log/timestamps/`. The owner loop renews
+before the configured age or TSA-certificate expiry margin by timestamping the prior archive
+timestamp; every creation, renewal, and read uses the registry authorization and signed audit path.
+RFC 3161 and RFC 4998 client verification is tracked in liquid #210. Replication and agent session
+keys remain #38 and #39.
 
 ## Waves
 
