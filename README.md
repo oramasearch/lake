@@ -61,9 +61,13 @@ liquid is the tool. lake is where it collects.
 > quorum, expiry, completion, and one-way share evidence. OIDC/JWT claim policy comes from the
 > shared federation issuer store. All remain on the signed audit path.
 > Drive presents the same repositories as folders with stable-node ACLs, server-rendered previews,
-> effective-access sharing, expiring links, path history, and restore-as-a-new-change. Model
-> repositories expose model cards, exact file resolution, and verified SBOM/SLSA build provenance
-> through Hugging Face-compatible reads. Migration `0015_drive` stores link expiry and revocation.
+> effective-access sharing, expiring links, path history, and restore-as-a-new-change. Models and
+> datasets use native resumable liquid sync with chunk-level deduplication and unique-byte
+> metering. The Hugging Face-compatible adapter supports repository creation, file/folder upload,
+> basic LFS, listings, model metadata, snapshots, and named or digest downloads. Model reads and
+> the model page expose revision storage savings and a verified liquid-attestation chain from the
+> training dataset and code revision through the recorded run. Migration `0015_drive` stores link
+> expiry and revocation.
 > The source tree also serves threshold-signed TUF root, targets, snapshot, and timestamp metadata
 > from immutable instance-local objects under `LAKE_STORE_ROOT/<instance>/log/tuf/`. Publication
 > refuses expired, rolled-back, mixed, or under-threshold metadata; root rotation requires both the
@@ -109,7 +113,8 @@ ctest --test-dir build
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
 | `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
-| `GET /api/models/:id`, `/models/:id/resolve/:revision/:file` | compatible model metadata, verified build provenance, and exact revision file bytes |
+| `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
+| `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |

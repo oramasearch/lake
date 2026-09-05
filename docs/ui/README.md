@@ -26,6 +26,7 @@ Home, Customers, Organizations, Repositories, Applications, Exports, Search, Sec
 | Effective access | `GET /access?object_id=<uuid>` | direct and inherited principals, roles and allowed actions; object pages link to entity-specific views |
 | Repositories | `GET /repositories[?customer_id=<uuid>]` | public repositories for anonymous readers, or authorized repositories for a signed-in caller |
 | Repository | `GET /repository?id=<uuid>` | metadata, refs, content links, lifecycle state, and effective access |
+| Model | `GET /models/<namespace>/<name>` or `/models/<uuid>` | card, revisions, file sizes and deduplication savings, storage totals, and the verified dataset-to-model provenance chain |
 | Exports | `GET /exports?repository_id=<uuid>` | signed archive requests and prior export manifests; its download form calls the export capability |
 | Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree at a published ref |
 | File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>` | one file, backing blob and escaped contents |

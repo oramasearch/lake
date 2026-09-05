@@ -276,8 +276,12 @@ policies are evaluated from the proposed ref update once liquid #177 supplies it
 authorizer; CI is the build engine, not a product (#30). **Drive and model status (#7, #8, #43,
 #44, #45): implemented on the lake side.** Stable liquid node ids bind folder policy objects;
 live grants and expiring links use `authorize`; browse, preview, sharing, history and restore are
-server-rendered. Models and datasets remain repositories, and the Hugging Face-compatible read
-surface exposes model cards, files, and verified `sbom/1` plus `slsa_provenance/1` build evidence.
+server-rendered. Models and datasets remain repositories. Their native liquid sync path provides
+resumable chunk transfer and unique-byte metering, while the Hugging Face-compatible adapter
+provides repository creation, regular and basic-LFS commits, listings, metadata, and named or
+immutable downloads. Model reads expose revision/file storage savings and the verified
+dataset-to-model training chain alongside `sbom/1` and `slsa_provenance/1` build evidence. The
+server-rendered model page shows revisions, file sizes, deduplication, and training provenance.
 The liquid drive client and Linux shell integration are tracked in liquid #195 and #196. Contracts
 are [`../api/drive.md`](../api/drive.md), [`../api/sharing.md`](../api/sharing.md), and
 [`../api/models.md`](../api/models.md).

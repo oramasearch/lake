@@ -1828,4 +1828,84 @@ std::string web_ui_drive_link(std::string_view path,
     return web_ui_shell("lake — shared drive folder", "share link", content, false);
 }
 
+std::string web_ui_model(const nlohmann::json& model, bool signed_in) {
+    const nlohmann::json& storage = model.at("storage");
+    std::string content =
+        "<p class=\"eyebrow\">model</p><h1>" + web_ui_escape(model.value("modelId", "")) +
+        "</h1><p class=\"sub\">Revision <code>" + web_ui_escape(model.value("sha", "")) +
+        "</code></p><div class=\"grid\"><section class=\"panel\"><h2>Storage</h2><dl>";
+    content += "<dt>Logical bytes</dt><dd>" +
+               std::to_string(storage.value("logical_bytes", std::uint64_t{0})) + "</dd>";
+    content += "<dt>Unique bytes</dt><dd>" +
+               std::to_string(storage.value("unique_bytes", std::uint64_t{0})) + "</dd>";
+    content += "<dt>Deduplicated bytes</dt><dd>" +
+               std::to_string(storage.value("deduplicated_bytes", std::uint64_t{0})) + "</dd>";
+    content += "<dt>Deduplication ratio</dt><dd>" +
+               std::to_string(storage.value("dedup_ratio", 0.0)) + "</dd>";
+    content += "</dl></section><section class=\"panel\"><h2>Training provenance</h2>";
+    const nlohmann::json& provenance = model.at("training_provenance");
+    if (provenance.is_object()) {
+        content += provenance.value("verified", false)
+                       ? "<p><span class=\"badge\">verified</span></p>"
+                       : "<p><span class=\"badge\">not verified</span></p>";
+        content += "<dl><dt>Dataset</dt><dd><code>" +
+                   web_ui_escape(provenance.value("dataset_repository_id", "")) + "</code></dd>";
+        content += "<dt>Dataset revision</dt><dd><code>" +
+                   web_ui_escape(provenance.value("dataset_revision", "")) + "</code></dd>";
+        content += "<dt>Code revision</dt><dd><code>" +
+                   web_ui_escape(provenance.value("code_revision", "")) + "</code></dd>";
+        content += "<dt>Run</dt><dd><code>" + web_ui_escape(provenance.value("invocation_id", "")) +
+                   "</code></dd>";
+        content += "<dt>Runner</dt><dd><code>" + web_ui_escape(provenance.value("runner", "")) +
+                   "</code></dd>";
+        content += "<dt>Builder</dt><dd><code>" + web_ui_escape(provenance.value("builder", "")) +
+                   "</code></dd>";
+        content += "<dt>Environment digest</dt><dd><code>" +
+                   web_ui_escape(provenance.value("environment_digest", "")) + "</code></dd>";
+        content += "<dt>Parameters</dt><dd><code>" +
+                   web_ui_escape(provenance.value("parameters", nlohmann::json::array()).dump()) +
+                   "</code></dd>";
+        content += "<dt>Environment</dt><dd><code>" +
+                   web_ui_escape(provenance.value("environment", nlohmann::json::object()).dump()) +
+                   "</code></dd>";
+        content += "<dt>Model attestation</dt><dd><code>" +
+                   web_ui_escape(provenance.value("model_attestation", "")) + "</code></dd>";
+        content += "<dt>Run attestation</dt><dd><code>" +
+                   web_ui_escape(provenance.value("run_attestation", "")) + "</code></dd>";
+        if (!provenance.value("reason", "").empty()) {
+            content +=
+                "<dt>Reason</dt><dd>" + web_ui_escape(provenance.value("reason", "")) + "</dd>";
+        }
+        content += "</dl>";
+    } else {
+        content += "<p class=\"empty\">No training provenance is attached.</p>";
+    }
+    content += "</section></div><h2>Files</h2><table><thead><tr><th>Path</th><th>Size</th>"
+               "<th>Stored</th><th>Saved</th></tr></thead><tbody>";
+    for (const nlohmann::json& file : model.at("siblings")) {
+        content += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                               web_ui_escape(file.value("rfilename", "")),
+                               file.value("size", std::uint64_t{0}),
+                               file.value("storedSize", std::uint64_t{0}),
+                               file.value("deduplicatedBytes", std::uint64_t{0}));
+    }
+    if (model.at("siblings").empty()) {
+        content += "<tr><td colspan=\"4\" class=\"empty\">No files.</td></tr>";
+    }
+    content += "</tbody></table><h2>Revisions</h2><table><thead><tr><th>Revision</th>"
+               "<th>Logical</th><th>Unique</th><th>Saved</th></tr></thead><tbody>";
+    for (const nlohmann::json& revision : storage.at("revisions")) {
+        content += std::format("<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                               web_ui_escape(revision.value("revision", "")),
+                               revision.value("logical_bytes", std::uint64_t{0}),
+                               revision.value("unique_bytes", std::uint64_t{0}),
+                               revision.value("deduplicated_bytes", std::uint64_t{0}));
+    }
+    if (storage.at("revisions").empty()) {
+        content += "<tr><td colspan=\"4\" class=\"empty\">No revisions.</td></tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell("lake — model", model.value("modelId", ""), content, signed_in);
+}
+
 } // namespace lake::api
