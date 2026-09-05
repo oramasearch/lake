@@ -25,6 +25,10 @@ out) and are the unit-tested surface.
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public identity entry pages |
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated identity management pages |
 | `POST /identity/*` | form adapters that call the corresponding registry capability; see [`../ui/identity.md`](../ui/identity.md) |
+| `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and authorized management pages |
+| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed hosted application identity pages; custom hosts serve their corresponding entry pages |
+| `POST /apps/<id>/identity/*` | application-pool identity form adapters |
+| `GET /v1/apps/<id>/.well-known/jwks.json` | exact public application JWKS route |
 | `GET /v1/<capability>`, `POST /v1/<capability>` | the registry rendered as REST |
 | `POST /v1/repositories/<repository-id>/sync/{find-missing,push,pull,chunks}` | liquid sync operations with bounded streaming request and response bodies; see [`../api/sync.md`](../api/sync.md) |
 | `GET /v1/repositories/<repository-id>/sync/chunks/<digest>` | ranged liquid chunk reads with `offset` and `length` query parameters |

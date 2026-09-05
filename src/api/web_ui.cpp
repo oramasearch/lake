@@ -63,6 +63,7 @@ namespace {
 std::string nav(bool signed_in) {
     std::string out = "<nav><a href=\"/\">Home</a><a href=\"/customers\">Customers</a><a "
                       "href=\"/organizations\">Organizations</a><a "
+                      "href=\"/applications\">Applications</a><a "
                       "href=\"/repositories\">Repositories</a><a href=\"/search\">Search</a>"
                       "<a href=\"/metering\">Metering</a>"
                       "<a href=\"/secret-mounts\">Secrets</a><a href=\"/audit\">Audit</a>"
@@ -135,6 +136,38 @@ std::string parent_path(std::string_view path) {
 bool hidden_reformatting_entry(const RepositoryDiffEntry& entry) {
     return entry.changes.size() == 1 && entry.changes.front() == "modified" && entry.line_hunks &&
            entry.line_hunks->empty();
+}
+
+std::string theme_color(const control::Application& application,
+                        std::string_view key,
+                        std::string_view fallback) {
+    const std::string value = application.theme.value(std::string(key), std::string(fallback));
+    if ((value.size() == 4 || value.size() == 7) && value.front() == '#' &&
+        std::ranges::all_of(value.substr(1), [](unsigned char character) {
+            return std::isxdigit(character) != 0;
+        })) {
+        return value;
+    }
+    return std::string(fallback);
+}
+
+std::string application_shell(const control::Application& application,
+                              std::string_view title,
+                              std::string_view content) {
+    const std::string accent = theme_color(application, "accent_color", "#0b6e99");
+    const std::string background = theme_color(application, "background_color", "#fafaf8");
+    std::string html =
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>" +
+        web_ui_escape(title) +
+        "</title><link rel=\"stylesheet\" href=\"/style.css\"><style>:root{--accent:" + accent +
+        ";--paper:" + background +
+        "}</style></head><body><header><span "
+        "class=\"brand\">" +
+        web_ui_escape(application.name) + "</span></header><main>" + std::string(content) +
+        "</main></body></html>";
+    return html;
 }
 
 } // namespace
@@ -1218,6 +1251,253 @@ std::string web_ui_passkey_sign_in(std::string_view error) {
 <div class="actions"><button class="primary" id="use-passkey" type="button">Use passkey</button><span id="passkey-status" class="muted"></span></div></div>
 <script>(()=>{const b=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+'==='.slice((s.length+3)%4)),c=>c.charCodeAt(0));const e=a=>btoa(String.fromCharCode(...new Uint8Array(a))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');const q=(u,o)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)}).then(r=>r.json());document.getElementById('use-passkey').onclick=async()=>{const s=document.getElementById('passkey-status');try{const a=await q('/v1/begin_passkey_sign_in',{});if(!a.ok)throw Error(a.error.message);const o=a.value.public_key,c=o.challenge;o.challenge=b(o.challenge);const k=await navigator.credentials.get({publicKey:o});const z=await q('/v1/sign_in_passkey',{challenge:c,credential_id:e(k.rawId),client_data_json:e(k.response.clientDataJSON),authenticator_data:e(k.response.authenticatorData),signature:e(k.response.signature),device_name:document.getElementById('device-name').value});if(!z.ok)throw Error(z.error.message);location='/sessions'}catch(x){s.textContent=x.message}}})();</script>)html";
     return web_ui_shell("lake — passkey sign in", "identity", content, false);
+}
+
+std::string web_ui_application_sign_up(const control::Application& application,
+                                       std::string_view error) {
+    const std::string base = "/apps/" + web_ui_escape(application.id);
+    std::string content = "<p class=\"eyebrow\">secure sign-up</p><h1>Create your account</h1>";
+    content += error_markup(error);
+    content += "<form class=\"stack\" method=\"post\" action=\"" + base +
+               "/identity/sign-up\"><label>Email<input type=\"email\" name=\"email\" "
+               "autocomplete=\"email\" required></label><label>Display name<input type=\"text\" "
+               "name=\"display_name\" autocomplete=\"name\"></label><label>Password<input "
+               "type=\"password\" name=\"password\" autocomplete=\"new-password\" minlength=\"12\" "
+               "required></label><label>Device name<input type=\"text\" name=\"device_name\" "
+               "value=\"browser\" required></label><label>TAAP/1 identity document<textarea "
+               "name=\"identity_document\" spellcheck=\"false\" required></textarea></label>"
+               "<button class=\"primary\" type=\"submit\">Create account</button></form><p "
+               "class=\"muted\">Already registered? <a href=\"" +
+               base + "/sign-in\">Sign in</a>.</p>";
+    return application_shell(application, application.name + " — sign up", content);
+}
+
+std::string web_ui_application_sign_in(const control::Application& application,
+                                       std::string_view error) {
+    const std::string base = "/apps/" + web_ui_escape(application.id);
+    std::string content = "<p class=\"eyebrow\">secure sign-in</p><h1>Sign in</h1>";
+    content += error_markup(error);
+    content +=
+        "<form class=\"stack\" method=\"post\" action=\"" + base +
+        "/identity/sign-in\"><label>Email<input type=\"email\" name=\"email\" "
+        "autocomplete=\"username\" required></label><label>Password<input type=\"password\" "
+        "name=\"password\" autocomplete=\"current-password\" required></label><label>Device "
+        "name<input type=\"text\" name=\"device_name\" value=\"browser\" required></label>"
+        "<button class=\"primary\" type=\"submit\">Sign in</button></form><p><a href=\"" +
+        base + "/mfa\">Verify TOTP</a> · <a href=\"" + base +
+        "/passkey-sign-in\">Use a passkey</a></p><h2>OAuth</h2><form class=\"stack\" "
+        "method=\"post\" "
+        "action=\"" +
+        base +
+        "/identity/oauth\"><label>Provider<input type=\"text\" name=\"provider\" required></label>"
+        "<label>Device name<input type=\"text\" name=\"device_name\" value=\"browser\" "
+        "required></label>"
+        "<label>TAAP/1 identity document for first sign-in<textarea "
+        "name=\"identity_document\"></textarea>"
+        "</label><button class=\"primary\" type=\"submit\">Continue to provider</button></form><p "
+        "class=\"muted\"><a href=\"" +
+        base + "/sign-up\">Create an account</a></p>";
+    return application_shell(application, application.name + " — sign in", content);
+}
+
+std::string web_ui_application_mfa(const control::Application& application,
+                                   std::string_view error) {
+    const std::string base = "/apps/" + web_ui_escape(application.id);
+    std::string content = "<p class=\"eyebrow\">secure sign-in</p><h1>Verify MFA</h1>";
+    content += error_markup(error);
+    content +=
+        "<form class=\"stack\" method=\"post\" action=\"" + base +
+        "/identity/mfa/verify\"><label>Email<input type=\"email\" name=\"email\" "
+        "autocomplete=\"username\" required></label><label>Password<input type=\"password\" "
+        "name=\"password\" autocomplete=\"current-password\" required></label><label>TOTP or "
+        "recovery code<input type=\"text\" name=\"code\" autocomplete=\"one-time-code\" "
+        "required></label><label>Device name<input type=\"text\" name=\"device_name\" "
+        "value=\"browser\" required></label><button class=\"primary\" type=\"submit\">Verify "
+        "and sign in</button></form>";
+    return application_shell(application, application.name + " — MFA", content);
+}
+
+std::string web_ui_application_passkey_sign_in(const control::Application& application,
+                                               std::string_view error) {
+    const std::string base = "/apps/" + web_ui_escape(application.id);
+    const std::string redirect = application.redirect_uris.empty()
+                                     ? base + "/sign-in"
+                                     : web_ui_escape(application.redirect_uris.front());
+    std::string content = "<p class=\"eyebrow\">secure sign-in</p><h1>Use a passkey</h1>";
+    content += error_markup(error);
+    content +=
+        "<div class=\"panel\"><label>Device name <input id=\"device-name\" type=\"text\" "
+        "value=\"browser\"></label><a id=\"signed-in\" href=\"" +
+        redirect +
+        "\" hidden></a><div class=\"actions\"><button class=\"primary\" "
+        "id=\"use-passkey\" type=\"button\">Use passkey</button><span id=\"passkey-status\" "
+        "class=\"muted\"></span></div></div><script>(()=>{const b=s=>Uint8Array.from(atob(s"
+        ".replace(/-/g,'+').replace(/_/g,'/')+'==='.slice((s.length+3)%4)),c=>c.charCodeAt(0));"
+        "const e=a=>btoa(String.fromCharCode(...new Uint8Array(a))).replace(/\\+/g,'-').replace("
+        "/\\//g,'_').replace(/=+$/,'');const q=(u,o)=>fetch(u,{method:'POST',headers:{'Content-"
+        "Type':'application/"
+        "json'},body:JSON.stringify(o)}).then(r=>r.json());document.getElementById("
+        "'use-passkey').onclick=async()=>{const "
+        "s=document.getElementById('passkey-status');try{const "
+        "a=await q('" +
+        base +
+        "/identity/passkey/begin',{});if(!a.ok)throw Error(a.error.message);const "
+        "o=a.value.public_key,"
+        "c=o.challenge;o.challenge=b(o.challenge);const k=await "
+        "navigator.credentials.get({publicKey:o}"
+        ");const z=await q('" +
+        base +
+        "/identity/passkey/"
+        "sign-in',{challenge:c,credential_id:e(k.rawId),client_data_json:e(k.response"
+        ".clientDataJSON),authenticator_data:e(k.response.authenticatorData),signature:e(k."
+        "response."
+        "signature),device_name:document.getElementById('device-name').value});if(!z.ok)throw "
+        "Error(z."
+        "error.message);const d=document.getElementById('signed-in').href;location=d+(d.includes("
+        "'#')?'&':'#')+'access_token='+encodeURIComponent(z.value.access_token)+'&token_type="
+        "Bearer&expires_in='+z.value.expires_in}catch(x){s.textContent=x.message}}})();</script>";
+    return application_shell(application, application.name + " — passkey", content);
+}
+
+std::string web_ui_applications(const std::vector<control::Application>& applications,
+                                const std::vector<control::Customer>& customers,
+                                std::string_view error) {
+    std::string content = "<p class=\"eyebrow\">auth as a service</p><h1>Applications</h1>";
+    content += error_markup(error);
+    content +=
+        "<div class=\"grid\"><div><table><thead><tr><th>Name</th><th>Pool</th><th>Domain</th>"
+        "</tr></thead><tbody>";
+    for (const auto& application : applications) {
+        content += "<tr><td><a href=\"/application?id=" + web_ui_escape(application.id) + "\">" +
+                   web_ui_escape(application.name) + "</a></td><td><code>" +
+                   web_ui_escape(application.pool_id) + "</code></td><td>" +
+                   web_ui_escape(application.custom_sign_in_domain.empty()
+                                     ? "lake domain"
+                                     : application.custom_sign_in_domain) +
+                   "</td></tr>";
+    }
+    if (applications.empty()) {
+        content += "<tr><td colspan=\"3\" class=\"empty\">No applications.</td></tr>";
+    }
+    content += "</tbody></table></div><div class=\"panel\"><h2>Register application</h2><form "
+               "class=\"stack\" method=\"post\" action=\"/applications\"><label>Customer<select "
+               "name=\"customer_id\" required>";
+    for (const auto& customer : customers) {
+        content += "<option value=\"" + web_ui_escape(customer.id) + "\">" +
+                   web_ui_escape(customer.name) + "</option>";
+    }
+    content +=
+        "</select></label><label>Name<input name=\"name\" required></label><label>Allowed origins "
+        "(one per line)<textarea name=\"allowed_origins\" "
+        "required></textarea></label><label>Redirect "
+        "URIs (one per line)<textarea name=\"redirect_uris\"></textarea></label><label>Custom "
+        "sign-in "
+        "domain<input name=\"custom_sign_in_domain\"></label><label>Accent color<input "
+        "name=\"accent_color\" value=\"#0b6e99\"></label><button class=\"primary\" type=\"submit\">"
+        "Register</button></form></div></div>";
+    return web_ui_shell(
+        "lake — applications", std::format("{} applications", applications.size()), content, true);
+}
+
+std::string web_ui_application(const control::Application& application) {
+    const std::string id = web_ui_escape(application.id);
+    std::string content =
+        "<p class=\"eyebrow\">application</p><h1>" + web_ui_escape(application.name) +
+        "</h1><div class=\"panel\"><dl><dt>ID</dt><dd><code>" + id +
+        "</code></dd><dt>Pool</dt><dd><code>" + web_ui_escape(application.pool_id) +
+        "</code></dd><dt>Origins</dt><dd>" + web_ui_escape(joined(application.allowed_origins)) +
+        "</dd><dt>Redirect URIs</dt><dd>" + web_ui_escape(joined(application.redirect_uris)) +
+        "</dd><dt>Custom domain</dt><dd>" +
+        web_ui_escape(
+            application.custom_sign_in_domain.empty() ? "—" : application.custom_sign_in_domain) +
+        "</dd></dl></div><p><a href=\"/application/users?id=" + id +
+        "\">Users</a> · <a href=\"/application/organizations?id=" + id +
+        "\">Organizations</a> · <a href=\"/application/events?id=" + id +
+        "\">Webhook events</a> · <a href=\"/apps/" + id + "/sign-in\">Hosted sign-in</a></p>";
+    return web_ui_shell("lake — " + application.name, application.pool_id, content, true);
+}
+
+std::string web_ui_application_users(const control::Application& application,
+                                     const std::vector<control::ApplicationUser>& users) {
+    std::string content = "<p class=\"eyebrow\">application users</p><h1>" +
+                          web_ui_escape(application.name) +
+                          " users</h1><table><thead><tr><th>Email</th>"
+                          "<th>Name</th><th>Status</th><th></th></tr></thead><tbody>";
+    for (const auto& user : users) {
+        content +=
+            "<tr><td>" + web_ui_escape(user.email) + "</td><td>" +
+            web_ui_escape(user.display_name) + "</td><td>" + web_ui_escape(user.status) +
+            "</td><td><form class=\"inline\" method=\"post\" action=\"/application/users/suspend\">"
+            "<input type=\"hidden\" name=\"application_id\" value=\"" +
+            web_ui_escape(application.id) + "\"><input type=\"hidden\" name=\"user_id\" value=\"" +
+            web_ui_escape(user.user_id) +
+            "\"><button type=\"submit\">Suspend</button></form></td></tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell(
+        "lake — application users", std::format("{} users", users.size()), content, true);
+}
+
+std::string web_ui_application_organizations(
+    const control::Application& application,
+    const std::vector<control::ApplicationOrganization>& organizations) {
+    std::string content =
+        "<p class=\"eyebrow\">application organizations</p><h1>" + web_ui_escape(application.name) +
+        " organizations</h1><table><thead><tr><th>Name</th><th>TAAP identity</th><th>Updated</th>"
+        "<th></th></tr></thead><tbody>";
+    for (const auto& organization : organizations) {
+        content +=
+            "<tr><td>" + web_ui_escape(organization.name) + "</td><td><code>" +
+            web_ui_escape(organization.taap_id) + "</code></td><td>" +
+            web_ui_escape(organization.updated_at) +
+            "</td><td><form class=\"inline\" method=\"post\" action=\"/application/organizations/"
+            "delete\"><input type=\"hidden\" name=\"application_id\" value=\"" +
+            web_ui_escape(application.id) +
+            "\"><input type=\"hidden\" name=\"organization_id\" value=\"" +
+            web_ui_escape(organization.id) +
+            "\"><button type=\"submit\">Delete</button></form></td></tr>";
+    }
+    content +=
+        "</tbody></table><div class=\"panel\"><h2>Create organization</h2><form class=\"stack\" "
+        "method=\"post\" action=\"/application/organizations\"><input type=\"hidden\" "
+        "name=\"application_id\" value=\"" +
+        web_ui_escape(application.id) +
+        "\"><label>Name<input name=\"name\" required></label><label>TAAP identity<input "
+        "name=\"taap_id\" required></label><button class=\"primary\" type=\"submit\">Create"
+        "</button></form></div>";
+    return web_ui_shell("lake — application organizations",
+                        std::format("{} organizations", organizations.size()),
+                        content,
+                        true);
+}
+
+std::string web_ui_application_events(const control::Application& application,
+                                      const std::vector<control::ApplicationWebhookEvent>& events,
+                                      std::string_view webhook_secret) {
+    std::string content = "<p class=\"eyebrow\">application webhooks</p><h1>" +
+                          web_ui_escape(application.name) + " event log</h1>";
+    if (!webhook_secret.empty()) {
+        content += "<p class=\"notice\">Save this webhook secret now: <code>" +
+                   web_ui_escape(webhook_secret) + "</code></p>";
+    }
+    content += "<table><thead><tr><th>Event</th><th>ID</th><th>Created</th></tr></thead><tbody>";
+    for (const auto& event : events) {
+        content += "<tr><td>" + web_ui_escape(event.event) + "</td><td><code>" +
+                   web_ui_escape(event.id) + "</code></td><td>" + web_ui_escape(event.created_at) +
+                   "</td></tr>";
+    }
+    content +=
+        "</tbody></table><div class=\"panel\"><h2>Create webhook</h2><form class=\"stack\" "
+        "method=\"post\" action=\"/application/webhooks\"><input type=\"hidden\" "
+        "name=\"application_id\" value=\"" +
+        web_ui_escape(application.id) +
+        "\"><label>HTTPS URL<input type=\"url\" name=\"url\" required></label><label>Events "
+        "(comma-separated)<input name=\"events\" value=\"user.created,user.updated,user.deleted,"
+        "organization.created,organization.updated,organization.deleted,session.started,mfa."
+        "changed\" "
+        "required></label><button class=\"primary\" type=\"submit\">Create</button></form></div>";
+    return web_ui_shell(
+        "lake — application events", std::format("{} events", events.size()), content, true);
 }
 
 std::string web_ui_sessions(const std::vector<control::Session>& sessions,

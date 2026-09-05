@@ -144,6 +144,9 @@ bool role_valid_for_object_type(std::string_view object_type, std::string_view r
 }
 
 bool object_parent_allowed(std::string_view object_type, std::string_view parent_type) {
+    if (object_type == "application") {
+        return parent_type == "customer";
+    }
     if (object_type == "organization") {
         return parent_type == "customer";
     }

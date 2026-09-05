@@ -1490,6 +1490,90 @@ constexpr const char* forge_record_columns =
 constexpr const char* drive_share_link_columns =
     "id::text, repository_id::text, object_id::text, node_id, path, role, token_hash, "
     "expires_at::text, coalesce(revoked_at::text,''), created_by_taap_id, created_at::text";
+constexpr const char* application_columns =
+    "id::text, customer_id::text, pool_id, name, allowed_origins::text, redirect_uris::text, "
+    "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text";
+constexpr const char* application_user_columns =
+    "auth_app_users.application_id::text, auth_app_users.user_id::text, "
+    "coalesce(users.taap_id,''), coalesce(users.email,''), users.display_name, "
+    "auth_app_users.status, auth_app_users.created_at::text, auth_app_users.updated_at::text";
+constexpr const char* application_organization_columns =
+    "id::text, application_id::text, taap_id, name, metadata::text, created_at::text, "
+    "updated_at::text";
+constexpr const char* application_webhook_columns =
+    "id::text, application_id::text, url, array_to_json(events)::text, encrypted_secret, "
+    "enabled, created_at::text, updated_at::text";
+constexpr const char* application_webhook_event_columns =
+    "id::text, application_id::text, event, payload::text, created_at::text";
+constexpr const char* application_webhook_delivery_columns =
+    "id::text, event_id::text, webhook_id::text, attempt, status, signature, error, "
+    "created_at::text";
+
+Application application_of(const pqxx::row& row) {
+    return Application{
+        row[0].as<std::string>(),
+        row[1].as<std::string>(),
+        row[2].as<std::string>(),
+        row[3].as<std::string>(),
+        nlohmann::json::parse(row[4].as<std::string>()).get<std::vector<std::string>>(),
+        nlohmann::json::parse(row[5].as<std::string>()).get<std::vector<std::string>>(),
+        row[6].as<std::string>(),
+        nlohmann::json::parse(row[7].as<std::string>()),
+        row[8].as<std::string>(),
+        row[9].as<std::string>()};
+}
+
+ApplicationUser application_user_of(const pqxx::row& row) {
+    return ApplicationUser{row[0].as<std::string>(),
+                           row[1].as<std::string>(),
+                           row[2].as<std::string>(),
+                           row[3].as<std::string>(),
+                           row[4].as<std::string>(),
+                           row[5].as<std::string>(),
+                           row[6].as<std::string>(),
+                           row[7].as<std::string>()};
+}
+
+ApplicationOrganization application_organization_of(const pqxx::row& row) {
+    return ApplicationOrganization{row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::string>(),
+                                   row[3].as<std::string>(),
+                                   nlohmann::json::parse(row[4].as<std::string>()),
+                                   row[5].as<std::string>(),
+                                   row[6].as<std::string>()};
+}
+
+ApplicationWebhook application_webhook_of(const pqxx::row& row, std::string secret) {
+    return ApplicationWebhook{
+        row[0].as<std::string>(),
+        row[1].as<std::string>(),
+        row[2].as<std::string>(),
+        nlohmann::json::parse(row[3].as<std::string>()).get<std::vector<std::string>>(),
+        std::move(secret),
+        row[5].as<bool>(),
+        row[6].as<std::string>(),
+        row[7].as<std::string>()};
+}
+
+ApplicationWebhookEvent application_webhook_event_of(const pqxx::row& row) {
+    return ApplicationWebhookEvent{row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::string>(),
+                                   nlohmann::json::parse(row[3].as<std::string>()),
+                                   row[4].as<std::string>()};
+}
+
+ApplicationWebhookDelivery application_webhook_delivery_of(const pqxx::row& row) {
+    return ApplicationWebhookDelivery{row[0].as<std::string>(),
+                                      row[1].as<std::string>(),
+                                      row[2].as<std::string>(),
+                                      row[3].as<int>(),
+                                      row[4].as<int>(),
+                                      row[5].as<std::string>(),
+                                      row[6].as<std::string>(),
+                                      row[7].as<std::string>()};
+}
 
 ForgeRecord forge_record_of(const pqxx::row& row) {
     return ForgeRecord{row[0].as<std::string>(),
@@ -2585,6 +2669,500 @@ public:
         });
     }
 
+    Result<Application> create_application(const NewApplication& input) override {
+        return with_tx<Application>([&](pqxx::work& tx) -> Result<Application> {
+            const pqxx::result parents = tx.exec_params(
+                "SELECT id::text FROM objects WHERE object_type = 'customer' AND external_id = $1",
+                input.customer_id);
+            if (parents.empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "application customer policy object is missing"});
+            }
+            const std::string purpose = "application.jwt." + input.id;
+            const auto encrypted_seed = encrypt_secret(tx, purpose, input.signing_key.seed);
+            if (!encrypted_seed) {
+                return std::unexpected(encrypted_seed.error());
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                            "allowed_origins, redirect_uris, custom_sign_in_domain, theme) VALUES "
+                            "($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6::jsonb, NULLIF($7, ''), "
+                            "$8::jsonb) RETURNING ") +
+                    application_columns,
+                input.id,
+                input.customer_id,
+                input.pool_id,
+                input.name,
+                nlohmann::json(input.allowed_origins).dump(),
+                nlohmann::json(input.redirect_uris).dump(),
+                input.custom_sign_in_domain,
+                input.theme.dump());
+            tx.exec_params("INSERT INTO auth_app_signing_keys (application_id, kid, version, "
+                           "encrypted_seed, public_key, current) VALUES "
+                           "($1::uuid, $2, $3, $4, $5, true)",
+                           input.id,
+                           input.signing_key.kid,
+                           input.signing_key.version,
+                           *encrypted_seed,
+                           input.signing_key.public_key);
+            tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) VALUES "
+                           "('application', $1, $2::uuid)",
+                           input.id,
+                           parents[0][0].as<std::string>());
+            return application_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<Application>> list_applications(const std::string& customer_id,
+                                                       int limit) override {
+        return with_tx<std::vector<Application>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Application>> {
+                const pqxx::result rows =
+                    customer_id.empty()
+                        ? tx.exec_params(std::string("SELECT ") + application_columns +
+                                             " FROM auth_applications ORDER BY "
+                                             "created_at DESC LIMIT $1",
+                                         limit)
+                        : tx.exec_params(std::string("SELECT ") + application_columns +
+                                             " FROM auth_applications WHERE "
+                                             "customer_id = $1::uuid ORDER BY "
+                                             "created_at DESC LIMIT $2",
+                                         customer_id,
+                                         limit);
+                std::vector<Application> output;
+                for (const auto& row : rows) {
+                    output.push_back(application_of(row));
+                }
+                return output;
+            });
+    }
+
+    Result<Application> get_application(const std::string& id) override {
+        return application_by("id = $1::uuid", id);
+    }
+
+    Result<Application> get_application_by_pool(const std::string& pool_id) override {
+        return application_by("pool_id = $1", pool_id);
+    }
+
+    Result<Application>
+    get_application_by_domain(const std::string& custom_sign_in_domain) override {
+        return application_by("lower(custom_sign_in_domain) = lower($1)", custom_sign_in_domain);
+    }
+
+    Result<Application> update_application_theme(const std::string& id,
+                                                 const nlohmann::json& theme) override {
+        return with_tx<Application>([&](pqxx::work& tx) -> Result<Application> {
+            if (!theme.is_object()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "application theme must be an object"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE auth_applications SET theme = $2::jsonb WHERE id = $1::uuid "
+                            "RETURNING ") +
+                    application_columns,
+                id,
+                theme.dump());
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no application " + id});
+            }
+            return application_of(rows[0]);
+        });
+    }
+
+    Result<ApplicationSigningKey>
+    rotate_application_signing_key(const ApplicationSigningKey& input) override {
+        return with_tx<ApplicationSigningKey>([&](pqxx::work& tx) -> Result<ApplicationSigningKey> {
+            const std::string purpose = "application.jwt." + input.application_id;
+            const auto encrypted_seed = encrypt_secret(tx, purpose, input.seed);
+            if (!encrypted_seed) {
+                return std::unexpected(encrypted_seed.error());
+            }
+            tx.exec_params("UPDATE auth_app_signing_keys SET current = false, retired_at = "
+                           "now() WHERE application_id = $1::uuid AND current",
+                           input.application_id);
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO auth_app_signing_keys (application_id, kid, version, "
+                "encrypted_seed, public_key, current) VALUES ($1::uuid, $2, $3, $4, $5, true) "
+                "RETURNING created_at::text",
+                input.application_id,
+                input.kid,
+                input.version,
+                *encrypted_seed,
+                input.public_key);
+            ApplicationSigningKey output = input;
+            output.current = true;
+            output.created_at = rows[0][0].as<std::string>();
+            return output;
+        });
+    }
+
+    Result<ApplicationSigningKey>
+    current_application_signing_key(const std::string& application_id) override {
+        return with_tx<ApplicationSigningKey>([&](pqxx::work& tx) -> Result<ApplicationSigningKey> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT kid, version, encrypted_seed, public_key, created_at::text, "
+                               "coalesce(retired_at::text,'') FROM auth_app_signing_keys WHERE "
+                               "application_id = $1::uuid AND current",
+                               application_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "application has no current signing key"});
+            }
+            const auto seed = decrypt_secret(
+                tx, "application.jwt." + application_id, rows[0][2].as<std::string>());
+            if (!seed) {
+                return std::unexpected(seed.error());
+            }
+            return ApplicationSigningKey{application_id,
+                                         rows[0][0].as<std::string>(),
+                                         *seed,
+                                         rows[0][3].as<std::string>(),
+                                         rows[0][1].as<int>(),
+                                         true,
+                                         rows[0][4].as<std::string>(),
+                                         rows[0][5].as<std::string>()};
+        });
+    }
+
+    Result<std::vector<ApplicationSigningKey>>
+    list_application_signing_keys(const std::string& application_id) override {
+        return with_tx<std::vector<ApplicationSigningKey>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ApplicationSigningKey>> {
+                const pqxx::result rows =
+                    tx.exec_params("SELECT kid, version, public_key, current, created_at::text, "
+                                   "coalesce(retired_at::text,'') FROM auth_app_signing_keys WHERE "
+                                   "application_id = $1::uuid ORDER BY version",
+                                   application_id);
+                std::vector<ApplicationSigningKey> output;
+                for (const auto& row : rows) {
+                    output.push_back(ApplicationSigningKey{application_id,
+                                                           row[0].as<std::string>(),
+                                                           {},
+                                                           row[2].as<std::string>(),
+                                                           row[1].as<int>(),
+                                                           row[3].as<bool>(),
+                                                           row[4].as<std::string>(),
+                                                           row[5].as<std::string>()});
+                }
+                return output;
+            });
+    }
+
+    Result<ApplicationUser> register_application_user(const std::string& application_id,
+                                                      const std::string& user_id) override {
+        return with_tx<ApplicationUser>([&](pqxx::work& tx) -> Result<ApplicationUser> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO auth_app_users (application_id, user_id) VALUES "
+                            "($1::uuid, $2::uuid) ON CONFLICT (application_id, user_id) DO UPDATE "
+                            "SET updated_at = auth_app_users.updated_at RETURNING user_id::text"),
+                application_id,
+                user_id);
+            static_cast<void>(rows);
+            return application_user_tx(tx, application_id, user_id);
+        });
+    }
+
+    Result<ApplicationUser> get_application_user(const std::string& application_id,
+                                                 const std::string& user_id) override {
+        return with_tx<ApplicationUser>(
+            [&](pqxx::work& tx) { return application_user_tx(tx, application_id, user_id); });
+    }
+
+    Result<std::vector<ApplicationUser>> list_application_users(const std::string& application_id,
+                                                                const std::string& query,
+                                                                int limit) override {
+        return with_tx<std::vector<ApplicationUser>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ApplicationUser>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + application_user_columns +
+                        " FROM auth_app_users JOIN users ON users.id = auth_app_users.user_id "
+                        "WHERE auth_app_users.application_id = $1::uuid AND ($2 = '' OR "
+                        "coalesce(users.email,'') ILIKE '%' || $2 || '%' OR users.display_name "
+                        "ILIKE '%' || $2 || '%') ORDER BY auth_app_users.created_at DESC LIMIT $3",
+                    application_id,
+                    query,
+                    limit);
+                std::vector<ApplicationUser> output;
+                for (const auto& row : rows) {
+                    output.push_back(application_user_of(row));
+                }
+                return output;
+            });
+    }
+
+    Result<ApplicationUser> set_application_user_status(const std::string& application_id,
+                                                        const std::string& user_id,
+                                                        const std::string& status) override {
+        return with_tx<ApplicationUser>([&](pqxx::work& tx) -> Result<ApplicationUser> {
+            if (status != "active" && status != "suspended") {
+                return std::unexpected(
+                    StoreError{"invalid_input", "application user status is invalid"});
+            }
+            const pqxx::result updated = tx.exec_params(
+                "UPDATE auth_app_users SET status = $3 WHERE application_id = $1::uuid AND "
+                "user_id = $2::uuid RETURNING user_id::text",
+                application_id,
+                user_id,
+                status);
+            if (updated.empty()) {
+                return std::unexpected(StoreError{"not_found", "application user does not exist"});
+            }
+            if (status == "suspended") {
+                tx.exec_params("UPDATE sessions SET revoked_at = now() FROM auth_applications "
+                               "WHERE auth_applications.id = $1::uuid AND sessions.user_id = "
+                               "$2::uuid AND sessions.pool_id = auth_applications.pool_id AND "
+                               "sessions.revoked_at IS NULL",
+                               application_id,
+                               user_id);
+            }
+            return application_user_tx(tx, application_id, user_id);
+        });
+    }
+
+    Result<void> delete_application_user(const std::string& application_id,
+                                         const std::string& user_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result applications = tx.exec_params(
+                "SELECT pool_id FROM auth_applications WHERE id = $1::uuid", application_id);
+            if (applications.empty()) {
+                return std::unexpected(StoreError{"not_found", "application does not exist"});
+            }
+            const std::string pool_id = applications[0][0].as<std::string>();
+            tx.exec_params(
+                "DELETE FROM sessions WHERE user_id = $1::uuid AND pool_id = $2", user_id, pool_id);
+            tx.exec_params("DELETE FROM credentials WHERE user_id = $1::uuid AND pool_id = $2",
+                           user_id,
+                           pool_id);
+            const pqxx::result removed = tx.exec_params(
+                "DELETE FROM auth_app_users WHERE application_id = $1::uuid AND user_id = "
+                "$2::uuid RETURNING user_id::text",
+                application_id,
+                user_id);
+            if (removed.empty()) {
+                return std::unexpected(StoreError{"not_found", "application user does not exist"});
+            }
+            return {};
+        });
+    }
+
+    Result<ApplicationOrganization>
+    create_application_organization(const NewApplicationOrganization& input) override {
+        return with_tx<ApplicationOrganization>(
+            [&](pqxx::work& tx) -> Result<ApplicationOrganization> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("INSERT INTO auth_app_organizations (application_id, taap_id, "
+                                "name, metadata) VALUES ($1::uuid, $2, $3, $4::jsonb) RETURNING ") +
+                        application_organization_columns,
+                    input.application_id,
+                    input.taap_id,
+                    input.name,
+                    input.metadata.dump());
+                return application_organization_of(rows[0]);
+            });
+    }
+
+    Result<std::vector<ApplicationOrganization>>
+    list_application_organizations(const std::string& application_id, int limit) override {
+        return with_tx<std::vector<ApplicationOrganization>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ApplicationOrganization>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + application_organization_columns +
+                        " FROM auth_app_organizations WHERE application_id = $1::uuid ORDER BY "
+                        "created_at DESC LIMIT $2",
+                    application_id,
+                    limit);
+                std::vector<ApplicationOrganization> output;
+                for (const auto& row : rows) {
+                    output.push_back(application_organization_of(row));
+                }
+                return output;
+            });
+    }
+
+    Result<ApplicationOrganization> update_application_organization(
+        const std::string& id, const std::string& name, const nlohmann::json& metadata) override {
+        return with_tx<ApplicationOrganization>(
+            [&](pqxx::work& tx) -> Result<ApplicationOrganization> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("UPDATE auth_app_organizations SET name = CASE WHEN $2 = '' THEN "
+                                "name ELSE $2 END, metadata = $3::jsonb WHERE id = $1::uuid "
+                                "RETURNING ") +
+                        application_organization_columns,
+                    id,
+                    name,
+                    metadata.dump());
+                if (rows.empty()) {
+                    return std::unexpected(
+                        StoreError{"not_found", "application organization does not exist"});
+                }
+                return application_organization_of(rows[0]);
+            });
+    }
+
+    Result<void> delete_application_organization(const std::string& id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows = tx.exec_params(
+                "DELETE FROM auth_app_organizations WHERE id = $1::uuid RETURNING id::text", id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "application organization does not exist"});
+            }
+            return {};
+        });
+    }
+
+    Result<ApplicationWebhook>
+    create_application_webhook(const NewApplicationWebhook& input) override {
+        return with_tx<ApplicationWebhook>([&](pqxx::work& tx) -> Result<ApplicationWebhook> {
+            const std::string id = new_uuid_v4();
+            const auto encrypted = encrypt_secret(tx, "application.webhook." + id, input.secret);
+            if (!encrypted) {
+                return std::unexpected(encrypted.error());
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string(
+                    "INSERT INTO auth_app_webhooks (id, application_id, url, events, "
+                    "encrypted_secret) VALUES ($1::uuid, $2::uuid, $3, $4, $5) RETURNING ") +
+                    application_webhook_columns,
+                id,
+                input.application_id,
+                input.url,
+                input.events,
+                *encrypted);
+            return application_webhook_of(rows[0], input.secret);
+        });
+    }
+
+    Result<ApplicationWebhook> get_application_webhook(const std::string& id) override {
+        return with_tx<ApplicationWebhook>([&](pqxx::work& tx) -> Result<ApplicationWebhook> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + application_webhook_columns +
+                                   " FROM auth_app_webhooks WHERE id = $1::uuid",
+                               id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "application webhook does not exist"});
+            }
+            const auto secret =
+                decrypt_secret(tx, "application.webhook." + id, rows[0][4].as<std::string>());
+            if (!secret) {
+                return std::unexpected(secret.error());
+            }
+            return application_webhook_of(rows[0], *secret);
+        });
+    }
+
+    Result<std::vector<ApplicationWebhook>>
+    list_application_webhooks(const std::string& application_id, int limit) override {
+        return with_tx<std::vector<ApplicationWebhook>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ApplicationWebhook>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + application_webhook_columns +
+                        " FROM auth_app_webhooks WHERE application_id = $1::uuid ORDER BY "
+                        "created_at DESC LIMIT $2",
+                    application_id,
+                    limit);
+                std::vector<ApplicationWebhook> output;
+                for (const auto& row : rows) {
+                    const std::string id = row[0].as<std::string>();
+                    const auto secret =
+                        decrypt_secret(tx, "application.webhook." + id, row[4].as<std::string>());
+                    if (!secret) {
+                        return std::unexpected(secret.error());
+                    }
+                    output.push_back(application_webhook_of(row, *secret));
+                }
+                return output;
+            });
+    }
+
+    Result<ApplicationWebhookEvent>
+    create_application_webhook_event(const std::string& application_id,
+                                     const std::string& event,
+                                     const nlohmann::json& payload) override {
+        return with_tx<ApplicationWebhookEvent>(
+            [&](pqxx::work& tx) -> Result<ApplicationWebhookEvent> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("INSERT INTO auth_app_webhook_events (application_id, event, "
+                                "payload) VALUES ($1::uuid, $2, $3::jsonb) RETURNING ") +
+                        application_webhook_event_columns,
+                    application_id,
+                    event,
+                    payload.dump());
+                return application_webhook_event_of(rows[0]);
+            });
+    }
+
+    Result<ApplicationWebhookEvent> get_application_webhook_event(const std::string& id) override {
+        return with_tx<ApplicationWebhookEvent>(
+            [&](pqxx::work& tx) -> Result<ApplicationWebhookEvent> {
+                const pqxx::result rows =
+                    tx.exec_params(std::string("SELECT ") + application_webhook_event_columns +
+                                       " FROM auth_app_webhook_events WHERE id = $1::uuid",
+                                   id);
+                if (rows.empty()) {
+                    return std::unexpected(
+                        StoreError{"not_found", "application webhook event does not exist"});
+                }
+                return application_webhook_event_of(rows[0]);
+            });
+    }
+
+    Result<std::vector<ApplicationWebhookEvent>>
+    list_application_webhook_events(const std::string& application_id, int limit) override {
+        return with_tx<std::vector<ApplicationWebhookEvent>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ApplicationWebhookEvent>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + application_webhook_event_columns +
+                        " FROM auth_app_webhook_events WHERE application_id = $1::uuid ORDER BY "
+                        "created_at DESC LIMIT $2",
+                    application_id,
+                    limit);
+                std::vector<ApplicationWebhookEvent> output;
+                for (const auto& row : rows) {
+                    output.push_back(application_webhook_event_of(row));
+                }
+                return output;
+            });
+    }
+
+    Result<ApplicationWebhookDelivery>
+    create_application_webhook_delivery(const NewApplicationWebhookDelivery& input) override {
+        return with_tx<ApplicationWebhookDelivery>(
+            [&](pqxx::work& tx) -> Result<ApplicationWebhookDelivery> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("INSERT INTO auth_app_webhook_deliveries (event_id, webhook_id, "
+                                "attempt, status, signature, error) VALUES ($1::uuid, $2::uuid, "
+                                "$3, $4, $5, $6) RETURNING ") +
+                        application_webhook_delivery_columns,
+                    input.event_id,
+                    input.webhook_id,
+                    input.attempt,
+                    input.status,
+                    input.signature,
+                    input.error);
+                return application_webhook_delivery_of(rows[0]);
+            });
+    }
+
+    Result<std::vector<ApplicationWebhookDelivery>>
+    list_application_webhook_deliveries(const std::string& event_id) override {
+        return with_tx<std::vector<ApplicationWebhookDelivery>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ApplicationWebhookDelivery>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + application_webhook_delivery_columns +
+                        " FROM auth_app_webhook_deliveries WHERE event_id = $1::uuid ORDER BY "
+                        "created_at, attempt",
+                    event_id);
+                std::vector<ApplicationWebhookDelivery> output;
+                for (const auto& row : rows) {
+                    output.push_back(application_webhook_delivery_of(row));
+                }
+                return output;
+            });
+    }
+
     audit::Result<audit::Identity> current_lake_identity() override {
         return with_audit_tx<audit::Identity>([](pqxx::work& tx) -> audit::Result<audit::Identity> {
             const pqxx::result rows =
@@ -2843,13 +3421,24 @@ public:
                 StoreError{"store_error", "could not derive password credential"});
         }
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
+            std::string application_id;
+            if (in.pool_id != "lake") {
+                const pqxx::result applications = tx.exec_params(
+                    "SELECT id::text FROM auth_applications WHERE pool_id = $1", in.pool_id);
+                if (applications.empty()) {
+                    return std::unexpected(
+                        StoreError{"invalid_input", "application pool does not exist"});
+                }
+                application_id = applications[0][0].as<std::string>();
+            }
             const pqxx::result user_rows =
-                tx.exec_params("INSERT INTO users (taap_id, email, display_name) "
-                               "VALUES ($1, $2, $3) "
+                tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) "
+                               "VALUES ($1, $2, $3, $4) "
                                "RETURNING id::text",
                                identity->identifier,
                                in.email,
-                               in.display_name);
+                               in.display_name,
+                               in.pool_id);
             const std::string user_id = user_rows[0][0].as<std::string>();
             tx.exec_params("INSERT INTO identity_documents (user_id, document, "
                            "document_hash) VALUES ($1::uuid, to_jsonb($2::text), $3)",
@@ -2863,6 +3452,12 @@ public:
                            in.pool_id,
                            in.email,
                            password_hash);
+            if (!application_id.empty()) {
+                tx.exec_params("INSERT INTO auth_app_users (application_id, user_id) VALUES "
+                               "($1::uuid, $2::uuid)",
+                               application_id,
+                               user_id);
+            }
             return issue_session(tx,
                                  user_id,
                                  in.pool_id,
@@ -2887,6 +3482,10 @@ public:
                 return std::unexpected(StoreError{"not_found", "invalid email or password"});
             }
             const std::string user_id = rows[0][0].as<std::string>();
+            if (const auto active = require_application_user_active_tx(tx, in.pool_id, user_id);
+                !active) {
+                return std::unexpected(active.error());
+            }
             const pqxx::result totp_rows = tx.exec_params(
                 "SELECT 1 FROM credentials WHERE user_id = $1::uuid AND pool_id = $2 "
                 "AND kind = 'totp' AND revoked_at IS NULL",
@@ -3014,6 +3613,11 @@ public:
                                              password_rows[0][1].as<std::string>(), in.password)) {
                 return std::unexpected(StoreError{"not_found", "invalid email or password"});
             }
+            if (const auto active = require_application_user_active_tx(
+                    tx, in.pool_id, password_rows[0][0].as<std::string>());
+                !active) {
+                return std::unexpected(active.error());
+            }
             return sign_in_totp_tx(tx, in, password_rows[0][0].as<std::string>());
         });
     }
@@ -3130,6 +3734,11 @@ public:
                 return std::unexpected(StoreError{"not_found", "passkey is not registered"});
             }
             const std::uint32_t previous_count = rows[0][2].as<std::uint32_t>();
+            if (const auto active = require_application_user_active_tx(
+                    tx, in.pool_id, rows[0][0].as<std::string>());
+                !active) {
+                return std::unexpected(active.error());
+            }
             const auto sign_count =
                 identity_crypto::verify_passkey_assertion(in.client_data_json,
                                                           in.authenticator_data,
@@ -3166,6 +3775,16 @@ public:
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity& in) override {
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
             const std::string subject = in.provider + ":" + in.subject;
+            std::string application_id;
+            if (in.pool_id != "lake") {
+                const pqxx::result applications = tx.exec_params(
+                    "SELECT id::text FROM auth_applications WHERE pool_id = $1", in.pool_id);
+                if (applications.empty()) {
+                    return std::unexpected(
+                        StoreError{"invalid_input", "application pool does not exist"});
+                }
+                application_id = applications[0][0].as<std::string>();
+            }
             pqxx::result rows =
                 tx.exec_params("SELECT user_id::text FROM credentials WHERE pool_id = $1 "
                                "AND kind = 'oauth' AND subject = $2 AND revoked_at IS NULL",
@@ -3178,11 +3797,12 @@ public:
                 if (!identity) {
                     return std::unexpected(identity.error());
                 }
-                rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name) VALUES "
-                                      "($1, $2, $3) RETURNING id::text",
+                rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) "
+                                      "VALUES ($1, $2, $3, $4) RETURNING id::text",
                                       identity->identifier,
                                       nullable(in.email),
-                                      in.display_name);
+                                      in.display_name,
+                                      in.pool_id);
                 user_id = rows[0][0].as<std::string>();
                 tx.exec_params("INSERT INTO identity_documents (user_id, document, "
                                "document_hash) VALUES ($1::uuid, to_jsonb($2::text), $3)",
@@ -3194,8 +3814,18 @@ public:
                                user_id,
                                in.pool_id,
                                subject);
+                if (!application_id.empty()) {
+                    tx.exec_params("INSERT INTO auth_app_users (application_id, user_id) VALUES "
+                                   "($1::uuid, $2::uuid)",
+                                   application_id,
+                                   user_id);
+                }
             } else {
                 user_id = rows[0][0].as<std::string>();
+            }
+            if (const auto active = require_application_user_active_tx(tx, in.pool_id, user_id);
+                !active) {
+                return std::unexpected(active.error());
             }
             return issue_session(tx,
                                  user_id,
@@ -3421,7 +4051,12 @@ public:
                         "LEFT JOIN users ON users.id = sessions.user_id "
                         "WHERE sessions.revoked_at IS NULL AND (sessions.expires_at IS NULL "
                         "OR sessions.expires_at > now()) AND (devices.id IS NULL OR "
-                        "devices.revoked_at IS NULL)");
+                        "devices.revoked_at IS NULL) AND (sessions.pool_id = 'lake' OR EXISTS "
+                        "(SELECT 1 FROM auth_applications JOIN auth_app_users ON "
+                        "auth_app_users.application_id = auth_applications.id WHERE "
+                        "auth_applications.pool_id = sessions.pool_id AND "
+                        "auth_app_users.user_id = sessions.user_id AND "
+                        "auth_app_users.status = 'active'))");
             for (const pqxx::row& row : rows) {
                 const std::string secret_hash = row[13].as<std::string>();
                 if (!identity_crypto::verify_secret(secret_hash, secret)) {
@@ -5485,6 +6120,52 @@ public:
     }
 
 private:
+    Result<Application> application_by(std::string_view predicate, const std::string& value) {
+        return with_tx<Application>([&](pqxx::work& tx) -> Result<Application> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + application_columns +
+                                   " FROM auth_applications WHERE " + std::string(predicate),
+                               value);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "application does not exist"});
+            }
+            return application_of(rows[0]);
+        });
+    }
+
+    Result<ApplicationUser> application_user_tx(pqxx::work& tx,
+                                                const std::string& application_id,
+                                                const std::string& user_id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + application_user_columns +
+                " FROM auth_app_users JOIN users ON users.id = auth_app_users.user_id WHERE "
+                "auth_app_users.application_id = $1::uuid AND auth_app_users.user_id = $2::uuid",
+            application_id,
+            user_id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "application user does not exist"});
+        }
+        return application_user_of(rows[0]);
+    }
+
+    Result<void> require_application_user_active_tx(pqxx::work& tx,
+                                                    const std::string& pool_id,
+                                                    const std::string& user_id) {
+        if (pool_id == "lake") {
+            return {};
+        }
+        const pqxx::result rows = tx.exec_params(
+            "SELECT auth_app_users.status FROM auth_applications JOIN auth_app_users ON "
+            "auth_app_users.application_id = auth_applications.id WHERE "
+            "auth_applications.pool_id = $1 AND auth_app_users.user_id = $2::uuid",
+            pool_id,
+            user_id);
+        if (rows.empty() || rows[0][0].as<std::string>() != "active") {
+            return std::unexpected(StoreError{"unauthorized", "application user is suspended"});
+        }
+        return {};
+    }
+
     bool organization_admin(pqxx::work& tx,
                             const std::string& organization_id,
                             const std::string& principal_taap_id) {
