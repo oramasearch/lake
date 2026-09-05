@@ -9,6 +9,19 @@ TEST(WebUi, EscapesHtml) {
               "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
 }
 
+TEST(WebUi, EmbedsEveryDesignSystemFont) {
+    for (const std::string_view name : {"ibm-plex-sans-400.woff2",
+                                        "ibm-plex-sans-500.woff2",
+                                        "ibm-plex-sans-600.woff2",
+                                        "ibm-plex-mono-400.woff2",
+                                        "ibm-plex-mono-500.woff2"}) {
+        const std::string_view font = lake::api::web_ui_font(name);
+        ASSERT_GE(font.size(), 4);
+        EXPECT_EQ(font.substr(0, 4), "wOF2");
+    }
+    EXPECT_TRUE(lake::api::web_ui_font("unknown.woff2").empty());
+}
+
 TEST(DrivePreview, DefaultRegistryRendersEveryFormat) {
     auto registry = lake::api::DriveFormatRegistry::defaults();
     const std::vector<std::pair<std::string, std::string>> fixtures{

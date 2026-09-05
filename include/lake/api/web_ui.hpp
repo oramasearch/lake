@@ -20,6 +20,9 @@ namespace lake::api {
 std::string web_ui_escape(std::string_view text);
 std::string web_ui_stylesheet();
 
+// A self-hosted IBM Plex WOFF2 face embedded in the binary. Unknown names return an empty view.
+std::string_view web_ui_font(std::string_view name);
+
 // The page frame: title, shared navigation, and page content. signed_in switches
 // the session link.
 std::string web_ui_shell(std::string_view title,

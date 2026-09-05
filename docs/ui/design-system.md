@@ -32,6 +32,15 @@ extension. An explicit `data-theme` setting wins over `prefers-color-scheme`; wi
 setting, the browser preference selects the theme. Reduced-motion collapses all three upstream
 duration tokens.
 
+## Fonts
+
+IBM Plex Sans 400, 500, and 600 and IBM Plex Mono 400 and 500 are self-hosted Latin WOFF2
+subsets under `assets/fonts/`. They are sourced from the Fontsource versions pinned by the design
+system, and the Sans and Mono OFL-1.1 notices ship beside them. CMake embeds the files into the
+binary; Lake serves `/fonts/<face>.woff2` as `font/woff2` with
+`public, max-age=31536000, immutable`. The stylesheet declares every face with `font-display:
+swap`. No browser request reaches a third-party origin.
+
 ## Components and pages
 
 The shell, component catalog, page recipe, accessibility checks, and screenshot workflow are
