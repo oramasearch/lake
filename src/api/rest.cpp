@@ -102,6 +102,22 @@ nlohmann::json sync_parameter(std::string name, std::string location, bool requi
             {"schema", {{"type", "string"}}}};
 }
 
+nlohmann::json sync_ref_outcome_schema() {
+    return {
+        {"type", "object"},
+        {"properties",
+         {{"name", {{"type", "string"}}},
+          {"outcome", {{"type", "string"}, {"enum", {"applied", "refused"}}}},
+          {"reason", {{"type", "string"}}}}},
+        {"required", {"name", "outcome"}},
+        {"additionalProperties", false},
+    };
+}
+
+nlohmann::json sync_binary_schema() {
+    return {{"type", "string"}, {"format", "binary"}};
+}
+
 nlohmann::json sync_operation(const Capability& capability) {
     nlohmann::json operation;
     operation["operationId"] = capability.name;
@@ -121,18 +137,39 @@ nlohmann::json sync_operation(const Capability& capability) {
         length["schema"]["minimum"] = 0;
         operation["parameters"].push_back(std::move(length));
     } else {
+        nlohmann::json request_schema = sync_binary_schema();
+        if (capability.name == "push") {
+            request_schema["description"] =
+                "A liquid sync-v1 metadata stream. Its canonical-CBOR header may set atomic true.";
+            request_schema["x-liquid-sync-header-schema"] = {
+                {"type", "object"},
+                {"properties", {{"atomic", {{"type", "boolean"}}}}},
+            };
+        }
         operation["requestBody"] = {
             {"required", true},
             {"content",
-             {{"application/vnd.liquid.sync-v1",
-               {{"schema", {{"type", "string"}, {"format", "binary"}}}}}}},
+             {{"application/vnd.liquid.sync-v1", {{"schema", std::move(request_schema)}}}}},
         };
     }
     nlohmann::json success = {{"description", "the sync operation succeeded"}};
     if (capability.name != "upload_chunks") {
+        nlohmann::json response_schema = sync_binary_schema();
+        if (capability.name == "push") {
+            success["description"] =
+                "The push was accepted and reports every requested reference outcome.";
+            response_schema["description"] =
+                "A liquid sync-v1 acknowledgement stream. Its canonical-CBOR header carries "
+                "outcomes in request-reference order.";
+            response_schema["x-liquid-sync-header-schema"] = {
+                {"type", "object"},
+                {"properties",
+                 {{"outcomes", {{"type", "array"}, {"items", sync_ref_outcome_schema()}}}}},
+                {"required", {"outcomes"}},
+            };
+        }
         success["content"] = {
-            {"application/vnd.liquid.sync-v1",
-             {{"schema", {{"type", "string"}, {"format", "binary"}}}}},
+            {"application/vnd.liquid.sync-v1", {{"schema", std::move(response_schema)}}},
         };
     }
     operation["responses"] = {

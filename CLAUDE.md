@@ -32,8 +32,9 @@ conflict values, paged artifact results with verified attestations and trace sum
 effective access; anonymous readers receive only public repositories. These repository
 data pages are not part of the production state above.
 Lake links libliquid as a library-only submodule and opens one customer store at
-`LAKE_STORE_ROOT/<customer id>/store`; liquid #160, #165, and #184's client, server, protocol, and
-reference-update authorization contracts are pinned. The source tree serves repository push, pull,
+`LAKE_STORE_ROOT/<customer id>/store`; liquid #160, #165, and #192's client, server, protocol, and
+per-reference authorization and outcome contracts are pinned. The source tree serves repository
+push, pull,
 missing-object negotiation, chunk upload,
 and ranged reads through the registry, with per-change and protected-reference policy and signed
 audit. These routes are not
