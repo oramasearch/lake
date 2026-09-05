@@ -10,6 +10,7 @@ add_executable(lake-tests test_web_ui.cpp
   test_offline_recovery.cpp
   test_pki.cpp
   test_callers.cpp
+  test_transparency.cpp
   test_postgres_identity.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest_main)
 include(GoogleTest)

@@ -108,12 +108,14 @@ add_library(lake-core STATIC
   src/api/drive.cpp
   src/api/drive_capabilities.cpp
   src/api/model_capabilities.cpp
+  src/api/transparency_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp
   src/control/handles.cpp
   src/control/policy.cpp
   src/search/index.cpp
+  src/transparency/tuf.cpp
   src/telemetry/metrics.cpp
 )
 target_include_directories(lake-core PUBLIC include)
