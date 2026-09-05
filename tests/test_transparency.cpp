@@ -30,6 +30,7 @@
 #include "lake/transparency/checkpoint.hpp"
 #include "lake/transparency/log.hpp"
 #include "lake/transparency/tuf.hpp"
+#include "temporary_directory.hpp"
 
 using nlohmann::json;
 
@@ -228,8 +229,7 @@ class TemporaryRoot {
 public:
     TemporaryRoot() {
         static std::atomic<unsigned long> next{0};
-        path_ =
-            std::filesystem::temp_directory_path() / ("lake-tuf-test-" + std::to_string(++next));
+        path_ = lake::test::fixture_path("tuf-" + std::to_string(++next));
         std::filesystem::remove_all(path_);
         std::filesystem::create_directories(path_);
     }

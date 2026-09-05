@@ -20,6 +20,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "temporary_directory.hpp"
 #include "webauthn_test_support.hpp"
 
 namespace {
@@ -44,8 +45,7 @@ std::string base64url(const std::vector<std::byte>& bytes) {
 
 std::string signed_identity_document(std::string_view label) {
     const std::filesystem::path home =
-        std::filesystem::temp_directory_path() /
-        ("lake-identity-public-api-" + std::to_string(getpid()) + "-" + std::string(label));
+        lake::test::fixture_path("identity-public-api-" + std::string(label));
     std::error_code error;
     std::filesystem::remove_all(home, error);
     setenv("LIQUID_HOME", home.c_str(), 1);

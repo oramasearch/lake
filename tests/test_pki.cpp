@@ -17,6 +17,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/pki.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "temporary_directory.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -474,10 +475,8 @@ TEST(Pki, PersistsAuthorityKeysThroughTheCustomerKeystore) {
 }
 
 TEST(Pki, IssuesOpenSshUserAndHostCertificates) {
-    char directory_template[] = "/tmp/lake-ssh-XXXXXX";
-    const char* directory_value = mkdtemp(directory_template);
-    ASSERT_NE(directory_value, nullptr);
-    const std::filesystem::path directory(directory_value);
+    const std::filesystem::path directory = lake::test::fixture_path("ssh");
+    std::filesystem::create_directories(directory);
     const std::filesystem::path key_path = directory / "subject";
     const std::string generate_command = "ssh-keygen -q -t ed25519 -N '' -f " + key_path.string();
     ASSERT_EQ(std::system(generate_command.c_str()), 0);

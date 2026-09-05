@@ -44,6 +44,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/telemetry/metrics.hpp"
+#include "temporary_directory.hpp"
 
 using nlohmann::json;
 using namespace lake::api;
@@ -304,7 +305,7 @@ class TemporaryRepositoryRoot {
 public:
     TemporaryRepositoryRoot() {
         static std::atomic<unsigned long> next{0};
-        path_ = std::filesystem::temp_directory_path() / ("lake-web-ui-" + std::to_string(++next));
+        path_ = lake::test::fixture_path("web-ui-" + std::to_string(++next));
         std::filesystem::create_directories(path_);
     }
 
@@ -325,8 +326,7 @@ class TemporarySyncRoot {
 public:
     TemporarySyncRoot() {
         static std::atomic<unsigned long> next{0};
-        path_ = std::filesystem::temp_directory_path() /
-                ("lake-sync-" + std::to_string(getpid()) + "-" + std::to_string(++next));
+        path_ = lake::test::fixture_path("sync-" + std::to_string(++next));
         std::filesystem::create_directories(path_);
     }
 

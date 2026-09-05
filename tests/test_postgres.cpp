@@ -14,6 +14,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/search/index.hpp"
+#include "temporary_directory.hpp"
 
 namespace {
 
@@ -26,8 +27,7 @@ class TemporarySearchStore {
 public:
     TemporarySearchStore() {
         static std::atomic<unsigned long> next{0};
-        path_ = std::filesystem::temp_directory_path() /
-                ("lake-postgres-search-" + std::to_string(++next));
+        path_ = lake::test::fixture_path("postgres-search-" + std::to_string(++next));
         std::filesystem::create_directories(path_);
     }
 
