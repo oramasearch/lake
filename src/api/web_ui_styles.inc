@@ -715,6 +715,148 @@ dd {
   max-height: 40rem;
   overflow: auto;
 }
+.forge-heading,
+.section-heading,
+.change-list li,
+.detail-list li,
+.language-summary li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lake-space-3);
+}
+.forge-heading {
+  align-items: start;
+}
+.forge-tabs {
+  margin: var(--lake-space-6) 0 var(--lake-space-4);
+  overflow-x: auto;
+  flex-wrap: nowrap;
+}
+.forge-tabs a {
+  flex: 0 0 auto;
+}
+.repository-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(17rem, 21rem);
+  gap: var(--lake-space-4);
+  align-items: start;
+}
+.repository-main,
+.repository-sidebar {
+  min-width: 0;
+}
+.repository-sidebar {
+  display: grid;
+  gap: var(--lake-space-4);
+}
+.repository-sidebar .panel h2,
+.repository-browser h2,
+.recent-changes h2,
+.readme-panel h2 {
+  margin: 0;
+  font-size: var(--lake-text-16);
+}
+.section-heading {
+  align-items: baseline;
+  margin-bottom: var(--lake-space-3);
+}
+.section-heading p {
+  margin: var(--lake-space-1) 0 0;
+}
+.tree-group {
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+.tree-group summary {
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--lake-space-2);
+  color: var(--lake-text-secondary);
+  cursor: pointer;
+}
+.forge-tree,
+.change-list,
+.detail-list,
+.language-summary {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.forge-tree li {
+  min-height: 2.5rem;
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--lake-space-2);
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+.tree-kind,
+.tree-size {
+  color: var(--lake-text-tertiary);
+}
+.tree-size {
+  font-family: var(--lake-font-mono);
+  font-size: var(--lake-text-12);
+}
+.change-list li,
+.detail-list li,
+.language-summary li {
+  min-height: 2.75rem;
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+.change-list li > div,
+.detail-list li > div {
+  min-width: 0;
+  display: grid;
+}
+.change-list .muted {
+  font-size: var(--lake-text-12);
+}
+.identifier {
+  max-width: 18rem;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compact-empty {
+  padding: var(--lake-space-5);
+}
+.markdown-body {
+  max-width: 78ch;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  scroll-margin-top: calc(var(--lake-topbar-height) + var(--lake-space-3));
+}
+.markdown-body h1 {
+  margin-top: var(--lake-space-6);
+  font-size: var(--lake-text-24);
+}
+.heading-anchor {
+  margin-left: var(--lake-space-2);
+  color: var(--lake-text-tertiary);
+  text-decoration: none;
+  opacity: 0;
+}
+.markdown-body :is(h1, h2, h3, h4, h5, h6):hover .heading-anchor,
+.heading-anchor:focus-visible {
+  opacity: 1;
+}
+.repository-sidebar pre {
+  padding: var(--lake-space-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.repository-sidebar pre code {
+  padding: 0;
+  background: transparent;
+}
 
 @media (max-width: 58rem) {
   .app-shell {
@@ -749,6 +891,9 @@ dd {
   }
   th {
     top: var(--lake-topbar-height);
+  }
+  .repository-layout {
+    grid-template-columns: 1fr;
   }
 }
 

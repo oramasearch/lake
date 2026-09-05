@@ -1,5 +1,6 @@
 #pragma once
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +19,7 @@
 namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
+std::string web_ui_markdown(std::string_view markdown);
 std::string web_ui_stylesheet();
 std::string web_ui_icon(std::string_view name);
 
@@ -82,6 +84,20 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers);
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners,
                                 bool signed_in = true);
+
+struct RepositoryHomeData {
+    std::vector<RepositoryContentRef> refs;
+    std::vector<RepositoryTreeEntry> tree;
+    std::vector<RepositoryChange> changes;
+    std::optional<RepositoryFile> readme;
+    std::vector<control::EffectiveAccessEntry> access;
+    std::vector<control::ForgeRecord> releases;
+};
+
+std::string web_ui_repository(const control::Repository& repository,
+                              const control::Customer* owner,
+                              const RepositoryHomeData& data,
+                              bool signed_in = true);
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const std::vector<RepositoryContentRef>& refs = {},

@@ -2,6 +2,7 @@
 
 Drive browsing, preview, history, sharing, and documented Linux client states are in
 [`drive.md`](drive.md).
+The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at `/style.css`, an accessible shared shell,
@@ -25,7 +26,7 @@ exports, SSO, repository content, and drive views.
 | Grants | `GET /grants?object_id=<uuid>` | direct policy grants and their attestation evidence |
 | Effective access | `GET /access?object_id=<uuid>` | direct and inherited principals, roles and allowed actions; object pages link to entity-specific views |
 | Repositories | `GET /repositories[?customer_id=<uuid>]` | public repositories for anonymous readers, or authorized repositories for a signed-in caller |
-| Repository | `GET /repository?id=<uuid>` | metadata, refs, content links, lifecycle state, and effective access |
+| Repository | `GET /repository?id=<uuid>` | forge home with tree, recent changes, rendered README, refs and releases, clone/push commands, language/size summary, lifecycle state, and effective access |
 | Model | `GET /models/<namespace>/<name>` or `/models/<uuid>` | card, revisions, file sizes and deduplication savings, storage totals, and the verified dataset-to-model provenance chain |
 | Exports | `GET /exports?repository_id=<uuid>` | signed archive requests and prior export manifests; its download form calls the export capability |
 | Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree at a published ref |

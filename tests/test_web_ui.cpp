@@ -29,6 +29,17 @@ TEST(WebUi, EscapesHtml) {
               "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
 }
 
+TEST(WebUi, MarkdownEscapesRawHtmlAndAddsStableHeadingAnchors) {
+    const std::string html = lake::api::web_ui_markdown(
+        "# Overview\n\nUse `<safe>` here.\n\n## Details\n\n## Details\n\n<script>bad()</script>");
+    EXPECT_NE(html.find("id=\"overview\""), std::string::npos);
+    EXPECT_NE(html.find("id=\"details\""), std::string::npos);
+    EXPECT_NE(html.find("id=\"details-2\""), std::string::npos);
+    EXPECT_NE(html.find("<code>&lt;safe&gt;</code>"), std::string::npos);
+    EXPECT_NE(html.find("&lt;script&gt;bad()&lt;/script&gt;"), std::string::npos);
+    EXPECT_EQ(html.find("<script>bad()</script>"), std::string::npos);
+}
+
 TEST(WebUi, EmbedsEveryDesignSystemFont) {
     for (const std::string_view name : {"ibm-plex-sans-400.woff2",
                                         "ibm-plex-sans-500.woff2",
@@ -327,6 +338,30 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     repo.deleted_at = "2026-09-03T00:00:00Z";
     repo.retention_until = "2026-10-03T00:00:00Z";
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
+
+    const lake::api::RepositoryHomeData data{
+        .refs = {{"main", "blake3:123456789012345678901234567890"}},
+        .tree = {{"README.md", "blob", "blob-1", 0644, "node-1", 48, 32},
+                 {"src/example.cpp", "blob", "blob-2", 0644, "node-2", 96, 64},
+                 {"src", "tree", "", 0755}},
+        .changes = {{"blake3:abcdef012345678901234567890",
+                     {},
+                     "taap:1:ed25519:author",
+                     "Explain the repository",
+                     "2026-09-04T00:00:00Z"}},
+        .readme = lake::api::RepositoryFile{"README.md", "blob-1", "# Lake\n\nSafe <text>.", 26},
+        .access = {{"taap:1:ed25519:reader", "", "read", {"read"}, false}},
+    };
+    const std::string home = lake::api::web_ui_repository(repo, &ada, data);
+    EXPECT_NE(home.find("aria-label=\"Repository\""), std::string::npos);
+    EXPECT_NE(home.find("Repository root"), std::string::npos);
+    EXPECT_NE(home.find("Recent changes"), std::string::npos);
+    EXPECT_NE(home.find("id=\"lake\""), std::string::npos);
+    EXPECT_NE(home.find("Safe &lt;text&gt;"), std::string::npos);
+    EXPECT_NE(home.find("Clone and push"), std::string::npos);
+    EXPECT_NE(home.find("C++"), std::string::npos);
+    EXPECT_NE(home.find("Markdown"), std::string::npos);
+    EXPECT_NE(home.find("Effective access"), std::string::npos);
 }
 
 TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {

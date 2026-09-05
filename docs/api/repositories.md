@@ -24,7 +24,7 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 | `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
 | `repository_refs` | read | `id` | `{items: [{name, change}]}` |
-| `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode}]}` |
+| `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode, node_id, size, stored_size}]}` |
 | `repository_file` | read | `id`, `ref`, `path` | `{path, blob, contents, size}` |
 | `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
 | `get_change` | read | `id`, `change_id` | change identity and metadata |
@@ -50,7 +50,8 @@ every successful or denied call.
 
 `repository_refs`, `repository_tree`, `repository_file`, `list_changes`, and `list_conflicts`
 read libliquid directly through the lake repository-store adapter. Tree output is recursive;
-every file links to its backing blob identity and rendered contents. Conflict records remain
+every entry retains its stable node identity plus logical and stored sizes, and every file links
+to its backing blob identity and rendered contents. Conflict records remain
 first-class values containing a path and the competing blob references.
 
 `change_diff` compares the selected change with its first parent through libliquid's public

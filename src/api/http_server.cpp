@@ -925,7 +925,9 @@ RepositoryTreeEntry repository_tree_entry_from_json(const nlohmann::json& value)
             json_string(value, "kind"),
             json_string(value, "blob"),
             value.value("mode", 0U),
-            json_string(value, "node_id")};
+            json_string(value, "node_id"),
+            value.value("size", std::uint64_t{0}),
+            value.value("stored_size", std::uint64_t{0})};
 }
 
 RepositoryFile repository_file_from_json(const nlohmann::json& value) {
@@ -5647,8 +5649,9 @@ struct ApiServer::Impl {
     boost::http::route_task serve_repository_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "id");
-        if (id.empty())
+        if (id.empty()) {
             return redirect(route, "/repositories");
+        }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
             return serve_repository_page_error(route, ctx, repository_result);
@@ -5666,14 +5669,57 @@ struct ApiServer::Impl {
         if (!refs_result.ok) {
             return serve_repository_page_error(route, ctx, refs_result);
         }
-        std::vector<RepositoryContentRef> refs;
+        RepositoryHomeData data;
         for (const nlohmann::json& value : refs_result.value.at("items")) {
-            refs.push_back(repository_content_ref_from_json(value));
+            data.refs.push_back(repository_content_ref_from_json(value));
+        }
+        const std::string default_ref = data.refs.empty() ? "main" : data.refs.front().name;
+        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
+        if (!changes_result.ok) {
+            return serve_repository_page_error(route, ctx, changes_result);
+        }
+        for (const nlohmann::json& value : changes_result.value.at("items")) {
+            data.changes.push_back(repository_change_from_json(value));
+        }
+        if (!data.refs.empty()) {
+            const ApiResult tree_result =
+                registry.call("repository_tree", {{"id", id}, {"ref", default_ref}}, ctx);
+            if (!tree_result.ok) {
+                return serve_repository_page_error(route, ctx, tree_result);
+            }
+            for (const nlohmann::json& value : tree_result.value.at("items")) {
+                data.tree.push_back(repository_tree_entry_from_json(value));
+            }
+            const ApiResult readme_result = registry.call(
+                "repository_file", {{"id", id}, {"ref", default_ref}, {"path", "README.md"}}, ctx);
+            if (readme_result.ok) {
+                data.readme = repository_file_from_json(readme_result.value);
+            } else if (readme_result.error.code != "not_found") {
+                return serve_repository_page_error(route, ctx, readme_result);
+            }
+        }
+        if (ctx.authorized) {
+            const ApiResult access_result = registry.call(
+                "entity_effective_access", {{"object_type", "repository"}, {"id", id}}, ctx);
+            if (!access_result.ok) {
+                return serve_repository_page_error(route, ctx, access_result);
+            }
+            for (const nlohmann::json& value : access_result.value.at("items")) {
+                data.access.push_back(access_from_json(value));
+            }
+        }
+        const ApiResult releases_result =
+            registry.call("list_releases", {{"repository_id", id}}, ctx);
+        if (!releases_result.ok) {
+            return serve_repository_page_error(route, ctx, releases_result);
+        }
+        for (const nlohmann::json& value : releases_result.value.at("items")) {
+            data.releases.push_back(forge_record_from_json(value));
         }
         return send_text(
             route,
             boost::http::status::ok,
-            web_ui_repository(repository, owner ? &*owner : nullptr, refs, ctx.authorized),
+            web_ui_repository(repository, owner ? &*owner : nullptr, data, ctx.authorized),
             "text/html; charset=utf-8",
             "no-store");
     }

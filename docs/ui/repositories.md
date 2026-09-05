@@ -1,14 +1,14 @@
 # Repository pages
 
 The repository UI is rendered on the server by the pure functions declared in
-`include/lake/api/web_ui.hpp`. It has no client-side code. Each route calls the same registry
+`include/lake/api/web_ui.hpp`. Each route calls the same registry
 capability as REST and MCP, so authorization and audit recording have one path.
 
 | Page | Route | Capability | Contents |
 |---|---|---|---|
 | Repository list | `GET /repositories` | `list_repositories` | repositories the caller may open |
-| Repository | `GET /repository?id=<id>` | `get_repository`, `repository_refs` | metadata and published refs |
-| Tree | `GET /repository/tree?id=<id>&ref=<ref>` | `repository_tree` | paths, kinds, blobs and modes at the ref |
+| Repository | `GET /repository?id=<id>` | `get_repository`, repository content, forge release, and effective-access reads | tree, recent changes, rendered README, refs and releases, clone/push commands, indexed language and size totals, lifecycle, and access |
+| Tree | `GET /repository/tree?id=<id>&ref=<ref>` | `repository_tree` | paths, kinds, blobs, modes, stable nodes, and sizes at the ref |
 | File | `GET /file?repository_id=<id>&ref=<ref>&path=<path>` | `repository_file` | a file, its backing blob and escaped contents |
 | Change log | `GET /changes?repository_id=<id>` | `list_changes` | libliquid change identities and metadata |
 | Change | `GET /change?repository_id=<id>&id=<change>` | `get_change`, `change_diff` | change identity and its first-parent structural diff, including text hunks |
