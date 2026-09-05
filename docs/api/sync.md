@@ -4,10 +4,11 @@
 metadata and content. This page mirrors liquid's `docs/library/sync.md` at the pinned revision and
 records lake's adapter-specific authorization, storage, and audit behavior.
 
-**Status: implemented.** liquid #160 and #165 provide the bounded client and public
-`sync_server` contracts. Lake registers their operations through its capability registry, streams
-the binary bodies in its one HTTP adapter translation unit, and stores all repositories owned by a
-customer in that customer's caller-owned liquid store.
+**Status: implemented.** liquid #160, #165, and #184 provide the bounded client, public
+`sync_server`, and server-derived reference-update authorization contracts. Lake registers their
+operations through its capability registry, streams the binary bodies in its one HTTP adapter
+translation unit, and stores all repositories owned by a customer in that customer's caller-owned
+liquid store.
 
 ## Repository URL and requests
 
@@ -124,10 +125,13 @@ queries, pack-frame uploads, and logical range reads; the canonical codecs remai
 `sync_server::encode_error` produces the error body described above so an adapter need only choose
 the transport status.
 
-`sync_server_options::authorize` is an optional asynchronous per-change callback. Push invokes it
-in frame order before repository import. A callback failure returns that error and leaves repository
-metadata unchanged; object uploads that arrived earlier remain unreferenced content-addressed data
-eligible for collection. Embedders can perform authorization and audit work in this callback
+`sync_server_options::authorize` is an optional asynchronous callback for changes and reference
+updates. The callback receives the metadata item plus the affected `sync_ref_update` values. Each
+update names the ref, supplies its server-derived prior and proposed heads, and reports whether the
+old head is reachable from the new head. Push computes this context before invoking callbacks in
+frame order and before repository import. A callback failure returns that error and leaves the
+complete metadata batch unchanged; object uploads that arrived earlier remain unreferenced
+content-addressed data eligible for collection. Embedders can perform authorization and audit work
 without reimplementing the wire format.
 
 `repository::export_drips` writes as many `sync_item` values as fit in the supplied span and returns

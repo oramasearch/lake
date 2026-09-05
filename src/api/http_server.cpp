@@ -1096,8 +1096,10 @@ public:
             return std::unexpected(state.error());
         }
         liquid::sync_server_options options;
-        options.authorize = [authorize = std::move(authorize)](
-                                const liquid::sync_item& item) -> liquid::runtime::task<void> {
+        options.authorize =
+            [authorize = std::move(authorize)](
+                const liquid::sync_item& item,
+                std::span<const liquid::sync_ref_update>) -> liquid::runtime::task<void> {
             const std::string change_id = liquid::to_string(item.reference.value);
             auto result = authorize(change_id);
             if (!result) {
