@@ -78,6 +78,7 @@
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
+#include "lake/transparency/tuf.hpp"
 #include "lake/version.hpp"
 
 #include <liquid/git.hpp>
@@ -2751,6 +2752,7 @@ struct ApiServer::Impl {
     mutable LiquidCustomerStores sync_store;
     Registry registry;
     mutable control::pki::Service pki;
+    std::unique_ptr<transparency::Service> transparency;
     std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
@@ -2770,6 +2772,10 @@ struct ApiServer::Impl {
     std::condition_variable work_cv;
 
     explicit Impl(ServerOptions opts) : options(std::move(opts)), sync_store(options.store_root) {
+        if (!options.store_root.empty()) {
+            transparency =
+                std::make_unique<transparency::Service>(options.store_root, options.node_name);
+        }
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
         metrics.set_gauge("lake_build_info",
@@ -2911,6 +2917,7 @@ struct ApiServer::Impl {
         ctx.search = options.search.get();
         ctx.pki = &pki;
         ctx.callers = callers.get();
+        ctx.transparency = transparency.get();
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;

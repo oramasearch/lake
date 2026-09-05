@@ -88,6 +88,10 @@ expiring and revocable links, format-registry previews, per-path history and res
 server-rendered browse/share/history pages. Model repositories expose cards, exact revision files,
 and verified `sbom/1` plus `slsa_provenance/1` build evidence through compatible metadata and
 resolve routes. The liquid sync client and Linux desktop work are tracked in liquid #195 and #196.
+TUF repository metadata adds immutable root, targets, snapshot, and timestamp objects at
+`LAKE_STORE_ROOT/<instance>/log/tuf/`, distinct-key threshold verification, version/expiry and
+cross-role binding checks, dual-threshold root rotation, and a rehearsed compromised-key
+replacement. Its four capabilities use policy metadata and the signed registry audit stream.
 
 ## Where to read Zetta
 

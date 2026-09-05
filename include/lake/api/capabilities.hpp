@@ -15,5 +15,6 @@ void register_pki_capabilities(Registry& registry);
 void register_metering_capabilities(Registry& registry);
 void register_drive_capabilities(Registry& registry);
 void register_model_capabilities(Registry& registry);
+void register_transparency_capabilities(Registry& registry);
 
 } // namespace lake::api

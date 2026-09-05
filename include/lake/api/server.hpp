@@ -57,8 +57,9 @@ struct ServerOptions {
     control::callers::JwtVerifier* jwt_verifier = nullptr;
     control::callers::CloudIdentityVerifier* cloud_identity_verifier = nullptr;
     control::callers::FederationIssuerPolicy* federation_issuer_policy = nullptr;
-    // The operator-provided PersistentVolume mount. Each customer store lives
-    // at <root>/<customer id>/store. Empty disables data-plane storage.
+    // The operator-provided PersistentVolume mount. Customer stores live at
+    // <root>/<customer id>/store and instance log objects at
+    // <root>/<node name>/log. Empty disables data-plane storage.
     std::string store_root;
     MeteringConfig metering;
 };

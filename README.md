@@ -64,6 +64,10 @@ liquid is the tool. lake is where it collects.
 > effective-access sharing, expiring links, path history, and restore-as-a-new-change. Model
 > repositories expose model cards, exact file resolution, and verified SBOM/SLSA build provenance
 > through Hugging Face-compatible reads. Migration `0015_drive` stores link expiry and revocation.
+> The source tree also serves threshold-signed TUF root, targets, snapshot, and timestamp metadata
+> from immutable instance-local objects under `LAKE_STORE_ROOT/<instance>/log/tuf/`. Publication
+> refuses expired, rolled-back, mixed, or under-threshold metadata; root rotation requires both the
+> trusted and replacement root thresholds, and every outcome is signed in the audit stream.
 
 ## Build and run
 
@@ -94,7 +98,7 @@ ctest --test-dir build
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
 | `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
 | `GET /api/models/:id`, `/models/:id/resolve/:revision/:file` | compatible model metadata, verified build provenance, and exact revision file bytes |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
@@ -145,6 +149,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
+| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, and root rotation |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
