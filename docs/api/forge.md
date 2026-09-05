@@ -21,6 +21,11 @@ Each record has a UUID and creation/update timestamps. Values are intentionally 
 where possible; state transitions retain the same record identifier and replace only its versioned
 value. Secrets such as webhook signing material are never exposed in a list or export result.
 
+Every forge `list_*` capability is a repository candidate read. It resolves the requested
+repository and authorizes its `read` action before returning records. Forge lists therefore remain
+authenticated and never turn the public-repository exception into anonymous issue, review, release,
+delivery, or policy access.
+
 ## Issues and reviews
 
 `create_issue` creates an open issue with Markdown `body`, labels, assignees, and explicit

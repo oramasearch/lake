@@ -88,6 +88,22 @@ ApiResult list_records(const std::string& kind, const json& input, ApiContext& c
     if (!context.store) {
         return ApiResult::failure("store_unavailable", "no control-plane store is configured");
     }
+    if (context.acting_identity != "admin") {
+        const auto object = repository_object(input, context);
+        if (!object) {
+            return ApiResult::failure(
+                object.error().code, object.error().message, object.error().path);
+        }
+        const auto decision = control::authorize(
+            *context.store, context.acting_identity, *object, "read", context.authorization_cache);
+        if (!decision) {
+            return from_store_error(decision.error());
+        }
+        if (!decision->allowed) {
+            return ApiResult::failure("unauthorized",
+                                      "principal is not allowed to read repository");
+        }
+    }
     const auto records = context.store->list_forge_records(
         input.at("repository_id"), kind, input.value("limit", 100));
     if (!records) {
@@ -448,6 +464,7 @@ void add_list(Registry& registry, std::string name, std::string title, std::stri
         .object = "repository",
         .action = "read",
         .resolve_object = repository_object,
+        .authorizes_candidates = true,
         .handler = [kind = std::move(kind)](const json& input, ApiContext& context) {
             return list_records(kind, input, context);
         }});
