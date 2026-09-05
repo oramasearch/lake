@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -31,12 +32,15 @@ struct Occurrence {
     std::string change;
     std::string path;
     std::string blob;
+    PublicationKind kind = PublicationKind::BranchTip;
 };
 
 struct Segment {
     std::string repository;
     std::string ref;
     std::string change;
+    PublicationKind kind = PublicationKind::BranchTip;
+    std::string file;
     std::vector<Occurrence> occurrences;
 };
 
@@ -49,12 +53,33 @@ struct TrigramPosting {
     std::vector<std::size_t> positions;
 };
 
-std::string slot_key(const std::string& repository, const std::string& ref) {
-    return repository + "\n" + ref;
+std::string publication_kind_name(PublicationKind kind) {
+    return kind == PublicationKind::TagSnapshot ? "tag" : "branch";
 }
 
-std::string segment_name(const std::string& repository, const std::string& change) {
-    return "segment-" + repository + "-" + change + ".json";
+PublicationKind publication_kind(const json& value) {
+    return value.value("kind", "branch") == "tag" ? PublicationKind::TagSnapshot
+                                                  : PublicationKind::BranchTip;
+}
+
+std::string slot_key(PublicationKind kind, const std::string& repository, const std::string& ref) {
+    return publication_kind_name(kind) + "\n" + repository + "\n" + ref;
+}
+
+std::string hex_string(std::string_view value) {
+    constexpr std::string_view digits = "0123456789abcdef";
+    std::string output;
+    output.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        output.push_back(digits[byte >> 4]);
+        output.push_back(digits[byte & 0x0f]);
+    }
+    return output;
+}
+
+std::string segment_name(const Segment& segment) {
+    return "segment-" + segment.repository + "-" + segment.change + "-" +
+           publication_kind_name(segment.kind) + "-" + hex_string(segment.ref) + ".json";
 }
 
 std::vector<std::string> trigrams(const std::string& text) {
@@ -204,16 +229,25 @@ Result<json> read_json(const std::filesystem::path& path) {
 
 } // namespace
 
+std::string_view to_string(QueryMode mode) {
+    switch (mode) {
+    case QueryMode::Hot:
+        return "hot";
+    case QueryMode::Snapshot:
+        return "snapshot";
+    case QueryMode::Scan:
+        return "scan";
+    }
+    return "hot";
+}
+
 struct Service::Impl {
     struct CustomerState {
         std::map<std::string, BlobRecord> blobs;
         std::map<std::string, Segment> active;
-        std::vector<Occurrence> occurrences;
         std::unordered_map<std::string, std::vector<TrigramPosting>> trigram_index;
         std::vector<std::string> blob_documents;
-        std::vector<Occurrence> path_documents;
         oramacore::index::MemoryIndex blob_index{{{"content", {1.0, 0.75}}}};
-        oramacore::index::MemoryIndex path_index{{{"path", {3.0, 0.75}}}};
     };
 
     std::filesystem::path root;
@@ -227,12 +261,9 @@ struct Service::Impl {
     }
 
     void rebuild(CustomerState& state) {
-        state.occurrences.clear();
         state.trigram_index.clear();
         state.blob_documents.clear();
-        state.path_documents.clear();
         state.blob_index = oramacore::index::MemoryIndex({{"content", {1.0, 0.75}}});
-        state.path_index = oramacore::index::MemoryIndex({{"path", {3.0, 0.75}}});
         for (const auto& [digest, blob] : state.blobs) {
             const auto document = state.blob_index.add({{"content", blob.content}});
             if (state.blob_documents.size() <= document) {
@@ -253,16 +284,135 @@ struct Service::Impl {
                 found->positions.push_back(position);
             }
         }
-        for (const auto& [slot, segment] : state.active) {
-            for (const Occurrence& occurrence : segment.occurrences) {
-                state.occurrences.push_back(occurrence);
-                const auto document = state.path_index.add({{"path", occurrence.path}});
-                if (state.path_documents.size() <= document) {
-                    state.path_documents.resize(document + 1);
+    }
+
+    [[nodiscard]] Result<Segment> collect_snapshot(liquid::repository& repository,
+                                                   CustomerState& state,
+                                                   const std::string& repository_id,
+                                                   const std::string& ref,
+                                                   const std::string& change,
+                                                   PublicationKind kind,
+                                                   const liquid::tree& root_tree) {
+        Segment segment{.repository = repository_id, .ref = ref, .change = change, .kind = kind};
+        const auto walk = [&](const auto& self,
+                              const liquid::tree& tree,
+                              const std::string& prefix) -> Result<void> {
+            for (const auto& entry : tree.entries) {
+                const std::string path = prefix.empty() ? entry.name : prefix + "/" + entry.name;
+                if (entry.kind == liquid::node_kind::tree) {
+                    auto nested = liquid::runtime::block_on(repository.tree(entry.ref));
+                    if (!nested) {
+                        return std::unexpected(Error{"store_error", nested.error().message});
+                    }
+                    const auto nested_walk = self(self, *nested, path);
+                    if (!nested_walk) {
+                        return nested_walk;
+                    }
+                    continue;
                 }
-                state.path_documents[document] = occurrence;
+                if (entry.kind != liquid::node_kind::blob) {
+                    continue;
+                }
+                const std::string digest = liquid::to_string(entry.ref);
+                if (!state.blobs.contains(digest)) {
+                    auto contents = liquid::runtime::block_on(repository.blob(entry.ref));
+                    if (!contents) {
+                        return std::unexpected(Error{"store_error", contents.error().message});
+                    }
+                    state.blobs.emplace(
+                        digest,
+                        BlobRecord{std::string(reinterpret_cast<const char*>(contents->data()),
+                                               contents->size())});
+                }
+                segment.occurrences.push_back(
+                    Occurrence{repository_id, ref, change, path, digest, kind});
+            }
+            return {};
+        };
+        const auto walked = walk(walk, root_tree, "");
+        if (!walked) {
+            return std::unexpected(walked.error());
+        }
+        return segment;
+    }
+
+    [[nodiscard]] Result<void> save_blobs(const std::string& customer,
+                                          const CustomerState& state) const {
+        json blobs = json::object();
+        for (const auto& [digest, record] : state.blobs) {
+            blobs[digest] = {{"content", record.content}};
+        }
+        return write_json_atomically(index_path(customer) / "blobs.json", blobs);
+    }
+
+    struct ScanOutput {
+        std::vector<Occurrence> occurrences;
+        std::size_t changes = 0;
+    };
+
+    [[nodiscard]] Result<ScanOutput> scan(const Query& query, CustomerState& state) {
+        const std::filesystem::path repository_path =
+            root / query.customer / "repositories" / query.repository;
+        auto customer_store =
+            liquid::runtime::block_on(liquid::store::open(root / query.customer / "store"));
+        if (!customer_store) {
+            return std::unexpected(Error{"store_error", customer_store.error().message});
+        }
+        liquid::repository_options repository_options;
+        repository_options.store = &*customer_store;
+        auto opened = liquid::runtime::block_on(
+            liquid::repository::open(repository_path, repository_options));
+        if (!opened) {
+            return std::unexpected(Error{"store_error", opened.error().message});
+        }
+        std::vector<liquid::change_id> changes;
+        if (!query.change.empty()) {
+            const auto parsed = liquid::parse_digest(query.change);
+            if (!parsed) {
+                return std::unexpected(Error{"invalid_input", parsed.error().message});
+            }
+            changes.push_back(liquid::change_id{*parsed});
+        } else {
+            const auto history = liquid::runtime::block_on(opened->log());
+            if (!history) {
+                return std::unexpected(Error{"store_error", history.error().message});
+            }
+            changes.reserve(history->size());
+            for (const liquid::change& change : *history) {
+                changes.push_back(change.id);
             }
         }
+        ScanOutput output;
+        output.changes = changes.size();
+        const std::size_t original_blob_count = state.blobs.size();
+        for (const liquid::change_id& id : changes) {
+            auto snapshot = liquid::runtime::block_on(opened->at(id));
+            if (!snapshot) {
+                return std::unexpected(Error{"not_found", snapshot.error().message});
+            }
+            const std::string change = liquid::to_string(id.value);
+            auto segment = collect_snapshot(*opened,
+                                            state,
+                                            query.repository,
+                                            "",
+                                            change,
+                                            PublicationKind::BranchTip,
+                                            snapshot->root);
+            if (!segment) {
+                return std::unexpected(segment.error());
+            }
+            output.occurrences.insert(output.occurrences.end(),
+                                      std::make_move_iterator(segment->occurrences.begin()),
+                                      std::make_move_iterator(segment->occurrences.end()));
+        }
+        if (state.blobs.size() != original_blob_count) {
+            const auto saved = save_blobs(query.customer, state);
+            if (!saved) {
+                return std::unexpected(saved.error());
+            }
+            rebuild(state);
+        }
+        return output;
     }
 
     [[nodiscard]] Result<void> load_customer(const std::string& customer) {
@@ -296,14 +446,18 @@ struct Service::Impl {
                 segment.repository = segment_value->at("repository").get<std::string>();
                 segment.ref = segment_value->at("ref").get<std::string>();
                 segment.change = segment_value->at("change").get<std::string>();
+                segment.kind = publication_kind(*segment_value);
+                segment.file = active.at("segment").get<std::string>();
                 for (const json& value : segment_value->at("occurrences")) {
                     segment.occurrences.push_back(Occurrence{segment.repository,
                                                              segment.ref,
                                                              segment.change,
                                                              value.at("path").get<std::string>(),
-                                                             value.at("blob").get<std::string>()});
+                                                             value.at("blob").get<std::string>(),
+                                                             segment.kind});
                 }
-                state.active.emplace(slot_key(segment.repository, segment.ref), std::move(segment));
+                state.active.emplace(slot_key(segment.kind, segment.repository, segment.ref),
+                                     std::move(segment));
             }
         }
         rebuild(state);
@@ -348,6 +502,16 @@ Result<void> Service::publish(const Publish& publication) {
         if (!loaded) {
             return loaded;
         }
+        auto& state = impl_->customers.at(publication.customer);
+        const std::string key = slot_key(publication.kind, publication.repository, publication.ref);
+        const auto existing = state.active.find(key);
+        if (publication.kind == PublicationKind::TagSnapshot && existing != state.active.end()) {
+            if (existing->second.change == publication.change) {
+                return {};
+            }
+            return std::unexpected(
+                Error{"conflict", "a tag snapshot cannot move to another change"});
+        }
         const std::filesystem::path repository_path =
             impl_->root / publication.customer / "repositories" / publication.repository;
         auto customer_store = liquid::runtime::block_on(
@@ -370,85 +534,53 @@ Result<void> Service::publish(const Publish& publication) {
         if (!snapshot) {
             return std::unexpected(Error{"not_found", snapshot.error().message});
         }
-        Segment segment{publication.repository, publication.ref, publication.change, {}};
-        const auto walk = [&](const auto& self,
-                              const liquid::tree& tree,
-                              const std::string& prefix) -> Result<void> {
-            for (const auto& entry : tree.entries) {
-                const std::string path = prefix.empty() ? entry.name : prefix + "/" + entry.name;
-                if (entry.kind == liquid::node_kind::tree) {
-                    auto nested = liquid::runtime::block_on(opened->tree(entry.ref));
-                    if (!nested) {
-                        return std::unexpected(Error{"store_error", nested.error().message});
-                    }
-                    const auto nested_walk = self(self, *nested, path);
-                    if (!nested_walk) {
-                        return nested_walk;
-                    }
-                    continue;
-                }
-                if (entry.kind != liquid::node_kind::blob) {
-                    continue;
-                }
-                const std::string digest = liquid::to_string(entry.ref);
-                auto& state = impl_->customers.at(publication.customer);
-                if (!state.blobs.contains(digest)) {
-                    auto contents = liquid::runtime::block_on(opened->blob(entry.ref));
-                    if (!contents) {
-                        return std::unexpected(Error{"store_error", contents.error().message});
-                    }
-                    state.blobs.emplace(
-                        digest,
-                        BlobRecord{std::string(reinterpret_cast<const char*>(contents->data()),
-                                               contents->size())});
-                }
-                segment.occurrences.push_back(Occurrence{
-                    publication.repository, publication.ref, publication.change, path, digest});
-            }
-            return {};
-        };
-        const auto walked = walk(walk, snapshot->root, "");
-        if (!walked) {
-            return walked;
+        auto segment = impl_->collect_snapshot(*opened,
+                                               state,
+                                               publication.repository,
+                                               publication.ref,
+                                               publication.change,
+                                               publication.kind,
+                                               snapshot->root);
+        if (!segment) {
+            return std::unexpected(segment.error());
         }
 
-        auto& state = impl_->customers.at(publication.customer);
-        json blobs = json::object();
-        for (const auto& [digest, record] : state.blobs) {
-            blobs[digest] = {{"content", record.content}};
-        }
         const std::filesystem::path directory = impl_->index_path(publication.customer);
-        const auto saved_blobs = write_json_atomically(directory / "blobs.json", blobs);
+        const auto saved_blobs = impl_->save_blobs(publication.customer, state);
         if (!saved_blobs) {
             return saved_blobs;
         }
-        json segment_value{{"version", 1},
-                           {"repository", segment.repository},
-                           {"ref", segment.ref},
-                           {"change", segment.change},
+        json segment_value{{"version", 2},
+                           {"repository", segment->repository},
+                           {"ref", segment->ref},
+                           {"change", segment->change},
+                           {"kind", publication_kind_name(segment->kind)},
                            {"occurrences", json::array()}};
-        for (const Occurrence& occurrence : segment.occurrences) {
+        for (const Occurrence& occurrence : segment->occurrences) {
             segment_value["occurrences"].push_back(
                 {{"path", occurrence.path}, {"blob", occurrence.blob}});
         }
-        const std::string file_name = segment_name(publication.repository, publication.change);
+        const std::string file_name = segment_name(*segment);
         const auto saved_segment = write_json_atomically(directory / file_name, segment_value);
         if (!saved_segment) {
             return saved_segment;
         }
-        state.active[slot_key(publication.repository, publication.ref)] = std::move(segment);
-        json manifest{{"version", 1}, {"active", json::array()}};
-        for (const auto& [slot, active] : state.active) {
-            manifest["active"].push_back(
-                {{"repository", active.repository},
-                 {"ref", active.ref},
-                 {"change", active.change},
-                 {"segment", segment_name(active.repository, active.change)}});
+        segment->file = file_name;
+        auto next_active = state.active;
+        next_active[key] = std::move(*segment);
+        json manifest{{"version", 2}, {"active", json::array()}};
+        for (const auto& [slot, active] : next_active) {
+            manifest["active"].push_back({{"repository", active.repository},
+                                          {"ref", active.ref},
+                                          {"change", active.change},
+                                          {"kind", publication_kind_name(active.kind)},
+                                          {"segment", active.file}});
         }
         const auto published = write_json_atomically(directory / "manifest.json", manifest);
         if (!published) {
             return published;
         }
+        state.active = std::move(next_active);
         impl_->rebuild(state);
         return {};
     } catch (const std::exception& error) {
@@ -456,11 +588,21 @@ Result<void> Service::publish(const Publish& publication) {
     }
 }
 
-Result<std::vector<Hit>>
+Result<QueryResult>
 Service::query(const Query& query, const std::string& principal, control::Store& store) const {
     try {
         if (query.text.empty()) {
             return std::unexpected(Error{"invalid_input", "query is required"});
+        }
+        if (query.history && !query.change.empty()) {
+            return std::unexpected(
+                Error{"invalid_input", "history and change are mutually exclusive"});
+        }
+        const bool scans_history = query.history || !query.change.empty();
+        if (scans_history &&
+            (!query.ref.empty() || query.customer.empty() || query.repository.empty())) {
+            return std::unexpected(Error{
+                "invalid_input", "scan queries require customer and repository, without ref"});
         }
         std::unique_lock lock(impl_->mutex);
         const auto loaded = query.customer.empty() ? impl_->load_all_customers()
@@ -484,10 +626,45 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                     Error{"invalid_input", "invalid regex: " + std::string(error.what())});
             }
         }
-        std::vector<Hit> output;
-        for (const auto& [customer, state] : impl_->customers) {
+        QueryResult output;
+        output.mode = scans_history ? QueryMode::Scan : QueryMode::Hot;
+        for (auto& [customer, state] : impl_->customers) {
             if (!query.customer.empty() && query.customer != customer) {
                 continue;
+            }
+            std::vector<Occurrence> selected;
+            if (scans_history) {
+                const auto scanned = impl_->scan(query, state);
+                if (!scanned) {
+                    return std::unexpected(scanned.error());
+                }
+                selected = std::move(scanned->occurrences);
+                output.scanned_changes += scanned->changes;
+            } else {
+                for (const auto& [slot, segment] : state.active) {
+                    if (!query.repository.empty() && query.repository != segment.repository) {
+                        continue;
+                    }
+                    if (query.ref.empty()) {
+                        if (segment.kind != PublicationKind::BranchTip) {
+                            continue;
+                        }
+                    } else {
+                        if (query.ref != segment.ref) {
+                            continue;
+                        }
+                        const bool tag_matches = state.active.contains(
+                            slot_key(PublicationKind::TagSnapshot, segment.repository, query.ref));
+                        if (tag_matches && segment.kind != PublicationKind::TagSnapshot) {
+                            continue;
+                        }
+                    }
+                    if (segment.kind == PublicationKind::TagSnapshot) {
+                        output.mode = QueryMode::Snapshot;
+                    }
+                    selected.insert(
+                        selected.end(), segment.occurrences.begin(), segment.occurrences.end());
+                }
             }
             std::unordered_map<std::string, double> scores;
             if (!is_regex && !is_substring) {
@@ -496,9 +673,18 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                         scores[state.blob_documents[result.doc_id]] += result.score;
                     }
                 }
-                for (const auto& result : state.path_index.search(needle, 0).hits) {
-                    if (result.doc_id < state.path_documents.size()) {
-                        scores[state.path_documents[result.doc_id].blob] += result.score;
+                oramacore::index::MemoryIndex path_index({{"path", {3.0, 0.75}}});
+                std::vector<std::string> path_documents;
+                for (const Occurrence& occurrence : selected) {
+                    const auto document = path_index.add({{"path", occurrence.path}});
+                    if (path_documents.size() <= document) {
+                        path_documents.resize(document + 1);
+                    }
+                    path_documents[document] = occurrence.blob;
+                }
+                for (const auto& result : path_index.search(needle, 0).hits) {
+                    if (result.doc_id < path_documents.size()) {
+                        scores[path_documents[result.doc_id]] += result.score;
                     }
                 }
             } else {
@@ -555,13 +741,7 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             };
             std::vector<Candidate> candidates;
             std::vector<std::string> policy_object_ids;
-            for (const Occurrence& occurrence : state.occurrences) {
-                if (!query.repository.empty() && query.repository != occurrence.repository) {
-                    continue;
-                }
-                if (!query.ref.empty() && query.ref != occurrence.ref) {
-                    continue;
-                }
+            for (const Occurrence& occurrence : selected) {
                 const auto score = scores.find(occurrence.blob);
                 if (score == scores.end()) {
                     continue;
@@ -598,15 +778,15 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                 }
                 const Occurrence& occurrence = *candidate.occurrence;
                 const auto blob = state.blobs.find(occurrence.blob);
-                output.push_back(Hit{customer,
-                                     occurrence.repository,
-                                     occurrence.path,
-                                     occurrence.change,
-                                     snippet_for(blob->second.content, needle),
-                                     scores.at(occurrence.blob)});
+                output.items.push_back(Hit{customer,
+                                           occurrence.repository,
+                                           occurrence.path,
+                                           occurrence.change,
+                                           snippet_for(blob->second.content, needle),
+                                           scores.at(occurrence.blob)});
             }
         }
-        std::sort(output.begin(), output.end(), [](const Hit& left, const Hit& right) {
+        std::sort(output.items.begin(), output.items.end(), [](const Hit& left, const Hit& right) {
             if (left.score != right.score) {
                 return left.score > right.score;
             }
@@ -616,8 +796,8 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             return left.path < right.path;
         });
         const int limit = query.limit <= 0 ? 20 : std::min(query.limit, 1000);
-        if (output.size() > static_cast<std::size_t>(limit)) {
-            output.resize(static_cast<std::size_t>(limit));
+        if (output.items.size() > static_cast<std::size_t>(limit)) {
+            output.items.resize(static_cast<std::size_t>(limit));
         }
         return output;
     } catch (const std::exception& error) {

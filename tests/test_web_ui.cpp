@@ -86,10 +86,15 @@ TEST(WebUi, SsoPageEscapesProviderAndProvisioningValues) {
 
 TEST(WebUi, SearchEscapesHitsAndOffersTheQueryForm) {
     const lake::search::Hit hit{"customer", "repository", "<path>", "change", "<snippet>", 1.0};
-    const std::string page = lake::api::web_ui_search("needle", {hit});
+    const lake::search::Query query{.text = "needle", .history = true};
+    const lake::search::QueryResult result{
+        .mode = lake::search::QueryMode::Scan, .scanned_changes = 12, .items = {hit}};
+    const std::string page = lake::api::web_ui_search(query, result);
     EXPECT_NE(page.find("action=\"/search\""), std::string::npos);
     EXPECT_NE(page.find("&lt;path&gt;"), std::string::npos);
     EXPECT_NE(page.find("&lt;snippet&gt;"), std::string::npos);
+    EXPECT_NE(page.find("scan"), std::string::npos);
+    EXPECT_NE(page.find("12 changes examined"), std::string::npos);
     EXPECT_EQ(page.find("<path>"), std::string::npos);
 }
 

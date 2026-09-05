@@ -867,24 +867,44 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
         "lake — effective access", object.object_type + ":" + object.external_id, content, true);
 }
 
-std::string web_ui_search(std::string_view query, const std::vector<search::Hit>& hits) {
+std::string web_ui_search(const search::Query& query, const search::QueryResult& result) {
     std::string content = "<p class=\"eyebrow\">search</p><h1>Search</h1>"
                           "<p class=\"sub\">Ranked text, quoted substring, or /regex/ search "
-                          "across repositories you may read.</p>"
-                          "<form class=\"search\" method=\"get\" action=\"/search\"><input "
-                          "name=\"query\" value=\"" +
-                          web_ui_escape(query) +
-                          "\" placeholder=\"Search repositories\" required><button "
-                          "type=\"submit\">Search</button></form>";
-    if (query.empty()) {
+                          "across repositories you may read. A tag uses its immutable snapshot; "
+                          "a change or complete history uses scan mode.</p>"
+                          "<form class=\"filters\" method=\"get\" action=\"/search\">"
+                          "<label>Query<input name=\"query\" value=\"" +
+                          web_ui_escape(query.text) +
+                          "\" placeholder=\"Search repositories\" required></label>"
+                          "<label>Customer<input name=\"customer\" value=\"" +
+                          web_ui_escape(query.customer) +
+                          "\"></label><label>Repository<input name=\"repository\" value=\"" +
+                          web_ui_escape(query.repository) +
+                          "\"></label><label>Branch or tag<input name=\"ref\" value=\"" +
+                          web_ui_escape(query.ref) +
+                          "\"></label><label>Exact change<input name=\"change\" value=\"" +
+                          web_ui_escape(query.change) +
+                          "\"></label><label><input type=\"checkbox\" name=\"history\" " +
+                          (query.history ? "checked " : "") +
+                          "value=\"1\"> Scan complete history</label><button type=\"submit\">"
+                          "Search</button></form>";
+    if (query.text.empty()) {
         content += "<div class=\"panel empty\">Enter a query to search published "
                    "changes.</div>";
-    } else if (hits.empty()) {
-        content += "<div class=\"panel empty\">No readable matches.</div>";
     } else {
+        content += std::format("<p>Query mode: <span class=\"badge\">{}</span>",
+                               web_ui_escape(search::to_string(result.mode)));
+        if (result.mode == search::QueryMode::Scan) {
+            content += std::format(" · {} changes examined", result.scanned_changes);
+        }
+        content += ".</p>";
+    }
+    if (!query.text.empty() && result.items.empty()) {
+        content += "<div class=\"panel empty\">No readable matches.</div>";
+    } else if (!result.items.empty()) {
         content += "<table><thead><tr><th>Repository</th><th>Path</th><th>Change</"
                    "th><th>Snippet</th></tr></thead><tbody>";
-        for (const search::Hit& hit : hits) {
+        for (const search::Hit& hit : result.items) {
             content +=
                 std::format("<tr><td>{}/{}</td><td><code>{}</code></td><td><code>{}</code></td>"
                             "<td>{}</td></tr>",
@@ -896,8 +916,7 @@ std::string web_ui_search(std::string_view query, const std::vector<search::Hit>
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell(
-        "lake — search", query.empty() ? "search" : std::string(query), content, true);
+    return web_ui_shell("lake — search", query.text.empty() ? "search" : query.text, content, true);
 }
 
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter) {

@@ -4263,16 +4263,42 @@ struct ApiServer::Impl {
         if (!context.authorized) {
             return redirect(route, "/login");
         }
-        const std::string query = query_value(route, "query");
-        std::vector<search::Hit> hits;
-        if (!query.empty()) {
-            const ApiResult result =
-                registry.call("search", {{"query", query}, {"limit", 100}}, context);
+        const search::Query query{.text = query_value(route, "query"),
+                                  .customer = query_value(route, "customer"),
+                                  .repository = query_value(route, "repository"),
+                                  .ref = query_value(route, "ref"),
+                                  .limit = 100,
+                                  .change = query_value(route, "change"),
+                                  .history = query_value(route, "history") == "1"};
+        search::QueryResult search_result;
+        if (!query.text.empty()) {
+            nlohmann::json input{{"query", query.text}, {"limit", query.limit}};
+            if (!query.customer.empty()) {
+                input["customer"] = query.customer;
+            }
+            if (!query.repository.empty()) {
+                input["repository"] = query.repository;
+            }
+            if (!query.ref.empty()) {
+                input["ref"] = query.ref;
+            }
+            if (!query.change.empty()) {
+                input["change"] = query.change;
+            }
+            if (query.history) {
+                input["history"] = true;
+            }
+            const ApiResult result = registry.call("search", input, context);
             if (!result.ok) {
                 return serve_page_error(route, result);
             }
+            const std::string mode = result.value.value("mode", "hot");
+            search_result.mode = mode == "scan"       ? search::QueryMode::Scan
+                                 : mode == "snapshot" ? search::QueryMode::Snapshot
+                                                      : search::QueryMode::Hot;
+            search_result.scanned_changes = result.value.value("scanned_changes", std::size_t{0});
             for (const nlohmann::json& item : result.value.at("items")) {
-                hits.push_back(search::Hit{
+                search_result.items.push_back(search::Hit{
                     .customer = item.at("customer").get<std::string>(),
                     .repository = item.at("repository").get<std::string>(),
                     .path = item.at("path").get<std::string>(),
@@ -4284,7 +4310,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_search(query, hits),
+                         web_ui_search(query, search_result),
                          "text/html; charset=utf-8",
                          "no-store");
     }

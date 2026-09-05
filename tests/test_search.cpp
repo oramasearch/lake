@@ -129,7 +129,8 @@ TEST(Search, IndexesSharedBlobOnceAndReloadsTheManifest) {
 
     const auto hits = service.query({"orbit", "customer", "", "", 20}, "admin", control);
     ASSERT_TRUE(hits) << hits.error().message;
-    ASSERT_EQ(hits->size(), 2U);
+    ASSERT_EQ(hits->items.size(), 2U);
+    EXPECT_EQ(hits->mode, lake::search::QueryMode::Hot);
 
     std::ifstream input(root / "customer" / "index" / "blobs.json");
     const nlohmann::json blobs = nlohmann::json::parse(input);
@@ -138,7 +139,31 @@ TEST(Search, IndexesSharedBlobOnceAndReloadsTheManifest) {
     lake::search::Service reopened(root);
     const auto reloaded = reopened.query({"orbit", "customer", "", "", 20}, "admin", control);
     ASSERT_TRUE(reloaded) << reloaded.error().message;
-    EXPECT_EQ(reloaded->size(), 2U);
+    EXPECT_EQ(reloaded->items.size(), 2U);
+
+    const std::filesystem::path manifest_path = root / "customer" / "index" / "manifest.json";
+    std::ifstream manifest_input(manifest_path);
+    nlohmann::json legacy_manifest = nlohmann::json::parse(manifest_input);
+    legacy_manifest["version"] = 1;
+    for (nlohmann::json& active : legacy_manifest["active"]) {
+        active.erase("kind");
+        const std::filesystem::path segment_path =
+            manifest_path.parent_path() / active.at("segment").get<std::string>();
+        std::ifstream segment_input(segment_path);
+        nlohmann::json legacy_segment = nlohmann::json::parse(segment_input);
+        legacy_segment["version"] = 1;
+        legacy_segment.erase("kind");
+        std::ofstream segment_output(segment_path);
+        segment_output << legacy_segment.dump(2);
+    }
+    std::ofstream manifest_output(manifest_path);
+    manifest_output << legacy_manifest.dump(2);
+    manifest_output.close();
+
+    lake::search::Service legacy(root);
+    const auto legacy_result = legacy.query({"orbit", "customer", "", "", 20}, "admin", control);
+    ASSERT_TRUE(legacy_result) << legacy_result.error().message;
+    EXPECT_EQ(legacy_result->items.size(), 2U);
 }
 
 TEST(Search, PublicationMakesEveryQueryObserveOneCompleteChange) {
@@ -161,14 +186,119 @@ TEST(Search, PublicationMakesEveryQueryObserveOneCompleteChange) {
         const auto hits =
             service.query({"atomictoken", "customer", "repo", "main", 20}, "admin", control);
         ASSERT_TRUE(hits) << hits.error().message;
-        ASSERT_EQ(hits->size(), 2U);
-        const bool old_paths =
-            hits->at(0).path.starts_with("old-") && hits->at(1).path.starts_with("old-");
-        const bool new_paths =
-            hits->at(0).path.starts_with("new-") && hits->at(1).path.starts_with("new-");
+        ASSERT_EQ(hits->items.size(), 2U);
+        const bool old_paths = hits->items.at(0).path.starts_with("old-") &&
+                               hits->items.at(1).path.starts_with("old-");
+        const bool new_paths = hits->items.at(0).path.starts_with("new-") &&
+                               hits->items.at(1).path.starts_with("new-");
         EXPECT_TRUE(old_paths || new_paths);
     }
     publisher.join();
+}
+
+TEST(Search, TagSnapshotIsImmutableAndReturnsOnlyItsTaggedChange) {
+    TemporaryStore store;
+    const auto root = store.path();
+    const auto repository = root / "customer" / "repositories" / "repo";
+    const std::string tagged_change =
+        create_change(repository, {{"old-a.txt", "tagged historical token"}});
+    lake::control::InMemoryStore control;
+    lake::search::Service service(root);
+    ASSERT_TRUE(service.publish(
+        {"customer", "repo", "v1.0.0", tagged_change, lake::search::PublicationKind::TagSnapshot}));
+
+    const std::string branch_change =
+        update_change(repository, {{"current.txt", "current branch token"}});
+    ASSERT_TRUE(service.publish(publication("customer", "repo", branch_change)));
+    ASSERT_TRUE(service.publish({"customer", "repo", "v1.0.0", branch_change}));
+
+    const auto tag = service.query({"tagged", "customer", "repo", "v1.0.0", 20}, "admin", control);
+    ASSERT_TRUE(tag) << tag.error().message;
+    EXPECT_EQ(tag->mode, lake::search::QueryMode::Snapshot);
+    ASSERT_EQ(tag->items.size(), 1U);
+    EXPECT_EQ(tag->items.front().change, tagged_change);
+
+    const auto current_at_tag =
+        service.query({"current", "customer", "repo", "v1.0.0", 20}, "admin", control);
+    ASSERT_TRUE(current_at_tag) << current_at_tag.error().message;
+    EXPECT_EQ(current_at_tag->mode, lake::search::QueryMode::Snapshot);
+    EXPECT_TRUE(current_at_tag->items.empty());
+
+    const auto moved = service.publish(
+        {"customer", "repo", "v1.0.0", branch_change, lake::search::PublicationKind::TagSnapshot});
+    ASSERT_FALSE(moved);
+    EXPECT_EQ(moved.error().code, "conflict");
+
+    lake::search::Service reopened(root);
+    const auto reloaded =
+        reopened.query({"tagged", "customer", "repo", "v1.0.0", 20}, "admin", control);
+    ASSERT_TRUE(reloaded) << reloaded.error().message;
+    EXPECT_EQ(reloaded->mode, lake::search::QueryMode::Snapshot);
+    ASSERT_EQ(reloaded->items.size(), 1U);
+    EXPECT_EQ(reloaded->items.front().change, tagged_change);
+}
+
+TEST(Search, HistoryScanFindsTheOneMatchingChangeAmongOneThousand) {
+    TemporaryStore store;
+    const auto root = store.path();
+    const auto repository_path = root / "customer" / "repositories" / "history";
+    auto customer_store =
+        liquid::runtime::block_on(liquid::store::open(root / "customer" / "store"));
+    ASSERT_TRUE(customer_store) << customer_store.error().message;
+    liquid::repository_options options;
+    options.store = &*customer_store;
+    auto opened = liquid::runtime::block_on(liquid::repository::create(repository_path, options));
+    ASSERT_TRUE(opened) << opened.error().message;
+    auto repository = std::move(*opened);
+    ASSERT_TRUE(liquid::runtime::block_on(repository.write("history.txt", bytes("ordinary"))));
+    ASSERT_TRUE(liquid::runtime::block_on(repository.cut("history change 0")));
+
+    std::string matching_change;
+    for (int index = 1; index < 1'000; ++index) {
+        if (index == 500) {
+            ASSERT_TRUE(liquid::runtime::block_on(
+                repository.write("history.txt", bytes("one-thousand-change-needle"))));
+        } else if (index == 501) {
+            ASSERT_TRUE(
+                liquid::runtime::block_on(repository.write("history.txt", bytes("ordinary"))));
+        }
+        const auto change =
+            liquid::runtime::block_on(repository.cut("history change " + std::to_string(index)));
+        ASSERT_TRUE(change) << change.error().message;
+        if (index == 500) {
+            matching_change = liquid::to_string(change->value);
+        }
+    }
+
+    lake::control::InMemoryStore control;
+    lake::search::Service service(root);
+    const lake::search::Query query{.text = "one-thousand-change-needle",
+                                    .customer = "customer",
+                                    .repository = "history",
+                                    .limit = 20,
+                                    .history = true};
+    const auto result = service.query(query, "admin", control);
+    ASSERT_TRUE(result) << result.error().message;
+    EXPECT_EQ(result->mode, lake::search::QueryMode::Scan);
+    EXPECT_EQ(result->scanned_changes, 1'000U);
+    ASSERT_EQ(result->items.size(), 1U);
+    EXPECT_EQ(result->items.front().change, matching_change);
+
+    const lake::search::Query exact_query{.text = "one-thousand-change-needle",
+                                          .customer = "customer",
+                                          .repository = "history",
+                                          .limit = 20,
+                                          .change = matching_change};
+    const auto exact = service.query(exact_query, "admin", control);
+    ASSERT_TRUE(exact) << exact.error().message;
+    EXPECT_EQ(exact->mode, lake::search::QueryMode::Scan);
+    EXPECT_EQ(exact->scanned_changes, 1U);
+    ASSERT_EQ(exact->items.size(), 1U);
+    EXPECT_EQ(exact->items.front().change, matching_change);
+
+    std::ifstream input(root / "customer" / "index" / "blobs.json");
+    const nlohmann::json blobs = nlohmann::json::parse(input);
+    EXPECT_EQ(blobs.size(), 2U);
 }
 
 TEST(Search, BatchAuthorizationFiltersRepositoryCandidates) {
@@ -195,8 +325,8 @@ TEST(Search, BatchAuthorizationFiltersRepositoryCandidates) {
 
     const auto hits = service.query({"access", "customer", "", "", 20}, "reader", control);
     ASSERT_TRUE(hits) << hits.error().message;
-    ASSERT_EQ(hits->size(), 1U);
-    EXPECT_EQ(hits->front().repository, "allowed");
+    ASSERT_EQ(hits->items.size(), 1U);
+    EXPECT_EQ(hits->items.front().repository, "allowed");
 }
 
 TEST(Search, SubstringRegexAndRankedQueriesUseTheirExpectedOrder) {
@@ -212,18 +342,18 @@ TEST(Search, SubstringRegexAndRankedQueriesUseTheirExpectedOrder) {
 
     const auto ranked = service.query({"alpha", "customer", "", "", 20}, "admin", control);
     ASSERT_TRUE(ranked) << ranked.error().message;
-    ASSERT_EQ(ranked->size(), 2U);
-    EXPECT_EQ(ranked->front().path, "first.txt");
+    ASSERT_EQ(ranked->items.size(), 2U);
+    EXPECT_EQ(ranked->items.front().path, "first.txt");
 
     const auto substring =
         service.query({"\"quick brown\"", "customer", "", "", 20}, "admin", control);
     ASSERT_TRUE(substring) << substring.error().message;
-    EXPECT_EQ(substring->size(), 2U);
+    EXPECT_EQ(substring->items.size(), 2U);
 
     const auto regex =
         service.query({"/quick\\s+brown/", "customer", "", "", 20}, "admin", control);
     ASSERT_TRUE(regex) << regex.error().message;
-    EXPECT_EQ(regex->size(), 2U);
+    EXPECT_EQ(regex->items.size(), 2U);
 }
 
 TEST(Search, RegisteredCapabilityReturnsAuthorizedHits) {
@@ -247,7 +377,13 @@ TEST(Search, RegisteredCapabilityReturnsAuthorizedHits) {
 
     ASSERT_TRUE(result.ok) << result.error.message;
     ASSERT_EQ(result.value.at("items").size(), 1U);
+    EXPECT_EQ(result.value.at("mode"), "hot");
+    EXPECT_EQ(result.value.at("scanned_changes"), 0U);
     EXPECT_EQ(result.value.at("items").front().at("path"), "hit.txt");
+    const auto events = control.list_audit_events({.limit = 100});
+    ASSERT_TRUE(events) << events.error().message;
+    ASSERT_FALSE(events->empty());
+    EXPECT_EQ(events->front().draft.details.value("mode", ""), "hot");
 }
 
 TEST(SearchBenchmark, DISABLED_BuildAndQueryTenThousandFiles) {
