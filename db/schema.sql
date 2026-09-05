@@ -889,3 +889,33 @@ CREATE TABLE IF NOT EXISTS pki_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0013_pki') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Metering (migration 0014): hourly customer usage and an idempotency ledger for build compute.
+-- Stored bytes are a gauge; transfer and compute values are counters.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS metering_usage (
+    customer_id        uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    hour               timestamptz NOT NULL,
+    stored_bytes       bigint      NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
+    transfer_in_bytes  bigint      NOT NULL DEFAULT 0 CHECK (transfer_in_bytes >= 0),
+    transfer_out_bytes bigint      NOT NULL DEFAULT 0 CHECK (transfer_out_bytes >= 0),
+    compute_seconds    bigint      NOT NULL DEFAULT 0 CHECK (compute_seconds >= 0),
+    PRIMARY KEY (customer_id, hour),
+    CONSTRAINT metering_usage_hour_check CHECK (hour = date_trunc('hour', hour))
+);
+
+CREATE TABLE IF NOT EXISTS metering_build_records (
+    customer_id     uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    result_id       text        NOT NULL,
+    hour            timestamptz NOT NULL,
+    compute_seconds bigint     NOT NULL CHECK (compute_seconds >= 0),
+    PRIMARY KEY (customer_id, result_id),
+    CONSTRAINT metering_build_records_hour_check CHECK (hour = date_trunc('hour', hour))
+);
+
+CREATE TABLE IF NOT EXISTS metering_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0014_metering') ON CONFLICT DO NOTHING;

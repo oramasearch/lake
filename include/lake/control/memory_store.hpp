@@ -2,6 +2,7 @@
 #include <chrono>
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include "lake/control/store.hpp"
@@ -84,6 +85,12 @@ public:
     Result<audit::Event> latest_audit_event() override;
     Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) override;
     Result<void> set_audit_retention_days(const std::string& customer_id, int days) override;
+    Result<MeteringUsage> upsert_metering_usage(const MeteringUpdate& update) override;
+    Result<bool> record_metered_build(const MeteredBuild& build) override;
+    Result<std::vector<MeteringUsage>> list_metering_usage(const std::string& customer_id,
+                                                           const std::string& from_hour,
+                                                           const std::string& to_hour,
+                                                           int limit) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                     const std::string& instance_kek) override;
     Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
@@ -273,6 +280,8 @@ private:
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
+    std::vector<MeteringUsage> metering_usage_;
+    std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;

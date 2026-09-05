@@ -413,6 +413,81 @@ Result<void> InMemoryStore::set_audit_retention_days(const std::string& customer
     return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
 }
 
+Result<MeteringUsage> InMemoryStore::upsert_metering_usage(const MeteringUpdate& update) {
+    if (update.customer_id.empty() || update.hour.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "customer_id and hour are required"});
+    }
+    std::lock_guard lock(mutex_);
+    auto found = std::ranges::find_if(metering_usage_, [&](const MeteringUsage& usage) {
+        return usage.customer_id == update.customer_id && usage.hour == update.hour;
+    });
+    if (found == metering_usage_.end()) {
+        metering_usage_.push_back(MeteringUsage{.customer_id = update.customer_id,
+                                                .hour = update.hour,
+                                                .stored_bytes = update.stored_bytes.value_or(0),
+                                                .transfer_in_bytes = update.transfer_in_bytes,
+                                                .transfer_out_bytes = update.transfer_out_bytes});
+        return metering_usage_.back();
+    }
+    if (update.stored_bytes) {
+        found->stored_bytes = *update.stored_bytes;
+    }
+    found->transfer_in_bytes += update.transfer_in_bytes;
+    found->transfer_out_bytes += update.transfer_out_bytes;
+    return *found;
+}
+
+Result<bool> InMemoryStore::record_metered_build(const MeteredBuild& build) {
+    if (build.customer_id.empty() || build.result_id.empty() || build.hour.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "customer_id, result_id, and hour are required"});
+    }
+    std::lock_guard lock(mutex_);
+    if (!metered_builds_.emplace(build.customer_id, build.result_id).second) {
+        return false;
+    }
+    auto found = std::ranges::find_if(metering_usage_, [&](const MeteringUsage& usage) {
+        return usage.customer_id == build.customer_id && usage.hour == build.hour;
+    });
+    if (found == metering_usage_.end()) {
+        metering_usage_.push_back(MeteringUsage{.customer_id = build.customer_id,
+                                                .hour = build.hour,
+                                                .compute_seconds = build.compute_seconds});
+    } else {
+        found->compute_seconds += build.compute_seconds;
+    }
+    return true;
+}
+
+Result<std::vector<MeteringUsage>>
+InMemoryStore::list_metering_usage(const std::string& customer_id,
+                                   const std::string& from_hour,
+                                   const std::string& to_hour,
+                                   int limit) {
+    if (customer_id.empty() || limit < 1) {
+        return std::unexpected(StoreError{"invalid_input", "customer_id and limit are required"});
+    }
+    std::lock_guard lock(mutex_);
+    std::vector<MeteringUsage> result;
+    for (const MeteringUsage& usage : metering_usage_) {
+        if (usage.customer_id != customer_id) {
+            continue;
+        }
+        if (!from_hour.empty() && usage.hour < from_hour) {
+            continue;
+        }
+        if (!to_hour.empty() && usage.hour > to_hour) {
+            continue;
+        }
+        result.push_back(usage);
+    }
+    std::ranges::sort(result, {}, &MeteringUsage::hour);
+    if (result.size() > static_cast<std::size_t>(limit)) {
+        result.resize(static_cast<std::size_t>(limit));
+    }
+    return result;
+}
+
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)

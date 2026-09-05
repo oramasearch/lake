@@ -189,13 +189,24 @@ capability succeeds and therefore correlate with the capability's signed audit e
 
 The migration follows forge/export/import migration `0012`.
 
+## Metering (migration `0014_metering`)
+
+| Table | Purpose |
+|---|---|
+| `metering_usage` | One row per customer and UTC hour. Unique stored bytes are a gauge; inbound transfer, outbound transfer, and compute seconds are counters. |
+| `metering_build_records` | Customer/result idempotency ledger that adds a build's rounded compute seconds to its hour once. |
+| `metering_guard` | Guard table for this migration. |
+
+Both data tables use the metering area prefix. Customer deletion cascades its usage and ledger.
+The migration follows PKI migration `0013`.
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`pki_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`metering_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -214,7 +225,8 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    the operator copies for `0009_secrets` and `0010_sso_federation` are deferred to the separate
    operator migration pull request that collects this wave; lake keeps the source-of-truth schema
    and newest guard ready for that update. The forge wave adds `0012_forge_export_import` and
-   `forge_guard` to that same operator copy.
+   `forge_guard`; the metering wave adds `0014_metering` and `metering_guard`. The operator copy
+   remains deferred to the single wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
    lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a
@@ -227,6 +239,6 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import')" \
-  -c "SELECT to_regclass('forge_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering')" \
+  -c "SELECT to_regclass('metering_guard')"
 ```

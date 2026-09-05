@@ -346,6 +346,30 @@ struct PkiRecoveryShareEvidence {
     std::string digest;
 };
 
+struct MeteringUsage {
+    std::string customer_id;
+    std::string hour;
+    std::uint64_t stored_bytes = 0;
+    std::uint64_t transfer_in_bytes = 0;
+    std::uint64_t transfer_out_bytes = 0;
+    std::uint64_t compute_seconds = 0;
+};
+
+struct MeteringUpdate {
+    std::string customer_id;
+    std::string hour;
+    std::optional<std::uint64_t> stored_bytes;
+    std::uint64_t transfer_in_bytes = 0;
+    std::uint64_t transfer_out_bytes = 0;
+};
+
+struct MeteredBuild {
+    std::string customer_id;
+    std::string result_id;
+    std::string hour;
+    std::uint64_t compute_seconds = 0;
+};
+
 nlohmann::json to_json(const User&);
 nlohmann::json to_json(const Organization&);
 nlohmann::json to_json(const Customer&);
@@ -450,6 +474,13 @@ public:
     virtual Result<audit::Event> latest_audit_event() = 0;
     virtual Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) = 0;
     virtual Result<void> set_audit_retention_days(const std::string& customer_id, int days) = 0;
+
+    virtual Result<MeteringUsage> upsert_metering_usage(const MeteringUpdate& update) = 0;
+    virtual Result<bool> record_metered_build(const MeteredBuild& build) = 0;
+    virtual Result<std::vector<MeteringUsage>> list_metering_usage(const std::string& customer_id,
+                                                                   const std::string& from_hour,
+                                                                   const std::string& to_hour,
+                                                                   int limit) = 0;
 
     virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                             const std::string& instance_kek) = 0;
