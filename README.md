@@ -180,7 +180,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
-| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, root rotation, RFC 3161 timestamping, and RFC 4998 archive renewal |
+| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, root rotation, checkpoint-bound Merkle entry tiles, identity monitoring, RFC 3161 timestamping, and RFC 4998 archive renewal |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |
