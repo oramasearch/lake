@@ -48,6 +48,25 @@ std::string web_ui_mfa(std::string_view error,
                        bool signed_in);
 std::string web_ui_passkeys(std::string_view error);
 std::string web_ui_passkey_sign_in(std::string_view error);
+std::string web_ui_application_sign_up(const control::Application& application,
+                                       std::string_view error);
+std::string web_ui_application_sign_in(const control::Application& application,
+                                       std::string_view error);
+std::string web_ui_application_mfa(const control::Application& application, std::string_view error);
+std::string web_ui_application_passkey_sign_in(const control::Application& application,
+                                               std::string_view error);
+std::string web_ui_applications(const std::vector<control::Application>& applications,
+                                const std::vector<control::Customer>& customers,
+                                std::string_view error);
+std::string web_ui_application(const control::Application& application);
+std::string web_ui_application_users(const control::Application& application,
+                                     const std::vector<control::ApplicationUser>& users);
+std::string web_ui_application_organizations(
+    const control::Application& application,
+    const std::vector<control::ApplicationOrganization>& organizations);
+std::string web_ui_application_events(const control::Application& application,
+                                      const std::vector<control::ApplicationWebhookEvent>& events,
+                                      std::string_view webhook_secret = {});
 std::string web_ui_sessions(const std::vector<control::Session>& sessions,
                             const std::vector<control::Device>& devices,
                             std::string_view error);

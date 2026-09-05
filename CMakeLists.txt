@@ -87,6 +87,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 # lake-core: HTTP-free. Version, the pure web_ui renderers, the capability registry and its
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
+  src/control/apps.cpp
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/callers.cpp
@@ -107,6 +108,7 @@ add_library(lake-core STATIC
   src/api/drive_capabilities.cpp
   src/api/model_capabilities.cpp
   src/api/transparency_capabilities.cpp
+  src/api/app_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp
@@ -123,6 +125,7 @@ target_link_libraries(lake-core PUBLIC nlohmann_json::nlohmann_json liquid::liqu
 
 # lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
 add_library(lake-control-postgres STATIC
+  src/control/apps_memory.cpp
   src/control/memory_store.cpp
   src/control/postgres_store.cpp
 )

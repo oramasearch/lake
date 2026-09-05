@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/audit/audit.hpp"
+#include "lake/control/apps.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
 
@@ -122,9 +123,8 @@ struct NewGrant {
         request_id;
 };
 
-// Identity-core records deliberately carry the same pool_id from the first
-// lake-owned pool. The auth-as-a-service work can therefore add pools without
-// duplicating identity tables.
+// Identity-core records carry pool_id so lake and application users share the
+// same credential, device, and session tables without sharing authentication state.
 struct Device {
     std::string id, user_id, name, revoked_at, created_at, updated_at;
     std::string passkey_credential_id;
@@ -479,6 +479,57 @@ public:
     list_grants(const std::vector<std::string>& object_ids,
                 const std::optional<std::string>& principal_taap_id,
                 int limit) = 0;
+
+    virtual Result<Application> create_application(const NewApplication& value) = 0;
+    virtual Result<std::vector<Application>> list_applications(const std::string& customer_id,
+                                                               int limit) = 0;
+    virtual Result<Application> get_application(const std::string& id) = 0;
+    virtual Result<Application> get_application_by_pool(const std::string& pool_id) = 0;
+    virtual Result<Application>
+    get_application_by_domain(const std::string& custom_sign_in_domain) = 0;
+    virtual Result<Application> update_application_theme(const std::string& id,
+                                                         const nlohmann::json& theme) = 0;
+    virtual Result<ApplicationSigningKey>
+    rotate_application_signing_key(const ApplicationSigningKey& value) = 0;
+    virtual Result<ApplicationSigningKey>
+    current_application_signing_key(const std::string& application_id) = 0;
+    virtual Result<std::vector<ApplicationSigningKey>>
+    list_application_signing_keys(const std::string& application_id) = 0;
+    virtual Result<ApplicationUser> register_application_user(const std::string& application_id,
+                                                              const std::string& user_id) = 0;
+    virtual Result<ApplicationUser> get_application_user(const std::string& application_id,
+                                                         const std::string& user_id) = 0;
+    virtual Result<std::vector<ApplicationUser>> list_application_users(
+        const std::string& application_id, const std::string& query, int limit) = 0;
+    virtual Result<ApplicationUser> set_application_user_status(const std::string& application_id,
+                                                                const std::string& user_id,
+                                                                const std::string& status) = 0;
+    virtual Result<void> delete_application_user(const std::string& application_id,
+                                                 const std::string& user_id) = 0;
+    virtual Result<ApplicationOrganization>
+    create_application_organization(const NewApplicationOrganization& value) = 0;
+    virtual Result<std::vector<ApplicationOrganization>>
+    list_application_organizations(const std::string& application_id, int limit) = 0;
+    virtual Result<ApplicationOrganization> update_application_organization(
+        const std::string& id, const std::string& name, const nlohmann::json& metadata) = 0;
+    virtual Result<void> delete_application_organization(const std::string& id) = 0;
+    virtual Result<ApplicationWebhook>
+    create_application_webhook(const NewApplicationWebhook& value) = 0;
+    virtual Result<ApplicationWebhook> get_application_webhook(const std::string& id) = 0;
+    virtual Result<std::vector<ApplicationWebhook>>
+    list_application_webhooks(const std::string& application_id, int limit) = 0;
+    virtual Result<ApplicationWebhookEvent>
+    create_application_webhook_event(const std::string& application_id,
+                                     const std::string& event,
+                                     const nlohmann::json& payload) = 0;
+    virtual Result<ApplicationWebhookEvent>
+    get_application_webhook_event(const std::string& id) = 0;
+    virtual Result<std::vector<ApplicationWebhookEvent>>
+    list_application_webhook_events(const std::string& application_id, int limit) = 0;
+    virtual Result<ApplicationWebhookDelivery>
+    create_application_webhook_delivery(const NewApplicationWebhookDelivery& value) = 0;
+    virtual Result<std::vector<ApplicationWebhookDelivery>>
+    list_application_webhook_deliveries(const std::string& event_id) = 0;
 
     virtual audit::Result<audit::Identity> current_lake_identity() = 0;
     virtual audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) = 0;

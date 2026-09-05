@@ -15,6 +15,7 @@
 #include <openssl/evp.h>
 #include <pqxx/pqxx>
 
+#include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
@@ -65,6 +66,137 @@ std::string signed_identity_document(std::string_view label) {
     }
     std::filesystem::remove_all(home, error);
     return base64url(document);
+}
+
+TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+    const std::string suffix = std::to_string(static_cast<long long>(getpid()));
+    const auto owner = store->create_user({"taap:1:ed25519:postgres-app-owner-" + suffix,
+                                           "postgres-app-owner-" + suffix + "@example.test",
+                                           "Application owner"});
+    ASSERT_TRUE(owner) << owner.error().message;
+    const auto customer =
+        store->create_customer({"individual", owner->id, "", "postgres-app-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.authorized = true;
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    context.instance_kek = std::string(test_instance_kek);
+    context.public_host = "lake.example.test";
+    context.request_origin = "https://lake.example.test";
+    context.webhook_sender = [](const std::string&, const nlohmann::json&, const std::string&) {
+        return lake::api::WebhookDeliveryResult{.status = 204};
+    };
+    const auto call = [&](const std::string& name,
+                          nlohmann::json input = nlohmann::json::object()) {
+        context.request_id = lake::control::new_uuid_v4();
+        return registry.call(name, input, context);
+    };
+
+    const auto registered =
+        call("register_application",
+             {{"customer_id", customer->id},
+              {"name", "Postgres application"},
+              {"allowed_origins", nlohmann::json::array({"https://postgres-client.example.test"})},
+              {"redirect_uris",
+               nlohmann::json::array({"https://postgres-client.example.test/callback"})},
+              {"custom_sign_in_domain", "login-" + suffix + ".example.test"},
+              {"theme", {{"accent_color", "#445566"}}}});
+    ASSERT_TRUE(registered.ok) << registered.error.message;
+    const std::string application_id = registered.value.at("id");
+    const std::string pool_id = registered.value.at("pool_id");
+    EXPECT_TRUE(call("get_application", {{"id", application_id}}).ok);
+    EXPECT_TRUE(call("list_applications", {{"customer_id", customer->id}}).ok);
+    EXPECT_TRUE(call("update_application_theme",
+                     {{"application_id", application_id}, {"theme", {{"accent_color", "#778899"}}}})
+                    .ok);
+    EXPECT_TRUE(call("rotate_application_signing_key", {{"application_id", application_id}}).ok);
+    const auto jwks = call("application_jwks", {{"application_id", application_id}});
+    ASSERT_TRUE(jwks.ok) << jwks.error.message;
+    EXPECT_EQ(jwks.value.at("keys").size(), 2);
+
+    const auto webhook =
+        call("create_application_webhook",
+             {{"application_id", application_id},
+              {"url", "https://hooks.example.test/postgres"},
+              {"events", nlohmann::json::array({"session.started", "organization.created"})}});
+    ASSERT_TRUE(webhook.ok) << webhook.error.message;
+    EXPECT_TRUE(call("list_application_webhooks", {{"application_id", application_id}}).ok);
+
+    const auto sign_up =
+        call("sign_up_password",
+             {{"pool_id", pool_id},
+              {"email", "postgres-app-user-" + suffix + "@example.test"},
+              {"password", "correct horse battery staple"},
+              {"display_name", "Postgres application user"},
+              {"identity_document", signed_identity_document("application-" + suffix)}});
+    ASSERT_TRUE(sign_up.ok) << sign_up.error.message;
+    EXPECT_TRUE(sign_up.value.contains("access_token"));
+    const auto users = call("list_application_users", {{"application_id", application_id}});
+    ASSERT_TRUE(users.ok) << users.error.message;
+    ASSERT_EQ(users.value.at("items").size(), 1);
+    const std::string user_id = users.value.at("items").at(0).at("user_id");
+    EXPECT_TRUE(
+        call("export_application_user", {{"application_id", application_id}, {"user_id", user_id}})
+            .ok);
+    EXPECT_TRUE(
+        call("issue_application_jwt", {{"application_id", application_id}, {"user_id", user_id}})
+            .ok);
+
+    const auto organization = call("create_application_organization",
+                                   {{"application_id", application_id},
+                                    {"taap_id", "taap:1:ed25519:postgres-app-org-" + suffix},
+                                    {"name", "Postgres organization"},
+                                    {"metadata", {{"plan", "test"}}}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const std::string organization_id = organization.value.at("id");
+    EXPECT_TRUE(call("list_application_organizations", {{"application_id", application_id}}).ok);
+    EXPECT_TRUE(call("update_application_organization",
+                     {{"application_id", application_id},
+                      {"organization_id", organization_id},
+                      {"name", "Updated organization"},
+                      {"metadata", {{"plan", "updated"}}}})
+                    .ok);
+
+    const auto events =
+        call("list_application_webhook_events", {{"application_id", application_id}});
+    ASSERT_TRUE(events.ok) << events.error.message;
+    ASSERT_FALSE(events.value.at("items").empty());
+    const auto subscribed = std::ranges::find_if(events.value.at("items"), [](const auto& event) {
+        return event.at("event") == "organization.created";
+    });
+    ASSERT_NE(subscribed, events.value.at("items").end());
+    EXPECT_TRUE(call("retry_application_webhook",
+                     {{"application_id", application_id},
+                      {"event_id", subscribed->at("id")},
+                      {"webhook_id", webhook.value.at("id")}})
+                    .ok);
+
+    EXPECT_TRUE(call("delete_application_organization",
+                     {{"application_id", application_id}, {"organization_id", organization_id}})
+                    .ok);
+    EXPECT_TRUE(
+        call("suspend_application_user", {{"application_id", application_id}, {"user_id", user_id}})
+            .ok);
+    EXPECT_FALSE(call("sign_in_password",
+                      {{"pool_id", pool_id},
+                       {"email", "postgres-app-user-" + suffix + "@example.test"},
+                       {"password", "correct horse battery staple"}})
+                     .ok);
+    EXPECT_TRUE(
+        call("delete_application_user", {{"application_id", application_id}, {"user_id", user_id}})
+            .ok);
 }
 
 TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {

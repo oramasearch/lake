@@ -4,15 +4,17 @@ Drive browsing, preview, history, sharing, and documented Linux client states ar
 [`drive.md`](drive.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
-`src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on the two passkey
-pages that call `navigator.credentials`, unit-tested as strings. The navigation is on every page:
-Home, Customers, Organizations, Repositories, Exports, Search, Secrets, Audit, SSO, API
+`src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on passkey pages
+that call `navigator.credentials`, unit-tested as strings. The navigation is on every operator page:
+Home, Customers, Organizations, Repositories, Applications, Exports, Search, Secrets, Audit, SSO, API
 (`/v1/openapi.json`), and Sign in / Sign out.
 
 | Page | Route | Shows |
 |---|---|---|
 | Home | `GET /` | the node, version, links |
 | User identity | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`, `/sessions`, `/passkeys`, `/tokens` | password, TOTP, OAuth, passkeys, sessions/devices, and scoped tokens; see [identity.md](identity.md) |
+| Applications | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | registration, theme, pool users, organizations, webhooks, and delivery history; see [identity.md](identity.md) |
+| Application identity | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed pool-specific identity on lake's host or a configured custom host |
 | Operator sign in | `GET /login`, `POST /session` (form field `token`), `POST /logout` | the operator-token form; a match sets the session cookie and redirects to Repositories |
 | Customers | `GET /customers` | every tenant: handle (links to its repositories), type, identity id, created |
 | Organizations | `GET /organizations` | every authorized organization, with links to teams, members, and effective access |

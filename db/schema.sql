@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `forge_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `auth_app_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -948,3 +948,141 @@ CREATE TABLE IF NOT EXISTS drive_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0015_drive') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Application authentication service (migration 0016): isolated user pools, hosted identity
+-- configuration, per-application signing keys, lifecycle webhooks, and operator-managed users.
+-- Private signing seeds and webhook secrets are encrypted through application-specific keystore
+-- purposes before they enter these tables.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE objects DROP CONSTRAINT IF EXISTS objects_type_check;
+ALTER TABLE objects ADD CONSTRAINT objects_type_check CHECK (object_type IN (
+    'customer', 'organization', 'team', 'member', 'repository', 'path', 'environment',
+    'secret_mount', 'secret', 'application'));
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS pool_id text NOT NULL DEFAULT 'lake';
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_taap_id_key;
+DROP INDEX IF EXISTS users_email_lower_key;
+CREATE UNIQUE INDEX IF NOT EXISTS auth_app_users_pool_taap_unique
+    ON users (pool_id, taap_id) WHERE taap_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS auth_app_users_pool_email_unique
+    ON users (pool_id, lower(email)) WHERE email IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS auth_applications (
+    id                    uuid        PRIMARY KEY,
+    customer_id           uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    pool_id               text        NOT NULL UNIQUE,
+    name                  text        NOT NULL,
+    allowed_origins       jsonb       NOT NULL,
+    redirect_uris         jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    custom_sign_in_domain text,
+    theme                 jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    updated_at            timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT auth_applications_name_check CHECK (length(name) BETWEEN 1 AND 256),
+    CONSTRAINT auth_applications_origins_check CHECK (
+        jsonb_typeof(allowed_origins) = 'array' AND jsonb_array_length(allowed_origins) > 0),
+    CONSTRAINT auth_applications_redirects_check CHECK (jsonb_typeof(redirect_uris) = 'array'),
+    CONSTRAINT auth_applications_theme_check CHECK (jsonb_typeof(theme) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS auth_applications_custom_domain_unique
+    ON auth_applications (lower(custom_sign_in_domain))
+    WHERE custom_sign_in_domain IS NOT NULL;
+CREATE INDEX IF NOT EXISTS auth_applications_customer_idx
+    ON auth_applications (customer_id, created_at DESC);
+DROP TRIGGER IF EXISTS auth_applications_set_updated_at ON auth_applications;
+CREATE TRIGGER auth_applications_set_updated_at BEFORE UPDATE ON auth_applications
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS auth_app_signing_keys (
+    application_id uuid        NOT NULL REFERENCES auth_applications(id) ON DELETE CASCADE,
+    kid            text        NOT NULL UNIQUE,
+    version        integer     NOT NULL CHECK (version > 0),
+    encrypted_seed text        NOT NULL,
+    public_key     text        NOT NULL,
+    current        boolean     NOT NULL DEFAULT true,
+    retired_at     timestamptz,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (application_id, version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS auth_app_signing_keys_current_unique
+    ON auth_app_signing_keys (application_id) WHERE current;
+
+CREATE TABLE IF NOT EXISTS auth_app_users (
+    application_id uuid        NOT NULL REFERENCES auth_applications(id) ON DELETE CASCADE,
+    user_id        uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status         text        NOT NULL DEFAULT 'active',
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (application_id, user_id),
+    CONSTRAINT auth_app_users_status_check CHECK (status IN ('active', 'suspended'))
+);
+CREATE INDEX IF NOT EXISTS auth_app_users_status_idx
+    ON auth_app_users (application_id, status, created_at DESC);
+DROP TRIGGER IF EXISTS auth_app_users_set_updated_at ON auth_app_users;
+CREATE TRIGGER auth_app_users_set_updated_at BEFORE UPDATE ON auth_app_users
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS auth_app_organizations (
+    id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    application_id uuid        NOT NULL REFERENCES auth_applications(id) ON DELETE CASCADE,
+    taap_id        text        NOT NULL,
+    name           text        NOT NULL,
+    metadata       jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT auth_app_organizations_taap_unique UNIQUE (application_id, taap_id),
+    CONSTRAINT auth_app_organizations_name_unique UNIQUE (application_id, name),
+    CONSTRAINT auth_app_organizations_metadata_check CHECK (jsonb_typeof(metadata) = 'object')
+);
+DROP TRIGGER IF EXISTS auth_app_organizations_set_updated_at ON auth_app_organizations;
+CREATE TRIGGER auth_app_organizations_set_updated_at BEFORE UPDATE ON auth_app_organizations
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS auth_app_webhooks (
+    id               uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    application_id   uuid        NOT NULL REFERENCES auth_applications(id) ON DELETE CASCADE,
+    url              text        NOT NULL,
+    events           text[]      NOT NULL,
+    encrypted_secret text        NOT NULL,
+    enabled          boolean     NOT NULL DEFAULT true,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    updated_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT auth_app_webhooks_events_check CHECK (cardinality(events) > 0)
+);
+CREATE INDEX IF NOT EXISTS auth_app_webhooks_application_idx
+    ON auth_app_webhooks (application_id, created_at DESC);
+DROP TRIGGER IF EXISTS auth_app_webhooks_set_updated_at ON auth_app_webhooks;
+CREATE TRIGGER auth_app_webhooks_set_updated_at BEFORE UPDATE ON auth_app_webhooks
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS auth_app_webhook_events (
+    id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    application_id uuid        NOT NULL REFERENCES auth_applications(id) ON DELETE CASCADE,
+    event          text        NOT NULL,
+    payload        jsonb       NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT auth_app_webhook_events_payload_check CHECK (jsonb_typeof(payload) = 'object')
+);
+CREATE INDEX IF NOT EXISTS auth_app_webhook_events_application_idx
+    ON auth_app_webhook_events (application_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS auth_app_webhook_deliveries (
+    id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id   uuid        NOT NULL REFERENCES auth_app_webhook_events(id) ON DELETE CASCADE,
+    webhook_id uuid        NOT NULL REFERENCES auth_app_webhooks(id) ON DELETE CASCADE,
+    attempt    integer     NOT NULL CHECK (attempt > 0),
+    status     integer     NOT NULL DEFAULT 0,
+    signature  text        NOT NULL,
+    error      text        NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT auth_app_webhook_deliveries_attempt_unique UNIQUE (event_id, webhook_id, attempt)
+);
+CREATE INDEX IF NOT EXISTS auth_app_webhook_deliveries_event_idx
+    ON auth_app_webhook_deliveries (event_id, created_at);
+
+CREATE TABLE IF NOT EXISTS auth_app_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0016_auth_apps') ON CONFLICT DO NOTHING;

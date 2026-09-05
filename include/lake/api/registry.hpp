@@ -104,6 +104,8 @@ struct ApiContext {
     bool operator_credential = false;
     bool session_credential = false;
     std::string public_host;
+    std::string request_origin;
+    std::string caller_origin;
     std::string pool_id = "lake";
     std::vector<std::string> scopes;
     control::AuthorizationCache authorization_cache;

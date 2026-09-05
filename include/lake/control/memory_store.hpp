@@ -84,6 +84,56 @@ public:
     Result<std::vector<Grant>> list_grants(const std::vector<std::string>& object_ids,
                                            const std::optional<std::string>& principal_taap_id,
                                            int limit) override;
+    Result<Application> create_application(const NewApplication& value) override;
+    Result<std::vector<Application>> list_applications(const std::string& customer_id,
+                                                       int limit) override;
+    Result<Application> get_application(const std::string& id) override;
+    Result<Application> get_application_by_pool(const std::string& pool_id) override;
+    Result<Application>
+    get_application_by_domain(const std::string& custom_sign_in_domain) override;
+    Result<Application> update_application_theme(const std::string& id,
+                                                 const nlohmann::json& theme) override;
+    Result<ApplicationSigningKey>
+    rotate_application_signing_key(const ApplicationSigningKey& value) override;
+    Result<ApplicationSigningKey>
+    current_application_signing_key(const std::string& application_id) override;
+    Result<std::vector<ApplicationSigningKey>>
+    list_application_signing_keys(const std::string& application_id) override;
+    Result<ApplicationUser> register_application_user(const std::string& application_id,
+                                                      const std::string& user_id) override;
+    Result<ApplicationUser> get_application_user(const std::string& application_id,
+                                                 const std::string& user_id) override;
+    Result<std::vector<ApplicationUser>> list_application_users(const std::string& application_id,
+                                                                const std::string& query,
+                                                                int limit) override;
+    Result<ApplicationUser> set_application_user_status(const std::string& application_id,
+                                                        const std::string& user_id,
+                                                        const std::string& status) override;
+    Result<void> delete_application_user(const std::string& application_id,
+                                         const std::string& user_id) override;
+    Result<ApplicationOrganization>
+    create_application_organization(const NewApplicationOrganization& value) override;
+    Result<std::vector<ApplicationOrganization>>
+    list_application_organizations(const std::string& application_id, int limit) override;
+    Result<ApplicationOrganization> update_application_organization(
+        const std::string& id, const std::string& name, const nlohmann::json& metadata) override;
+    Result<void> delete_application_organization(const std::string& id) override;
+    Result<ApplicationWebhook>
+    create_application_webhook(const NewApplicationWebhook& value) override;
+    Result<ApplicationWebhook> get_application_webhook(const std::string& id) override;
+    Result<std::vector<ApplicationWebhook>>
+    list_application_webhooks(const std::string& application_id, int limit) override;
+    Result<ApplicationWebhookEvent>
+    create_application_webhook_event(const std::string& application_id,
+                                     const std::string& event,
+                                     const nlohmann::json& payload) override;
+    Result<ApplicationWebhookEvent> get_application_webhook_event(const std::string& id) override;
+    Result<std::vector<ApplicationWebhookEvent>>
+    list_application_webhook_events(const std::string& application_id, int limit) override;
+    Result<ApplicationWebhookDelivery>
+    create_application_webhook_delivery(const NewApplicationWebhookDelivery& value) override;
+    Result<std::vector<ApplicationWebhookDelivery>>
+    list_application_webhook_deliveries(const std::string& event_id) override;
     audit::Result<audit::Identity> current_lake_identity() override;
     audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) override;
     audit::Result<void> create_lake_identity(const audit::Identity& identity) override;
@@ -286,6 +336,13 @@ private:
     std::vector<Invitation> invitations_;
     std::vector<PolicyObject> policy_objects_;
     std::vector<Grant> grants_;
+    std::vector<Application> applications_;
+    std::vector<ApplicationSigningKey> application_signing_keys_;
+    std::vector<ApplicationUser> application_users_;
+    std::vector<ApplicationOrganization> application_organizations_;
+    std::vector<ApplicationWebhook> application_webhooks_;
+    std::vector<ApplicationWebhookEvent> application_webhook_events_;
+    std::vector<ApplicationWebhookDelivery> application_webhook_deliveries_;
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;

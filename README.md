@@ -73,6 +73,11 @@ liquid is the tool. lake is where it collects.
 > an aggregation proof. `/v1/transparency_log_configuration` and `/audit` expose the effective
 > public configuration. The operator handoff is [`docs/control-plane/log.md`](docs/control-plane/log.md).
 
+> Application authentication migration `0016_auth_apps` adds isolated user pools, hosted and
+> custom-domain identity pages, per-application JWT signing and JWKS, lifecycle webhooks, and
+> operator pages for application users and organizations. The registry authorizes and audits its
+> application management capabilities.
+
 ## Build and run
 
 Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3
@@ -98,11 +103,14 @@ ctest --test-dir build
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
+| `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
+| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |
+| `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
 | `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
 | `GET /api/models/:id`, `/models/:id/resolve/:revision/:file` | compatible model metadata, verified build provenance, and exact revision file bytes |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
@@ -149,7 +157,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/api/server.hpp` | `ApiServer` / `ServerOptions` in Zetta's shape — no HTTP type appears here |
 | `src/api/http_server.cpp` | the **one** translation unit that knows Beast2, `boost::http` and Boost.JSON; serves the registry as REST, OpenAPI and MCP |
 | `include/lake/api/registry.hpp`, `sync_store.hpp`, `rest.hpp`, `mcp.hpp`, `capabilities.hpp` | the HTTP-free capability registry, liquid-sync boundary, and surface renderers |
-| `include/lake/control/`, `src/control/` | the control-plane store, policy engine, static-secret lifecycle and encryption service: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
+| `include/lake/control/`, `src/control/` | the control-plane store, policy engine, application authentication, static-secret lifecycle and encryption service: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
@@ -159,7 +167,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |
 | `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+| `db/schema.sql` | **the control-plane schema, source of truth.** Identity and application user pools, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 
 ## What this is
 
@@ -175,7 +183,7 @@ by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator)
 | Drive | *Where is my stuff?* — for people who do not think in commits |
 | Platform | *Is it running?* — deploy on drip, preview environments |
 | Registry | OCI, npm, PyPI, Maven, apt, models and datasets — one deduplicated store |
-| Identity, secrets, PKI | TAAP/1 identities, dynamic secrets, one CA |
+| Identity, secrets, PKI | TAAP/1 identities, application authentication, dynamic secrets, one CA |
 | Search | BM25F plus a positional trigram index, over history and inside artifacts |
 
 ## Internal documentation

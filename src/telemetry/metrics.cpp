@@ -342,6 +342,138 @@ public:
         return call("list_grants",
                     [&] { return store_->list_grants(object_ids, principal_taap_id, limit); });
     }
+    control::Result<control::Application>
+    create_application(const control::NewApplication& value) override {
+        return call("create_application", [&] { return store_->create_application(value); });
+    }
+    control::Result<std::vector<control::Application>>
+    list_applications(const std::string& customer_id, int limit) override {
+        return call("list_applications",
+                    [&] { return store_->list_applications(customer_id, limit); });
+    }
+    control::Result<control::Application> get_application(const std::string& id) override {
+        return call("get_application", [&] { return store_->get_application(id); });
+    }
+    control::Result<control::Application>
+    get_application_by_pool(const std::string& pool_id) override {
+        return call("get_application_by_pool",
+                    [&] { return store_->get_application_by_pool(pool_id); });
+    }
+    control::Result<control::Application>
+    get_application_by_domain(const std::string& domain) override {
+        return call("get_application_by_domain",
+                    [&] { return store_->get_application_by_domain(domain); });
+    }
+    control::Result<control::Application>
+    update_application_theme(const std::string& id, const nlohmann::json& theme) override {
+        return call("update_application_theme",
+                    [&] { return store_->update_application_theme(id, theme); });
+    }
+    control::Result<control::ApplicationSigningKey>
+    rotate_application_signing_key(const control::ApplicationSigningKey& value) override {
+        return call("rotate_application_signing_key",
+                    [&] { return store_->rotate_application_signing_key(value); });
+    }
+    control::Result<control::ApplicationSigningKey>
+    current_application_signing_key(const std::string& application_id) override {
+        return call("current_application_signing_key",
+                    [&] { return store_->current_application_signing_key(application_id); });
+    }
+    control::Result<std::vector<control::ApplicationSigningKey>>
+    list_application_signing_keys(const std::string& application_id) override {
+        return call("list_application_signing_keys",
+                    [&] { return store_->list_application_signing_keys(application_id); });
+    }
+    control::Result<control::ApplicationUser>
+    register_application_user(const std::string& application_id,
+                              const std::string& user_id) override {
+        return call("register_application_user",
+                    [&] { return store_->register_application_user(application_id, user_id); });
+    }
+    control::Result<control::ApplicationUser>
+    get_application_user(const std::string& application_id, const std::string& user_id) override {
+        return call("get_application_user",
+                    [&] { return store_->get_application_user(application_id, user_id); });
+    }
+    control::Result<std::vector<control::ApplicationUser>> list_application_users(
+        const std::string& application_id, const std::string& query, int limit) override {
+        return call("list_application_users",
+                    [&] { return store_->list_application_users(application_id, query, limit); });
+    }
+    control::Result<control::ApplicationUser>
+    set_application_user_status(const std::string& application_id,
+                                const std::string& user_id,
+                                const std::string& status) override {
+        return call("set_application_user_status", [&] {
+            return store_->set_application_user_status(application_id, user_id, status);
+        });
+    }
+    control::Result<void> delete_application_user(const std::string& application_id,
+                                                  const std::string& user_id) override {
+        return call("delete_application_user",
+                    [&] { return store_->delete_application_user(application_id, user_id); });
+    }
+    control::Result<control::ApplicationOrganization>
+    create_application_organization(const control::NewApplicationOrganization& value) override {
+        return call("create_application_organization",
+                    [&] { return store_->create_application_organization(value); });
+    }
+    control::Result<std::vector<control::ApplicationOrganization>>
+    list_application_organizations(const std::string& application_id, int limit) override {
+        return call("list_application_organizations",
+                    [&] { return store_->list_application_organizations(application_id, limit); });
+    }
+    control::Result<control::ApplicationOrganization> update_application_organization(
+        const std::string& id, const std::string& name, const nlohmann::json& metadata) override {
+        return call("update_application_organization",
+                    [&] { return store_->update_application_organization(id, name, metadata); });
+    }
+    control::Result<void> delete_application_organization(const std::string& id) override {
+        return call("delete_application_organization",
+                    [&] { return store_->delete_application_organization(id); });
+    }
+    control::Result<control::ApplicationWebhook>
+    create_application_webhook(const control::NewApplicationWebhook& value) override {
+        return call("create_application_webhook",
+                    [&] { return store_->create_application_webhook(value); });
+    }
+    control::Result<control::ApplicationWebhook>
+    get_application_webhook(const std::string& id) override {
+        return call("get_application_webhook", [&] { return store_->get_application_webhook(id); });
+    }
+    control::Result<std::vector<control::ApplicationWebhook>>
+    list_application_webhooks(const std::string& application_id, int limit) override {
+        return call("list_application_webhooks",
+                    [&] { return store_->list_application_webhooks(application_id, limit); });
+    }
+    control::Result<control::ApplicationWebhookEvent>
+    create_application_webhook_event(const std::string& application_id,
+                                     const std::string& event,
+                                     const nlohmann::json& payload) override {
+        return call("create_application_webhook_event", [&] {
+            return store_->create_application_webhook_event(application_id, event, payload);
+        });
+    }
+    control::Result<control::ApplicationWebhookEvent>
+    get_application_webhook_event(const std::string& id) override {
+        return call("get_application_webhook_event",
+                    [&] { return store_->get_application_webhook_event(id); });
+    }
+    control::Result<std::vector<control::ApplicationWebhookEvent>>
+    list_application_webhook_events(const std::string& application_id, int limit) override {
+        return call("list_application_webhook_events",
+                    [&] { return store_->list_application_webhook_events(application_id, limit); });
+    }
+    control::Result<control::ApplicationWebhookDelivery> create_application_webhook_delivery(
+        const control::NewApplicationWebhookDelivery& value) override {
+        return call("create_application_webhook_delivery",
+                    [&] { return store_->create_application_webhook_delivery(value); });
+    }
+    control::Result<std::vector<control::ApplicationWebhookDelivery>>
+    list_application_webhook_deliveries(const std::string& event_id) override {
+        return call("list_application_webhook_deliveries",
+                    [&] { return store_->list_application_webhook_deliveries(event_id); });
+    }
     control::Result<control::DriveShareLink>
     create_drive_share_link(const control::NewDriveShareLink& value) override {
         return call("create_drive_share_link",

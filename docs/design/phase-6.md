@@ -29,7 +29,12 @@ recovery codes and fresh-verification disablement, persisted
 WebAuthn, OAuth, row-resolved sessions, scoped tokens and device revocation are implemented. The
 hosted sign-up, sign-in, MFA, passkey, sessions/devices, and token pages use those capabilities.
 The signed audit substrate from #18 is integrated, and every passkey registration stores a
-lake-signed TAAP binding beside the credential. Application user pools remain owned by #51.
+lake-signed TAAP binding beside the credential. **Application authentication status (#51):
+implemented.** Migration `0016_auth_apps` adds application registrations, isolated users on the
+same pool-scoped identity tables, per-application Ed25519 JWT keys and JWKS, signed lifecycle
+webhooks with retained retries, and application organizations. The themed hosted pages work on
+lake and custom hosts; operator pages manage applications, users, organizations, and the event
+log. The contract is [`../api/apps.md`](../api/apps.md).
 
 **SSO federation status (#15, #21).** Organization SAML and OIDC provider records, encrypted
 OIDC client secrets, hashed SCIM tokens, federation issuer-claim policy, JIT user mapping,
@@ -66,12 +71,12 @@ longer life, listed and revoked on a page and through capabilities; revocation t
 the next request because every request resolves the row. Long-lived static tokens are an explicit,
 audited exception (`kind = static`, reason required).
 
-**Auth as a service (decision §11).** An application deployed on lake registers and receives a
+**Auth as a service (decision §11; implemented by #51).** An application deployed on lake registers and receives a
 *user pool*: the same tables scoped by `pool_id` (lake's own users are pool `lake`), the same
 authentication methods, hosted sign-in pages on lake's domain or the application's, JWT issuance
 per application audience with a JWKS endpoint, and lifecycle webhooks. Nothing in the identity
-core is written twice; the application-facing surface is the follow-up epic (#51) and every
-identity-core issue keeps `pool_id` on its tables and in its capability inputs from the start.
+core is written twice. Migration `0016_auth_apps` and the application capabilities add only
+registration, policy, key, organization, webhook, and pool-association records around that core.
 
 ### Identity-core security decisions
 

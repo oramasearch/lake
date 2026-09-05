@@ -98,6 +98,11 @@ and anchored checkpoints require the configured distinct witness quorum before t
 anchored checkpoints retain an aggregation proof. The effective configuration is a read capability
 and appears on `/audit`; the Lake-CR environment mapping is `docs/control-plane/log.md`.
 
+Application authentication adds migration `0016_auth_apps`, isolated identity pools, themed
+hosted and custom-domain entry pages, per-application Ed25519 JWTs and JWKS, signed lifecycle
+webhooks with retained attempts, and authorized operator management for users and organizations.
+Its contract is `docs/api/apps.md`.
+
 ## Where to read Zetta
 
 lake builds on Zetta, so you will read Zetta constantly. **Read it only from the umbrella
@@ -161,7 +166,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `drive_guard` today, versioned by content hash).
+  `auth_app_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
