@@ -17,6 +17,23 @@ struct DrivePreview {
     std::string html;
 };
 
+struct DriveFolderOptions {
+    std::string view = "list";
+    std::string sort = "name";
+    bool descending = false;
+};
+
+struct DriveDiffLine {
+    std::string kind;
+    std::string text;
+};
+
+struct DriveVersionDiff {
+    RepositoryFile left;
+    RepositoryFile right;
+    std::vector<DriveDiffLine> lines;
+};
+
 class DrivePreviewResult {
 public:
     DrivePreviewResult(DrivePreview preview);
@@ -49,5 +66,8 @@ private:
     std::map<std::string, DrivePreviewRenderer> renderers_;
     std::vector<std::string> extensions_;
 };
+
+[[nodiscard]] bool drive_preview_is_text(const DrivePreview& preview);
+[[nodiscard]] DriveVersionDiff drive_text_diff(RepositoryFile left, RepositoryFile right);
 
 } // namespace lake::api

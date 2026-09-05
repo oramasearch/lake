@@ -75,11 +75,15 @@ struct Surface {
     }
 };
 
+std::vector<std::byte> bytes(const std::string& value);
+
 struct RepositoryFixtureStore final : SyncStore {
     std::map<std::string, RepositoryPortableData> imported;
     std::uint64_t unique_bytes = 123;
     bool restored = false;
     bool shared_folder_moved = false;
+    std::string commit_message;
+    std::vector<RepositoryWriteOperation> committed_operations;
     SyncStoreResult<std::vector<std::string>>
     find_missing(const std::string&, const std::vector<std::string>&) override {
         return std::vector<std::string>{};
@@ -120,7 +124,7 @@ struct RepositoryFixtureStore final : SyncStore {
 
     SyncStoreResult<RepositoryFile> repository_file(const std::string&,
                                                     const std::string&,
-                                                    const std::string&,
+                                                    const std::string& revision,
                                                     const std::string& path) override {
         if (path == "MODEL_CARD.md") {
             return RepositoryFile{path, "blob-card", "# Fixture model", 15};
@@ -128,7 +132,18 @@ struct RepositoryFixtureStore final : SyncStore {
         if (path == "weights.bin") {
             return RepositoryFile{path, "blob-weights", "fixture weights", 15};
         }
-        return RepositoryFile{path, "blob-1", "hello", 5};
+        if (revision == "change-1") {
+            return RepositoryFile{path, "blob-1", "old\nshared\n", 11, bytes("old\nshared\n")};
+        }
+        return RepositoryFile{path, "blob-2", "new\nshared\n", 11, bytes("new\nshared\n")};
+    }
+
+    SyncStoreResult<RepositoryFile> repository_blob(const std::string&,
+                                                    const std::string&,
+                                                    const std::string& path,
+                                                    const std::string& blob) override {
+        const std::string contents = blob == "blob-1" ? "old\nshared\n" : "new\nshared\n";
+        return RepositoryFile{path, blob, contents, contents.size(), bytes(contents)};
     }
 
     SyncStoreResult<std::vector<RepositoryChange>> repository_log(const std::string&,
@@ -189,6 +204,17 @@ struct RepositoryFixtureStore final : SyncStore {
     SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string&, const std::string&) override {
         return std::vector<RepositoryConflict>{{"readme.md", {"blob-1", "blob-2"}}};
+    }
+
+    SyncStoreResult<std::string>
+    commit_repository_files(const std::string&,
+                            const std::string&,
+                            const std::string&,
+                            const std::string& message,
+                            std::vector<RepositoryWriteOperation> operations) override {
+        commit_message = message;
+        committed_operations = std::move(operations);
+        return "drive-change";
     }
 
     SyncStoreResult<RepositoryChange> restore_repository_file(const std::string&,
@@ -2048,7 +2074,7 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(
         s.call("repository_file", {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}})
             .value["contents"],
-        "hello");
+        "new\nshared\n");
     EXPECT_EQ(s.call("list_changes", {{"id", repository_id}}).value["items"].size(), 1u);
     EXPECT_EQ(
         s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}}).value["message"],
@@ -2212,6 +2238,93 @@ TEST(Drive, PathHistoryRestoresAsANewChange) {
     ASSERT_TRUE(restored.ok) << restored.error.message;
     EXPECT_EQ(restored.value["id"], "restored-change");
     EXPECT_TRUE(repository_store.restored);
+}
+
+TEST(Drive, BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+
+    const ApiResult browse = surface.call("drive_browse",
+                                          {{"repository_id", repository.value["id"]},
+                                           {"ref", "main"},
+                                           {"path", ""},
+                                           {"sort", "modified"},
+                                           {"direction", "desc"}});
+    ASSERT_TRUE(browse.ok) << browse.error.message;
+    EXPECT_EQ(browse.value["items"].front()["kind"], "tree");
+    EXPECT_EQ(browse.value["items"][1]["modified_at"], "2026-09-04T00:00:00Z");
+
+    const ApiResult folder = surface.call("create_drive_folder",
+                                          {{"repository_id", repository.value["id"]},
+                                           {"ref", "main"},
+                                           {"path", ""},
+                                           {"name", "notes"}});
+    ASSERT_TRUE(folder.ok) << folder.error.message;
+    ASSERT_EQ(repository_store.committed_operations.size(), 1u);
+    EXPECT_EQ(repository_store.committed_operations.front().kind, RepositoryWriteKind::Folder);
+    EXPECT_EQ(repository_store.committed_operations.front().path, "notes");
+
+    const ApiResult upload =
+        surface.call("upload_drive_files",
+                     {{"repository_id", repository.value["id"]},
+                      {"ref", "main"},
+                      {"path", "shared"},
+                      {"files", json::array({{{"name", "note.txt"}, {"content", "aGVsbG8="}}})}});
+    ASSERT_TRUE(upload.ok) << upload.error.message;
+    ASSERT_EQ(repository_store.committed_operations.size(), 1u);
+    EXPECT_EQ(repository_store.committed_operations.front().kind, RepositoryWriteKind::File);
+    EXPECT_EQ(repository_store.committed_operations.front().path, "shared/note.txt");
+    EXPECT_EQ(repository_store.committed_operations.front().contents, bytes("hello"));
+
+    const ApiResult moved = surface.call("move_drive_path",
+                                         {{"repository_id", repository.value["id"]},
+                                          {"ref", "main"},
+                                          {"path", "readme.md"},
+                                          {"destination", "renamed.md"}});
+    ASSERT_TRUE(moved.ok) << moved.error.message;
+    EXPECT_EQ(repository_store.committed_operations.front().kind, RepositoryWriteKind::Moved);
+    EXPECT_EQ(repository_store.committed_operations.front().source_path, "readme.md");
+    EXPECT_EQ(repository_store.committed_operations.front().path, "renamed.md");
+
+    const ApiResult deleted = surface.call(
+        "delete_drive_path",
+        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "readme.md"}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(repository_store.committed_operations.front().kind, RepositoryWriteKind::DeletedFile);
+
+    const ApiResult download = surface.call(
+        "download_drive_file",
+        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "readme.md"}});
+    ASSERT_TRUE(download.ok) << download.error.message;
+    EXPECT_EQ(download.value["blob"], "blob-2");
+    EXPECT_EQ(surface.ctx.sync_response, bytes("new\nshared\n"));
+
+    const ApiResult difference = surface.call("diff_drive_versions",
+                                              {{"repository_id", repository.value["id"]},
+                                               {"ref", "main"},
+                                               {"path", "readme.md"},
+                                               {"left", "change-1"},
+                                               {"right", "main"}});
+    ASSERT_TRUE(difference.ok) << difference.error.message;
+    EXPECT_EQ(difference.value["lines"][0]["kind"], "removed");
+    EXPECT_EQ(difference.value["lines"][0]["text"], "old");
+    EXPECT_EQ(difference.value["lines"][1]["kind"], "added");
+    EXPECT_EQ(difference.value["lines"][1]["text"], "new");
+
+    const ApiResult conflict = surface.call(
+        "drive_conflict",
+        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "readme.md"}});
+    ASSERT_TRUE(conflict.ok) << conflict.error.message;
+    EXPECT_EQ(conflict.value["versions"].size(), 2u);
+    EXPECT_EQ(conflict.value["difference"]["lines"][0]["kind"], "removed");
 }
 
 TEST(Models, MetadataAndResolveUseRepositoryHistoryAndProvenance) {
@@ -2813,6 +2926,55 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
         server.port(), "/models/" + public_repository->id + "/resolve/main/nested/config.json");
     EXPECT_NE(nested_model_file.find(" 200 "), std::string::npos) << nested_model_file;
     EXPECT_NE(nested_model_file.find("{\"fixture\":true}"), std::string::npos);
+
+    const std::string drive =
+        http_get(server.port(),
+                 "/drive?repository_id=" + public_repository->id + "&ref=main&path=&view=grid",
+                 "Bearer test-token");
+    EXPECT_NE(drive.find(" 200 "), std::string::npos) << drive;
+    EXPECT_NE(drive.find("class=\"drive-grid\""), std::string::npos);
+    EXPECT_NE(drive.find("action=\"/drive/upload\""), std::string::npos);
+    EXPECT_EQ(drive.find(" · —"), std::string::npos);
+
+    const std::string boundary = "lake-drive-boundary";
+    const std::string multipart =
+        "--" + boundary + "\r\nContent-Disposition: form-data; name=\"repository_id\"\r\n\r\n" +
+        public_repository->id + "\r\n--" + boundary +
+        "\r\nContent-Disposition: form-data; name=\"ref\"\r\n\r\nmain\r\n--" + boundary +
+        "\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n\r\n--" + boundary +
+        "\r\nContent-Disposition: form-data; name=\"files\"; filename=\"browser.txt\"\r\n"
+        "Content-Type: text/plain\r\n\r\nbrowser upload\r\n--" +
+        boundary + "--\r\n";
+    const std::string uploaded = http_request(server.port(),
+                                              "POST",
+                                              "/drive/upload",
+                                              multipart,
+                                              "multipart/form-data; boundary=" + boundary,
+                                              {},
+                                              "Bearer test-token");
+    EXPECT_NE(uploaded.find(" 302 "), std::string::npos) << uploaded;
+    const std::string uploaded_preview = http_get(
+        server.port(),
+        "/drive/preview?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
+        "Bearer test-token");
+    EXPECT_NE(uploaded_preview.find(" 200 "), std::string::npos) << uploaded_preview;
+    EXPECT_NE(uploaded_preview.find("browser upload"), std::string::npos);
+    const std::string downloaded = http_get(
+        server.port(),
+        "/drive/download?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
+        "Bearer test-token");
+    EXPECT_NE(downloaded.find(" 200 "), std::string::npos) << downloaded;
+    EXPECT_NE(downloaded.find("attachment; filename=\"browser.txt\""), std::string::npos)
+        << downloaded;
+    EXPECT_NE(downloaded.find("browser upload"), std::string::npos);
+    const std::string version_diff =
+        http_get(server.port(),
+                 "/drive/history/diff?repository_id=" + public_repository->id +
+                     "&ref=main&path=readme.md&left=" + liquid::to_string(first_change->value) +
+                     "&right=" + liquid::to_string(second_change->value),
+                 "Bearer test-token");
+    EXPECT_NE(version_diff.find(" 200 "), std::string::npos) << version_diff;
+    EXPECT_NE(version_diff.find("+updated"), std::string::npos);
 
     const std::string private_page =
         http_get(server.port(), "/repository?id=" + private_repository->id);

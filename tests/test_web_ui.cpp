@@ -105,6 +105,8 @@ TEST(DrivePreview, DefaultRegistryRendersEveryFormat) {
         {"rows.csv", "name,value\none,1\n"},
         {"rows.json", R"([{"name":"one","value":1}])"},
         {"paper.pdf", "%PDF-1.7\n/Title (Paper)\n/Type /Page\n"},
+        {"clip.mp4", "video"},
+        {"sound.mp3", "audio"},
     };
     for (const auto& [path, contents] : fixtures) {
         const lake::api::RepositoryFile file{path, "blob", contents, contents.size()};
@@ -113,13 +115,103 @@ TEST(DrivePreview, DefaultRegistryRendersEveryFormat) {
         EXPECT_FALSE(preview->html.empty()) << path;
     }
     const lake::api::RepositoryFile unsupported{"archive.zip", "blob", "zip", 3};
-    EXPECT_FALSE(registry.preview(unsupported));
+    const auto fallback = registry.preview(unsupported);
+    ASSERT_TRUE(fallback);
+    EXPECT_EQ(fallback->format, "download");
+    EXPECT_NE(fallback->html.find("No preview is available"), std::string::npos);
+    const lake::api::RepositoryFile hostile{"README.md", "blob", "# <script>alert(1)</script>", 27};
+    const auto markdown = registry.preview(hostile);
+    ASSERT_TRUE(markdown);
+    EXPECT_EQ(markdown->html.find("<script>"), std::string::npos);
+    EXPECT_NE(markdown->html.find("&lt;script&gt;"), std::string::npos);
     EXPECT_TRUE(registry.add(".custom", [](const lake::api::RepositoryFile&) {
         return lake::api::DrivePreview{"custom", "text/plain", "<p>custom</p>"};
     }));
     EXPECT_FALSE(registry.add(".custom", [](const lake::api::RepositoryFile&) {
         return lake::api::DrivePreview{"custom", "text/plain", "<p>duplicate</p>"};
     }));
+}
+
+TEST(DrivePreview, TextDiffPreservesCommonAndChangedLines) {
+    const lake::api::RepositoryFile left{"note.txt", "left", "same\nold\ntail\n", 14};
+    const lake::api::RepositoryFile right{"note.txt", "right", "same\nnew\ntail\n", 14};
+    const lake::api::DriveVersionDiff difference = lake::api::drive_text_diff(left, right);
+    ASSERT_EQ(difference.lines.size(), 5u);
+    EXPECT_EQ(difference.lines[0].kind, "context");
+    EXPECT_EQ(difference.lines[1].kind, "removed");
+    EXPECT_EQ(difference.lines[1].text, "old");
+    EXPECT_EQ(difference.lines[2].kind, "added");
+    EXPECT_EQ(difference.lines[2].text, "new");
+    EXPECT_EQ(difference.lines[3].kind, "context");
+    EXPECT_EQ(difference.lines[4].kind, "context");
+}
+
+TEST(WebUi, DrivePagesExposeBrowseMutationHistoryAndConflictControls) {
+    const lake::control::Repository repository{
+        "r1", "c1", "lake", "", "private", "", "", "created", "updated"};
+    const std::vector<lake::api::RepositoryTreeEntry> entries{
+        {.path = "docs", .kind = "tree", .mode = 0755, .last_changed_at = "2026-09-04"},
+        {.path = "README.md",
+         .kind = "blob",
+         .blob = "digest",
+         .mode = 0644,
+         .size = 1536,
+         .last_changed_at = "2026-09-05"}};
+    const lake::api::DriveFolderOptions list_options{"list", "modified", true};
+    const std::string list =
+        lake::api::web_ui_drive_folder(repository, "main", "", entries, list_options, true);
+    EXPECT_NE(list.find("Name</th><th>Size</th><th>Modified"), std::string::npos);
+    EXPECT_NE(list.find("action=\"/drive/folder\""), std::string::npos);
+    EXPECT_NE(list.find("action=\"/drive/upload\""), std::string::npos);
+    EXPECT_NE(list.find("enctype=\"multipart/form-data\""), std::string::npos);
+    EXPECT_NE(list.find("action=\"/drive/rename\""), std::string::npos);
+    EXPECT_NE(list.find("action=\"/drive/move\""), std::string::npos);
+    EXPECT_NE(list.find("action=\"/drive/delete\""), std::string::npos);
+    EXPECT_NE(list.find("1.5 KiB"), std::string::npos);
+    expect_theme_scripts(list, 1);
+
+    const std::string nested =
+        lake::api::web_ui_drive_folder(repository, "main", "docs/guides", {}, list_options, true);
+    EXPECT_NE(nested.find("aria-label=\"Breadcrumb\""), std::string::npos);
+    EXPECT_NE(nested.find("path=docs"), std::string::npos);
+
+    const lake::api::DriveFolderOptions grid_options{"grid", "name", false};
+    const std::string grid =
+        lake::api::web_ui_drive_folder(repository, "main", "", entries, grid_options, false);
+    EXPECT_NE(grid.find("class=\"drive-grid\""), std::string::npos);
+    EXPECT_EQ(grid.find("/drive/upload"), std::string::npos);
+    expect_theme_scripts(grid);
+
+    const lake::api::RepositoryFile archive{"archive.zip", "archive-digest", "zip", 3};
+    const auto fallback = lake::api::DriveFormatRegistry::defaults().preview(archive);
+    ASSERT_TRUE(fallback);
+    const std::string preview =
+        lake::api::web_ui_drive_preview(repository, "main", archive, *fallback, true);
+    EXPECT_NE(preview.find("archive-digest"), std::string::npos);
+    EXPECT_NE(preview.find("3 B"), std::string::npos);
+    EXPECT_NE(preview.find("download>Download"), std::string::npos);
+
+    const std::vector<nlohmann::json> history{
+        {{"id", "new"}, {"new_blob", "new-blob"}, {"changes", {"modified"}}},
+        {{"id", "old"}, {"new_blob", "old-blob"}, {"changes", {"added"}}}};
+    const std::string versions =
+        lake::api::web_ui_drive_history(repository, "main", "README.md", history, true);
+    EXPECT_NE(versions.find("action=\"/drive/history/diff\""), std::string::npos);
+    EXPECT_NE(versions.find("action=\"/drive/history/restore\""), std::string::npos);
+
+    const lake::api::DriveVersionDiff difference = lake::api::drive_text_diff(
+        {"README.md", "old-blob", "old\n", 4}, {"README.md", "new-blob", "new\n", 4});
+    const std::string diff = lake::api::web_ui_drive_version_diff(
+        repository, "review", "README.md", "old", "new", difference, true);
+    EXPECT_NE(diff.find("ref=review"), std::string::npos);
+    EXPECT_NE(diff.find("class=\"diff-remove\""), std::string::npos);
+    EXPECT_NE(diff.find("class=\"diff-add\""), std::string::npos);
+
+    const std::string conflict = lake::api::web_ui_drive_conflict(
+        repository, "README.md", {difference.left, difference.right}, difference, true);
+    EXPECT_NE(conflict.find("Two versions of README.md"), std::string::npos);
+    EXPECT_NE(conflict.find("What differs"), std::string::npos);
+    expect_theme_scripts(conflict);
 }
 
 TEST(WebUi, HelloIsASelfContainedDocument) {

@@ -46,6 +46,10 @@ exports, SSO, repository content, and drive views.
 | Secret mounts | `GET /secret-mounts[?customer_id=<uuid>&organization_id=<uuid>]` | mounts the caller may read, with links to static secrets and named keys |
 | Static secrets | `GET /secrets?mount_id=<uuid>[&name=<name>]` | custom metadata and version lifecycle; never secret values |
 | Encryption keys | `GET /encryption-keys?mount_id=<uuid>` | key names, current versions and derivation parent; never key material |
+| Drive folder | `GET /drive?repository_id=<uuid>&ref=<ref>&path=<path>[&view=list|grid&sort=name|size|modified&direction=asc|desc]` | breadcrumbs, folder and file cards or rows, size, modified time, and capability-backed create, upload, rename, move, and delete controls |
+| Drive preview | `GET /drive/preview`, `/drive/download` | server-rendered or browser-native preview for registered formats, with exact-byte download, size, and digest fallback |
+| Drive history | `GET /drive/history`, `/drive/history/diff`, `/drive/conflict` | retained path versions, restore-as-new-change controls, two-version text differences, and preserved conflict values |
+| Drive sharing | `GET /drive/share`, `/share/<token>` | effective access, scoped links, and the public shared-folder view; see [drive.md](drive.md) and [sharing.md](sharing.md) |
 
 **Session.** `POST /session` compares the form token with the operator token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the

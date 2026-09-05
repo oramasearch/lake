@@ -88,9 +88,11 @@ credential, and OIDC/JWT claims resolve through `federation_issuers`. Root-recov
 persist quorum, expiry, completion, and one-way share evidence while keeping shares and
 reconstructed root material out of storage. Both use the signed registry audit path.
 Drive and models add migration `0015_drive`, stable-node folder ACLs, live recipient grants,
-expiring and revocable links, format-registry previews, per-path history and restore, and the
-server-rendered browse/share/history pages. Models and datasets use the liquid sync protocol for
-resumable deduplicated transfer and unique-byte metering. The compatible Hub routes support create,
+expiring and revocable links, list/grid browse and repository mutations, browser-native and
+server-rendered format-registry previews, version comparison, conflict presentation, per-path
+history and restore, and the server-rendered browse/share/history pages. Models and datasets use
+the liquid sync protocol for resumable deduplicated transfer and unique-byte metering. The
+compatible Hub routes support create,
 file/folder upload, basic LFS, list, info, snapshot, and named or digest downloads. Model metadata
 and the server-rendered model page include per-revision storage savings plus the verified liquid
 attestation chain from dataset and code revisions through the training run. The liquid sync client

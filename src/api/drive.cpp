@@ -26,7 +26,7 @@ std::string extension_of(std::string_view path) {
     const std::size_t dot = path.find_last_of('.');
     if (dot == std::string_view::npos || (slash != std::string_view::npos && dot < slash) ||
         dot + 1 == path.size()) {
-        return ".txt";
+        return {};
     }
     return lower(std::string(path.substr(dot)));
 }
@@ -216,38 +216,55 @@ DrivePreviewResult image_preview(const RepositoryFile& file, std::string media_t
 }
 
 DrivePreviewResult pdf_preview(const RepositoryFile& file) {
-    const std::string text = file_text(file);
-    const std::size_t version_start = text.find("%PDF-");
-    const std::string version =
-        version_start == std::string::npos || version_start + 8 > text.size()
-            ? "unknown"
-            : text.substr(version_start + 5, 3);
-    std::size_t pages = 0;
+    std::vector<std::byte> bytes = file.raw_contents;
+    if (bytes.empty()) {
+        bytes.reserve(file.contents.size());
+        for (const char character : file.contents) {
+            bytes.push_back(static_cast<std::byte>(character));
+        }
+    }
+    return DrivePreview{
+        "pdf",
+        "application/pdf",
+        "<object class=\"document-preview\" data=\"data:application/pdf;base64," + base64(bytes) +
+            "\" type=\"application/pdf\"><p>This browser cannot display the PDF.</p></object>"};
+}
+
+DrivePreviewResult
+media_preview(const RepositoryFile& file, std::string format, std::string media_type) {
+    std::vector<std::byte> bytes = file.raw_contents;
+    if (bytes.empty()) {
+        bytes.reserve(file.contents.size());
+        for (const char character : file.contents) {
+            bytes.push_back(static_cast<std::byte>(character));
+        }
+    }
+    const std::string element = format == "video" ? "video" : "audio";
+    return DrivePreview{std::move(format),
+                        media_type,
+                        "<" + element +
+                            " class=\"media-preview\" controls preload=\"metadata\" "
+                            "src=\"data:" +
+                            media_type + ";base64," + base64(bytes) + "\"></" + element + ">"};
+}
+
+std::vector<std::string> text_lines(std::string_view text) {
+    std::vector<std::string> output;
     std::size_t offset = 0;
-    while ((offset = text.find("/Type /Page", offset)) != std::string::npos) {
-        const std::size_t suffix = offset + 11;
-        if (suffix >= text.size() || text[suffix] != 's') {
-            ++pages;
+    while (offset < text.size()) {
+        const std::size_t newline = text.find('\n', offset);
+        const std::size_t size =
+            newline == std::string_view::npos ? text.size() - offset : newline - offset;
+        output.emplace_back(text.substr(offset, size));
+        if (newline == std::string_view::npos) {
+            break;
         }
-        offset = suffix;
+        offset = newline + 1;
     }
-    std::string title;
-    const std::size_t title_start = text.find("/Title (");
-    if (title_start != std::string::npos) {
-        const std::size_t value_start = title_start + 8;
-        const std::size_t value_end = text.find(')', value_start);
-        if (value_end != std::string::npos) {
-            title = text.substr(value_start, value_end - value_start);
-        }
+    if (text.empty() || text.back() == '\n') {
+        output.emplace_back();
     }
-    std::string html = "<dl><dt>Format</dt><dd>PDF " + web_ui_escape(version) +
-                       "</dd><dt>Pages</dt><dd>" + std::to_string(pages) +
-                       "</dd><dt>Size</dt><dd>" + std::to_string(file.size) + " bytes</dd>";
-    if (!title.empty()) {
-        html += "<dt>Title</dt><dd>" + web_ui_escape(title) + "</dd>";
-    }
-    html += "</dl>";
-    return DrivePreview{"pdf", "application/pdf", std::move(html)};
+    return output;
 }
 
 } // namespace
@@ -290,7 +307,8 @@ bool DriveFormatRegistry::add(std::string extension, DrivePreviewRenderer render
 DrivePreviewResult DriveFormatRegistry::preview(const RepositoryFile& file) const {
     const std::string extension = extension_of(file.path);
     if (!renderers_.contains(extension)) {
-        return DrivePreviewResult::failure("no preview renderer is registered for " + extension);
+        return DrivePreview{
+            "download", "application/octet-stream", "<p>No preview is available.</p>"};
     }
     return renderers_.at(extension)(file);
 }
@@ -304,6 +322,19 @@ DriveFormatRegistry DriveFormatRegistry::defaults() {
     registry.add(".txt", text_preview);
     registry.add(".md", markdown_preview);
     registry.add(".markdown", markdown_preview);
+    registry.add(".c", text_preview);
+    registry.add(".cc", text_preview);
+    registry.add(".cpp", text_preview);
+    registry.add(".css", text_preview);
+    registry.add(".h", text_preview);
+    registry.add(".hpp", text_preview);
+    registry.add(".html", text_preview);
+    registry.add(".js", text_preview);
+    registry.add(".log", text_preview);
+    registry.add(".toml", text_preview);
+    registry.add(".xml", text_preview);
+    registry.add(".yaml", text_preview);
+    registry.add(".yml", text_preview);
     registry.add(".csv", csv_preview);
     registry.add(".json", json_preview);
     registry.add(".png",
@@ -317,7 +348,64 @@ DriveFormatRegistry DriveFormatRegistry::defaults() {
     registry.add(".webp",
                  [](const RepositoryFile& file) { return image_preview(file, "image/webp"); });
     registry.add(".pdf", pdf_preview);
+    registry.add(".mp4", [](const RepositoryFile& file) {
+        return media_preview(file, "video", "video/mp4");
+    });
+    registry.add(".webm", [](const RepositoryFile& file) {
+        return media_preview(file, "video", "video/webm");
+    });
+    registry.add(".ogv", [](const RepositoryFile& file) {
+        return media_preview(file, "video", "video/ogg");
+    });
+    registry.add(".mp3", [](const RepositoryFile& file) {
+        return media_preview(file, "audio", "audio/mpeg");
+    });
+    registry.add(".m4a", [](const RepositoryFile& file) {
+        return media_preview(file, "audio", "audio/mp4");
+    });
+    registry.add(".ogg", [](const RepositoryFile& file) {
+        return media_preview(file, "audio", "audio/ogg");
+    });
+    registry.add(".wav", [](const RepositoryFile& file) {
+        return media_preview(file, "audio", "audio/wav");
+    });
     return registry;
+}
+
+bool drive_preview_is_text(const DrivePreview& preview) {
+    return preview.format == "text" || preview.format == "markdown" || preview.format == "csv" ||
+           preview.format == "json";
+}
+
+DriveVersionDiff drive_text_diff(RepositoryFile left, RepositoryFile right) {
+    const std::vector<std::string> left_lines = text_lines(file_text(left));
+    const std::vector<std::string> right_lines = text_lines(file_text(right));
+    std::size_t prefix = 0;
+    while (prefix < left_lines.size() && prefix < right_lines.size() &&
+           left_lines[prefix] == right_lines[prefix]) {
+        ++prefix;
+    }
+    std::size_t left_suffix = left_lines.size();
+    std::size_t right_suffix = right_lines.size();
+    while (left_suffix > prefix && right_suffix > prefix &&
+           left_lines[left_suffix - 1] == right_lines[right_suffix - 1]) {
+        --left_suffix;
+        --right_suffix;
+    }
+    std::vector<DriveDiffLine> lines;
+    for (std::size_t index = 0; index < prefix; ++index) {
+        lines.push_back({"context", left_lines[index]});
+    }
+    for (std::size_t index = prefix; index < left_suffix; ++index) {
+        lines.push_back({"removed", left_lines[index]});
+    }
+    for (std::size_t index = prefix; index < right_suffix; ++index) {
+        lines.push_back({"added", right_lines[index]});
+    }
+    for (std::size_t index = left_suffix; index < left_lines.size(); ++index) {
+        lines.push_back({"context", left_lines[index]});
+    }
+    return DriveVersionDiff{std::move(left), std::move(right), std::move(lines)};
 }
 
 } // namespace lake::api
