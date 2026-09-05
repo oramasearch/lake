@@ -2148,11 +2148,20 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     ASSERT_EQ(visible.value["items"].size(), 1u);
     EXPECT_EQ(visible.value["items"][0]["path"], "shared/readme.md");
 
+    const ApiResult shared_with_me = surface.call("drive_shared_with_me");
+    ASSERT_TRUE(shared_with_me.ok) << shared_with_me.error.message;
+    ASSERT_EQ(shared_with_me.value["items"].size(), 1u);
+    EXPECT_EQ(shared_with_me.value["items"][0]["repository"]["id"], repository.value["id"]);
+    EXPECT_EQ(shared_with_me.value["items"][0]["path"], "shared");
+    EXPECT_EQ(shared_with_me.value["items"][0]["shared_by"], "taap:1:ed25519:owner");
+    EXPECT_EQ(shared_with_me.value["items"][0]["actions"], json::array({"read"}));
+
     surface.ctx.acting_identity = "taap:1:ed25519:outsider";
     const ApiResult hidden = surface.call(
         "drive_browse",
         {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}});
     EXPECT_EQ(hidden.error.code, "unauthorized");
+    EXPECT_TRUE(surface.call("drive_shared_with_me").value["items"].empty());
 
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
     const ApiResult effective = surface.call(

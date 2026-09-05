@@ -128,6 +128,16 @@ int main(int argc, char** argv) {
                                                          "{}"}),
                                 "create fixture identity");
     const auto principal = require(store->context_for(issued.secret), "read fixture identity");
+    const auto shared_recipient_issued =
+        require(store->sign_up_password({"lake",
+                                         "shared-recipient@example.test",
+                                         "correct horse battery staple",
+                                         "Shared Recipient",
+                                         "fixture browser",
+                                         "{}"}),
+                "create shared recipient");
+    const auto shared_recipient =
+        require(store->context_for(shared_recipient_issued.secret), "read shared recipient");
     const auto individual_customer =
         require(store->create_customer({"individual", principal.user_id, "", "ui-fixture"}),
                 "create individual customer");
@@ -377,16 +387,23 @@ int main(int argc, char** argv) {
                                              "ui-fixture-drive-object",
                                              true}),
                 "create drive folder object");
-    require(store->create_drive_share_link({repository.id,
-                                            docs_object.id,
-                                            docs_node_id,
-                                            "docs",
-                                            "read",
-                                            share_token_hash(share_token),
-                                            "2030-01-01T00:00:00Z",
-                                            "admin",
-                                            "ui-fixture-share"}),
-            "create drive share link");
+    require(store->create_grant({shared_recipient.taap_id,
+                                 docs_object.id,
+                                 "read",
+                                 "ui-fixture-shared-recipient",
+                                 "admin",
+                                 "ui-fixture-shared-recipient"}),
+            "create shared recipient grant");
+    const auto share_link = require(store->create_drive_share_link({repository.id,
+                                                                    docs_object.id,
+                                                                    docs_node_id,
+                                                                    "docs",
+                                                                    "read",
+                                                                    share_token_hash(share_token),
+                                                                    "2030-01-01T00:00:00Z",
+                                                                    "admin",
+                                                                    "ui-fixture-share"}),
+                                    "create drive share link");
     require(store->create_forge_record(
                 {repository.id,
                  "export",
@@ -590,6 +607,13 @@ int main(int argc, char** argv) {
         {"drive-share",
          operator_token,
          std::format("/drive/share?repository_id={}&ref={}&path=docs", repository.id, ref)},
+        {"drive-share-link",
+         operator_token,
+         std::format("/drive/share/link?repository_id={}&ref={}&path=docs&link_id={}",
+                     repository.id,
+                     ref,
+                     share_link.id)},
+        {"shared-with-me", shared_recipient_issued.secret, "/shared-with-me"},
         {"shared-link", "-", std::format("/share/{}", share_token)},
     };
     write_manifest(manifest, pages);

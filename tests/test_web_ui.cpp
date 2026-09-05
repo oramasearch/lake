@@ -214,6 +214,50 @@ TEST(WebUi, DrivePagesExposeBrowseMutationHistoryAndConflictControls) {
     expect_theme_scripts(conflict);
 }
 
+TEST(WebUi, DriveSharingAnswersAccessExpiryAndRevocationQuestions) {
+    const lake::control::Repository repository{
+        "r1", "c1", "lake", "", "private", "", "", "created", "updated"};
+    const lake::control::EffectiveAccessEntry access{
+        "taap:1:ed25519:person<&>", "path-1", "write", {"read", "write"}, true};
+    const nlohmann::json link{{"id", "link-1"},
+                              {"role", "read"},
+                              {"expires_at", "2030-01-01T00:00:00Z"},
+                              {"active", true},
+                              {"revoked_at", nullptr}};
+    const std::string share =
+        lake::api::web_ui_drive_share(repository, "main", "docs", {access}, {link}, "", "");
+    EXPECT_NE(share.find("Who can access this folder now"), std::string::npos);
+    EXPECT_NE(share.find("People"), std::string::npos);
+    EXPECT_NE(share.find("Organization"), std::string::npos);
+    EXPECT_NE(share.find("Anyone holding the link"), std::string::npos);
+    EXPECT_NE(share.find("Until when (UTC)"), std::string::npos);
+    EXPECT_NE(share.find("Passcodes are not supported"), std::string::npos);
+    EXPECT_NE(share.find("Revoke link"), std::string::npos);
+    EXPECT_NE(share.find("person&lt;&amp;&gt;"), std::string::npos);
+    EXPECT_EQ(share.find("person<&>"), std::string::npos);
+    expect_theme_scripts(share);
+
+    const std::string detail =
+        lake::api::web_ui_drive_share_link(repository, "main", "docs", link, "");
+    EXPECT_NE(detail.find("Revoking prevents this link"), std::string::npos);
+    EXPECT_NE(detail.find("It does not recall files"), std::string::npos);
+    EXPECT_NE(detail.find("action=\"/drive/share/revoke\""), std::string::npos);
+    expect_theme_scripts(detail);
+
+    const nlohmann::json folder{{"repository", {{"id", "r1"}, {"name", "lake<&>"}}},
+                                {"ref", "main"},
+                                {"path", "docs"},
+                                {"shared_by", "taap:1:ed25519:owner"},
+                                {"actions", {"read", "write"}},
+                                {"available", true}};
+    const std::string shared_with_me = lake::api::web_ui_shared_with_me({folder}, "");
+    EXPECT_NE(shared_with_me.find("Shared with me"), std::string::npos);
+    EXPECT_NE(shared_with_me.find("lake&lt;&amp;&gt;/docs"), std::string::npos);
+    EXPECT_NE(shared_with_me.find("taap:1:ed25519:owner"), std::string::npos);
+    EXPECT_EQ(shared_with_me.find("lake<&>"), std::string::npos);
+    expect_theme_scripts(shared_with_me);
+}
+
 TEST(WebUi, HelloIsASelfContainedDocument) {
     const auto html = lake::api::web_ui_hello("node-1", lake::version_string());
     EXPECT_TRUE(html.starts_with("<!doctype html>"));

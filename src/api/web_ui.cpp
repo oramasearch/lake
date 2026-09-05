@@ -294,6 +294,7 @@ std::string nav(bool signed_in, std::string_view title) {
                       "<p class=\"nav-label\">Workspace</p>";
     out += nav_link("/", "Home", "home", "home", title);
     out += nav_link("/repositories", "Repositories", "repository", "repositories", title);
+    out += nav_link("/shared-with-me", "Shared with me", "repository", "shared", title);
     out += nav_link("/search", "Search", "search", "search", title);
     out += "<p class=\"nav-label\">Administration</p>";
     out += nav_link("/customers", "Customers", "customers", "customers", title);
@@ -717,6 +718,30 @@ std::string drive_hidden_context(const control::Repository& repository,
         web_ui_escape(repository.id),
         web_ui_escape(ref),
         web_ui_escape(path));
+}
+
+std::string share_link_state(const nlohmann::json& link) {
+    const auto revoked_at = link.find("revoked_at");
+    if (revoked_at != link.end() && revoked_at->is_string() && !revoked_at->empty()) {
+        return "revoked";
+    }
+    return link.value("active", false) ? "active" : "expired";
+}
+
+std::string share_link_actions(std::string_view role) {
+    if (role == "write") {
+        return "Read; write scope is available to capability-aware clients";
+    }
+    return "Browse and download";
+}
+
+std::string drive_share_link_url(const control::Repository& repository,
+                                 std::string_view ref,
+                                 std::string_view path,
+                                 std::string_view link_id) {
+    return "/drive/share/link?repository_id=" + url_component(repository.id) +
+           "&ref=" + url_component(ref) + "&path=" + url_component(path) +
+           "&link_id=" + url_component(link_id);
 }
 
 std::string drive_entry_actions(const control::Repository& repository,
@@ -3205,56 +3230,80 @@ std::string web_ui_drive_share(const control::Repository& repository,
         content += "<p class=\"notice\">Copy this link now: <code>" + web_ui_escape(created_link) +
                    "</code></p>";
     }
-    content += "<h2>Effective access</h2><table><thead><tr><th>Who</th><th>Role</th><th>Can do</th>"
-               "<th>Source</th></tr></thead><tbody>";
+    content += "<h2>Who can access this folder now</h2><p class=\"sub\">This is the live policy "
+               "result. It names people and organization identities, their actual actions, and "
+               "whether each access path is inherited.</p><table><thead><tr><th>Who</th><th>What "
+               "they can do</th><th>How access arrives</th></tr></thead><tbody>";
     for (const control::EffectiveAccessEntry& entry : access) {
-        content += std::format("<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+        content += std::format("<tr><td><code>{}</code></td><td>{}: {}</td><td>{}</td></tr>",
                                web_ui_escape(entry.principal_taap_id),
                                web_ui_escape(entry.role),
                                web_ui_escape(joined(entry.actions)),
                                entry.inherited ? "inherited" : "direct");
     }
     if (access.empty()) {
-        content += "<tr><td colspan=\"4\" class=\"empty\">No grants.</td></tr>";
+        content += "<tr><td colspan=\"3\" class=\"empty\">No grants.</td></tr>";
     }
-    content += "</tbody></table><div class=\"grid\"><section class=\"panel\"><h2>Live object</h2>"
-               "<p>Updates, moves, and revocation continue to apply.</p><form class=\"stack\" "
-               "method=\"post\" action=\"/drive/share/direct\">";
-    const std::string hidden = std::format(
-        "<input type=\"hidden\" name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
-        "name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\">",
-        web_ui_escape(repository.id),
-        web_ui_escape(ref),
-        web_ui_escape(path));
+    content += "</tbody></table><h2>Choose a delivery</h2><div class=\"grid\"><section "
+               "class=\"panel\"><h3>People</h3><p>A named person receives a live folder. "
+               "Updates and moves continue to apply.</p><form class=\"stack\" method=\"post\" "
+               "action=\"/drive/share/direct\">";
+    const std::string hidden = drive_hidden_context(repository, ref, path);
     content += hidden;
     content +=
-        "<label>Recipient TAAP identity<input name=\"principal_taap_id\" required></label>"
-        "<label>Role<select name=\"role\"><option>read</option><option>write</option>"
-        "<option>share</option></select></label><label>Attestation digest<input "
-        "name=\"attestation_digest\" required></label><button class=\"primary\" "
-        "type=\"submit\">Share live folder</button></form></section><section class=\"panel\">"
-        "<h2>Link</h2><p>Scope, role, expiry, and revocation continue to apply.</p><form "
-        "class=\"stack\" method=\"post\" action=\"/drive/share/link\">" +
+        "<label>Person's TAAP identity<input name=\"principal_taap_id\" required></label>"
+        "<label>What they can do<select name=\"role\"><option value=\"read\">View — "
+        "browse and download</option><option value=\"write\">Edit — upload, rename, move, "
+        "and delete</option><option value=\"share\">Share — browse and create shares</option>"
+        "</select></label><label>Attestation digest<input name=\"attestation_digest\" "
+        "required></label><button class=\"primary\" type=\"submit\">Share with person"
+        "</button></form></section><section class=\"panel\"><h3>Organization</h3><p>A named "
+        "organization identity receives the same live folder. People appear only when their "
+        "identity has effective access above.</p><form class=\"stack\" method=\"post\" "
+        "action=\"/drive/share/direct\">" +
         hidden +
-        "<label>Role<select name=\"role\"><option>read</option><option>write</option>"
-        "</select></label><label>Expires at (UTC)<input name=\"expires_at\" "
-        "placeholder=\"2030-01-01T00:00:00Z\" required></label><button class=\"primary\" "
-        "type=\"submit\">Create link</button></form></section><section class=\"panel\">"
-        "<h2>Independent copy</h2><p>Downloaded bytes stop being a live object. They cannot "
-        "be updated or recalled by changing access here.</p></section></div>";
-    content += "<h2>Share links</h2><table><thead><tr><th>Role</th><th>Expires</th><th>Status</th>"
-               "<th></th></tr></thead><tbody>";
+        "<label>Organization TAAP identity<input name=\"principal_taap_id\" required></label>"
+        "<label>What it can do<select name=\"role\"><option value=\"read\">View — browse "
+        "and download</option><option value=\"write\">Edit — upload, rename, move, and "
+        "delete</option><option value=\"share\">Share — browse and create shares</option>"
+        "</select></label><label>Attestation digest<input name=\"attestation_digest\" "
+        "required></label><button class=\"primary\" type=\"submit\">Share with organization"
+        "</button></form></section><section class=\"panel\"><h3>Link</h3><p>Anyone holding "
+        "the link can open this live folder until its expiry or revocation.</p><form "
+        "class=\"stack\" "
+        "method=\"post\" action=\"/drive/share/link\">" +
+        hidden +
+        "<label>What link holders can do<select name=\"role\"><option value=\"read\">View — "
+        "browse and download</option><option value=\"write\">Write scope — capability-aware "
+        "clients only</option></select></label><label>Until when (UTC)<input name=\"expires_at\" "
+        "placeholder=\"2030-01-01T00:00:00Z\" required></label><label>Passcode<input disabled "
+        "placeholder=\"Not available for drive links\"></label><p class=\"muted\">Passcodes are "
+        "not supported for drive-share links. No passcode is sent or stored.</p>"
+        "<button class=\"primary\" type=\"submit\">Create link</button></form></section>"
+        "<section class=\"panel\"><h3>Independent copy</h3><p>Downloaded bytes stop being a "
+        "live object. They cannot be updated or recalled by changing access "
+        "here.</p></section></div>";
+    content +=
+        "<h2>Folder share management</h2><p class=\"sub\">A link is a continuing capability, "
+        "not an attachment. Revoking it prevents its next open; copies already downloaded remain "
+        "independent.</p><table><thead><tr><th>Who can access</th><th>What they can "
+        "do</th><th>Until "
+        "when</th><th>State</th><th></th></tr></thead><tbody>";
     for (const nlohmann::json& link : links) {
+        const std::string link_id = link.value("id", "");
         content += std::format(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td><form class=\"inline\" method=\"post\" "
+            "<tr><td>Anyone with this link</td><td>{}</td><td>{}</td><td>{}</td><td><a "
+            "href=\"{}\">Details"
+            "</a> <form class=\"inline\" method=\"post\" "
             "action=\"/drive/share/revoke\"><input type=\"hidden\" name=\"link_id\" "
             "value=\"{}\"><input type=\"hidden\" name=\"repository_id\" value=\"{}\"><input "
             "type=\"hidden\" name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" "
-            "value=\"{}\"><button type=\"submit\">Revoke</button></form></td></tr>",
-            web_ui_escape(link.value("role", "")),
+            "value=\"{}\"><button type=\"submit\">Revoke link</button></form></td></tr>",
+            web_ui_escape(share_link_actions(link.value("role", ""))),
             web_ui_escape(link.value("expires_at", "")),
-            link.value("active", false) ? "active" : "expired or revoked",
-            web_ui_escape(link.value("id", "")),
+            web_ui_escape(share_link_state(link)),
+            web_ui_escape(drive_share_link_url(repository, ref, path, link_id)),
+            web_ui_escape(link_id),
             web_ui_escape(repository.id),
             web_ui_escape(ref),
             web_ui_escape(path));
@@ -3264,6 +3313,78 @@ std::string web_ui_drive_share(const control::Repository& repository,
     }
     content += "</tbody></table>";
     return web_ui_shell("lake — drive sharing", repository_name(repository), content, true);
+}
+
+std::string web_ui_drive_share_link(const control::Repository& repository,
+                                    std::string_view ref,
+                                    std::string_view path,
+                                    const nlohmann::json& link,
+                                    std::string_view error) {
+    const std::string state = share_link_state(link);
+    std::string content =
+        "<p class=\"eyebrow\">drive share</p><h1>Link for " + web_ui_escape(path) +
+        "</h1><p class=\"sub\">This page answers who can use "
+        "the link, what it allows, when it stops, and what revocation changes.</p>" +
+        error_markup(error);
+    content +=
+        "<dl class=\"details\"><dt>Who can access</dt><dd>Anyone holding this bearer link</dd>"
+        "<dt>What they can do</dt><dd>" +
+        web_ui_escape(share_link_actions(link.value("role", ""))) + "</dd><dt>Until when</dt><dd>" +
+        web_ui_escape(link.value("expires_at", "")) + "</dd><dt>State</dt><dd>" +
+        web_ui_escape(state) + "</dd></dl>";
+    if (state == "active") {
+        content +=
+            "<section class=\"panel\"><h2>Revoke this link</h2><p>Revoking prevents this link "
+            "from opening the live folder on its next use. It does not recall files someone "
+            "already "
+            "downloaded.</p><form method=\"post\" action=\"/drive/share/revoke\">" +
+            std::format("<input type=\"hidden\" name=\"link_id\" value=\"{}\">",
+                        web_ui_escape(link.value("id", ""))) +
+            drive_hidden_context(repository, ref, path) +
+            "<input type=\"hidden\" name=\"return_to\" value=\"detail\"><button class=\"danger\" "
+            "type=\"submit\">Revoke link</button></form></section>";
+    } else {
+        content += "<p class=\"notice\">This link no longer opens the folder.</p>";
+    }
+    content +=
+        row_link("/drive/share?" + drive_query(repository, ref, path), "Back to folder shares");
+    return web_ui_shell("lake — drive share link", repository_name(repository), content, true);
+}
+
+std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
+                                  std::string_view error) {
+    std::string content =
+        "<p class=\"eyebrow\">drive</p><h1>Shared with me</h1><p class=\"sub\">Live "
+        "folders shared directly with your identity. A move keeps the same folder identity; "
+        "a downloaded copy remains independent.</p>" +
+        error_markup(error);
+    content +=
+        "<table><thead><tr><th>Folder</th><th>Shared by</th><th>What you can do</th><th>State</th>"
+        "</tr></thead><tbody>";
+    for (const nlohmann::json& folder : folders) {
+        const nlohmann::json& repository = folder.at("repository");
+        const std::string repository_id = repository.value("id", "");
+        const std::string ref = folder.value("ref", "main");
+        const std::string path = folder.value("path", "");
+        const std::string href = "/drive?repository_id=" + url_component(repository_id) +
+                                 "&ref=" + url_component(ref) + "&path=" + url_component(path);
+        const bool available = folder.value("available", false);
+        const std::string label = repository.value("name", repository_id) + "/" + path;
+        const std::string location = available ? row_link(href, label) : web_ui_escape(label);
+        content +=
+            std::format("<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                        location,
+                        web_ui_escape(folder.value("shared_by", "")),
+                        web_ui_escape(joined(folder.value("actions", std::vector<std::string>{}))),
+                        available ? "available" : "removed");
+    }
+    if (folders.empty()) {
+        content +=
+            "<tr><td colspan=\"4\" class=\"empty\">No folders are shared directly with you.</td>"
+            "</tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell("lake — shared with me", "drive", content, true);
 }
 
 std::string web_ui_drive_link(std::string_view path,

@@ -1107,6 +1107,90 @@ void register_drive_capabilities(Registry& registry) {
         }});
 
     registry.add(Capability{
+        .name = "drive_shared_with_me",
+        .title = "Drive folders shared with me",
+        .description = "List live folders granted directly to the signed-in identity.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "shared drive folders",
+        .action = "read",
+        .resolve_object = [](const json&, ApiContext&) -> std::expected<std::string, ApiError> {
+            return std::string{};
+        },
+        .authorizes_candidates = true,
+        .handler =
+            [](const json&, ApiContext& context) {
+                if (!context.store || !context.sync_store) {
+                    return ApiResult::failure("store_unavailable",
+                                              "drive stores are not configured");
+                }
+                if (context.acting_identity.empty() || context.acting_identity == "admin") {
+                    return ApiResult::success({{"items", json::array()}});
+                }
+                const auto grants = context.store->list_grants({}, context.acting_identity, 1000);
+                if (!grants) {
+                    return store_error(grants.error());
+                }
+                json items = json::array();
+                for (const control::Grant& grant : *grants) {
+                    const auto object = context.store->get_policy_object(grant.object_id);
+                    if (!object) {
+                        return store_error(object.error());
+                    }
+                    if (object->object_type != "path") {
+                        continue;
+                    }
+                    const std::size_t separator = object->external_id.find(':');
+                    if (separator == std::string::npos || separator == 0 ||
+                        separator + 1 == object->external_id.size()) {
+                        continue;
+                    }
+                    const std::string repository_id = object->external_id.substr(0, separator);
+                    const std::string node_id = object->external_id.substr(separator + 1);
+                    const auto repository = context.store->get_repository(repository_id);
+                    if (!repository) {
+                        return store_error(repository.error());
+                    }
+                    if (!repository->deleted_at.empty()) {
+                        continue;
+                    }
+                    const auto tree = context.sync_store->repository_tree(
+                        repository->customer_id, repository->id, "main");
+                    if (!tree) {
+                        return sync_error(tree.error());
+                    }
+                    const auto entry =
+                        std::ranges::find(*tree, node_id, &RepositoryTreeEntry::node_id);
+                    json item{{"repository", control::to_json(*repository)},
+                              {"ref", "main"},
+                              {"node_id", node_id},
+                              {"role", grant.role},
+                              {"shared_by", grant.granted_by_taap_id},
+                              {"delivery", "live"},
+                              {"available", entry != tree->end()},
+                              {"actions", json::array()}};
+                    if (entry != tree->end() && entry->kind == "tree") {
+                        item["path"] = entry->path;
+                    } else {
+                        item["path"] = "";
+                        item["available"] = false;
+                    }
+                    for (const std::string_view action : {"read", "write", "share"}) {
+                        if (control::role_allows(grant.role, action)) {
+                            item["actions"].push_back(action);
+                        }
+                    }
+                    items.push_back(std::move(item));
+                }
+                context.audit_kind = "drive.shared_with_me.read";
+                context.audit_details = {{"items", items.size()}};
+                return ApiResult::success({{"items", std::move(items)}});
+            }});
+
+    registry.add(Capability{
         .name = "create_drive_share_link",
         .title = "Create drive share link",
         .description = "Create a folder-scoped link with an explicit role and expiry.",

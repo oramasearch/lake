@@ -1,8 +1,10 @@
 # Drive sharing
 
 **Status: implemented for lake #8 and #44.** A folder can be delivered as a live grant, a scoped
-link, or an independent copy. Lake implements live grants and revocable links. The page explains
-that a copy is independent bytes which cannot be recalled; export or download performs the copy.
+link, or an independent copy. Lake implements live grants and revocable links. The sharing pages
+show effective access before creation, link expiry and state, the exact revocation consequence,
+and folders shared directly with the signed-in identity. A copy is independent bytes which cannot
+be recalled; export or download performs the copy.
 
 ## Live grants and effective access
 
@@ -27,11 +29,20 @@ calls `authorize` for the synthetic principal, and returns only that folder's im
 `revoke_drive_share_link` takes effect on the next open. The browser route is `GET /share/:token`;
 create and revoke remain POSTs under `/drive/share/`.
 
+`drive_shared_with_me` is an authenticated read capability. It lists only `path` objects with a
+direct grant to the caller's TAAP identity, resolves their current `main` path by stable node id,
+and returns the repository, grantor, role-derived actions, and availability. It does not treat a
+bearer link or an inherited repository permission as a direct folder share.
+
+`create_drive_share_link` has no passcode input. The UI names that limitation rather than sending
+or storing a passcode that the capability cannot verify.
+
 Every capability outcome is written through the signed registry audit path. Successful changes
 use `drive.folder.shared`, `drive.share_link.created`, and `drive.share_link.revoked` audit kinds.
 
 ## Verification
 
 `Drive.FolderSharingMatchesAuthorizeAndLinksExpire` proves recipient visibility, outsider denial,
-effective-access agreement with `authorize`, active-link resolution, revocation, and expiry.
+effective-access agreement with `authorize`, a recipient's shared-with-me result, active-link
+resolution, revocation, and expiry.
 `PostgresCapabilities.DriveShareLinksRoundTrip` covers durable create, lookup, list, and revoke.

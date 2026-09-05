@@ -3945,6 +3945,8 @@ struct ApiServer::Impl {
             "/drive/move",
             "/drive/delete",
             "/drive/share",
+            "/drive/share/link",
+            "/shared-with-me",
             "/search",
             "/metering",
             "/transparency",
@@ -6727,6 +6729,73 @@ struct ApiServer::Impl {
                                        query_value(route, "path"));
     }
 
+    boost::http::route_task render_drive_share_link_page(boost::http::route_params& route,
+                                                         ApiContext context,
+                                                         const std::string& repository_id,
+                                                         const std::string& ref,
+                                                         const std::string& path,
+                                                         const std::string& link_id,
+                                                         std::string error = {}) {
+        const ApiResult result =
+            registry.call("drive_effective_access",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        const auto link =
+            std::ranges::find_if(result.value.at("links"), [&](const nlohmann::json& value) {
+                return json_string(value, "id") == link_id;
+            });
+        if (link == result.value.at("links").end()) {
+            return serve_repository_page_error(
+                route, context, ApiResult::failure("not_found", "drive share link was not found"));
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_drive_share_link(
+                repository_from_json(result.value.at("repository")), ref, path, *link, error),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_drive_share_link_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        return render_drive_share_link_page(route,
+                                            std::move(context),
+                                            query_value(route, "repository_id"),
+                                            ref,
+                                            query_value(route, "path"),
+                                            query_value(route, "link_id"));
+    }
+
+    boost::http::route_task serve_shared_with_me_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/sign-in");
+        }
+        const ApiResult result =
+            registry.call("drive_shared_with_me", nlohmann::json::object(), context);
+        if (!result.ok) {
+            return serve_page_error(route, result);
+        }
+        std::vector<nlohmann::json> folders;
+        for (const nlohmann::json& folder : result.value.at("items")) {
+            folders.push_back(folder);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_shared_with_me(folders, ""),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
     boost::http::route_task serve_drive_share_direct(boost::http::route_params& route) {
         namespace http = boost::http;
         auto [read_error, body] = co_await read_string_body(route);
@@ -6797,10 +6866,15 @@ struct ApiServer::Impl {
             co_return co_await render_drive_share_page(
                 route, context, repository_id, ref, path, {}, result.error.message);
         }
+        const std::string return_to = form_field(body, "return_to");
         co_return co_await redirect(
             route,
-            "/drive/share?repository_id=" + oauth_url_encode(repository_id) +
-                "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path));
+            return_to == "detail"
+                ? "/drive/share/link?repository_id=" + oauth_url_encode(repository_id) +
+                      "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path) +
+                      "&link_id=" + oauth_url_encode(form_field(body, "link_id"))
+                : "/drive/share?repository_id=" + oauth_url_encode(repository_id) +
+                      "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path));
     }
 
     boost::http::route_task serve_drive_restore(boost::http::route_params& route) {
@@ -8615,6 +8689,18 @@ bool ApiServer::start() {
         http::method::get, "/drive/share", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/drive/share", impl.serve_drive_share_page(route));
         });
+    router.add(http::method::get,
+               "/drive/share/link",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/share/link", impl.serve_drive_share_link_page(route));
+               });
+    router.add(http::method::get,
+               "/shared-with-me",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/shared-with-me", impl.serve_shared_with_me_page(route));
+               });
     router.add(http::method::post,
                "/drive/share/direct",
                [&impl](http::route_params& route) -> http::route_task {
