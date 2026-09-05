@@ -2,6 +2,7 @@
 
 Drive browsing, preview, history, sharing, and documented Linux client states are in
 [`drive.md`](drive.md).
+The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at `/style.css`, an accessible shared shell,
@@ -25,13 +26,18 @@ exports, SSO, repository content, and drive views.
 | Grants | `GET /grants?object_id=<uuid>` | direct policy grants and their attestation evidence |
 | Effective access | `GET /access?object_id=<uuid>` | direct and inherited principals, roles and allowed actions; object pages link to entity-specific views |
 | Repositories | `GET /repositories[?customer_id=<uuid>]` | public repositories for anonymous readers, or authorized repositories for a signed-in caller |
-| Repository | `GET /repository?id=<uuid>` | metadata, refs, content links, lifecycle state, and effective access |
+| Repository | `GET /repository?id=<uuid>` | forge home with tree, recent changes, rendered README, refs and releases, clone/push commands, language/size summary, lifecycle state, and effective access |
 | Model | `GET /models/<namespace>/<name>` or `/models/<uuid>` | card, revisions, file sizes and deduplication savings, storage totals, and the verified dataset-to-model provenance chain |
 | Exports | `GET /exports?repository_id=<uuid>` | signed archive requests and prior export manifests; its download form calls the export capability |
-| Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree at a published ref |
-| File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>` | one file, backing blob and escaped contents |
+| Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree with breadcrumbs, sizes, modes, and per-path last changes |
+| File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>`, `/file/raw`, `/file/download` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download responses |
 | Changes | `GET /changes?repository_id=<uuid>` | the libliquid change log |
-| Change | `GET /change?repository_id=<uuid>&id=<change>` | change identity, metadata, per-path status, modes, blobs, text hunks, moves, and conflict values |
+| Change | `GET /change?repository_id=<uuid>&id=<change>` | title and rendered message, compact identities, review state, file stats, unified/side-by-side text hunks, anchored comments, conflicts, checks, and attestations |
+| Issues | `GET /issues?repository_id=<uuid>[&state=<state>&label=<label>&assignee=<identity>]` | filterable issue list with state, labels, assignees, and compact identities |
+| Issue | `GET /issue?repository_id=<uuid>&id=<issue>` | sanitized Markdown body and discussion, labels, assignees, and linked changes |
+| Releases | `GET /releases?repository_id=<uuid>` | sanitized release notes, change identity, artifacts, output counts, and verified attestations |
+| Webhooks | `GET /webhooks?repository_id=<uuid>` | sanitized endpoints and events with delivery status, attempts, errors, and failed-delivery retry |
+| Branch protection | `GET /protection?repository_id=<uuid>` | ref rules, required review and verification, update mode, pushers, and signed refusal audit |
 | Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |
 | Artifacts | `GET /artifacts?repository_id=<uuid>[&action=<digest>&output=<path>&content=<digest>&cursor=<cursor>&limit=<n>]` | filtered cursor pages of build results |
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |

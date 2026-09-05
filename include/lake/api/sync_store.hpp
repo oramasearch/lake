@@ -61,6 +61,10 @@ struct RepositoryTreeEntry {
     std::string node_id;
     std::uint64_t size = 0;
     std::uint64_t stored_size = 0;
+    std::string last_change;
+    std::string last_message;
+    std::string last_author;
+    std::string last_changed_at;
 };
 
 struct RepositoryFile {
@@ -76,6 +80,13 @@ struct RepositoryChange {
     std::vector<std::string> parents;
     std::string author;
     std::string message;
+    std::string occurred_at;
+};
+
+struct RepositoryBlameLine {
+    std::uint64_t line = 0;
+    std::string change;
+    std::string author;
     std::string occurred_at;
 };
 

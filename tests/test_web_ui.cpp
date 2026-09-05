@@ -29,6 +29,17 @@ TEST(WebUi, EscapesHtml) {
               "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
 }
 
+TEST(WebUi, MarkdownEscapesRawHtmlAndAddsStableHeadingAnchors) {
+    const std::string html = lake::api::web_ui_markdown(
+        "# Overview\n\nUse `<safe>` here.\n\n## Details\n\n## Details\n\n<script>bad()</script>");
+    EXPECT_NE(html.find("id=\"overview\""), std::string::npos);
+    EXPECT_NE(html.find("id=\"details\""), std::string::npos);
+    EXPECT_NE(html.find("id=\"details-2\""), std::string::npos);
+    EXPECT_NE(html.find("<code>&lt;safe&gt;</code>"), std::string::npos);
+    EXPECT_NE(html.find("&lt;script&gt;bad()&lt;/script&gt;"), std::string::npos);
+    EXPECT_EQ(html.find("<script>bad()</script>"), std::string::npos);
+}
+
 TEST(WebUi, EmbedsEveryDesignSystemFont) {
     for (const std::string_view name : {"ibm-plex-sans-400.woff2",
                                         "ibm-plex-sans-500.woff2",
@@ -327,16 +338,51 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     repo.deleted_at = "2026-09-03T00:00:00Z";
     repo.retention_until = "2026-10-03T00:00:00Z";
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
+
+    const lake::api::RepositoryHomeData data{
+        .refs = {{"main", "blake3:123456789012345678901234567890"}},
+        .tree = {{"README.md", "blob", "blob-1", 0644, "node-1", 48, 32},
+                 {"src/example.cpp", "blob", "blob-2", 0644, "node-2", 96, 64},
+                 {"src", "tree", "", 0755}},
+        .changes = {{"blake3:abcdef012345678901234567890",
+                     {},
+                     "taap:1:ed25519:author",
+                     "Explain the repository",
+                     "2026-09-04T00:00:00Z"}},
+        .readme = lake::api::RepositoryFile{"README.md", "blob-1", "# Lake\n\nSafe <text>.", 26},
+        .access = {{"taap:1:ed25519:reader", "", "read", {"read"}, false}},
+    };
+    const std::string home = lake::api::web_ui_repository(repo, &ada, data);
+    EXPECT_NE(home.find("aria-label=\"Repository\""), std::string::npos);
+    EXPECT_NE(home.find("Repository root"), std::string::npos);
+    EXPECT_NE(home.find("Recent changes"), std::string::npos);
+    EXPECT_NE(home.find("id=\"lake\""), std::string::npos);
+    EXPECT_NE(home.find("Safe &lt;text&gt;"), std::string::npos);
+    EXPECT_NE(home.find("Clone and push"), std::string::npos);
+    EXPECT_NE(home.find("C++"), std::string::npos);
+    EXPECT_NE(home.find("Markdown"), std::string::npos);
+    EXPECT_NE(home.find("Effective access"), std::string::npos);
 }
 
 TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     const lake::control::Repository repository{
         "r1", "c1", "liquid", "", "public", "", "", "2026-09-02T00:00:00Z", "2026-09-02T00:00:00Z"};
-    const lake::api::RepositoryTreeEntry tree_entry{"<readme>.md", "blob", "blob-1", 0644};
+    const lake::api::RepositoryTreeEntry tree_entry{.path = "<readme>.md",
+                                                    .kind = "blob",
+                                                    .blob = "blob-1",
+                                                    .mode = 0644,
+                                                    .size = 8,
+                                                    .last_change = "change-1",
+                                                    .last_message = "Add README",
+                                                    .last_author = "author",
+                                                    .last_changed_at = "2026-09-04"};
     const std::string tree =
         lake::api::web_ui_repository_tree(repository, "main", {tree_entry}, false);
     EXPECT_NE(tree.find("&lt;readme&gt;.md"), std::string::npos);
     EXPECT_NE(tree.find("href=\"/file?repository_id=r1"), std::string::npos);
+    EXPECT_NE(tree.find("Last change"), std::string::npos);
+    EXPECT_NE(tree.find("Add README"), std::string::npos);
+    EXPECT_EQ(tree.find("<table>"), std::string::npos);
     expect_theme_scripts(tree);
 
     const lake::api::RepositoryFile file{"<readme>.md", "blob-1", "<source>", 8};
@@ -344,10 +390,35 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     EXPECT_NE(contents.find("&lt;source&gt;"), std::string::npos);
     EXPECT_EQ(contents.find("<source>"), std::string::npos);
 
+    const lake::api::RepositoryFile source{
+        "src/main.cpp", "blake3:source", "int main() {\n    return 0;\n}\n", 29};
+    const std::vector<lake::api::RepositoryBlameLine> blame{
+        {1, "blake3:change-one", "taap:1:author", "2026-09-04"},
+        {2, "blake3:change-two", "taap:1:reviewer", "2026-09-05"},
+        {3, "blake3:change-one", "taap:1:author", "2026-09-04"},
+    };
+    const std::string source_page =
+        lake::api::web_ui_repository_file(repository, "main", source, blame, false);
+    EXPECT_NE(source_page.find("class=\"source-view syntax-highlighted\""), std::string::npos);
+    EXPECT_NE(source_page.find("class=\"syntax-keyword\">int</span>"), std::string::npos);
+    EXPECT_NE(source_page.find("id=\"L2\""), std::string::npos);
+    EXPECT_NE(source_page.find("data-line-range=\"L2-L2\""), std::string::npos);
+    EXPECT_NE(source_page.find("taap:1:reviewer"), std::string::npos);
+    EXPECT_NE(source_page.find("/file/raw?repository_id=r1"), std::string::npos);
+    EXPECT_NE(source_page.find("/file/download?repository_id=r1"), std::string::npos);
+    EXPECT_NE(source_page.find("id=\"file-range-script\""), std::string::npos);
+    expect_theme_scripts(source_page, 1);
+
     const lake::api::RepositoryChange change{
-        "change-1", {"parent-1"}, "taap:1:ed25519:author", "<message>", "2026-09-04T00:00:00Z"};
+        "blake3:change-identifier-0123456789",
+        {"parent-1"},
+        "taap:1:ed25519:author",
+        "<message>\n\nReview **carefully**. <script>x</script>",
+        "2026-09-04T00:00:00Z"};
     const std::string log = lake::api::web_ui_repository_log(repository, {change}, false);
-    EXPECT_NE(log.find("href=\"/change?repository_id=r1&amp;id=change-1\""), std::string::npos);
+    EXPECT_NE(log.find("href=\"/change?repository_id=r1&amp;id=blake3%3Achange-identifier-"
+                       "0123456789\""),
+              std::string::npos);
     EXPECT_NE(log.find("&lt;message&gt;"), std::string::npos);
 
     const lake::api::RepositoryDiffEntry difference{
@@ -364,15 +435,53 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
         .old_conflicts = {"left"},
         .new_conflicts = {"left", "right"},
     };
+    const lake::control::ForgeRecord review_record{
+        "review-1",
+        "r1",
+        "review",
+        "created",
+        "updated",
+        {{"change_id", change.id}, {"state", "approved"}, {"reviewers", {"taap:1:reviewer"}}}};
+    const lake::control::ForgeRecord comment_record{
+        "comment-1",
+        "r1",
+        "review_comment",
+        "created",
+        "updated",
+        {{"review_id", "review-1"},
+         {"body", "Looks **good**. <img src=x>"},
+         {"anchor", {{"change", change.id}, {"path", "<readme>.md"}, {"line", 2}, {"column", 0}}}}};
+    const lake::api::RepositoryArtifact check{
+        .id = "result-long-identifier-0123456789",
+        .action = "test",
+        .exit_code = 0,
+        .attestations = {{"attestation-1", "profile", "subject", "issuer", true, ""}},
+    };
+    const lake::api::ChangeReviewData review_data{
+        .reviews = {review_record},
+        .comments = {comment_record},
+        .checks = {.items = {check}, .done = true},
+    };
     const std::string change_page =
-        lake::api::web_ui_change(repository, change, {difference}, false);
+        lake::api::web_ui_change(repository, change, {difference}, review_data, false);
     EXPECT_NE(change_page.find("&lt;message&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("&lt;readme&gt;.md"), std::string::npos);
     EXPECT_NE(change_page.find("@@ -2,1 +2,1 @@"), std::string::npos);
     EXPECT_NE(change_page.find("-&lt;old&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("+&lt;new&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("Conflict values"), std::string::npos);
-    expect_theme_scripts(change_page);
+    EXPECT_NE(change_page.find("Side by side"), std::string::npos);
+    EXPECT_NE(change_page.find("data-full-identifier=\"blake3:change-identifier-0123456789\""),
+              std::string::npos);
+    EXPECT_NE(change_page.find("Copy identifier"), std::string::npos);
+    EXPECT_NE(change_page.find("approved"), std::string::npos);
+    EXPECT_NE(change_page.find("Looks <strong>good</strong>. &lt;img src=x&gt;"),
+              std::string::npos);
+    EXPECT_NE(change_page.find("href=\"#readme-md-new-2\">line 2</a>"), std::string::npos);
+    EXPECT_NE(change_page.find("1 attestations"), std::string::npos);
+    EXPECT_EQ(change_page.find("<script>x</script>"), std::string::npos);
+    EXPECT_NE(change_page.find("id=\"change-review-script\""), std::string::npos);
+    expect_theme_scripts(change_page, 1);
 
     const lake::api::RepositoryDiffEntry reformatting{
         .path = "readme.md",
@@ -434,6 +543,185 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     EXPECT_NE(artifact_page.find("unverified: signature mismatch"), std::string::npos);
     EXPECT_NE(artifact_page.find("trace-1"), std::string::npos);
     expect_theme_scripts(artifact_page);
+}
+
+TEST(WebUi, IssueTrackerRendersFiltersDiscussionAndLinkedChangesSafely) {
+    const lake::control::Repository repository{
+        "r1", "c1", "forge", "description", "public", "", "", "created", "updated"};
+    const lake::control::ForgeRecord open_issue{
+        "issue-long-identifier-0123456789",
+        "r1",
+        "issue",
+        "2026-09-05",
+        "2026-09-05",
+        {{"title", "Fix <parser>"},
+         {"body", "## Reproduction\n\nUse `lake`. <script>x</script>"},
+         {"state", "open"},
+         {"labels", {"bug", "priority"}},
+         {"assignees", {"taap:1:alice"}},
+         {"references", {"blake3:change-0123456789"}}}};
+    const lake::control::ForgeRecord closed_issue{
+        "issue-2", "r1", "issue", "created", "updated", {{"title", "Closed"}, {"state", "closed"}}};
+    const std::string list =
+        lake::api::web_ui_issues(repository, {open_issue, closed_issue}, "open", "bug", "", false);
+    EXPECT_NE(list.find("Fix &lt;parser&gt;"), std::string::npos);
+    EXPECT_NE(list.find("name=\"state\""), std::string::npos);
+    EXPECT_NE(list.find("value=\"open\" selected"), std::string::npos);
+    EXPECT_NE(list.find("taap:1:alice"), std::string::npos);
+    EXPECT_EQ(list.find(">Closed</a>"), std::string::npos);
+    expect_theme_scripts(list);
+
+    const lake::control::ForgeRecord comment{
+        "comment-1",
+        "r1",
+        "issue_comment",
+        "2026-09-05",
+        "2026-09-05",
+        {{"issue_id", open_issue.id}, {"body", "Confirmed with **tests**. <iframe>x</iframe>"}}};
+    const std::string detail = lake::api::web_ui_issue(repository, open_issue, {comment}, false);
+    EXPECT_NE(detail.find("id=\"reproduction\""), std::string::npos);
+    EXPECT_NE(detail.find("Use <code>lake</code>. &lt;script&gt;x&lt;/script&gt;"),
+              std::string::npos);
+    EXPECT_NE(detail.find("Confirmed with <strong>tests</strong>. &lt;iframe&gt;x&lt;/iframe&gt;"),
+              std::string::npos);
+    EXPECT_NE(detail.find("Linked changes"), std::string::npos);
+    EXPECT_NE(detail.find("blake3:chang…3456789"), std::string::npos);
+    EXPECT_EQ(detail.find("<script>x</script>"), std::string::npos);
+    expect_theme_scripts(detail);
+}
+
+TEST(WebUi, ReleaseWebhookAndProtectionPagesRenderForgeEvidenceSafely) {
+    const lake::control::Repository repository{
+        "r1", "c1", "forge", "description", "private", "", "", "created", "updated"};
+    const lake::control::ForgeRecord release{
+        "release-1",
+        "r1",
+        "release",
+        "created",
+        "updated",
+        {{"tag", "v1.0 <stable>"},
+         {"change_id", "blake3:change-0123456789"},
+         {"notes", "## Notes\n\nShips **forge pages**. <script>x</script>"},
+         {"artifacts",
+          {{{"id", "artifact-1"},
+            {"action", "build"},
+            {"outputs", 2},
+            {"attestations", {{{"id", "attestation-1"}, {"profile", "slsa"}}}}}}}}};
+    const std::string releases = lake::api::web_ui_releases(repository, {release}, true);
+    EXPECT_NE(releases.find("v1.0 &lt;stable&gt;"), std::string::npos);
+    EXPECT_NE(releases.find("Ships <strong>forge pages</strong>. &lt;script&gt;x&lt;/script&gt;"),
+              std::string::npos);
+    EXPECT_NE(releases.find("2 outputs"), std::string::npos);
+    EXPECT_NE(releases.find("1 attestations"), std::string::npos);
+    expect_theme_scripts(releases);
+
+    const lake::control::ForgeRecord webhook{"webhook-1",
+                                             "r1",
+                                             "webhook",
+                                             "created",
+                                             "updated",
+                                             {{"url", "https://example.test/<hook>"},
+                                              {"events", {"review", "release"}},
+                                              {"secret", "x"}}};
+    const lake::control::ForgeRecord delivery{"delivery-1",
+                                              "r1",
+                                              "webhook_delivery",
+                                              "created",
+                                              "updated",
+                                              {{"webhook_id", "webhook-1"},
+                                               {"event", "review"},
+                                               {"attempt", 2},
+                                               {"status", 503},
+                                               {"error", "connection <failed>"},
+                                               {"delivered", false}}};
+    const std::string webhooks =
+        lake::api::web_ui_webhooks(repository, {webhook}, {delivery}, true);
+    EXPECT_NE(webhooks.find("https://example.test/&lt;hook&gt;"), std::string::npos);
+    EXPECT_NE(webhooks.find("attempt 2 · status 503"), std::string::npos);
+    EXPECT_NE(webhooks.find("connection &lt;failed&gt;"), std::string::npos);
+    EXPECT_NE(webhooks.find("action=\"/webhooks/retry\""), std::string::npos);
+    EXPECT_EQ(webhooks.find("name=\"secret\""), std::string::npos);
+    expect_theme_scripts(webhooks);
+
+    const lake::control::ForgeRecord rule{"rule-1",
+                                          "r1",
+                                          "branch_protection",
+                                          "created",
+                                          "updated",
+                                          {{"ref", "main"},
+                                           {"required_review", true},
+                                           {"required_verification", true},
+                                           {"fast_forward_only", true},
+                                           {"allowed_pushers", {"taap:1:maintainer"}},
+                                           {"policy_object_id", "policy-1"}}};
+    const lake::audit::Event refused{"event-1",
+                                     "2026-09-05",
+                                     {.customer_id = "c1",
+                                      .kind = "forge.branch_protection.refused",
+                                      .principal = "taap:1:outsider",
+                                      .object = "repository/r1/ref/main",
+                                      .action = "reference_update",
+                                      .outcome = "denied",
+                                      .details = {{"repository", "r1"},
+                                                  {"reference", "main"},
+                                                  {"caller", "taap:1:outsider"},
+                                                  {"rule", "required_review"},
+                                                  {"reason", "review <required>"}}},
+                                     "previous",
+                                     "signer",
+                                     "signature",
+                                     "digest"};
+    const std::string protection =
+        lake::api::web_ui_branch_protection(repository, {rule}, {refused}, true);
+    EXPECT_NE(protection.find("fast-forward only"), std::string::npos);
+    EXPECT_NE(protection.find("taap:1:maintainer"), std::string::npos);
+    EXPECT_NE(protection.find("review &lt;required&gt;"), std::string::npos);
+    EXPECT_NE(protection.find("Refused updates"), std::string::npos);
+    expect_theme_scripts(protection);
+}
+
+TEST(WebUi, ForgeStatesAndFocusOrderRemainAccessible) {
+    const std::string error = lake::api::web_ui_error("not_<found>", "Missing <repository>", true);
+    EXPECT_NE(error.find("role=\"alert\""), std::string::npos);
+    EXPECT_NE(error.find("not_&lt;found&gt;"), std::string::npos);
+    EXPECT_NE(error.find("Missing &lt;repository&gt;"), std::string::npos);
+    EXPECT_NE(error.find("Back to repositories"), std::string::npos);
+    expect_theme_scripts(error);
+
+    const std::string loading = lake::api::web_ui_loading("Change <review>", false);
+    EXPECT_NE(loading.find("role=\"status\""), std::string::npos);
+    EXPECT_NE(loading.find("aria-live=\"polite\""), std::string::npos);
+    EXPECT_NE(loading.find("aria-busy=\"true\""), std::string::npos);
+    EXPECT_NE(loading.find("Change &lt;review&gt;"), std::string::npos);
+    expect_theme_scripts(loading);
+
+    const lake::control::Repository repository{
+        "r1", "c1", "forge", "description", "public", "", "", "created", "updated"};
+    const std::string empty_issues = lake::api::web_ui_issues(repository, {}, "", "", "", false);
+    EXPECT_NE(empty_issues.find("No issues match these filters."), std::string::npos);
+    const std::string empty_releases = lake::api::web_ui_releases(repository, {}, false);
+    EXPECT_NE(empty_releases.find("No releases have been published."), std::string::npos);
+    const std::string empty_webhooks = lake::api::web_ui_webhooks(repository, {}, {}, false);
+    EXPECT_NE(empty_webhooks.find("No webhooks are configured."), std::string::npos);
+    const std::string empty_protection =
+        lake::api::web_ui_branch_protection(repository, {}, {}, false);
+    EXPECT_NE(empty_protection.find("No branch protection rules."), std::string::npos);
+    EXPECT_NE(empty_protection.find("No protected updates have been refused."), std::string::npos);
+
+    const std::size_t skip = empty_issues.find("class=\"skip-link\"");
+    const std::size_t navigation = empty_issues.find("class=\"sidebar\"");
+    const std::size_t topbar = empty_issues.find("class=\"topbar\"");
+    const std::size_t main = empty_issues.find("id=\"main-content\"");
+    const std::size_t filters = empty_issues.find("class=\"filters\"");
+    ASSERT_NE(skip, std::string::npos);
+    ASSERT_NE(navigation, std::string::npos);
+    ASSERT_NE(topbar, std::string::npos);
+    ASSERT_NE(main, std::string::npos);
+    ASSERT_NE(filters, std::string::npos);
+    EXPECT_LT(skip, navigation);
+    EXPECT_LT(navigation, topbar);
+    EXPECT_LT(topbar, main);
+    EXPECT_LT(main, filters);
 }
 
 TEST(WebUi, AuditPageFiltersAndEscapesEvents) {

@@ -64,7 +64,13 @@ empty states, notices, toasts, code blocks, diffs, pagination, breadcrumbs, and 
 Existing page markup uses these shared selectors, so the operator and Lake identity routes move
 together without adding renderer-side CSS.
 The public transparency monitor uses the same shell and the two shared theme scripts; it adds no
-page-specific script.
+page-specific script. File pages add one local script for line-range selection. The page remains
+readable, and each individual line anchor works, when that script does not run. Change pages add
+one local script for the diff-layout toggle and full-identity copy control; unified review and
+hover disclosure remain available without it.
+Forge empty states name the absent record type. The shared pending state is a polite busy status,
+and repository errors are alerts with an ordinary recovery link; both use the same shell, focus
+order, tokens, and reduced-motion rule as completed pages.
 
 Hosted application identity pages use a compact version of the same token, font, form, focus,
 theme, and motion contracts. Their validated application accent is a decorative rule and their
@@ -146,22 +152,26 @@ renders both themes at 1440 by 900. Session values and generated identifiers rem
 `.cache`; only the PNG evidence is checked in.
 
 The baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. The fixture manifest covers
-all 48 pages below in light and dark:
+all 53 pages below in light and dark:
 
 ```text
 home login sign-up sign-in mfa passkey-sign-in sessions passkeys tokens
 customers organizations teams sso members invitations grants access
 applications application application-users application-organizations application-events
 application-sign-up application-sign-in application-mfa application-passkey
-repositories repository exports repository-tree file changes change conflicts
+repositories repository exports repository-tree file changes change issues issue releases webhooks
+protection conflicts
 artifacts artifact search secret-mounts secrets encryption-keys metering audit transparency
 drive drive-preview drive-history drive-share shared-link
 ```
 
 The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
-path-for-path pair. Both directories contain 96 PNG files, and every capture is 1440 by 900.
+path-for-path pair. Both directories contain 106 PNG files, and every capture is 1440 by 900.
+The five routes introduced with the forge work had no old response; their baseline slot uses the
+closest prior record-list or record-detail page so the comparison still records the layout that
+preceded the new forge page.
 The three primary review screens are the
 [repository](screenshots/after/repository-light.png),
 [change](screenshots/after/change-light.png), and
-[organizations](screenshots/after/organizations-light.png) pages; each has a neighboring
+[issue](screenshots/after/issue-light.png) pages; each has a neighboring
 `-dark.png` capture from the same seeded run.

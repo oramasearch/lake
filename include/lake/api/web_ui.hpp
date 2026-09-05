@@ -1,5 +1,6 @@
 #pragma once
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,11 +14,14 @@
 #include "lake/search/index.hpp"
 
 // Pure renderers: data in, HTML out. No HTTP type, no I/O. Pages are
-// server-rendered, self-contained (one stylesheet at /style.css, no script) and
-// unit-tested here.
+// server-rendered, self-contained (one stylesheet at /style.css and only the
+// documented progressive-enhancement scripts) and unit-tested here.
 namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
+std::string web_ui_markdown(std::string_view markdown);
+std::string web_ui_error(std::string_view code, std::string_view message, bool signed_in = false);
+std::string web_ui_loading(std::string_view subject, bool signed_in = false);
 std::string web_ui_stylesheet();
 std::string web_ui_icon(std::string_view name);
 
@@ -82,6 +86,20 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers);
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners,
                                 bool signed_in = true);
+
+struct RepositoryHomeData {
+    std::vector<RepositoryContentRef> refs;
+    std::vector<RepositoryTreeEntry> tree;
+    std::vector<RepositoryChange> changes;
+    std::optional<RepositoryFile> readme;
+    std::vector<control::EffectiveAccessEntry> access;
+    std::vector<control::ForgeRecord> releases;
+};
+
+std::string web_ui_repository(const control::Repository& repository,
+                              const control::Customer* owner,
+                              const RepositoryHomeData& data,
+                              bool signed_in = true);
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const std::vector<RepositoryContentRef>& refs = {},
@@ -91,15 +109,52 @@ std::string web_ui_repository_tree(const control::Repository& repository,
                                    const std::vector<RepositoryTreeEntry>& entries,
                                    bool signed_in);
 std::string web_ui_repository_file(const control::Repository& repository,
+                                   std::string_view ref,
+                                   const RepositoryFile& file,
+                                   const std::vector<RepositoryBlameLine>& blame,
+                                   bool signed_in);
+std::string web_ui_repository_file(const control::Repository& repository,
                                    const RepositoryFile& file,
                                    bool signed_in);
 std::string web_ui_repository_log(const control::Repository& repository,
                                   const std::vector<RepositoryChange>& changes,
                                   bool signed_in);
+struct ChangeReviewData {
+    std::vector<control::ForgeRecord> reviews;
+    std::vector<control::ForgeRecord> comments;
+    RepositoryArtifactPage checks;
+};
+
+std::string web_ui_change(const control::Repository& repository,
+                          const RepositoryChange& change,
+                          const std::vector<RepositoryDiffEntry>& differences,
+                          const ChangeReviewData& review,
+                          bool signed_in);
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
                           bool signed_in);
+std::string web_ui_issues(const control::Repository& repository,
+                          const std::vector<control::ForgeRecord>& issues,
+                          std::string_view state,
+                          std::string_view label,
+                          std::string_view assignee,
+                          bool signed_in);
+std::string web_ui_issue(const control::Repository& repository,
+                         const control::ForgeRecord& issue,
+                         const std::vector<control::ForgeRecord>& comments,
+                         bool signed_in);
+std::string web_ui_releases(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& releases,
+                            bool signed_in);
+std::string web_ui_webhooks(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& webhooks,
+                            const std::vector<control::ForgeRecord>& deliveries,
+                            bool signed_in);
+std::string web_ui_branch_protection(const control::Repository& repository,
+                                     const std::vector<control::ForgeRecord>& rules,
+                                     const std::vector<audit::Event>& events,
+                                     bool signed_in);
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
                                         bool signed_in);

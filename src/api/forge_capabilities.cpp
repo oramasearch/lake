@@ -89,7 +89,16 @@ ApiResult list_records(const std::string& kind, const json& input, ApiContext& c
     if (!context.store) {
         return ApiResult::failure("store_unavailable", "no control-plane store is configured");
     }
-    if (context.acting_identity != "admin") {
+    if (!context.authorized) {
+        const auto repository =
+            context.store->get_repository(input.at("repository_id").get<std::string>());
+        if (!repository) {
+            return from_store_error(repository.error());
+        }
+        if (repository->visibility != "public") {
+            return ApiResult::failure("unauthorized", "the repository is not public");
+        }
+    } else if (context.acting_identity != "admin") {
         const auto object = repository_object(input, context);
         if (!object) {
             return ApiResult::failure(
@@ -465,7 +474,11 @@ void add_create(Registry& registry,
                    }});
 }
 
-void add_list(Registry& registry, std::string name, std::string title, std::string kind) {
+void add_list(Registry& registry,
+              std::string name,
+              std::string title,
+              std::string kind,
+              bool allows_anonymous_public_read = false) {
     registry.add(Capability{
         .name = std::move(name),
         .title = std::move(title),
@@ -477,6 +490,7 @@ void add_list(Registry& registry, std::string name, std::string title, std::stri
         .action = "read",
         .resolve_object = repository_object,
         .authorizes_candidates = true,
+        .allows_anonymous_public_read = allows_anonymous_public_read,
         .handler = [kind = std::move(kind)](const json& input, ApiContext& context) {
             return list_records(kind, input, context);
         }});
@@ -656,7 +670,7 @@ void register_forge_capabilities(Registry& registry) {
                             .action = "write",
                             .resolve_object = repository_object,
                             .handler = create_issue});
-    add_list(registry, "list_issues", "List issues", "issue");
+    add_list(registry, "list_issues", "List issues", "issue", true);
     registry.add(
         Capability{.name = "update_issue",
                    .title = "Update issue",
@@ -688,7 +702,7 @@ void register_forge_capabilities(Registry& registry) {
                             .action = "write",
                             .resolve_object = repository_object,
                             .handler = create_issue_comment});
-    add_list(registry, "list_issue_comments", "List issue comments", "issue_comment");
+    add_list(registry, "list_issue_comments", "List issue comments", "issue_comment", true);
 
     registry.add(Capability{.name = "create_review",
                             .title = "Create change review",
@@ -702,7 +716,7 @@ void register_forge_capabilities(Registry& registry) {
                             .action = "write",
                             .resolve_object = repository_object,
                             .handler = create_review});
-    add_list(registry, "list_reviews", "List change reviews", "review");
+    add_list(registry, "list_reviews", "List change reviews", "review", true);
     registry.add(Capability{
         .name = "update_review",
         .title = "Update change review",
@@ -732,7 +746,7 @@ void register_forge_capabilities(Registry& registry) {
                    .action = "write",
                    .resolve_object = repository_object,
                    .handler = create_review_comment});
-    add_list(registry, "list_review_comments", "List review comments", "review_comment");
+    add_list(registry, "list_review_comments", "List review comments", "review_comment", true);
 
     registry.add(Capability{
         .name = "map_review_anchors",
@@ -791,7 +805,7 @@ void register_forge_capabilities(Registry& registry) {
                             .action = "write",
                             .resolve_object = repository_object,
                             .handler = create_release});
-    add_list(registry, "list_releases", "List releases", "release");
+    add_list(registry, "list_releases", "List releases", "release", true);
     add_create(registry,
                "create_webhook",
                "Create signed webhook",

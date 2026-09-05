@@ -1,7 +1,13 @@
 #include "lake/api/web_ui.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <format>
+#include <optional>
+#include <set>
+#include <sstream>
+
+#include "modules/frontends/common/syntax.hpp"
 
 namespace lake::api {
 
@@ -30,6 +36,151 @@ std::string web_ui_escape(std::string_view text) {
         }
     }
     return out;
+}
+
+namespace {
+
+std::string markdown_slug(std::string_view heading) {
+    std::string slug;
+    bool pending_dash = false;
+    for (const unsigned char character : heading) {
+        if (std::isalnum(character)) {
+            if (pending_dash && !slug.empty()) {
+                slug += '-';
+            }
+            slug += static_cast<char>(std::tolower(character));
+            pending_dash = false;
+        } else if (!slug.empty()) {
+            pending_dash = true;
+        }
+    }
+    return slug.empty() ? "section" : slug;
+}
+
+std::string markdown_inline(std::string_view text) {
+    std::string output;
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        if (text[offset] == '`') {
+            const std::size_t end = text.find('`', offset + 1);
+            if (end == std::string_view::npos) {
+                output += "&#96;";
+                ++offset;
+                continue;
+            }
+            output += "<code>";
+            output += web_ui_escape(text.substr(offset + 1, end - offset - 1));
+            output += "</code>";
+            offset = end + 1;
+            continue;
+        }
+        if (text.substr(offset).starts_with("**")) {
+            const std::size_t end = text.find("**", offset + 2);
+            if (end != std::string_view::npos) {
+                output += "<strong>";
+                output += web_ui_escape(text.substr(offset + 2, end - offset - 2));
+                output += "</strong>";
+                offset = end + 2;
+                continue;
+            }
+        }
+        output += web_ui_escape(text.substr(offset, 1));
+        ++offset;
+    }
+    return output;
+}
+
+} // namespace
+
+std::string web_ui_markdown(std::string_view markdown) {
+    std::istringstream input{std::string(markdown)};
+    std::string line;
+    std::string output = "<article class=\"markdown-body\">";
+    std::map<std::string, std::size_t> heading_counts;
+    bool code_open = false;
+    bool list_open = false;
+    bool paragraph_open = false;
+    auto close_paragraph = [&]() {
+        if (paragraph_open) {
+            output += "</p>";
+            paragraph_open = false;
+        }
+    };
+    auto close_list = [&]() {
+        if (list_open) {
+            output += "</ul>";
+            list_open = false;
+        }
+    };
+    while (std::getline(input, line)) {
+        if (line.starts_with("```")) {
+            close_paragraph();
+            close_list();
+            if (code_open) {
+                output += "</code></pre>";
+            } else {
+                output += "<pre><code>";
+            }
+            code_open = !code_open;
+            continue;
+        }
+        if (code_open) {
+            output += web_ui_escape(line);
+            output += '\n';
+            continue;
+        }
+        std::size_t level = 0;
+        while (level < line.size() && level < 6 && line[level] == '#') {
+            ++level;
+        }
+        if (level > 0 && level < line.size() && line[level] == ' ') {
+            close_paragraph();
+            close_list();
+            const std::string_view heading{line.data() + level + 1, line.size() - level - 1};
+            std::string slug = markdown_slug(heading);
+            const std::size_t duplicate = heading_counts[slug]++;
+            if (duplicate > 0) {
+                slug += '-' + std::to_string(duplicate + 1);
+            }
+            output += std::format("<h{} id=\"{}\">{}<a class=\"heading-anchor\" href=\"#{}\" "
+                                  "aria-label=\"Link to this heading\">#</a></h{}>",
+                                  level,
+                                  slug,
+                                  markdown_inline(heading),
+                                  slug,
+                                  level);
+            continue;
+        }
+        if (line.starts_with("- ") || line.starts_with("* ")) {
+            close_paragraph();
+            if (!list_open) {
+                output += "<ul>";
+                list_open = true;
+            }
+            output += "<li>" + markdown_inline(std::string_view(line).substr(2)) + "</li>";
+            continue;
+        }
+        if (line.empty()) {
+            close_paragraph();
+            close_list();
+            continue;
+        }
+        close_list();
+        if (!paragraph_open) {
+            output += "<p>";
+            paragraph_open = true;
+        } else {
+            output += ' ';
+        }
+        output += markdown_inline(line);
+    }
+    close_paragraph();
+    close_list();
+    if (code_open) {
+        output += "</code></pre>";
+    }
+    output += "</article>";
+    return output;
 }
 
 std::string web_ui_stylesheet() {
@@ -190,6 +341,263 @@ std::string repository_name(const control::Repository& repository) {
     return repository.name.empty() ? repository.id : repository.name;
 }
 
+std::string forge_tabs(const control::Repository& repository, std::string_view current) {
+    const std::string id = url_component(repository.id);
+    const std::vector<std::tuple<std::string, std::string, std::string>> tabs{
+        {"Code", "/repository?id=" + id, "code"},
+        {"Changes", "/changes?repository_id=" + id, "changes"},
+        {"Issues", "/issues?repository_id=" + id, "issues"},
+        {"Releases", "/releases?repository_id=" + id, "releases"},
+        {"Artifacts", "/artifacts?repository_id=" + id, "artifacts"},
+        {"Webhooks", "/webhooks?repository_id=" + id, "webhooks"},
+        {"Protection", "/protection?repository_id=" + id, "protection"},
+    };
+    std::string output = "<nav class=\"tabs forge-tabs\" aria-label=\"Repository\">";
+    for (const auto& [label, href, key] : tabs) {
+        output += std::format("<a href=\"{}\"{}>{}</a>",
+                              web_ui_escape(href),
+                              key == current ? " aria-current=\"page\"" : "",
+                              label);
+    }
+    output += "</nav>";
+    return output;
+}
+
+std::string abbreviated_identifier(std::string_view value) {
+    if (value.size() <= 20) {
+        return std::string(value);
+    }
+    return std::string(value.substr(0, 12)) + "…" + std::string(value.substr(value.size() - 7));
+}
+
+std::string identifier_markup(std::string_view value) {
+    return std::format(
+        "<code class=\"identifier\" title=\"{}\" data-full-identifier=\"{}\">{}</code>",
+        web_ui_escape(value),
+        web_ui_escape(value),
+        web_ui_escape(abbreviated_identifier(value)));
+}
+
+std::string identifier_list_markup(const std::vector<std::string>& values) {
+    if (values.empty()) {
+        return "<span class=\"muted\">None</span>";
+    }
+    std::string output = "<span class=\"identity-list\">";
+    for (const std::string& value : values) {
+        output += identifier_markup(value);
+    }
+    output += "</span>";
+    return output;
+}
+
+std::string file_language(std::string_view path) {
+    const std::size_t dot = path.find_last_of('.');
+    if (dot == std::string_view::npos) {
+        return "Other";
+    }
+    const std::string_view extension = path.substr(dot);
+    if (extension == ".c" || extension == ".h") {
+        return "C";
+    }
+    if (extension == ".cc" || extension == ".cpp" || extension == ".cxx" || extension == ".hh" ||
+        extension == ".hpp" || extension == ".hxx") {
+        return "C++";
+    }
+    if (extension == ".md" || extension == ".markdown") {
+        return "Markdown";
+    }
+    if (extension == ".json") {
+        return "JSON";
+    }
+    if (extension == ".js" || extension == ".mjs") {
+        return "JavaScript";
+    }
+    if (extension == ".ts" || extension == ".tsx") {
+        return "TypeScript";
+    }
+    if (extension == ".py") {
+        return "Python";
+    }
+    if (extension == ".rs") {
+        return "Rust";
+    }
+    return "Other";
+}
+
+std::string byte_count(std::uint64_t bytes) {
+    if (bytes < 1024) {
+        return std::format("{} B", bytes);
+    }
+    if (bytes < 1024 * 1024) {
+        return std::format("{:.1f} KiB", static_cast<double>(bytes) / 1024.0);
+    }
+    return std::format("{:.1f} MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+}
+
+std::string path_breadcrumbs(const control::Repository& repository,
+                             std::string_view ref,
+                             std::string_view path) {
+    std::string output = "<nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\">";
+    output += row_link("/repository?id=" + repository.id, repository_name(repository));
+    output += "<span aria-hidden=\"true\">/</span>";
+    output += row_link("/repository/tree?id=" + repository.id + "&ref=" + url_component(ref), ref);
+    std::string accumulated;
+    std::size_t offset = 0;
+    while (offset < path.size()) {
+        const std::size_t slash = path.find('/', offset);
+        const std::size_t end = slash == std::string_view::npos ? path.size() : slash;
+        const std::string_view part = path.substr(offset, end - offset);
+        if (!accumulated.empty()) {
+            accumulated += '/';
+        }
+        accumulated += part;
+        output += "<span aria-hidden=\"true\">/</span>";
+        if (end == path.size()) {
+            output += "<span aria-current=\"page\">" + web_ui_escape(part) + "</span>";
+        } else {
+            output += row_link("/repository/tree?id=" + repository.id +
+                                   "&ref=" + url_component(ref) + "#" + url_component(accumulated),
+                               part);
+        }
+        offset = end + 1;
+    }
+    output += "</nav>";
+    return output;
+}
+
+std::optional<liquid_frontend::syntax_language> syntax_language(std::string_view path) {
+    const std::size_t dot = path.find_last_of('.');
+    const std::string_view extension =
+        dot == std::string_view::npos ? std::string_view{} : path.substr(dot);
+    if (extension == ".c" || extension == ".h") {
+        return liquid_frontend::syntax_language::c;
+    }
+    if (extension == ".cc" || extension == ".cpp" || extension == ".cxx" || extension == ".hh" ||
+        extension == ".hpp" || extension == ".hxx") {
+        return liquid_frontend::syntax_language::cpp;
+    }
+    return std::nullopt;
+}
+
+bool source_keyword(std::string_view token) {
+    static const std::set<std::string_view> keywords{
+        "alignas",   "alignof",  "auto",     "bool",      "break",    "case",    "catch",
+        "char",      "class",    "const",    "constexpr", "continue", "default", "delete",
+        "do",        "double",   "else",     "enum",      "explicit", "extern",  "false",
+        "float",     "for",      "friend",   "if",        "inline",   "int",     "long",
+        "namespace", "new",      "noexcept", "nullptr",   "operator", "private", "protected",
+        "public",    "return",   "short",    "signed",    "sizeof",   "static",  "struct",
+        "switch",    "template", "this",     "throw",     "true",     "try",     "typedef",
+        "typename",  "union",    "unsigned", "using",     "virtual",  "void",    "volatile",
+        "while"};
+    return keywords.contains(token);
+}
+
+std::string highlight_source_line(std::string_view line) {
+    std::string output;
+    std::size_t offset = 0;
+    while (offset < line.size()) {
+        if (offset + 1 < line.size() && line[offset] == '/' && line[offset + 1] == '/') {
+            output +=
+                "<span class=\"syntax-comment\">" + web_ui_escape(line.substr(offset)) + "</span>";
+            break;
+        }
+        if (line[offset] == '"' || line[offset] == '\'') {
+            const char quote = line[offset];
+            std::size_t end = offset + 1;
+            bool escaped = false;
+            while (end < line.size()) {
+                if (!escaped && line[end] == quote) {
+                    ++end;
+                    break;
+                }
+                escaped = !escaped && line[end] == '\\';
+                if (line[end] != '\\') {
+                    escaped = false;
+                }
+                ++end;
+            }
+            output += "<span class=\"syntax-string\">" +
+                      web_ui_escape(line.substr(offset, end - offset)) + "</span>";
+            offset = end;
+            continue;
+        }
+        if (std::isalpha(static_cast<unsigned char>(line[offset])) || line[offset] == '_') {
+            std::size_t end = offset + 1;
+            while (end < line.size() &&
+                   (std::isalnum(static_cast<unsigned char>(line[end])) || line[end] == '_')) {
+                ++end;
+            }
+            const std::string_view token = line.substr(offset, end - offset);
+            if (source_keyword(token)) {
+                output += "<span class=\"syntax-keyword\">" + web_ui_escape(token) + "</span>";
+            } else {
+                output += web_ui_escape(token);
+            }
+            offset = end;
+            continue;
+        }
+        output += web_ui_escape(line.substr(offset, 1));
+        ++offset;
+    }
+    return output;
+}
+
+const RepositoryBlameLine* blame_for_line(const std::vector<RepositoryBlameLine>& blame,
+                                          std::uint64_t line) {
+    const auto found = std::ranges::find(blame, line, &RepositoryBlameLine::line);
+    return found == blame.end() ? nullptr : &*found;
+}
+
+std::string source_view(const RepositoryFile& file, const std::vector<RepositoryBlameLine>& blame) {
+    std::set<std::uint64_t> syntax_lines;
+    const auto language = syntax_language(file.path);
+    if (language) {
+        const auto* first = reinterpret_cast<const std::uint8_t*>(file.contents.data());
+        const auto units = liquid_frontend::parse_units(
+            *language, std::span<const std::uint8_t>{first, file.contents.size()});
+        for (const liquid_frontend::syntax_unit& unit : units) {
+            for (std::uint64_t line = unit.start.line; line <= unit.end.line; ++line) {
+                syntax_lines.insert(line);
+            }
+        }
+    }
+    std::istringstream input{file.contents};
+    std::string line;
+    std::string output = std::format(
+        "<div class=\"source-view{}\" data-language=\"{}\"><table><thead class=\"sr-only\">"
+        "<tr><th>Blame</th><th>Line</th><th>Source</th></tr></thead><tbody>",
+        language ? " syntax-highlighted" : " plain-text",
+        language ? file_language(file.path) : "Plain text");
+    std::uint64_t number = 1;
+    while (std::getline(input, line)) {
+        const RepositoryBlameLine* line_blame = blame_for_line(blame, number);
+        output += std::format(
+            "<tr id=\"L{}\" data-line=\"{}\"{}><td class=\"blame-cell\">{}{}{}</td>"
+            "<td class=\"line-number\"><a href=\"#L{}\" data-line-range=\"L{}-L{}\" "
+            "aria-label=\"Line {}\">{}</a></td><td class=\"source-line\"><code>{}</code></td>"
+            "</tr>",
+            number,
+            number,
+            syntax_lines.contains(number) ? " class=\"syntax-unit\"" : "",
+            line_blame ? identifier_markup(line_blame->change) : "",
+            line_blame ? "<span>" + web_ui_escape(line_blame->author) + "</span>" : "",
+            line_blame ? "<time>" + web_ui_escape(line_blame->occurred_at) + "</time>" : "",
+            number,
+            number,
+            number,
+            number,
+            number,
+            language ? highlight_source_line(line) : web_ui_escape(line));
+        ++number;
+    }
+    if (number == 1) {
+        output += "<tr><td colspan=\"3\" class=\"empty\">This file is empty.</td></tr>";
+    }
+    output += "</tbody></table></div>";
+    return output;
+}
+
 std::string error_markup(std::string_view error) {
     return error.empty() ? std::string()
                          : std::format("<p class=\"error\">{}</p>", web_ui_escape(error));
@@ -314,6 +722,26 @@ std::string web_ui_shell(std::string_view title,
         theme_toggle_script);
 }
 
+std::string web_ui_error(std::string_view code, std::string_view message, bool signed_in) {
+    const std::string content = std::format(
+        "<div class=\"state-page error-state\" role=\"alert\"><p class=\"eyebrow\">{}</p>"
+        "<h1>We could not load this forge page</h1><p class=\"sub\">{}</p>"
+        "<p><a class=\"button primary\" href=\"/repositories\">Back to repositories</a></p></div>",
+        web_ui_escape(code),
+        web_ui_escape(message));
+    return web_ui_shell("lake — forge error", code, content, signed_in);
+}
+
+std::string web_ui_loading(std::string_view subject, bool signed_in) {
+    const std::string content = std::format(
+        "<div class=\"state-page loading-state\" role=\"status\" aria-live=\"polite\" "
+        "aria-busy=\"true\"><p class=\"eyebrow\">loading</p><h1>{}</h1>"
+        "<p class=\"sub\">Reading authorized forge data.</p><div class=\"loading-bars\" "
+        "aria-hidden=\"true\"><span></span><span></span><span></span></div></div>",
+        web_ui_escape(subject));
+    return web_ui_shell("lake — loading", subject, content, signed_in);
+}
+
 std::string web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in) {
     const std::string content =
         std::format("<p class=\"eyebrow\">hello world</p><h1>hello from lake</h1>"
@@ -409,112 +837,260 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
 
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
-                              const std::vector<RepositoryContentRef>& refs,
+                              const RepositoryHomeData& data,
                               bool signed_in) {
     const std::string owner_name = owner ? owner->name : repository.customer_id;
+    const std::string default_ref = data.refs.empty() ? "main" : data.refs.front().name;
     std::string content = std::format(
-        "<p class=\"eyebrow\">repository</p><h1>{}/{}</h1><p "
-        "class=\"sub\">{}</p><div "
-        "class=\"panel\"><dl>"
-        "<dt>id</dt><dd><code>{}</code></dd><dt>owner</dt><dd>{}</"
-        "dd><dt>visibility</dt><dd><span "
-        "class=\"badge\">{}</span></dd>"
-        "<dt>created</dt><dd>{}</dd><dt>updated</dt><dd>{}</dd><dt>API</"
-        "dt><dd><code>GET "
-        "/v1/get_repository?id={}</code></dd></dl></div>",
+        "<div class=\"forge-heading\"><div><p class=\"eyebrow\">repository</p>"
+        "<h1>{}/{}</h1><p class=\"sub\">{}</p></div><span class=\"badge\">{}</span></div>{}"
+        "<div class=\"repository-layout\"><div class=\"repository-main\">",
         web_ui_escape(owner_name),
         web_ui_escape(repository.name),
         web_ui_escape(repository.description.empty() ? "No description." : repository.description),
-        web_ui_escape(repository.id),
-        row_link("/repositories?customer_id=" + repository.customer_id, owner_name),
         web_ui_escape(repository.visibility),
-        web_ui_escape(repository.created_at),
-        web_ui_escape(repository.updated_at),
-        web_ui_escape(repository.id));
+        forge_tabs(repository, "code"));
     if (!repository.deleted_at.empty()) {
-        content += std::format("<div class=\"panel\"><strong>Tombstoned.</strong> "
-                               "Deleted {}. Collection may "
-                               "reclaim unreferenced content after {}.</div>",
+        content += std::format("<div class=\"notice status-danger\"><strong>Tombstoned.</strong> "
+                               "Deleted {}. Collection may reclaim unreferenced content after "
+                               "{}.</div>",
                                web_ui_escape(repository.deleted_at),
                                web_ui_escape(repository.retention_until));
     }
-    content += "<div class=\"panel\"><h2>Repository data</h2><p>"
-               "Browse the content stored by libliquid.</p>";
-    if (refs.empty()) {
-        content += "<p>No refs are published.</p>";
+    content +=
+        "<section class=\"panel repository-browser\"><div class=\"section-heading\">"
+        "<div><h2>Files</h2><p class=\"muted\">The published tree at <code>" +
+        web_ui_escape(default_ref) + "</code>.</p></div>" +
+        row_link("/repository/tree?id=" + repository.id + "&ref=" + url_component(default_ref),
+                 "Browse tree") +
+        "</div>";
+    if (data.tree.empty()) {
+        content += "<div class=\"empty compact-empty\">No files are published on this ref.</div>";
     } else {
-        content += "<ul>";
-        for (const RepositoryContentRef& ref : refs) {
+        content += "<details class=\"tree-group\" open><summary>Repository root</summary>"
+                   "<ul class=\"forge-tree\">";
+        const std::size_t visible = std::min<std::size_t>(data.tree.size(), 12);
+        for (std::size_t index = 0; index < visible; ++index) {
+            const RepositoryTreeEntry& entry = data.tree[index];
+            const std::string href = entry.kind == "blob"
+                                         ? "/file?repository_id=" + repository.id +
+                                               "&ref=" + url_component(default_ref) +
+                                               "&path=" + url_component(entry.path)
+                                         : "/repository/tree?id=" + repository.id +
+                                               "&ref=" + url_component(default_ref) + "#" +
+                                               url_component(entry.path);
+            content += std::format("<li><span class=\"tree-kind\" aria-hidden=\"true\">{}</span>{}"
+                                   "<span class=\"tree-size\">{}</span></li>",
+                                   entry.kind == "blob" ? "·" : "›",
+                                   row_link(href, entry.path),
+                                   entry.kind == "blob" ? byte_count(entry.size) : "directory");
+        }
+        content += "</ul></details>";
+    }
+    content += "</section><section class=\"panel recent-changes\"><div class=\"section-heading\">"
+               "<h2>Recent changes</h2>" +
+               row_link("/changes?repository_id=" + repository.id, "All changes") + "</div>";
+    if (data.changes.empty()) {
+        content += "<div class=\"empty compact-empty\">No changes have been cut.</div>";
+    } else {
+        content += "<ol class=\"change-list\">";
+        const std::size_t visible = std::min<std::size_t>(data.changes.size(), 5);
+        for (std::size_t index = 0; index < visible; ++index) {
+            const RepositoryChange& change = data.changes[index];
             content += std::format(
-                "<li>{} <code>{}</code></li>",
+                "<li><div><strong>{}</strong><span class=\"muted\">{} · {}</span></div>{}</li>",
+                row_link("/change?repository_id=" + repository.id +
+                             "&id=" + url_component(change.id),
+                         change.message.empty() ? "Untitled change" : change.message),
+                web_ui_escape(change.author),
+                web_ui_escape(change.occurred_at),
+                identifier_markup(change.id));
+        }
+        content += "</ol>";
+    }
+    content += "</section><section class=\"panel readme-panel\"><div class=\"section-heading\">"
+               "<h2>README</h2></div>";
+    if (data.readme) {
+        content += web_ui_markdown(data.readme->contents);
+    } else {
+        content += "<div class=\"empty compact-empty\">Add a README.md to explain this "
+                   "repository.</div>";
+    }
+    content +=
+        "</section></div><aside class=\"repository-sidebar\" aria-label=\"Repository "
+        "details\"><section class=\"panel\"><h2>Clone and push</h2><p class=\"muted\">"
+        "Use the repository URL with liquid.</p><pre><code>LIQUID_TOKEN=&lt;token&gt; liquid "
+        "pull https://lake.live/v1/repositories/" +
+        web_ui_escape(repository.id) +
+        "</code></pre><pre><code>LIQUID_TOKEN=&lt;token&gt; liquid push "
+        "https://lake.live/v1/repositories/" +
+        web_ui_escape(repository.id) + "</code></pre></section>";
+    content += "<section class=\"panel\"><h2>References</h2>";
+    if (data.refs.empty()) {
+        content += "<p class=\"muted\">No references are published.</p>";
+    } else {
+        content += "<ul class=\"detail-list\">";
+        for (std::size_t index = 0; index < data.refs.size(); ++index) {
+            const RepositoryContentRef& ref = data.refs[index];
+            content += std::format(
+                "<li><div>{}{}</div>{}</li>",
                 row_link("/repository/tree?id=" + repository.id + "&ref=" + url_component(ref.name),
                          ref.name),
-                web_ui_escape(ref.change));
+                index == 0 ? " <span class=\"badge\">default</span>" : "",
+                identifier_markup(ref.change));
         }
         content += "</ul>";
     }
-    const std::string drive_ref = refs.empty() ? "main" : refs.front().name;
+    if (!data.releases.empty()) {
+        content += "<h3>Releases</h3><ul class=\"detail-list\">";
+        for (const control::ForgeRecord& release : data.releases) {
+            content += std::format("<li><strong>{}</strong>{}</li>",
+                                   web_ui_escape(release.value.value("tag", "untagged")),
+                                   identifier_markup(release.value.value("change_id", "")));
+        }
+        content += "</ul>";
+    }
+    content += "</section><section class=\"panel\"><h2>Languages</h2>";
+    std::map<std::string, std::uint64_t> language_bytes;
+    std::uint64_t total_bytes = 0;
+    for (const RepositoryTreeEntry& entry : data.tree) {
+        if (entry.kind != "blob") {
+            continue;
+        }
+        language_bytes[file_language(entry.path)] += entry.size;
+        total_bytes += entry.size;
+    }
+    if (language_bytes.empty()) {
+        content += "<p class=\"muted\">No indexed file sizes yet.</p>";
+    } else {
+        content += "<ul class=\"language-summary\">";
+        for (const auto& [language, bytes] : language_bytes) {
+            content += std::format("<li><span>{}</span><strong>{}</strong></li>",
+                                   web_ui_escape(language),
+                                   byte_count(bytes));
+        }
+        content += std::format("</ul><p class=\"muted\">{} indexed across {} files.</p>",
+                               byte_count(total_bytes),
+                               std::ranges::count_if(data.tree, [](const auto& entry) {
+                                   return entry.kind == "blob";
+                               }));
+    }
+    content += "</section><section class=\"panel\"><h2>Effective access</h2>";
+    if (data.access.empty()) {
+        content += "<p class=\"muted\">No direct or inherited grants are visible.</p>";
+    } else {
+        content += "<ul class=\"detail-list\">";
+        for (const control::EffectiveAccessEntry& entry : data.access) {
+            content += std::format("<li>{}{}</li>",
+                                   identifier_markup(entry.principal_taap_id),
+                                   badge_markup(entry.role));
+        }
+        content += "</ul>";
+    }
     content += std::format(
-        "<p>{} · {} · {} · {} · {}</p></div>",
-        row_link("/drive?repository_id=" + repository.id + "&ref=" + url_component(drive_ref),
-                 "Drive"),
-        row_link("/changes?repository_id=" + repository.id, "Change log"),
-        row_link("/artifacts?repository_id=" + repository.id, "Artifacts"),
-        row_link("/conflicts?repository_id=" + repository.id, "Conflicts"),
-        row_link("/repository/access?id=" + repository.id, "Effective access"));
+        "<p>{}</p></section><section class=\"panel repository-meta\"><h2>About</h2><dl>"
+        "<dt>Identifier</dt><dd>{}</dd><dt>Owner</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd>"
+        "<dt>Updated</dt><dd>{}</dd></dl></section></aside></div>",
+        row_link("/repository/access?id=" + repository.id, "View access details"),
+        identifier_markup(repository.id),
+        row_link("/repositories?customer_id=" + repository.customer_id, owner_name),
+        web_ui_escape(repository.created_at),
+        web_ui_escape(repository.updated_at));
     return web_ui_shell("lake — " + owner_name + "/" + repository.name,
                         owner_name + "/" + repository.name,
                         content,
                         signed_in);
 }
 
+std::string web_ui_repository(const control::Repository& repository,
+                              const control::Customer* owner,
+                              const std::vector<RepositoryContentRef>& refs,
+                              bool signed_in) {
+    RepositoryHomeData data;
+    data.refs = refs;
+    return web_ui_repository(repository, owner, data, signed_in);
+}
+
 std::string web_ui_repository_tree(const control::Repository& repository,
                                    std::string_view ref,
                                    const std::vector<RepositoryTreeEntry>& entries,
                                    bool signed_in) {
-    std::string content = std::format("<p class=\"eyebrow\">repository tree</p><h1>{}</h1>"
-                                      "<p class=\"sub\">Ref <code>{}</code>.</p>",
+    std::string content = path_breadcrumbs(repository, ref, "") +
+                          std::format("<p class=\"eyebrow\">repository tree</p><h1>{}</h1>"
+                                      "<p class=\"sub\">Browse <code>{}</code> by path and last "
+                                      "change.</p>{}",
                                       web_ui_escape(repository_name(repository)),
-                                      web_ui_escape(ref));
+                                      web_ui_escape(ref),
+                                      forge_tabs(repository, "code"));
     if (entries.empty()) {
-        content += "<div class=\"panel empty\">This tree has no files.</div>";
+        content += "<div class=\"panel empty\"><strong>This ref has no files.</strong><p>Push a "
+                   "change to publish its first tree.</p></div>";
     } else {
-        content += "<table><thead><tr><th>Path</th><th>Kind</th><th>Blob</th><th>Mode</th>"
-                   "</tr></thead><tbody>";
+        content += "<section class=\"panel tree-browser\"><div class=\"tree-browser-heading\">"
+                   "<span>Path</span><span>Last change</span></div><ul class=\"tree-view\">";
         for (const RepositoryTreeEntry& entry : entries) {
             const std::string path = "/file?repository_id=" + repository.id +
                                      "&ref=" + url_component(ref) +
                                      "&path=" + url_component(entry.path);
             const std::string displayed =
-                entry.kind == "blob" ? row_link(path, entry.path) : web_ui_escape(entry.path);
-            content += std::format("<tr><td>{}</td><td>{}</td><td><code>{}</code></td>"
-                                   "<td><code>{:o}</code></td></tr>",
-                                   displayed,
-                                   web_ui_escape(entry.kind),
-                                   web_ui_escape(entry.blob),
-                                   entry.mode);
+                entry.kind == "blob" ? row_link(path, entry.path)
+                                     : row_link("#" + url_component(entry.path), entry.path);
+            content += std::format(
+                "<li id=\"{}\"><div class=\"tree-entry-name\"><span class=\"tree-kind\" "
+                "aria-hidden=\"true\">{}</span><div>{}<span class=\"tree-entry-meta\">{} · "
+                "<code>{:o}</code>{}</span></div></div><div class=\"tree-last-change\">{}{}"
+                "</div></li>",
+                web_ui_escape(entry.path),
+                entry.kind == "blob" ? "·" : "›",
+                displayed,
+                web_ui_escape(entry.kind),
+                entry.mode,
+                entry.kind == "blob" ? " · " + byte_count(entry.size) : "",
+                entry.last_change.empty() ? "<span class=\"muted\">No recorded change</span>"
+                                          : identifier_markup(entry.last_change),
+                entry.last_message.empty()
+                    ? ""
+                    : "<span class=\"muted\">" + web_ui_escape(entry.last_message) + " · " +
+                          web_ui_escape(entry.last_changed_at) + "</span>");
         }
-        content += "</tbody></table>";
+        content += "</ul></section>";
     }
-    content +=
-        std::format("<p>{}</p>", row_link("/repository?id=" + repository.id, "Back to repository"));
     return web_ui_shell("lake — tree", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_repository_file(const control::Repository& repository,
+                                   std::string_view ref,
+                                   const RepositoryFile& file,
+                                   const std::vector<RepositoryBlameLine>& blame,
+                                   bool signed_in) {
+    const std::string query = "repository_id=" + url_component(repository.id) +
+                              "&ref=" + url_component(ref) + "&path=" + url_component(file.path);
+    std::string content =
+        path_breadcrumbs(repository, ref, file.path) +
+        std::format("<p class=\"eyebrow\">file</p><div class=\"file-heading\">"
+                    "<div><h1>{}</h1><p class=\"sub\">{} at <code>{}</code></p>"
+                    "</div><div class=\"actions\">{}{}</div></div>{}"
+                    "<div class=\"file-meta\"><span>{}</span><span>{}</span>"
+                    "<span>{}</span></div>{}",
+                    web_ui_escape(file.path),
+                    web_ui_escape(repository_name(repository)),
+                    web_ui_escape(ref),
+                    row_link("/file/raw?" + query, "Raw"),
+                    row_link("/file/download?" + query, "Download"),
+                    forge_tabs(repository, "code"),
+                    identifier_markup(file.blob),
+                    byte_count(file.size),
+                    syntax_language(file.path) ? file_language(file.path) : "Plain text",
+                    source_view(file, blame));
+    content +=
+        R"(<script id="file-range-script">(()=>{const rows=[...document.querySelectorAll('[data-line]')];const select=()=>{rows.forEach(r=>r.classList.remove('selected'));const match=location.hash.match(/^#L(\d+)(?:-L(\d+))?$/);if(!match)return;const first=Number(match[1]);const last=Number(match[2]||match[1]);rows.forEach(r=>{const line=Number(r.dataset.line);if(line>=first&&line<=last)r.classList.add('selected');});};let anchor=null;document.addEventListener('click',event=>{const link=event.target.closest('[data-line-range]');if(!link)return;const line=Number(link.closest('[data-line]').dataset.line);if(event.shiftKey&&anchor!==null){event.preventDefault();const first=Math.min(anchor,line);const last=Math.max(anchor,line);location.hash=`L${first}-L${last}`;}else{anchor=line;}});addEventListener('hashchange',select);select();})();</script>)";
+    return web_ui_shell("lake — file", file.path, content, signed_in);
 }
 
 std::string web_ui_repository_file(const control::Repository& repository,
                                    const RepositoryFile& file,
                                    bool signed_in) {
-    const std::string content =
-        std::format("<p class=\"eyebrow\">file</p><h1>{}</h1><p class=\"sub\">{}</p>"
-                    "<div class=\"panel\"><dl><dt>blob</dt><dd><code>{}</code></dd><dt>size</dt>"
-                    "<dd>{} bytes</dd></dl></div><pre>{}</pre><p>{}</p>",
-                    web_ui_escape(file.path),
-                    web_ui_escape(repository_name(repository)),
-                    web_ui_escape(file.blob),
-                    file.size,
-                    web_ui_escape(file.contents),
-                    row_link("/repository?id=" + repository.id, "Back to repository"));
-    return web_ui_shell("lake — file", file.path, content, signed_in);
+    return web_ui_repository_file(repository, "main", file, {}, signed_in);
 }
 
 std::string web_ui_repository_log(const control::Repository& repository,
@@ -546,6 +1122,7 @@ std::string web_ui_repository_log(const control::Repository& repository,
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
+                          const ChangeReviewData& review,
                           bool signed_in) {
     std::string parents;
     for (const std::string& parent : change.parents) {
@@ -554,37 +1131,109 @@ std::string web_ui_change(const control::Repository& repository,
         }
         parents += parent;
     }
+    const std::size_t newline = change.message.find('\n');
+    std::string title = change.message.substr(0, newline);
+    if (title.starts_with("# ")) {
+        title.erase(0, 2);
+    }
+    const std::string body = newline == std::string::npos ? "" : change.message.substr(newline + 1);
     std::string content = std::format(
-        "<p class=\"eyebrow\">change</p><h1>{}</h1><p class=\"sub\">{}</p>"
-        "<div class=\"panel\"><dl><dt>author</dt><dd><code>{}</code></dd><dt>created</dt>"
-        "<dd>{}</dd><dt>parents</dt><dd><code>{}</code></dd></dl></div>",
+        "<p class=\"eyebrow\">change review</p><h1>{}</h1><p class=\"sub\">{}</p>{}"
+        "<div class=\"change-toolbar\"><span>{}</span><button class=\"button secondary copy-id\" "
+        "type=\"button\" data-copy=\"{}\">Copy identifier</button><div class=\"view-toggle\" "
+        "role=\"group\" aria-label=\"Diff layout\"><button type=\"button\" data-view=\"unified\" "
+        "aria-pressed=\"true\">Unified</button><button type=\"button\" data-view=\"split\" "
+        "aria-pressed=\"false\">Side by side</button></div></div>"
+        "<div class=\"panel\"><dl><dt>author</dt><dd>{}</dd><dt>created</dt>"
+        "<dd>{}</dd><dt>parents</dt><dd>{}</dd></dl></div>",
+        web_ui_escape(title.empty() ? "Untitled change" : title),
+        web_ui_escape(repository_name(repository)),
+        forge_tabs(repository, "changes"),
+        identifier_markup(change.id),
         web_ui_escape(change.id),
-        web_ui_escape(change.message),
-        web_ui_escape(change.author),
+        identifier_markup(change.author),
         web_ui_escape(change.occurred_at),
-        web_ui_escape(parents));
+        identifier_markup(parents));
+    if (!body.empty()) {
+        content +=
+            std::format("<section class=\"panel change-message\"><h2>Description</h2>{}</section>",
+                        web_ui_markdown(body));
+    }
+    content += "<section class=\"review-summary\"><h2>Review</h2>";
+    if (review.reviews.empty()) {
+        content += "<div class=\"panel empty\">No review has been requested.</div>";
+    } else {
+        for (const control::ForgeRecord& item : review.reviews) {
+            content += std::format(
+                "<div class=\"panel review-state\"><div><strong>{}</strong> "
+                "{}</div><p class=\"sub\">Reviewers: {}</p></div>",
+                web_ui_escape(item.value.value("state", "open")),
+                badge_markup(item.value.value("state", "open")),
+                identifier_list_markup(item.value.value("reviewers", std::vector<std::string>{})));
+        }
+    }
+    content += "</section>";
+    content += "<section><h2>Files changed</h2>";
     std::size_t visible = 0;
+    std::uint64_t total_added = 0;
+    std::uint64_t total_removed = 0;
+    std::string file_summary;
     for (const RepositoryDiffEntry& entry : differences) {
         if (hidden_reformatting_entry(entry)) {
             continue;
         }
         ++visible;
+        std::uint64_t added = 0;
+        std::uint64_t removed = 0;
+        if (entry.line_hunks) {
+            for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
+                added += hunk.added_lines.size();
+                removed += hunk.removed_lines.size();
+            }
+        }
+        total_added += added;
+        total_removed += removed;
+        file_summary += std::format(
+            "<li><a href=\"#diff-{}\"><code>{}</code></a><span class=\"diff-stats\">"
+            "<span class=\"additions\">+{}</span> <span class=\"deletions\">−{}</span></span></li>",
+            web_ui_escape(markdown_slug(entry.path)),
+            web_ui_escape(entry.path),
+            added,
+            removed);
+    }
+    if (visible != 0) {
+        content += std::format("<div class=\"panel file-summary\"><strong>{} files</strong> "
+                               "<span class=\"additions\">+{}</span> "
+                               "<span class=\"deletions\">−{}</span><ul>{}</ul></div>",
+                               visible,
+                               total_added,
+                               total_removed,
+                               file_summary);
+    }
+    for (const RepositoryDiffEntry& entry : differences) {
+        if (hidden_reformatting_entry(entry)) {
+            continue;
+        }
         std::string badges;
         for (const std::string& status : entry.changes) {
             badges += badge_markup(status);
         }
-        content += std::format("<section class=\"panel diff-entry\"><h2><code>{}</code>{}</h2><dl>"
-                               "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
-                               "<dt>mode</dt><dd><code>{} → {}</code></dd><dt>blobs</dt>"
-                               "<dd><code>{} → {}</code></dd></dl>",
-                               web_ui_escape(entry.path),
-                               badges,
-                               web_ui_escape(entry.kind),
-                               web_ui_escape(entry.old_path.empty() ? "—" : entry.old_path),
-                               mode_text(entry.old_mode),
-                               mode_text(entry.new_mode),
-                               web_ui_escape(entry.old_blob.empty() ? "—" : entry.old_blob),
-                               web_ui_escape(entry.new_blob.empty() ? "—" : entry.new_blob));
+        content +=
+            std::format("<section class=\"panel diff-entry\" id=\"diff-{}\"><h3><code>{}</code>"
+                        "{}{}</h3><dl>"
+                        "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
+                        "<dt>mode</dt><dd><code>{} → {}</code></dd><dt>blobs</dt>"
+                        "<dd>{} → {}</dd></dl>",
+                        web_ui_escape(markdown_slug(entry.path)),
+                        web_ui_escape(entry.path),
+                        badges,
+                        "",
+                        web_ui_escape(entry.kind),
+                        web_ui_escape(entry.old_path.empty() ? "—" : entry.old_path),
+                        mode_text(entry.old_mode),
+                        mode_text(entry.new_mode),
+                        identifier_markup(entry.old_blob.empty() ? "—" : entry.old_blob),
+                        identifier_markup(entry.new_blob.empty() ? "—" : entry.new_blob));
         if (!entry.old_conflicts.empty() || !entry.new_conflicts.empty()) {
             content += std::format("<div class=\"notice\"><strong>Conflict values</strong><br>old: "
                                    "<code>{}</code><br>new: <code>{}</code></div>",
@@ -592,21 +1241,78 @@ std::string web_ui_change(const control::Repository& repository,
                                    web_ui_escape(joined(entry.new_conflicts)));
         }
         if (entry.line_hunks) {
+            content += "<div class=\"diff-view unified-diff\" data-diff-view=\"unified\">";
             for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
-                content += std::format("<pre class=\"diff-hunk\"><span>@@ -{},{} +{},{} @@</span>",
+                content += std::format("<div class=\"diff-hunk\"><div class=\"hunk-heading\">"
+                                       "@@ -{},{} +{},{} @@</div>",
                                        hunk.old_line,
                                        hunk.old_count,
                                        hunk.new_line,
                                        hunk.new_count);
+                std::uint64_t old_line = hunk.old_line;
                 for (const std::string& line : hunk.removed_lines) {
-                    content +=
-                        std::format("<span class=\"diff-remove\">-{}</span>", web_ui_escape(line));
+                    content += std::format("<div class=\"diff-line diff-remove\" id=\"{}-old-{}\">"
+                                           "<a href=\"#{}-old-{}\">{}</a><code>-{}</code></div>",
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           old_line,
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           old_line,
+                                           old_line,
+                                           web_ui_escape(line));
+                    ++old_line;
                 }
+                std::uint64_t new_line = hunk.new_line;
                 for (const std::string& line : hunk.added_lines) {
-                    content +=
-                        std::format("<span class=\"diff-add\">+{}</span>", web_ui_escape(line));
+                    content += std::format("<div class=\"diff-line diff-add\" id=\"{}-new-{}\">"
+                                           "<a href=\"#{}-new-{}\">{}</a><code>+{}</code></div>",
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           new_line,
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           new_line,
+                                           new_line,
+                                           web_ui_escape(line));
+                    ++new_line;
                 }
-                content += "</pre>";
+                content += "</div>";
+            }
+            content += "</div><div class=\"diff-view split-diff\" data-diff-view=\"split\" hidden>";
+            for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
+                const std::size_t rows =
+                    std::max(hunk.removed_lines.size(), hunk.added_lines.size());
+                content += std::format("<div class=\"hunk-heading\">@@ -{},{} +{},{} @@</div>",
+                                       hunk.old_line,
+                                       hunk.old_count,
+                                       hunk.new_line,
+                                       hunk.new_count);
+                for (std::size_t index = 0; index < rows; ++index) {
+                    const std::string old_text = index < hunk.removed_lines.size()
+                                                     ? web_ui_escape(hunk.removed_lines[index])
+                                                     : "";
+                    const std::string new_text = index < hunk.added_lines.size()
+                                                     ? web_ui_escape(hunk.added_lines[index])
+                                                     : "";
+                    content +=
+                        std::format("<div class=\"split-row\"><code class=\"diff-remove\">{}</code>"
+                                    "<code class=\"diff-add\">{}</code></div>",
+                                    old_text,
+                                    new_text);
+                }
+            }
+            content += "</div>";
+            for (const control::ForgeRecord& comment : review.comments) {
+                const nlohmann::json anchor =
+                    comment.value.value("anchor", nlohmann::json::object());
+                if (anchor.value("path", "") != entry.path) {
+                    continue;
+                }
+                const std::uint64_t line = anchor.value("line", std::uint64_t{0});
+                content += std::format("<article class=\"review-comment\"><p class=\"sub\">{} · "
+                                       "<a href=\"#{}-new-{}\">line {}</a></p>{}</article>",
+                                       identifier_markup(comment.id),
+                                       web_ui_escape(markdown_slug(entry.path)),
+                                       line,
+                                       line,
+                                       web_ui_markdown(comment.value.value("body", "")));
             }
         }
         content += "</section>";
@@ -614,7 +1320,301 @@ std::string web_ui_change(const control::Repository& repository,
     if (visible == 0) {
         content += "<div class=\"panel empty diff-entry\">No changes to display.</div>";
     }
+    content += "</section><section><h2>Checks and attestations</h2>";
+    if (review.checks.items.empty()) {
+        content += "<div class=\"panel empty\">No checks have reported for this change.</div>";
+    } else {
+        content += "<div class=\"stack\">";
+        for (const RepositoryArtifact& check : review.checks.items) {
+            content += std::format("<article class=\"panel check-row\"><strong>{}</strong>{}"
+                                   "<span>{} attestations</span><span>{}</span></article>",
+                                   web_ui_escape(check.action),
+                                   badge_markup(check.exit_code == 0 ? "passed" : "failed"),
+                                   check.attestations.size(),
+                                   identifier_markup(check.id));
+        }
+        content += "</div>";
+    }
+    content +=
+        R"(</section><script id="change-review-script">(()=>{const views=[...document.querySelectorAll('[data-diff-view]')];document.addEventListener('click',async event=>{const copy=event.target.closest('[data-copy]');if(copy){await navigator.clipboard.writeText(copy.dataset.copy);copy.textContent='Copied';return;}const toggle=event.target.closest('[data-view]');if(!toggle)return;views.forEach(view=>{view.hidden=view.dataset.diffView!==toggle.dataset.view;});document.querySelectorAll('[data-view]').forEach(button=>{button.setAttribute('aria-pressed',String(button===toggle));});});})();</script>)";
     return web_ui_shell("lake — change", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_change(const control::Repository& repository,
+                          const RepositoryChange& change,
+                          const std::vector<RepositoryDiffEntry>& differences,
+                          bool signed_in) {
+    return web_ui_change(repository, change, differences, {}, signed_in);
+}
+
+std::string web_ui_issues(const control::Repository& repository,
+                          const std::vector<control::ForgeRecord>& issues,
+                          std::string_view state,
+                          std::string_view label,
+                          std::string_view assignee,
+                          bool signed_in) {
+    std::string content = std::format(
+        "<p class=\"eyebrow\">issue tracker</p><h1>Issues</h1><p class=\"sub\">{}</p>{}"
+        "<form class=\"filters\" method=\"get\" action=\"/issues\">"
+        "<input type=\"hidden\" name=\"repository_id\" value=\"{}\">"
+        "<label>State<select name=\"state\"><option value=\"\"{}>All</option>"
+        "<option value=\"open\"{}>Open</option><option value=\"closed\"{}>Closed</option>"
+        "</select></label><label>Label<input name=\"label\" value=\"{}\"></label>"
+        "<label>Assignee<input name=\"assignee\" value=\"{}\"></label>"
+        "<button type=\"submit\">Filter</button></form>",
+        web_ui_escape(repository_name(repository)),
+        forge_tabs(repository, "issues"),
+        web_ui_escape(repository.id),
+        state.empty() ? " selected" : "",
+        state == "open" ? " selected" : "",
+        state == "closed" ? " selected" : "",
+        web_ui_escape(label),
+        web_ui_escape(assignee));
+    std::size_t visible = 0;
+    content += "<div class=\"issue-list\">";
+    for (const control::ForgeRecord& issue : issues) {
+        const std::string issue_state = issue.value.value("state", "open");
+        const std::vector<std::string> labels =
+            issue.value.value("labels", std::vector<std::string>{});
+        const std::vector<std::string> assignees =
+            issue.value.value("assignees", std::vector<std::string>{});
+        if ((!state.empty() && issue_state != state) ||
+            (!label.empty() && !std::ranges::contains(labels, label)) ||
+            (!assignee.empty() && !std::ranges::contains(assignees, assignee))) {
+            continue;
+        }
+        ++visible;
+        std::string label_markup;
+        for (const std::string& item : labels) {
+            label_markup += badge_markup(item);
+        }
+        content += std::format("<article class=\"panel issue-row\"><div><h2><a "
+                               "href=\"/issue?repository_id={}&amp;id={}\">"
+                               "{}</a></h2><p class=\"sub\">{} · opened {} · assignees "
+                               "{}</p></div><div>{}{}</div></article>",
+                               web_ui_escape(url_component(repository.id)),
+                               web_ui_escape(url_component(issue.id)),
+                               web_ui_escape(issue.value.value("title", "Untitled issue")),
+                               identifier_markup(issue.id),
+                               web_ui_escape(issue.created_at),
+                               identifier_list_markup(assignees),
+                               badge_markup(issue_state),
+                               label_markup);
+    }
+    content += "</div>";
+    if (visible == 0) {
+        content += "<div class=\"panel empty\">No issues match these filters.</div>";
+    }
+    return web_ui_shell("lake — issues", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_issue(const control::Repository& repository,
+                         const control::ForgeRecord& issue,
+                         const std::vector<control::ForgeRecord>& comments,
+                         bool signed_in) {
+    const std::vector<std::string> labels = issue.value.value("labels", std::vector<std::string>{});
+    const std::vector<std::string> assignees =
+        issue.value.value("assignees", std::vector<std::string>{});
+    const std::vector<std::string> references =
+        issue.value.value("references", std::vector<std::string>{});
+    std::string labels_markup;
+    for (const std::string& label : labels) {
+        labels_markup += badge_markup(label);
+    }
+    std::string references_markup;
+    for (const std::string& reference : references) {
+        references_markup += std::format("<li>{}</li>", identifier_markup(reference));
+    }
+    if (references_markup.empty()) {
+        references_markup = "<li class=\"muted\">No linked changes.</li>";
+    }
+    std::string content = std::format(
+        "<p class=\"eyebrow\">issue</p><h1>{}</h1><p class=\"sub\">{} opened {} {}</p>{}"
+        "<div class=\"issue-layout\"><div><article class=\"panel issue-body\">{}</article>"
+        "<section class=\"discussion\"><h2>Discussion</h2>",
+        web_ui_escape(issue.value.value("title", "Untitled issue")),
+        identifier_markup(issue.id),
+        web_ui_escape(issue.created_at),
+        badge_markup(issue.value.value("state", "open")),
+        forge_tabs(repository, "issues"),
+        web_ui_markdown(issue.value.value("body", "")));
+    if (comments.empty()) {
+        content += "<div class=\"panel empty\">No discussion yet.</div>";
+    } else {
+        for (const control::ForgeRecord& comment : comments) {
+            content += std::format(
+                "<article class=\"panel issue-comment\"><p class=\"sub\">{} · {}</p>{}</article>",
+                identifier_markup(comment.id),
+                web_ui_escape(comment.created_at),
+                web_ui_markdown(comment.value.value("body", "")));
+        }
+    }
+    content +=
+        std::format("</section></div><aside class=\"panel issue-details\"><h2>Details</h2><dl>"
+                    "<dt>labels</dt><dd>{}</dd><dt>assignees</dt><dd>{}</dd></dl>"
+                    "<h3>Linked changes</h3><ul>{}</ul></aside></div>",
+                    labels_markup.empty() ? "<span class=\"muted\">None</span>" : labels_markup,
+                    assignees.empty() ? "<span class=\"muted\">Unassigned</span>"
+                                      : identifier_list_markup(assignees),
+                    references_markup);
+    return web_ui_shell("lake — issue", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_releases(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& releases,
+                            bool signed_in) {
+    std::string content =
+        std::format("<p class=\"eyebrow\">repository releases</p><h1>Releases</h1>"
+                    "<p class=\"sub\">{}</p>{}",
+                    web_ui_escape(repository_name(repository)),
+                    forge_tabs(repository, "releases"));
+    if (releases.empty()) {
+        content += "<div class=\"panel empty\">No releases have been published.</div>";
+    }
+    for (const control::ForgeRecord& release : releases) {
+        content += std::format(
+            "<article class=\"panel release-card\"><header><div><p class=\"eyebrow\">{}</p>"
+            "<h2>{}</h2></div><span>{}</span></header><p class=\"sub\">Published {} at {}</p>{}",
+            identifier_markup(release.id),
+            web_ui_escape(release.value.value("tag", "Untitled release")),
+            identifier_markup(release.value.value("change_id", "")),
+            web_ui_escape(release.created_at),
+            web_ui_escape(release.updated_at),
+            web_ui_markdown(release.value.value("notes", "")));
+        const nlohmann::json artifacts = release.value.value("artifacts", nlohmann::json::array());
+        if (artifacts.empty()) {
+            content += "<div class=\"empty compact-empty\">No release artifacts.</div>";
+        } else {
+            content += "<h3>Artifacts and attestations</h3><ul class=\"release-artifacts\">";
+            for (const nlohmann::json& artifact : artifacts) {
+                const nlohmann::json attestations =
+                    artifact.value("attestations", nlohmann::json::array());
+                content += std::format("<li><span><strong>{}</strong> · {} outputs</span><span>{} "
+                                       "· {} attestations</span></li>",
+                                       web_ui_escape(artifact.value("action", "artifact")),
+                                       artifact.value("outputs", 0),
+                                       identifier_markup(artifact.value("id", "")),
+                                       attestations.size());
+            }
+            content += "</ul>";
+        }
+        content += "</article>";
+    }
+    return web_ui_shell("lake — releases", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_webhooks(const control::Repository& repository,
+                            const std::vector<control::ForgeRecord>& webhooks,
+                            const std::vector<control::ForgeRecord>& deliveries,
+                            bool signed_in) {
+    std::string content =
+        std::format("<p class=\"eyebrow\">repository automation</p><h1>Webhooks</h1>"
+                    "<p class=\"sub\">{} · signed delivery history</p>{}",
+                    web_ui_escape(repository_name(repository)),
+                    forge_tabs(repository, "webhooks"));
+    if (webhooks.empty()) {
+        content += "<div class=\"panel empty\">No webhooks are configured.</div>";
+    }
+    for (const control::ForgeRecord& webhook : webhooks) {
+        const std::vector<std::string> events =
+            webhook.value.value("events", std::vector<std::string>{});
+        content += std::format(
+            "<section class=\"panel webhook-card\"><header><div><h2>{}</h2><p class=\"sub\">{}</p>"
+            "</div>{}</header><p>Events: {}</p><h3>Deliveries</h3>",
+            web_ui_escape(webhook.value.value("url", "")),
+            web_ui_escape(webhook.created_at),
+            identifier_markup(webhook.id),
+            web_ui_escape(joined(events)));
+        std::size_t count = 0;
+        for (const control::ForgeRecord& delivery : deliveries) {
+            if (delivery.value.value("webhook_id", "") != webhook.id) {
+                continue;
+            }
+            ++count;
+            const bool delivered = delivery.value.value("delivered", false);
+            content += std::format(
+                "<article class=\"delivery-row\"><div><strong>{}</strong>{}<p class=\"sub\">"
+                "attempt {} · status {} · {}</p></div>{}",
+                web_ui_escape(delivery.value.value("event", "event")),
+                badge_markup(delivered ? "delivered" : "failed"),
+                delivery.value.value("attempt", 0),
+                delivery.value.value("status", 0),
+                web_ui_escape(delivery.value.value("error", "no error")),
+                identifier_markup(delivery.id));
+            if (!delivered && signed_in) {
+                content += std::format(
+                    "<form method=\"post\" action=\"/webhooks/retry\"><input type=\"hidden\" "
+                    "name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
+                    "name=\"delivery_id\" "
+                    "value=\"{}\"><button class=\"secondary\" "
+                    "type=\"submit\">Retry</button></form>",
+                    web_ui_escape(repository.id),
+                    web_ui_escape(delivery.id));
+            }
+            content += "</article>";
+        }
+        if (count == 0) {
+            content += "<div class=\"empty compact-empty\">No delivery attempts.</div>";
+        }
+        content += "</section>";
+    }
+    return web_ui_shell("lake — webhooks", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_branch_protection(const control::Repository& repository,
+                                     const std::vector<control::ForgeRecord>& rules,
+                                     const std::vector<audit::Event>& events,
+                                     bool signed_in) {
+    std::string content =
+        std::format("<p class=\"eyebrow\">repository policy</p><h1>Branch protection</h1>"
+                    "<p class=\"sub\">{}</p>{}<section><h2>Rules</h2>",
+                    web_ui_escape(repository_name(repository)),
+                    forge_tabs(repository, "protection"));
+    if (rules.empty()) {
+        content += "<div class=\"panel empty\">No branch protection rules.</div>";
+    }
+    for (const control::ForgeRecord& rule : rules) {
+        const std::vector<std::string> pushers =
+            rule.value.value("allowed_pushers", std::vector<std::string>{});
+        content += std::format(
+            "<article class=\"panel protection-rule\"><header><h3><code>{}</code></h3>{}</header>"
+            "<dl><dt>review</dt><dd>{}</dd><dt>verification</dt><dd>{}</dd>"
+            "<dt>updates</dt><dd>{}</dd><dt>allowed pushers</dt><dd>{}</dd>"
+            "<dt>policy object</dt><dd>{}</dd></dl></article>",
+            web_ui_escape(rule.value.value("ref", "")),
+            identifier_markup(rule.id),
+            badge_markup(rule.value.value("required_review", false) ? "required" : "optional"),
+            badge_markup(rule.value.value("required_verification", false) ? "required"
+                                                                          : "optional"),
+            badge_markup(rule.value.value("fast_forward_only", false) ? "fast-forward only"
+                                                                      : "any"),
+            identifier_list_markup(pushers),
+            identifier_markup(rule.value.value("policy_object_id", "")));
+    }
+    content += "</section><section><h2>Refused updates</h2>";
+    std::size_t refused = 0;
+    for (const audit::Event& event : events) {
+        if (event.draft.kind != "forge.branch_protection.refused" ||
+            event.draft.details.value("repository", "") != repository.id) {
+            continue;
+        }
+        ++refused;
+        content += std::format(
+            "<article class=\"panel protection-event\"><header><strong>{}</strong>{}</header>"
+            "<p>{}</p><p class=\"sub\">{} · {} · {}</p></article>",
+            web_ui_escape(event.draft.details.value("reference", "reference")),
+            badge_markup("refused"),
+            web_ui_escape(event.draft.details.value("reason", "update refused")),
+            identifier_markup(event.draft.details.value("caller", event.draft.principal)),
+            web_ui_escape(event.draft.details.value("rule", "rule")),
+            web_ui_escape(event.occurred_at));
+    }
+    if (refused == 0) {
+        content += "<div class=\"panel empty\">No protected updates have been refused.</div>";
+    }
+    content += "</section>";
+    return web_ui_shell(
+        "lake — branch protection", repository_name(repository), content, signed_in);
 }
 
 std::string web_ui_repository_conflicts(const control::Repository& repository,

@@ -148,7 +148,10 @@ json repository_tree_entry_schema() {
              {{"path", {{"type", "string"}}},
               {"kind", {{"type", "string"}}},
               {"blob", {{"type", "string"}}},
-              {"mode", {{"type", "integer"}}}}}};
+              {"mode", {{"type", "integer"}}},
+              {"node_id", {{"type", "string"}}},
+              {"size", {{"type", "integer"}}},
+              {"stored_size", {{"type", "integer"}}}}}};
 }
 
 json repository_change_schema() {
@@ -206,7 +209,13 @@ json repository_ref_json(const RepositoryContentRef& ref) {
 }
 
 json repository_tree_entry_json(const RepositoryTreeEntry& entry) {
-    return {{"path", entry.path}, {"kind", entry.kind}, {"blob", entry.blob}, {"mode", entry.mode}};
+    return {{"path", entry.path},
+            {"kind", entry.kind},
+            {"blob", entry.blob},
+            {"mode", entry.mode},
+            {"node_id", entry.node_id},
+            {"size", entry.size},
+            {"stored_size", entry.stored_size}};
 }
 
 json repository_file_json(const RepositoryFile& file) {
