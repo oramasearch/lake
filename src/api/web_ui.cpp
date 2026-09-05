@@ -1546,9 +1546,9 @@ std::string web_ui_applications(const std::vector<control::Application>& applica
                                 std::string_view error) {
     std::string content = "<p class=\"eyebrow\">auth as a service</p><h1>Applications</h1>";
     content += error_markup(error);
-    content +=
-        "<div class=\"grid\"><div><table><thead><tr><th>Name</th><th>Pool</th><th>Domain</th>"
-        "</tr></thead><tbody>";
+    content += "<div class=\"grid\"><div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>"
+               "Pool</th><th>Domain</th>"
+               "</tr></thead><tbody>";
     for (const auto& application : applications) {
         content += "<tr><td><a href=\"/application?id=" + web_ui_escape(application.id) + "\">" +
                    web_ui_escape(application.name) + "</a></td><td><code>" +
@@ -1604,7 +1604,7 @@ std::string web_ui_application_users(const control::Application& application,
                                      const std::vector<control::ApplicationUser>& users) {
     std::string content = "<p class=\"eyebrow\">application users</p><h1>" +
                           web_ui_escape(application.name) +
-                          " users</h1><table><thead><tr><th>Email</th>"
+                          " users</h1><div class=\"table-wrap\"><table><thead><tr><th>Email</th>"
                           "<th>Name</th><th>Status</th><th></th></tr></thead><tbody>";
     for (const auto& user : users) {
         content +=
@@ -1616,7 +1616,7 @@ std::string web_ui_application_users(const control::Application& application,
             web_ui_escape(user.user_id) +
             "\"><button type=\"submit\">Suspend</button></form></td></tr>";
     }
-    content += "</tbody></table>";
+    content += "</tbody></table></div>";
     return web_ui_shell(
         "lake — application users", std::format("{} users", users.size()), content, true);
 }
@@ -1626,8 +1626,8 @@ std::string web_ui_application_organizations(
     const std::vector<control::ApplicationOrganization>& organizations) {
     std::string content =
         "<p class=\"eyebrow\">application organizations</p><h1>" + web_ui_escape(application.name) +
-        " organizations</h1><table><thead><tr><th>Name</th><th>TAAP identity</th><th>Updated</th>"
-        "<th></th></tr></thead><tbody>";
+        " organizations</h1><div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>TAAP "
+        "identity</th><th>Updated</th><th></th></tr></thead><tbody>";
     for (const auto& organization : organizations) {
         content +=
             "<tr><td>" + web_ui_escape(organization.name) + "</td><td><code>" +
@@ -1640,14 +1640,14 @@ std::string web_ui_application_organizations(
             web_ui_escape(organization.id) +
             "\"><button type=\"submit\">Delete</button></form></td></tr>";
     }
-    content +=
-        "</tbody></table><div class=\"panel\"><h2>Create organization</h2><form class=\"stack\" "
-        "method=\"post\" action=\"/application/organizations\"><input type=\"hidden\" "
-        "name=\"application_id\" value=\"" +
-        web_ui_escape(application.id) +
-        "\"><label>Name<input name=\"name\" required></label><label>TAAP identity<input "
-        "name=\"taap_id\" required></label><button class=\"primary\" type=\"submit\">Create"
-        "</button></form></div>";
+    content += "</tbody></table></div><div class=\"panel\"><h2>Create organization</h2><form "
+               "class=\"stack\" "
+               "method=\"post\" action=\"/application/organizations\"><input type=\"hidden\" "
+               "name=\"application_id\" value=\"" +
+               web_ui_escape(application.id) +
+               "\"><label>Name<input name=\"name\" required></label><label>TAAP identity<input "
+               "name=\"taap_id\" required></label><button class=\"primary\" type=\"submit\">Create"
+               "</button></form></div>";
     return web_ui_shell("lake — application organizations",
                         std::format("{} organizations", organizations.size()),
                         content,
@@ -1663,14 +1663,16 @@ std::string web_ui_application_events(const control::Application& application,
         content += "<p class=\"notice\">Save this webhook secret now: <code>" +
                    web_ui_escape(webhook_secret) + "</code></p>";
     }
-    content += "<table><thead><tr><th>Event</th><th>ID</th><th>Created</th></tr></thead><tbody>";
+    content += "<div class=\"table-wrap\"><table><thead><tr><th>Event</th><th>ID</th><th>Created"
+               "</th></tr></thead><tbody>";
     for (const auto& event : events) {
         content += "<tr><td>" + web_ui_escape(event.event) + "</td><td><code>" +
                    web_ui_escape(event.id) + "</code></td><td>" + web_ui_escape(event.created_at) +
                    "</td></tr>";
     }
     content +=
-        "</tbody></table><div class=\"panel\"><h2>Create webhook</h2><form class=\"stack\" "
+        "</tbody></table></div><div class=\"panel\"><h2>Create webhook</h2><form "
+        "class=\"stack\" "
         "method=\"post\" action=\"/application/webhooks\"><input type=\"hidden\" "
         "name=\"application_id\" value=\"" +
         web_ui_escape(application.id) +

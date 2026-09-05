@@ -449,6 +449,9 @@ table {
 .table-wrap table {
   border: 0;
 }
+.table-wrap th {
+  top: 0;
+}
 th,
 td {
   height: 2.25rem;

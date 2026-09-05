@@ -67,7 +67,8 @@ together without adding renderer-side CSS.
 Hosted application identity pages use a compact version of the same token, font, form, focus,
 theme, and motion contracts. Their validated application accent is a decorative rule and their
 background color is mixed lightly into the governed canvas; readable text and controls retain the
-design-system roles in both themes.
+design-system roles in both themes. Application management tables use the shared horizontal
+scroll container so their identifiers cannot overlap neighboring forms.
 
 `web_ui_icon(name)` returns decorative, focus-disabled SVG for the approved navigation and theme
 names. Accessible names stay on the surrounding link or button. Unknown names return an empty
@@ -155,7 +156,7 @@ drive drive-preview drive-history drive-share shared-link
 ```
 
 The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
-path-for-path pair. Every capture is 1440 by 900.
+path-for-path pair. Both directories contain 94 PNG files, and every capture is 1440 by 900.
 The three primary review screens are the
 [repository](screenshots/after/repository-light.png),
 [change](screenshots/after/change-light.png), and
