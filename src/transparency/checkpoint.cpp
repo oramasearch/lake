@@ -9,6 +9,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <ranges>
 #include <set>
 #include <string_view>
@@ -553,6 +554,71 @@ Result<json> CheckpointService::current() const {
             Error{"invalid_input", "lake instance name is not a safe path component"});
     }
     return read_json(impl_->directory / "current.json");
+}
+
+Result<json> CheckpointService::at_tree_size(std::uint64_t tree_size) const {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    std::error_code error;
+    if (!std::filesystem::exists(impl_->directory, error)) {
+        if (error) {
+            return std::unexpected(
+                Error{"store_error", "could not inspect checkpoint directory: " + error.message()});
+        }
+        return std::unexpected(
+            Error{"not_found", "no checkpoint exists for the requested tree size"});
+    }
+    std::optional<json> selected;
+    std::uint64_t selected_sequence = 0;
+    constexpr std::string_view suffix = ".checkpoint.json";
+    std::filesystem::directory_iterator entries(impl_->directory, error);
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not list checkpoints: " + error.message()});
+    }
+    const std::filesystem::directory_iterator end;
+    for (; entries != end; entries.increment(error)) {
+        const auto& entry = *entries;
+        const std::string name = entry.path().filename().string();
+        if (!entry.is_regular_file(error)) {
+            if (error) {
+                return std::unexpected(
+                    Error{"store_error", "could not inspect checkpoint: " + error.message()});
+            }
+            continue;
+        }
+        if (!name.ends_with(suffix)) {
+            continue;
+        }
+        const auto record = read_json(entry.path());
+        if (!record || !record->is_object() || !record->contains("checkpoint") ||
+            !record->at("checkpoint").is_object() ||
+            !record->at("checkpoint").contains("tree_size") ||
+            !record->at("checkpoint").at("tree_size").is_number_unsigned() ||
+            !record->contains("sequence") || !record->at("sequence").is_number_unsigned()) {
+            return std::unexpected(Error{"store_error", "stored checkpoint is malformed"});
+        }
+        if (record->at("checkpoint").at("tree_size").get<std::uint64_t>() != tree_size) {
+            continue;
+        }
+        const std::uint64_t sequence = record->at("sequence").get<std::uint64_t>();
+        if (!selected || sequence > selected_sequence) {
+            selected = *record;
+            selected_sequence = sequence;
+        }
+    }
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not list checkpoints: " + error.message()});
+    }
+    if (!selected) {
+        return std::unexpected(
+            Error{"not_found", "no checkpoint exists for the requested tree size"});
+    }
+    return *selected;
 }
 
 json CheckpointService::configuration() const {

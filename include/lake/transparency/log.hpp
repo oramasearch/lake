@@ -31,6 +31,7 @@ struct AppendResult {
     std::uint64_t tree_size = 0;
     std::string root_hash;
     std::size_t tiles_published = 0;
+    std::size_t hash_tiles_published = 0;
 };
 
 struct Tile {
@@ -38,6 +39,29 @@ struct Tile {
     std::size_t width = 0;
     std::string encoded;
     std::string sha256;
+};
+
+struct HashTile {
+    std::uint32_t level = 0;
+    std::uint64_t index = 0;
+    std::size_t width = 0;
+    std::string encoded;
+    std::string sha256;
+};
+
+struct InclusionProof {
+    std::uint64_t leaf_index = 0;
+    std::uint64_t tree_size = 0;
+    std::string root_hash;
+    std::vector<std::string> audit_path;
+};
+
+struct ConsistencyProof {
+    std::uint64_t old_tree_size = 0;
+    std::uint64_t new_tree_size = 0;
+    std::string old_root_hash;
+    std::string new_root_hash;
+    std::vector<std::string> audit_path;
 };
 
 struct IdentityMatch {
@@ -64,6 +88,10 @@ public:
 
     Result<AppendResult> append(const std::vector<std::string>& attestations);
     Result<Tile> tile(std::uint64_t index, std::size_t width) const;
+    Result<HashTile> hash_tile(std::uint32_t level, std::uint64_t index, std::size_t width) const;
+    Result<InclusionProof> inclusion_proof(std::uint64_t leaf_index, std::uint64_t tree_size) const;
+    Result<ConsistencyProof> consistency_proof(std::uint64_t old_tree_size,
+                                               std::uint64_t new_tree_size) const;
     Result<LogState> state() const;
     Result<LogState> state_at(std::uint64_t tree_size) const;
     Result<LogReplicationBatch> replication_batch(std::uint64_t after_tree_size) const;

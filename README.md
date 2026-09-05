@@ -80,10 +80,11 @@ liquid is the tool. lake is where it collects.
 > (the runtime default) requires configured witness cosignatures; anchored additionally retains
 > an aggregation proof. `/v1/transparency_log_configuration` and `/audit` expose the effective
 > public configuration. The operator handoff is [`docs/control-plane/log.md`](docs/control-plane/log.md).
-> Canonical TAAP attestations append to immutable 1,024-entry bulk tiles under the instance log.
-> Signed checkpoints commit to their Merkle root. Public tile fetches and the hosted
-> `/transparency` identity monitor recompute that root before returning matches, so a modified
-> tile is refused.
+> Canonical TAAP attestations append to immutable 1,024-entry and interior-hash tiles under the
+> instance log. Signed checkpoints commit to their Merkle root. Public tile and compact
+> inclusion/consistency-proof capabilities bind responses to exact signed checkpoints. The hosted
+> `/transparency` identity monitor recomputes the root before returning matches, so a modified tile
+> is refused.
 > Active/standby Lake instances also replicate customer repositories through durable liquid
 > cursors and replicate the transparency log only from a matching Merkle prefix. Signed
 > checkpoints are verified and adopted without rollback. The consistency model and operator
@@ -190,7 +191,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
-| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, root rotation, checkpoint-bound Merkle entry tiles, identity monitoring, RFC 3161 timestamping, and RFC 4998 archive renewal |
+| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, root rotation, checkpoint-bound Merkle entry/hash tiles and compact proofs, identity monitoring, RFC 3161 timestamping, and RFC 4998 archive renewal |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |

@@ -64,8 +64,55 @@ json checkpoint_output_schema() {
     return {{"type", "object"}};
 }
 
+json inclusion_proof_output_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"audit_path",
+               {{"type", "array"}, {"items", {{"type", "string"}, {"pattern", "^[0-9a-f]{64}$"}}}}},
+              {"checkpoint", {{"type", "object"}}},
+              {"hash_algorithm", {{"type", "string"}, {"const", "sha256"}}},
+              {"leaf_index", {{"type", "integer"}, {"minimum", 0}}},
+              {"root_hash", {{"type", "string"}, {"pattern", "^[0-9a-f]{64}$"}}},
+              {"tree_size", {{"type", "integer"}, {"minimum", 1}}},
+              {"version", {{"type", "string"}, {"const", "lake_inclusion_proof/1"}}}}},
+            {"required",
+             json::array({"audit_path",
+                          "checkpoint",
+                          "hash_algorithm",
+                          "leaf_index",
+                          "root_hash",
+                          "tree_size",
+                          "version"})},
+            {"additionalProperties", false}};
+}
+
+json consistency_proof_output_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"audit_path",
+               {{"type", "array"}, {"items", {{"type", "string"}, {"pattern", "^[0-9a-f]{64}$"}}}}},
+              {"checkpoint", {{"type", "object"}}},
+              {"hash_algorithm", {{"type", "string"}, {"const", "sha256"}}},
+              {"new_root_hash", {{"type", "string"}, {"pattern", "^[0-9a-f]{64}$"}}},
+              {"new_tree_size", {{"type", "integer"}, {"minimum", 0}}},
+              {"old_root_hash", {{"type", "string"}, {"pattern", "^[0-9a-f]{64}$"}}},
+              {"old_tree_size", {{"type", "integer"}, {"minimum", 0}}},
+              {"version", {{"type", "string"}, {"const", "lake_consistency_proof/1"}}}}},
+            {"required",
+             json::array({"audit_path",
+                          "checkpoint",
+                          "hash_algorithm",
+                          "new_root_hash",
+                          "new_tree_size",
+                          "old_root_hash",
+                          "old_tree_size",
+                          "version"})},
+            {"additionalProperties", false}};
+}
+
 json append_value(const transparency::AppendResult& appended) {
     return {{"first_index", appended.first_index},
+            {"hash_tiles_published", appended.hash_tiles_published},
             {"root_hash", appended.root_hash},
             {"tile_width", transparency::transparency_tile_width},
             {"tiles_published", appended.tiles_published},
@@ -76,9 +123,60 @@ json tile_value(const transparency::Tile& tile) {
     return {{"encoding", "base64url"},
             {"entries", tile.width},
             {"index", tile.index},
+            {"kind", "entries"},
+            {"level", 0},
             {"sha256", tile.sha256},
             {"tile", tile.encoded},
             {"version", "lake_tile/1"}};
+}
+
+json hash_tile_value(const transparency::HashTile& tile) {
+    return {{"encoding", "base64url"},
+            {"hashes", tile.width},
+            {"index", tile.index},
+            {"kind", "hashes"},
+            {"level", tile.level},
+            {"sha256", tile.sha256},
+            {"tile", tile.encoded},
+            {"version", "lake_hash_tile/1"}};
+}
+
+json inclusion_proof_value(const transparency::InclusionProof& proof, const json& checkpoint) {
+    return {{"audit_path", proof.audit_path},
+            {"checkpoint", checkpoint},
+            {"hash_algorithm", "sha256"},
+            {"leaf_index", proof.leaf_index},
+            {"root_hash", proof.root_hash},
+            {"tree_size", proof.tree_size},
+            {"version", "lake_inclusion_proof/1"}};
+}
+
+json consistency_proof_value(const transparency::ConsistencyProof& proof, const json& checkpoint) {
+    return {{"audit_path", proof.audit_path},
+            {"checkpoint", checkpoint},
+            {"hash_algorithm", "sha256"},
+            {"new_root_hash", proof.new_root_hash},
+            {"new_tree_size", proof.new_tree_size},
+            {"old_root_hash", proof.old_root_hash},
+            {"old_tree_size", proof.old_tree_size},
+            {"version", "lake_consistency_proof/1"}};
+}
+
+ApiResult checkpoint_for_proof(ApiContext& context, std::uint64_t tree_size, json& checkpoint) {
+    if (!context.checkpoints) {
+        return no_checkpoint_service();
+    }
+    const auto selected = context.checkpoints->at_tree_size(tree_size);
+    if (!selected) {
+        return from_transparency_error(selected.error());
+    }
+    if (!selected->contains("checkpoint") || !selected->at("checkpoint").is_object() ||
+        !selected->at("checkpoint").contains("root_hash") ||
+        !selected->at("checkpoint").at("root_hash").is_string()) {
+        return ApiResult::failure("unrecoverable", "selected checkpoint has no log root");
+    }
+    checkpoint = *selected;
+    return ApiResult::success(json::object());
 }
 
 json scan_value(const transparency::IdentityScan& scan) {
@@ -162,10 +260,14 @@ void register_transparency_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "transparency_tile",
         .title = "Fetch transparency tile",
-        .description = "Fetch one immutable bulk entry tile for public monitoring.",
+        .description =
+            "Fetch one immutable bulk entry or interior hash tile for public monitoring.",
         .input_schema = {{"type", "object"},
                          {"properties",
-                          {{"index", {{"type", "integer"}}}, {"width", {{"type", "integer"}}}}},
+                          {{"index", {{"type", "integer"}, {"minimum", 0}}},
+                           {"level",
+                            {{"type", "integer"}, {"minimum", 0}, {"maximum", 63}, {"default", 0}}},
+                           {"width", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1024}}}}},
                          {"required", json::array({"index", "width"})},
                          {"additionalProperties", false}},
         .output_schema = checkpoint_output_schema(),
@@ -180,6 +282,7 @@ void register_transparency_capabilities(Registry& registry) {
                 return no_tiled_log();
             }
             const std::int64_t index = input.at("index").get<std::int64_t>();
+            const std::int64_t level = input.value("level", std::int64_t{0});
             const std::int64_t width = input.at("width").get<std::int64_t>();
             if (index < 0) {
                 return ApiResult::failure("invalid_input", "index must not be negative", "/index");
@@ -189,6 +292,23 @@ void register_transparency_capabilities(Registry& registry) {
                 return ApiResult::failure(
                     "invalid_input", "width must be between 1 and 1024", "/width");
             }
+            if (level < 0 || level >= 64) {
+                return ApiResult::failure(
+                    "invalid_input", "level must be between 0 and 63", "/level");
+            }
+            if (level != 0) {
+                const auto tile =
+                    context.transparency_log->hash_tile(static_cast<std::uint32_t>(level),
+                                                        static_cast<std::uint64_t>(index),
+                                                        static_cast<std::size_t>(width));
+                if (!tile) {
+                    return from_transparency_error(tile.error());
+                }
+                context.audit_details["tile_index"] = tile->index;
+                context.audit_details["tile_level"] = tile->level;
+                context.audit_details["tile_width"] = tile->width;
+                return ApiResult::success(hash_tile_value(*tile));
+            }
             const auto tile = context.transparency_log->tile(static_cast<std::uint64_t>(index),
                                                              static_cast<std::size_t>(width));
             if (!tile) {
@@ -197,6 +317,120 @@ void register_transparency_capabilities(Registry& registry) {
             context.audit_details["tile_index"] = tile->index;
             context.audit_details["tile_width"] = tile->width;
             return ApiResult::success(tile_value(*tile));
+        }});
+    registry.add(Capability{
+        .name = "transparency_inclusion_proof",
+        .title = "Fetch transparency inclusion proof",
+        .description =
+            "Fetch the audit path for one leaf, bound to an immutable signed checkpoint.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"leaf_index", {{"type", "integer"}, {"minimum", 0}}},
+                           {"tree_size", {{"type", "integer"}, {"minimum", 1}}}}},
+                         {"required", json::array({"leaf_index", "tree_size"})},
+                         {"additionalProperties", false}},
+        .output_schema = inclusion_proof_output_schema(),
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "transparency log",
+        .action = "read",
+        .resolve_object = instance_object,
+        .handler = [](const json& input, ApiContext& context) {
+            set_audit_fields(context, "inclusion_proof");
+            if (!context.transparency_log) {
+                return no_tiled_log();
+            }
+            const std::int64_t leaf_index = input.at("leaf_index").get<std::int64_t>();
+            const std::int64_t tree_size = input.at("tree_size").get<std::int64_t>();
+            if (leaf_index < 0) {
+                return ApiResult::failure(
+                    "invalid_input", "leaf_index must not be negative", "/leaf_index");
+            }
+            if (tree_size <= 0) {
+                return ApiResult::failure(
+                    "invalid_input", "tree_size must be positive", "/tree_size");
+            }
+            json checkpoint;
+            const ApiResult selected =
+                checkpoint_for_proof(context, static_cast<std::uint64_t>(tree_size), checkpoint);
+            if (!selected.ok) {
+                return selected;
+            }
+            const auto proof = context.transparency_log->inclusion_proof(
+                static_cast<std::uint64_t>(leaf_index), static_cast<std::uint64_t>(tree_size));
+            if (!proof) {
+                return from_transparency_error(proof.error());
+            }
+            const std::string checkpoint_root =
+                checkpoint.at("checkpoint").at("root_hash").get<std::string>();
+            if (proof->root_hash != checkpoint_root) {
+                return ApiResult::failure("unrecoverable",
+                                          "proof root does not match the selected checkpoint");
+            }
+            context.audit_details["checkpoint_sequence"] = checkpoint.at("sequence");
+            context.audit_details["leaf_index"] = leaf_index;
+            context.audit_details["tree_size"] = tree_size;
+            return ApiResult::success(inclusion_proof_value(*proof, checkpoint));
+        }});
+    registry.add(Capability{
+        .name = "transparency_consistency_proof",
+        .title = "Fetch transparency consistency proof",
+        .description =
+            "Fetch the audit path from an old tree size to a checkpoint-bound new tree size.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"new_tree_size", {{"type", "integer"}, {"minimum", 0}}},
+                           {"old_tree_size", {{"type", "integer"}, {"minimum", 0}}}}},
+                         {"required", json::array({"old_tree_size", "new_tree_size"})},
+                         {"additionalProperties", false}},
+        .output_schema = consistency_proof_output_schema(),
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "transparency log",
+        .action = "read",
+        .resolve_object = instance_object,
+        .handler = [](const json& input, ApiContext& context) {
+            set_audit_fields(context, "consistency_proof");
+            if (!context.transparency_log) {
+                return no_tiled_log();
+            }
+            const std::int64_t old_tree_size = input.at("old_tree_size").get<std::int64_t>();
+            const std::int64_t new_tree_size = input.at("new_tree_size").get<std::int64_t>();
+            if (old_tree_size < 0) {
+                return ApiResult::failure(
+                    "invalid_input", "old_tree_size must not be negative", "/old_tree_size");
+            }
+            if (new_tree_size < 0) {
+                return ApiResult::failure(
+                    "invalid_input", "new_tree_size must not be negative", "/new_tree_size");
+            }
+            if (old_tree_size > new_tree_size) {
+                return ApiResult::failure("invalid_input",
+                                          "old_tree_size must not exceed new_tree_size",
+                                          "/old_tree_size");
+            }
+            json checkpoint;
+            const ApiResult selected = checkpoint_for_proof(
+                context, static_cast<std::uint64_t>(new_tree_size), checkpoint);
+            if (!selected.ok) {
+                return selected;
+            }
+            const auto proof = context.transparency_log->consistency_proof(
+                static_cast<std::uint64_t>(old_tree_size),
+                static_cast<std::uint64_t>(new_tree_size));
+            if (!proof) {
+                return from_transparency_error(proof.error());
+            }
+            const std::string checkpoint_root =
+                checkpoint.at("checkpoint").at("root_hash").get<std::string>();
+            if (proof->new_root_hash != checkpoint_root) {
+                return ApiResult::failure("unrecoverable",
+                                          "proof root does not match the selected checkpoint");
+            }
+            context.audit_details["checkpoint_sequence"] = checkpoint.at("sequence");
+            context.audit_details["new_tree_size"] = new_tree_size;
+            context.audit_details["old_tree_size"] = old_tree_size;
+            return ApiResult::success(consistency_proof_value(*proof, checkpoint));
         }});
     registry.add(Capability{
         .name = "transparency_identity_scan",
@@ -427,6 +661,8 @@ void register_transparency_capabilities(Registry& registry) {
             }
             const json checkpoint{{"root", root->document},
                                   {"root_version", root->version},
+                                  {"hash_algorithm", "sha256"},
+                                  {"hash_tile_width", transparency::transparency_tile_width},
                                   {"root_hash", log_state->root_hash},
                                   {"timestamp", timestamp->document},
                                   {"timestamp_version", timestamp->version},

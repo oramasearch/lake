@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <format>
@@ -32,6 +34,7 @@ using Hash = std::array<std::byte, 32>;
 using nlohmann::json;
 
 constexpr std::string_view tile_header = "LAKE-TILE-1\n";
+constexpr std::string_view hash_tile_header = "LAKE-HASH-TILE-1\n";
 
 class AppendLock {
 public:
@@ -256,6 +259,41 @@ Result<std::vector<Bytes>> decode_tile(std::span<const std::byte> encoded,
     return entries;
 }
 
+Result<Bytes> encode_hash_tile(const std::vector<Hash>& hashes) {
+    Bytes output;
+    output.reserve(hash_tile_header.size() + hashes.size() * Hash{}.size());
+    for (const char value : hash_tile_header) {
+        output.push_back(std::byte{static_cast<unsigned char>(value)});
+    }
+    for (const Hash& hash : hashes) {
+        output.insert(output.end(), hash.begin(), hash.end());
+    }
+    return output;
+}
+
+Result<std::vector<Hash>> decode_hash_tile(std::span<const std::byte> encoded,
+                                           std::size_t expected_hashes) {
+    const std::size_t expected_size = hash_tile_header.size() + expected_hashes * Hash{}.size();
+    if (encoded.size() != expected_size) {
+        return std::unexpected(
+            Error{"unrecoverable", "transparency hash tile has an invalid size"});
+    }
+    for (std::size_t index = 0; index < hash_tile_header.size(); ++index) {
+        if (encoded[index] != std::byte{static_cast<unsigned char>(hash_tile_header[index])}) {
+            return std::unexpected(
+                Error{"unrecoverable", "transparency hash tile header is invalid"});
+        }
+    }
+    std::vector<Hash> hashes(expected_hashes);
+    std::size_t offset = hash_tile_header.size();
+    for (Hash& hash : hashes) {
+        std::ranges::copy_n(
+            encoded.begin() + static_cast<std::ptrdiff_t>(offset), hash.size(), hash.begin());
+        offset += hash.size();
+    }
+    return hashes;
+}
+
 Result<Bytes> read_bytes(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -359,6 +397,8 @@ struct StoredState {
     std::vector<std::optional<Hash>> frontier;
 };
 
+using ParentLevels = std::vector<std::vector<Hash>>;
+
 Result<Hash> frontier_root(const std::vector<std::optional<Hash>>& frontier) {
     std::optional<Hash> root;
     for (const std::optional<Hash>& peak : frontier) {
@@ -381,7 +421,9 @@ Result<Hash> frontier_root(const std::vector<std::optional<Hash>>& frontier) {
     return empty_root();
 }
 
-Result<void> add_leaf(std::vector<std::optional<Hash>>& frontier, const Hash& leaf) {
+Result<void> add_leaf(std::vector<std::optional<Hash>>& frontier,
+                      const Hash& leaf,
+                      ParentLevels* parent_levels = nullptr) {
     Hash carried = leaf;
     std::size_t level = 0;
     while (true) {
@@ -400,6 +442,12 @@ Result<void> add_leaf(std::vector<std::optional<Hash>>& frontier, const Hash& le
         frontier[level].reset();
         carried = *parent;
         ++level;
+        if (parent_levels != nullptr) {
+            if (parent_levels->size() <= level) {
+                parent_levels->resize(level + 1);
+            }
+            parent_levels->at(level).push_back(carried);
+        }
     }
 }
 
@@ -569,6 +617,12 @@ struct TiledLog::Impl {
                (std::to_string(width) + ".tile");
     }
 
+    std::filesystem::path
+    hash_tile_path(std::uint32_t level, std::uint64_t index, std::size_t width) const {
+        return directory / "tiles" / "hashes" / std::to_string(level) / std::to_string(index) /
+               (std::to_string(width) + ".tile");
+    }
+
     Result<std::vector<Bytes>> load_tile(std::uint64_t index, std::size_t width) const {
         const auto bytes = read_bytes(tile_path(index, width));
         if (!bytes) {
@@ -592,10 +646,98 @@ struct TiledLog::Impl {
         return write_bytes(path, *encoded);
     }
 
+    Result<std::vector<Hash>>
+    load_hash_tile(std::uint32_t level, std::uint64_t index, std::size_t width) const {
+        const auto bytes = read_bytes(hash_tile_path(level, index, width));
+        if (!bytes) {
+            return std::unexpected(bytes.error());
+        }
+        return decode_hash_tile(*bytes, width);
+    }
+
+    Result<std::vector<Hash>> load_or_materialize_hash_tile(std::uint32_t level,
+                                                            std::uint64_t index,
+                                                            std::size_t width) const {
+        const auto exact = load_hash_tile(level, index, width);
+        if (exact || exact.error().code != "not_found") {
+            return exact;
+        }
+        const std::filesystem::path directory_path =
+            hash_tile_path(level, index, width).parent_path();
+        std::error_code error;
+        std::filesystem::directory_iterator entries(directory_path, error);
+        if (error) {
+            return std::unexpected(exact.error());
+        }
+        std::optional<std::size_t> source_width;
+        const std::filesystem::directory_iterator end;
+        for (; entries != end; entries.increment(error)) {
+            const auto& entry = *entries;
+            if (!entry.is_regular_file(error)) {
+                if (error) {
+                    return std::unexpected(
+                        Error{"store_error",
+                              "could not inspect transparency hash tile: " + error.message()});
+                }
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            if (!name.ends_with(".tile")) {
+                continue;
+            }
+            const std::string_view encoded_width(name.data(), name.size() - 5);
+            std::size_t candidate = 0;
+            const auto parsed =
+                std::from_chars(encoded_width.begin(), encoded_width.end(), candidate);
+            if (parsed.ec != std::errc{} || parsed.ptr != encoded_width.end() ||
+                candidate <= width || candidate > transparency_tile_width) {
+                continue;
+            }
+            if (!source_width || candidate < *source_width) {
+                source_width = candidate;
+            }
+        }
+        if (error) {
+            return std::unexpected(
+                Error{"store_error", "could not list transparency hash tiles: " + error.message()});
+        }
+        if (!source_width) {
+            return std::unexpected(exact.error());
+        }
+        auto source = load_hash_tile(level, index, *source_width);
+        if (!source) {
+            return std::unexpected(source.error());
+        }
+        source->resize(width);
+        const auto published = publish_hash_tile(level, index, *source);
+        if (!published) {
+            return std::unexpected(published.error());
+        }
+        return *source;
+    }
+
+    Result<void> publish_hash_tile(std::uint32_t level,
+                                   std::uint64_t index,
+                                   const std::vector<Hash>& hashes) const {
+        const auto encoded = encode_hash_tile(hashes);
+        if (!encoded) {
+            return std::unexpected(encoded.error());
+        }
+        std::error_code error;
+        const std::filesystem::path path = hash_tile_path(level, index, hashes.size());
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) {
+            return std::unexpected(Error{
+                "store_error", "could not create transparency hash tile: " + error.message()});
+        }
+        return write_bytes(path, *encoded);
+    }
+
     Result<std::pair<StoredState, std::vector<std::string>>>
     replay(std::uint64_t end,
            std::uint64_t source_tree_size,
-           std::optional<std::uint64_t> collect_from = std::nullopt) const {
+           std::optional<std::uint64_t> collect_from = std::nullopt,
+           ParentLevels* parent_levels = nullptr) const {
         StoredState replayed;
         const auto initial_root = empty_root();
         if (!initial_root) {
@@ -620,7 +762,7 @@ struct TiledLog::Impl {
                 if (!digest) {
                     return std::unexpected(digest.error());
                 }
-                const auto added = add_leaf(replayed.frontier, *digest);
+                const auto added = add_leaf(replayed.frontier, *digest, parent_levels);
                 if (!added) {
                     return std::unexpected(added.error());
                 }
@@ -641,6 +783,234 @@ struct TiledLog::Impl {
         }
         replayed.root = *root;
         return std::pair{std::move(replayed), std::move(collected)};
+    }
+
+    static std::size_t tile_width_at(std::uint64_t value_count, std::uint64_t tile_index) {
+        if (value_count == 0) {
+            return 0;
+        }
+        const std::uint64_t tile_count = (value_count - 1) / transparency_tile_width + 1;
+        if (tile_index >= tile_count) {
+            return 0;
+        }
+        if (tile_index + 1 < tile_count) {
+            return transparency_tile_width;
+        }
+        return static_cast<std::size_t>(value_count - tile_index * transparency_tile_width);
+    }
+
+    Result<std::size_t> ensure_hash_tiles(const StoredState& state) const {
+        bool missing = false;
+        for (std::uint32_t level = 1; level < 64 && (state.tree_size >> level) != 0; ++level) {
+            const std::uint64_t hash_count = state.tree_size >> level;
+            const std::uint64_t tile_count = (hash_count - 1) / transparency_tile_width + 1;
+            for (std::uint64_t tile_index = 0; tile_index < tile_count; ++tile_index) {
+                const std::size_t width = tile_width_at(hash_count, tile_index);
+                std::error_code error;
+                const bool exists =
+                    std::filesystem::exists(hash_tile_path(level, tile_index, width), error);
+                if (error) {
+                    return std::unexpected(
+                        Error{"store_error",
+                              "could not inspect transparency hash tile: " + error.message()});
+                }
+                missing = missing || !exists;
+            }
+        }
+        if (!missing) {
+            return 0;
+        }
+        ParentLevels parent_levels;
+        const auto replayed =
+            replay(state.tree_size, state.tree_size, std::nullopt, &parent_levels);
+        if (!replayed) {
+            return std::unexpected(replayed.error());
+        }
+        if (replayed->first.root != state.root) {
+            return std::unexpected(
+                Error{"unrecoverable", "transparency entry tiles do not match the stored root"});
+        }
+        std::size_t published = 0;
+        for (std::uint32_t level = 1; level < parent_levels.size(); ++level) {
+            const std::vector<Hash>& hashes = parent_levels[level];
+            for (std::size_t first = 0; first < hashes.size(); first += transparency_tile_width) {
+                const std::size_t width = std::min(transparency_tile_width, hashes.size() - first);
+                std::vector<Hash> tile_hashes(hashes.begin() + static_cast<std::ptrdiff_t>(first),
+                                              hashes.begin() +
+                                                  static_cast<std::ptrdiff_t>(first + width));
+                const auto written =
+                    publish_hash_tile(level, first / transparency_tile_width, tile_hashes);
+                if (!written) {
+                    return std::unexpected(written.error());
+                }
+                ++published;
+            }
+        }
+        return published;
+    }
+
+    Result<std::size_t> publish_parent_hashes(std::uint64_t tree_size,
+                                              const ParentLevels& parent_levels) const {
+        std::size_t published = 0;
+        for (std::uint32_t level = 1; level < parent_levels.size(); ++level) {
+            const std::vector<Hash>& added_hashes = parent_levels[level];
+            if (added_hashes.empty()) {
+                continue;
+            }
+            const std::uint64_t existing_count = tree_size >> level;
+            std::uint64_t tile_index = existing_count / transparency_tile_width;
+            const std::size_t partial_width = existing_count % transparency_tile_width;
+            std::vector<Hash> tile_hashes;
+            if (partial_width != 0) {
+                const auto partial = load_hash_tile(level, tile_index, partial_width);
+                if (!partial) {
+                    return std::unexpected(partial.error());
+                }
+                tile_hashes = *partial;
+            }
+            for (const Hash& hash : added_hashes) {
+                tile_hashes.push_back(hash);
+                if (tile_hashes.size() == transparency_tile_width) {
+                    const auto written = publish_hash_tile(level, tile_index, tile_hashes);
+                    if (!written) {
+                        return std::unexpected(written.error());
+                    }
+                    ++published;
+                    ++tile_index;
+                    tile_hashes.clear();
+                }
+            }
+            if (!tile_hashes.empty()) {
+                const auto written = publish_hash_tile(level, tile_index, tile_hashes);
+                if (!written) {
+                    return std::unexpected(written.error());
+                }
+                ++published;
+            }
+        }
+        return published;
+    }
+
+    Result<Hash>
+    hash_at(std::uint32_t level, std::uint64_t node_index, std::uint64_t tree_size) const {
+        const std::uint64_t value_count = tree_size >> level;
+        if (node_index >= value_count) {
+            return std::unexpected(
+                Error{"invalid_input", "requested Merkle node is outside the tree"});
+        }
+        const std::uint64_t tile_index = node_index / transparency_tile_width;
+        const std::size_t width = tile_width_at(value_count, tile_index);
+        const std::size_t offset = node_index % transparency_tile_width;
+        if (level == 0) {
+            const auto entries = load_tile(tile_index, width);
+            if (!entries) {
+                return std::unexpected(entries.error());
+            }
+            return leaf_hash(entries->at(offset));
+        }
+        const auto hashes = load_or_materialize_hash_tile(level, tile_index, width);
+        if (!hashes) {
+            return std::unexpected(hashes.error());
+        }
+        return hashes->at(offset);
+    }
+
+    Result<Hash>
+    range_hash(std::uint64_t first, std::uint64_t count, std::uint64_t tree_size) const {
+        if (count == 0 || first > tree_size || count > tree_size - first) {
+            return std::unexpected(Error{"invalid_input", "Merkle range is outside the tree"});
+        }
+        if (std::has_single_bit(count) && first % count == 0) {
+            const std::uint32_t level = static_cast<std::uint32_t>(std::countr_zero(count));
+            return hash_at(level, first / count, tree_size);
+        }
+        const std::uint64_t split = std::uint64_t{1} << (std::bit_width(count - 1) - 1);
+        const auto left = range_hash(first, split, tree_size);
+        if (!left) {
+            return std::unexpected(left.error());
+        }
+        const auto right = range_hash(first + split, count - split, tree_size);
+        if (!right) {
+            return std::unexpected(right.error());
+        }
+        return node_hash(*left, *right);
+    }
+
+    Result<void> append_inclusion_path(std::uint64_t leaf_index,
+                                       std::uint64_t first,
+                                       std::uint64_t count,
+                                       std::uint64_t tree_size,
+                                       std::vector<std::string>& path) const {
+        if (count == 1) {
+            return {};
+        }
+        const std::uint64_t split = std::uint64_t{1} << (std::bit_width(count - 1) - 1);
+        if (leaf_index < first + split) {
+            const auto child = append_inclusion_path(leaf_index, first, split, tree_size, path);
+            if (!child) {
+                return std::unexpected(child.error());
+            }
+            const auto sibling = range_hash(first + split, count - split, tree_size);
+            if (!sibling) {
+                return std::unexpected(sibling.error());
+            }
+            path.push_back(hex(*sibling));
+            return {};
+        }
+        const auto child =
+            append_inclusion_path(leaf_index, first + split, count - split, tree_size, path);
+        if (!child) {
+            return std::unexpected(child.error());
+        }
+        const auto sibling = range_hash(first, split, tree_size);
+        if (!sibling) {
+            return std::unexpected(sibling.error());
+        }
+        path.push_back(hex(*sibling));
+        return {};
+    }
+
+    Result<void> append_consistency_path(std::uint64_t old_size,
+                                         std::uint64_t new_size,
+                                         std::uint64_t first,
+                                         bool complete,
+                                         std::uint64_t tree_size,
+                                         std::vector<std::string>& path) const {
+        if (old_size == new_size) {
+            if (!complete) {
+                const auto root = range_hash(first, new_size, tree_size);
+                if (!root) {
+                    return std::unexpected(root.error());
+                }
+                path.push_back(hex(*root));
+            }
+            return {};
+        }
+        const std::uint64_t split = std::uint64_t{1} << (std::bit_width(new_size - 1) - 1);
+        if (old_size <= split) {
+            const auto child =
+                append_consistency_path(old_size, split, first, complete, tree_size, path);
+            if (!child) {
+                return std::unexpected(child.error());
+            }
+            const auto sibling = range_hash(first + split, new_size - split, tree_size);
+            if (!sibling) {
+                return std::unexpected(sibling.error());
+            }
+            path.push_back(hex(*sibling));
+            return {};
+        }
+        const auto child = append_consistency_path(
+            old_size - split, new_size - split, first + split, false, tree_size, path);
+        if (!child) {
+            return std::unexpected(child.error());
+        }
+        const auto sibling = range_hash(first, split, tree_size);
+        if (!sibling) {
+            return std::unexpected(sibling.error());
+        }
+        path.push_back(hex(*sibling));
+        return {};
     }
 
     Result<AppendResult> append_entries(const std::vector<std::string>& attestations,
@@ -673,20 +1043,25 @@ struct TiledLog::Impl {
         }
         if (expected_head && current->tree_size == expected_head->tree_size &&
             hex(current->root) == expected_head->root_hash) {
-            return AppendResult{current->tree_size, current->tree_size, hex(current->root), 0};
+            return AppendResult{current->tree_size, current->tree_size, hex(current->root), 0, 0};
         }
         if (expected_base && (current->tree_size != expected_base->tree_size ||
                               hex(current->root) != expected_base->root_hash)) {
             return std::unexpected(
                 Error{"unrecoverable", "replication base does not match the local log prefix"});
         }
+        const auto backfilled_hash_tiles = ensure_hash_tiles(*current);
+        if (!backfilled_hash_tiles) {
+            return std::unexpected(backfilled_hash_tiles.error());
+        }
         StoredState candidate = *current;
+        ParentLevels parent_levels;
         for (const Bytes& entry : *decoded) {
             const auto digest = leaf_hash(entry);
             if (!digest) {
                 return std::unexpected(digest.error());
             }
-            const auto added = add_leaf(candidate.frontier, *digest);
+            const auto added = add_leaf(candidate.frontier, *digest, &parent_levels);
             if (!added) {
                 return std::unexpected(added.error());
             }
@@ -704,7 +1079,8 @@ struct TiledLog::Impl {
         }
         const std::uint64_t first_index = current->tree_size;
         if (decoded->empty()) {
-            return AppendResult{first_index, current->tree_size, hex(current->root), 0};
+            return AppendResult{
+                first_index, current->tree_size, hex(current->root), 0, *backfilled_hash_tiles};
         }
         std::uint64_t tile_index = current->tree_size / transparency_tile_width;
         const std::size_t partial_width = current->tree_size % transparency_tile_width;
@@ -736,11 +1112,19 @@ struct TiledLog::Impl {
             }
             ++tiles_published;
         }
+        const auto hash_tiles_published = publish_parent_hashes(current->tree_size, parent_levels);
+        if (!hash_tiles_published) {
+            return std::unexpected(hash_tiles_published.error());
+        }
         const auto state_written = write_json(state_path(), state_json(candidate));
         if (!state_written) {
             return std::unexpected(state_written.error());
         }
-        return AppendResult{first_index, candidate.tree_size, hex(candidate.root), tiles_published};
+        return AppendResult{first_index,
+                            candidate.tree_size,
+                            hex(candidate.root),
+                            tiles_published,
+                            *backfilled_hash_tiles + *hash_tiles_published};
     }
 };
 
@@ -782,6 +1166,162 @@ Result<Tile> TiledLog::tile(std::uint64_t index, std::size_t width) const {
         return std::unexpected(encoded.error());
     }
     return Tile{index, width, *encoded, hex(*digest)};
+}
+
+Result<HashTile>
+TiledLog::hash_tile(std::uint32_t level, std::uint64_t index, std::size_t width) const {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    if (level == 0 || level >= 64) {
+        return std::unexpected(Error{"invalid_input", "hash tile level must be between 1 and 63"});
+    }
+    if (width == 0 || width > transparency_tile_width) {
+        return std::unexpected(Error{"invalid_input", "tile width must be between 1 and 1024"});
+    }
+    std::error_code error;
+    std::filesystem::create_directories(impl_->directory, error);
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not create transparency directory: " + error.message()});
+    }
+    const auto append_lock = AppendLock::acquire(impl_->directory / "append.lock");
+    if (!append_lock) {
+        return std::unexpected(append_lock.error());
+    }
+    const auto current = stored_state(impl_->state_path());
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    const auto ensured = impl_->ensure_hash_tiles(*current);
+    if (!ensured) {
+        return std::unexpected(ensured.error());
+    }
+    const auto hashes = impl_->load_or_materialize_hash_tile(level, index, width);
+    if (!hashes) {
+        return std::unexpected(hashes.error());
+    }
+    const auto encoded_bytes = encode_hash_tile(*hashes);
+    if (!encoded_bytes) {
+        return std::unexpected(encoded_bytes.error());
+    }
+    const auto digest = sha256(*encoded_bytes);
+    const auto encoded = base64url_encode(*encoded_bytes);
+    if (!digest) {
+        return std::unexpected(digest.error());
+    }
+    if (!encoded) {
+        return std::unexpected(encoded.error());
+    }
+    return HashTile{level, index, width, *encoded, hex(*digest)};
+}
+
+Result<InclusionProof> TiledLog::inclusion_proof(std::uint64_t leaf_index,
+                                                 std::uint64_t tree_size) const {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    if (tree_size == 0 || leaf_index >= tree_size) {
+        return std::unexpected(
+            Error{"invalid_input", "leaf index must be within a non-empty tree"});
+    }
+    std::error_code error;
+    std::filesystem::create_directories(impl_->directory, error);
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not create transparency directory: " + error.message()});
+    }
+    const auto append_lock = AppendLock::acquire(impl_->directory / "append.lock");
+    if (!append_lock) {
+        return std::unexpected(append_lock.error());
+    }
+    const auto current = stored_state(impl_->state_path());
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    if (tree_size > current->tree_size) {
+        return std::unexpected(
+            Error{"invalid_input", "requested tree size is beyond the current log"});
+    }
+    const auto ensured = impl_->ensure_hash_tiles(*current);
+    if (!ensured) {
+        return std::unexpected(ensured.error());
+    }
+    InclusionProof proof{.leaf_index = leaf_index, .tree_size = tree_size};
+    const auto appended =
+        impl_->append_inclusion_path(leaf_index, 0, tree_size, tree_size, proof.audit_path);
+    if (!appended) {
+        return std::unexpected(appended.error());
+    }
+    const auto root = impl_->range_hash(0, tree_size, tree_size);
+    if (!root) {
+        return std::unexpected(root.error());
+    }
+    proof.root_hash = hex(*root);
+    return proof;
+}
+
+Result<ConsistencyProof> TiledLog::consistency_proof(std::uint64_t old_tree_size,
+                                                     std::uint64_t new_tree_size) const {
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->valid_instance) {
+        return std::unexpected(
+            Error{"invalid_input", "lake instance name is not a safe path component"});
+    }
+    if (old_tree_size > new_tree_size) {
+        return std::unexpected(
+            Error{"invalid_input", "old tree size must not exceed new tree size"});
+    }
+    std::error_code error;
+    std::filesystem::create_directories(impl_->directory, error);
+    if (error) {
+        return std::unexpected(
+            Error{"store_error", "could not create transparency directory: " + error.message()});
+    }
+    const auto append_lock = AppendLock::acquire(impl_->directory / "append.lock");
+    if (!append_lock) {
+        return std::unexpected(append_lock.error());
+    }
+    const auto current = stored_state(impl_->state_path());
+    if (!current) {
+        return std::unexpected(current.error());
+    }
+    if (new_tree_size > current->tree_size) {
+        return std::unexpected(
+            Error{"invalid_input", "requested tree size is beyond the current log"});
+    }
+    const auto ensured = impl_->ensure_hash_tiles(*current);
+    if (!ensured) {
+        return std::unexpected(ensured.error());
+    }
+    ConsistencyProof proof{
+        .old_tree_size = old_tree_size,
+        .new_tree_size = new_tree_size,
+    };
+    const auto old_root =
+        old_tree_size == 0 ? empty_root() : impl_->range_hash(0, old_tree_size, new_tree_size);
+    if (!old_root) {
+        return std::unexpected(old_root.error());
+    }
+    const auto new_root =
+        new_tree_size == 0 ? empty_root() : impl_->range_hash(0, new_tree_size, new_tree_size);
+    if (!new_root) {
+        return std::unexpected(new_root.error());
+    }
+    proof.old_root_hash = hex(*old_root);
+    proof.new_root_hash = hex(*new_root);
+    if (old_tree_size != 0 && old_tree_size != new_tree_size) {
+        const auto appended = impl_->append_consistency_path(
+            old_tree_size, new_tree_size, 0, true, new_tree_size, proof.audit_path);
+        if (!appended) {
+            return std::unexpected(appended.error());
+        }
+    }
+    return proof;
 }
 
 Result<LogState> TiledLog::state() const {
