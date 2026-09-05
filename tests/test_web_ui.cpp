@@ -1,11 +1,38 @@
 #include <gtest/gtest.h>
 
+#include "lake/api/drive.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/version.hpp"
 
 TEST(WebUi, EscapesHtml) {
     EXPECT_EQ(lake::api::web_ui_escape("<a href=\"x\">&'"),
               "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
+}
+
+TEST(DrivePreview, DefaultRegistryRendersEveryFormat) {
+    auto registry = lake::api::DriveFormatRegistry::defaults();
+    const std::vector<std::pair<std::string, std::string>> fixtures{
+        {"note.txt", "plain"},
+        {"README.md", "# Heading\n- item"},
+        {"image.png", "PNG"},
+        {"rows.csv", "name,value\none,1\n"},
+        {"rows.json", R"([{"name":"one","value":1}])"},
+        {"paper.pdf", "%PDF-1.7\n/Title (Paper)\n/Type /Page\n"},
+    };
+    for (const auto& [path, contents] : fixtures) {
+        const lake::api::RepositoryFile file{path, "blob", contents, contents.size()};
+        const auto preview = registry.preview(file);
+        ASSERT_TRUE(preview) << path << ": " << preview.error();
+        EXPECT_FALSE(preview->html.empty()) << path;
+    }
+    const lake::api::RepositoryFile unsupported{"archive.zip", "blob", "zip", 3};
+    EXPECT_FALSE(registry.preview(unsupported));
+    EXPECT_TRUE(registry.add(".custom", [](const lake::api::RepositoryFile&) {
+        return lake::api::DrivePreview{"custom", "text/plain", "<p>custom</p>"};
+    }));
+    EXPECT_FALSE(registry.add(".custom", [](const lake::api::RepositoryFile&) {
+        return lake::api::DrivePreview{"custom", "text/plain", "<p>duplicate</p>"};
+    }));
 }
 
 TEST(WebUi, HelloIsASelfContainedDocument) {

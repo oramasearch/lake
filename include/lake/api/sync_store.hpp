@@ -50,6 +50,7 @@ struct RepositoryTreeEntry {
     std::string kind;
     std::string blob;
     std::uint32_t mode = 0;
+    std::string node_id;
 };
 
 struct RepositoryFile {
@@ -57,6 +58,7 @@ struct RepositoryFile {
     std::string blob;
     std::string contents;
     std::uint64_t size = 0;
+    std::vector<std::byte> raw_contents;
 };
 
 struct RepositoryChange {
@@ -217,6 +219,11 @@ public:
                         const std::string& result_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id, const std::string& repository_id) = 0;
+    virtual SyncStoreResult<RepositoryChange>
+    restore_repository_file(const std::string& customer_id,
+                            const std::string& repository_id,
+                            const std::string& change_id,
+                            const std::string& path) = 0;
 
     virtual SyncStoreResult<RepositoryPortableData> export_portable(
         const std::string& customer_id, const std::string& repository_id, bool include_git) = 0;

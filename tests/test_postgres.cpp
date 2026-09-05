@@ -228,6 +228,53 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     EXPECT_FALSE(access.value.at("items").empty());
 }
 
+TEST(PostgresCapabilities, DriveShareLinksRoundTrip) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const std::string node_id = suffix + "000000000000000000000000";
+    const auto user = store->create_user(
+        {"taap:1:ed25519:drive-" + suffix, "drive-" + suffix + "@example.test", "Drive"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "drive-" + suffix});
+    ASSERT_TRUE(customer);
+    const auto repository =
+        store->create_repository({customer->id, "drive-" + suffix, "", "private"});
+    ASSERT_TRUE(repository);
+    const auto repository_object = store->find_policy_object("repository", repository->id);
+    ASSERT_TRUE(repository_object);
+    const auto folder = store->create_policy_object({"path",
+                                                     repository->id + ":" + node_id,
+                                                     repository_object->id,
+                                                     user->taap_id,
+                                                     "request-folder-" + suffix,
+                                                     true});
+    ASSERT_TRUE(folder);
+    const auto link = store->create_drive_share_link({repository->id,
+                                                      folder->id,
+                                                      node_id,
+                                                      "shared",
+                                                      "read",
+                                                      "token-hash-" + suffix,
+                                                      "2999-01-01T00:00:00Z",
+                                                      user->taap_id,
+                                                      "request-link-" + suffix});
+    ASSERT_TRUE(link) << link.error().message;
+    EXPECT_EQ(store->get_drive_share_link(link->id)->path, "shared");
+    EXPECT_EQ(store->get_drive_share_link_by_token_hash("token-hash-" + suffix)->id, link->id);
+    const auto listed = store->list_drive_share_links(repository->id, folder->id, 10);
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 1u);
+    const auto revoked = store->revoke_drive_share_link(link->id);
+    ASSERT_TRUE(revoked);
+    EXPECT_FALSE(revoked->revoked_at.empty());
+}
+
 TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     const char* uri = std::getenv("LAKE_TEST_DB_URI");
     if (uri == nullptr || std::string(uri).empty()) {

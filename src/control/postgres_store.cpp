@@ -1487,6 +1487,9 @@ constexpr const char* provisioning_log_columns =
     "created_at::text";
 constexpr const char* forge_record_columns =
     "id::text, repository_id::text, kind, value::text, created_at::text, updated_at::text";
+constexpr const char* drive_share_link_columns =
+    "id::text, repository_id::text, object_id::text, node_id, path, role, token_hash, "
+    "expires_at::text, coalesce(revoked_at::text,''), created_by_taap_id, created_at::text";
 
 ForgeRecord forge_record_of(const pqxx::row& row) {
     return ForgeRecord{row[0].as<std::string>(),
@@ -1495,6 +1498,20 @@ ForgeRecord forge_record_of(const pqxx::row& row) {
                        row[4].as<std::string>(),
                        row[5].as<std::string>(),
                        nlohmann::json::parse(row[3].as<std::string>())};
+}
+
+DriveShareLink drive_share_link_of(const pqxx::row& row) {
+    return DriveShareLink{row[0].as<std::string>(),
+                          row[1].as<std::string>(),
+                          row[2].as<std::string>(),
+                          row[3].as<std::string>(),
+                          row[4].as<std::string>(),
+                          row[5].as<std::string>(),
+                          row[6].as<std::string>(),
+                          row[7].as<std::string>(),
+                          row[8].as<std::string>(),
+                          row[9].as<std::string>(),
+                          row[10].as<std::string>()};
 }
 
 void remove_scim_user_access(pqxx::work& tx,
@@ -1949,6 +1966,121 @@ public:
                 return std::unexpected(StoreError{"not_found", "no forge record " + id});
             }
             return forge_record_of(rows[0]);
+        });
+    }
+
+    Result<DriveShareLink> create_drive_share_link(const NewDriveShareLink& input) override {
+        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
+            const pqxx::result object = tx.exec_params(
+                "SELECT object_type FROM objects WHERE id = $1::uuid", input.object_id);
+            if (object.empty() || object[0][0].as<std::string>() != "path") {
+                return std::unexpected(
+                    StoreError{"invalid_input", "object_id does not reference a drive folder"});
+            }
+            if (input.role != "read" && input.role != "write") {
+                return std::unexpected(
+                    StoreError{"invalid_input", "share link role must be read or write"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("INSERT INTO drive_share_links (repository_id, object_id, node_id, "
+                            "path, role, token_hash, expires_at, created_by_taap_id) VALUES "
+                            "($1::uuid, $2::uuid, $3, $4, $5, $6, $7::timestamptz, $8) "
+                            "RETURNING ") +
+                    drive_share_link_columns,
+                input.repository_id,
+                input.object_id,
+                input.node_id,
+                input.path,
+                input.role,
+                input.token_hash,
+                input.expires_at,
+                input.created_by_taap_id);
+            const DriveShareLink link = drive_share_link_of(rows[0]);
+            tx.exec_params("INSERT INTO grants (principal_taap_id, object_id, role, "
+                           "attestation_digest, granted_by_taap_id) VALUES ($1, $2::uuid, $3, $4, "
+                           "$5)",
+                           "share-link:" + link.id,
+                           link.object_id,
+                           link.role,
+                           "drive_share_link/" + link.id,
+                           input.created_by_taap_id);
+            return link;
+        });
+    }
+
+    Result<DriveShareLink> get_drive_share_link(const std::string& id) override {
+        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
+                                   " FROM drive_share_links WHERE id = $1::uuid",
+                               id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no drive share link " + id});
+            }
+            return drive_share_link_of(rows[0]);
+        });
+    }
+
+    Result<DriveShareLink>
+    get_drive_share_link_by_token_hash(const std::string& token_hash) override {
+        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
+                                   " FROM drive_share_links WHERE token_hash = $1",
+                               token_hash);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "share link is not recognized"});
+            }
+            return drive_share_link_of(rows[0]);
+        });
+    }
+
+    Result<std::vector<DriveShareLink>> list_drive_share_links(const std::string& repository_id,
+                                                               const std::string& object_id,
+                                                               int limit) override {
+        return with_tx<std::vector<DriveShareLink>>(
+            [&](pqxx::work& tx) -> Result<std::vector<DriveShareLink>> {
+                const pqxx::result rows =
+                    object_id.empty()
+                        ? tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
+                                             " FROM drive_share_links WHERE repository_id = "
+                                             "$1::uuid ORDER BY created_at DESC LIMIT $2",
+                                         repository_id,
+                                         limit)
+                        : tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
+                                             " FROM drive_share_links WHERE repository_id = "
+                                             "$1::uuid AND object_id = $2::uuid ORDER BY "
+                                             "created_at DESC LIMIT $3",
+                                         repository_id,
+                                         object_id,
+                                         limit);
+                std::vector<DriveShareLink> output;
+                for (const auto& row : rows) {
+                    output.push_back(drive_share_link_of(row));
+                }
+                return output;
+            });
+    }
+
+    Result<DriveShareLink> revoke_drive_share_link(const std::string& id) override {
+        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
+            const pqxx::result current =
+                tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
+                                   " FROM drive_share_links WHERE id = $1::uuid FOR UPDATE",
+                               id);
+            if (current.empty()) {
+                return std::unexpected(StoreError{"not_found", "no drive share link " + id});
+            }
+            if (!drive_share_link_of(current[0]).revoked_at.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "drive share link is already revoked"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE drive_share_links SET revoked_at = now() WHERE id = $1::uuid "
+                            "RETURNING ") +
+                    drive_share_link_columns,
+                id);
+            return drive_share_link_of(rows[0]);
         });
     }
 

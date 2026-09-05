@@ -53,6 +53,14 @@ struct NewForgeRecord {
     std::string repository_id, kind;
     nlohmann::json value;
 };
+struct DriveShareLink {
+    std::string id, repository_id, object_id, node_id, path, role, token_hash, expires_at,
+        revoked_at, created_by_taap_id, created_at;
+};
+struct NewDriveShareLink {
+    std::string repository_id, object_id, node_id, path, role, token_hash, expires_at,
+        created_by_taap_id, request_id;
+};
 struct Team {
     std::string id, organization_id, name, display_name, created_at, updated_at;
 };
@@ -381,6 +389,7 @@ nlohmann::json to_json(const Membership&);
 nlohmann::json to_json(const Invitation&);
 nlohmann::json to_json(const PolicyObject&);
 nlohmann::json to_json(const Grant&);
+nlohmann::json to_json(const DriveShareLink&);
 std::string new_uuid_v4();
 std::string now_iso8601();
 nlohmann::json to_json(const Device&);
@@ -433,6 +442,13 @@ public:
     list_forge_records(const std::string& repository_id, const std::string& kind, int limit) = 0;
     virtual Result<ForgeRecord> update_forge_record(const std::string& id,
                                                     const nlohmann::json& value) = 0;
+    virtual Result<DriveShareLink> create_drive_share_link(const NewDriveShareLink&) = 0;
+    virtual Result<DriveShareLink> get_drive_share_link(const std::string& id) = 0;
+    virtual Result<DriveShareLink>
+    get_drive_share_link_by_token_hash(const std::string& token_hash) = 0;
+    virtual Result<std::vector<DriveShareLink>> list_drive_share_links(
+        const std::string& repository_id, const std::string& object_id, int limit) = 0;
+    virtual Result<DriveShareLink> revoke_drive_share_link(const std::string& id) = 0;
 
     virtual Result<Team> create_team(const NewTeam&) = 0;
     virtual Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) = 0;

@@ -22,6 +22,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <openssl/hmac.h>
+
 #include <liquid/liquid.hpp>
 
 #include "lake/api/capabilities.hpp"
@@ -34,6 +36,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/telemetry/metrics.hpp"
 
@@ -64,6 +67,8 @@ struct Surface {
 struct RepositoryFixtureStore final : SyncStore {
     std::map<std::string, RepositoryPortableData> imported;
     std::uint64_t unique_bytes = 123;
+    bool restored = false;
+    bool shared_folder_moved = false;
     SyncStoreResult<std::vector<std::string>>
     find_missing(const std::string&, const std::vector<std::string>&) override {
         return std::vector<std::string>{};
@@ -89,14 +94,30 @@ struct RepositoryFixtureStore final : SyncStore {
 
     SyncStoreResult<std::vector<RepositoryTreeEntry>>
     repository_tree(const std::string&, const std::string&, const std::string&) override {
-        return std::vector<RepositoryTreeEntry>{{"readme.md", "blob", "blob-1", 0644}};
+        const std::string shared_path = shared_folder_moved ? "renamed" : "shared";
+        return std::vector<RepositoryTreeEntry>{
+            {"readme.md", "blob", "blob-1", 0644, "11111111111111111111111111111111"},
+            {"MODEL_CARD.md", "blob", "blob-card", 0644, "44444444444444444444444444444444"},
+            {"weights.bin", "blob", "blob-weights", 0644, "55555555555555555555555555555555"},
+            {shared_path, "tree", "", 0755, "22222222222222222222222222222222"},
+            {shared_path + "/readme.md",
+             "blob",
+             "blob-2",
+             0644,
+             "33333333333333333333333333333333"}};
     }
 
     SyncStoreResult<RepositoryFile> repository_file(const std::string&,
                                                     const std::string&,
                                                     const std::string&,
-                                                    const std::string&) override {
-        return RepositoryFile{"readme.md", "blob-1", "hello", 5};
+                                                    const std::string& path) override {
+        if (path == "MODEL_CARD.md") {
+            return RepositoryFile{path, "blob-card", "# Fixture model", 15};
+        }
+        if (path == "weights.bin") {
+            return RepositoryFile{path, "blob-weights", "fixture weights", 15};
+        }
+        return RepositoryFile{path, "blob-1", "hello", 5};
     }
 
     SyncStoreResult<std::vector<RepositoryChange>> repository_log(const std::string&,
@@ -143,18 +164,32 @@ struct RepositoryFixtureStore final : SyncStore {
             .cache_status = "hit",
             .worker = "worker-1",
             .observed_at = "2026-09-04T00:00:00Z",
-            .attestations = {{"attestation-1",
-                              "slsa_provenance/1",
-                              "subject-1",
-                              "taap:1:ed25519:builder",
-                              true,
-                              ""}},
+            .attestations =
+                {{"attestation-1",
+                  "slsa_provenance/1",
+                  "subject-1",
+                  "taap:1:ed25519:builder",
+                  true,
+                  ""},
+                 {"attestation-2", "sbom/1", "subject-1", "taap:1:ed25519:builder", true, ""}},
             .trace = RepositoryArtifactTrace{"trace-1", 12, 2, 1, 1, 1}};
     }
 
     SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string&, const std::string&) override {
         return std::vector<RepositoryConflict>{{"readme.md", {"blob-1", "blob-2"}}};
+    }
+
+    SyncStoreResult<RepositoryChange> restore_repository_file(const std::string&,
+                                                              const std::string&,
+                                                              const std::string& change_id,
+                                                              const std::string& path) override {
+        restored = true;
+        return RepositoryChange{"restored-change",
+                                {change_id},
+                                "taap:1:ed25519:author",
+                                "Restore " + path,
+                                "2026-09-04T01:00:00Z"};
     }
 
     SyncStoreResult<RepositoryPortableData>
@@ -307,6 +342,27 @@ std::vector<std::byte> bytes(const std::string& value) {
     output.reserve(value.size());
     for (const char character : value) {
         output.push_back(static_cast<std::byte>(character));
+    }
+    return output;
+}
+
+std::string share_token_hash(std::string_view token) {
+    static constexpr std::string_view key = "lake-drive-share-link/1";
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int size = 0;
+    HMAC(EVP_sha256(),
+         key.data(),
+         static_cast<int>(key.size()),
+         reinterpret_cast<const unsigned char*>(token.data()),
+         token.size(),
+         digest,
+         &size);
+    static constexpr char alphabet[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(size * 2);
+    for (unsigned index = 0; index < size; ++index) {
+        output += alphabet[digest[index] >> 4U];
+        output += alphabet[digest[index] & 0x0fU];
     }
     return output;
 }
@@ -1761,6 +1817,177 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     EXPECT_EQ(artifact.value["trace"]["id"], "trace-1");
 }
 
+TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult owner = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:owner"}, {"display_name", "Owner"}});
+    const ApiResult recipient = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:recipient"}, {"display_name", "Recipient"}});
+    const ApiResult outsider = surface.call(
+        "create_user", {{"taap_id", "taap:1:ed25519:outsider"}, {"display_name", "Outsider"}});
+    ASSERT_TRUE(owner.ok);
+    ASSERT_TRUE(recipient.ok);
+    ASSERT_TRUE(outsider.ok);
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "owner"}});
+    ASSERT_TRUE(customer.ok);
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const auto repository_object =
+        surface.store.find_policy_object("repository", repository.value["id"]);
+    ASSERT_TRUE(repository_object);
+    ASSERT_TRUE(surface.store.create_grant({"taap:1:ed25519:owner",
+                                            repository_object->id,
+                                            "admin",
+                                            "attestation-owner",
+                                            "admin",
+                                            "request-owner"}));
+
+    surface.ctx.operator_credential = false;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const ApiResult shared = surface.call("share_drive_folder",
+                                          {{"repository_id", repository.value["id"]},
+                                           {"ref", "main"},
+                                           {"path", "shared"},
+                                           {"principal_taap_id", "taap:1:ed25519:recipient"},
+                                           {"role", "read"},
+                                           {"attestation_digest", "attestation-recipient"}});
+    ASSERT_TRUE(shared.ok) << shared.error.message;
+    const std::string folder_object = shared.value["object"]["id"];
+
+    surface.ctx.acting_identity = "taap:1:ed25519:recipient";
+    const ApiResult visible = surface.call(
+        "drive_browse",
+        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}});
+    ASSERT_TRUE(visible.ok) << visible.error.message;
+    ASSERT_EQ(visible.value["items"].size(), 1u);
+    EXPECT_EQ(visible.value["items"][0]["path"], "shared/readme.md");
+
+    surface.ctx.acting_identity = "taap:1:ed25519:outsider";
+    const ApiResult hidden = surface.call(
+        "drive_browse",
+        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}});
+    EXPECT_EQ(hidden.error.code, "unauthorized");
+
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const ApiResult effective = surface.call(
+        "drive_effective_access",
+        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}});
+    ASSERT_TRUE(effective.ok) << effective.error.message;
+    for (const json& entry : effective.value["items"]) {
+        for (const std::string action : {"read", "write", "share"}) {
+            lake::control::AuthorizationCache cache;
+            const auto decision = lake::control::authorize(
+                surface.store, entry["principal_taap_id"], folder_object, action, cache);
+            ASSERT_TRUE(decision);
+            const auto actions = entry["actions"].get<std::vector<std::string>>();
+            EXPECT_EQ(decision->allowed, std::ranges::find(actions, action) != actions.end());
+        }
+    }
+
+    const ApiResult active_link = surface.call("create_drive_share_link",
+                                               {{"repository_id", repository.value["id"]},
+                                                {"ref", "main"},
+                                                {"path", "shared"},
+                                                {"role", "read"},
+                                                {"expires_at", "2999-01-01T00:00:00Z"}});
+    ASSERT_TRUE(active_link.ok) << active_link.error.message;
+    surface.ctx.authorized = false;
+    surface.ctx.acting_identity.clear();
+    repository_store.shared_folder_moved = true;
+    const ApiResult moved_link = surface.call(
+        "resolve_drive_share_link", {{"token", active_link.value["token"]}, {"ref", "main"}});
+    ASSERT_TRUE(moved_link.ok) << moved_link.error.message;
+    EXPECT_EQ(moved_link.value["path"], "renamed");
+    EXPECT_EQ(moved_link.value["items"][0]["path"], "renamed/readme.md");
+    surface.ctx.authorized = true;
+    surface.ctx.acting_identity = "taap:1:ed25519:owner";
+    const ApiResult revoked =
+        surface.call("revoke_drive_share_link", {{"link_id", active_link.value["id"]}});
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    surface.ctx.authorized = false;
+    surface.ctx.acting_identity.clear();
+    EXPECT_EQ(surface
+                  .call("resolve_drive_share_link",
+                        {{"token", active_link.value["token"]}, {"ref", "main"}})
+                  .error.code,
+              "unauthorized");
+
+    const std::string expired_token = "expired-token";
+    ASSERT_TRUE(surface.store.create_drive_share_link({repository.value["id"],
+                                                       folder_object,
+                                                       "22222222222222222222222222222222",
+                                                       "shared",
+                                                       "read",
+                                                       share_token_hash(expired_token),
+                                                       "2020-01-01T00:00:00Z",
+                                                       "taap:1:ed25519:owner",
+                                                       "request-expired"}));
+    const ApiResult expired =
+        surface.call("resolve_drive_share_link", {{"token", expired_token}, {"ref", "main"}});
+    EXPECT_EQ(expired.error.code, "unauthorized");
+}
+
+TEST(Drive, PathHistoryRestoresAsANewChange) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "history"}});
+    ASSERT_TRUE(repository.ok);
+    const ApiResult history = surface.call(
+        "drive_history",
+        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "readme.md"}});
+    ASSERT_TRUE(history.ok) << history.error.message;
+    ASSERT_EQ(history.value["items"].size(), 1u);
+    EXPECT_EQ(history.value["items"][0]["id"], "change-1");
+    const ApiResult restored = surface.call("restore_drive_version",
+                                            {{"repository_id", repository.value["id"]},
+                                             {"ref", "main"},
+                                             {"path", "readme.md"},
+                                             {"change_id", "change-1"}});
+    ASSERT_TRUE(restored.ok) << restored.error.message;
+    EXPECT_EQ(restored.value["id"], "restored-change");
+    EXPECT_TRUE(repository_store.restored);
+}
+
+TEST(Models, MetadataAndResolveUseRepositoryHistoryAndProvenance) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult user = surface.call("create_user", {{"display_name", "Ada"}});
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
+    const ApiResult repository = surface.call("create_repository",
+                                              {{"customer_id", customer.value["id"]},
+                                               {"name", "fixture-model"},
+                                               {"visibility", "public"}});
+    ASSERT_TRUE(repository.ok);
+    surface.ctx.authorized = false;
+    surface.ctx.acting_identity.clear();
+    const ApiResult model =
+        surface.call("get_model", {{"id", repository.value["id"]}, {"revision", "main"}});
+    ASSERT_TRUE(model.ok) << model.error.message;
+    EXPECT_EQ(model.value["card"], "# Fixture model");
+    EXPECT_TRUE(model.value["provenance_complete"]);
+    EXPECT_TRUE(model.value["provenance"][0]["sbom"]);
+    EXPECT_TRUE(model.value["provenance"][0]["slsa_provenance"]);
+    const ApiResult file = surface.call(
+        "resolve_model_file",
+        {{"id", repository.value["id"]}, {"revision", "main"}, {"path", "weights.bin"}});
+    ASSERT_TRUE(file.ok) << file.error.message;
+    EXPECT_EQ(file.value["contents"], "fixture weights");
+}
+
 TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     TemporaryRepositoryRoot root;
     const auto store = std::make_shared<lake::control::InMemoryStore>();
@@ -1795,6 +2022,12 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     ASSERT_TRUE(liquid::runtime::block_on(
         repository.write("readme.md", bytes("public content\nupdated\n"))));
     ASSERT_TRUE(liquid::runtime::block_on(repository.write("notes.md", bytes("new file\n"))));
+    ASSERT_TRUE(liquid::runtime::block_on(
+        repository.write("MODEL_CARD.md", bytes("# Recorded fixture model\n"))));
+    ASSERT_TRUE(liquid::runtime::block_on(
+        repository.write("weights.bin", bytes("recorded fixture weights"))));
+    ASSERT_TRUE(liquid::runtime::block_on(
+        repository.write("nested/config.json", bytes("{\"fixture\":true}"))));
     const auto second_change = liquid::runtime::block_on(repository.cut("update public content"));
     ASSERT_TRUE(second_change) << second_change.error().message;
     const std::vector<std::byte> artifact_bytes = bytes("artifact output");
@@ -1913,6 +2146,22 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     EXPECT_NE(artifact_page.find("slsa_provenance/1"), std::string::npos);
     EXPECT_NE(artifact_page.find("sbom/1"), std::string::npos);
     EXPECT_NE(artifact_page.find("verified"), std::string::npos);
+
+    const std::string model_response =
+        http_get(server.port(), "/api/models/" + public_repository->id);
+    EXPECT_NE(model_response.find(" 200 "), std::string::npos) << model_response;
+    const json model = response_json(model_response);
+    ASSERT_TRUE(model.is_object());
+    EXPECT_EQ(model["card"], "# Recorded fixture model\n");
+    EXPECT_TRUE(model["provenance_complete"]);
+    const std::string model_file =
+        http_get(server.port(), "/models/" + public_repository->id + "/resolve/main/weights.bin");
+    EXPECT_NE(model_file.find(" 200 "), std::string::npos) << model_file;
+    EXPECT_NE(model_file.find("recorded fixture weights"), std::string::npos);
+    const std::string nested_model_file = http_get(
+        server.port(), "/models/" + public_repository->id + "/resolve/main/nested/config.json");
+    EXPECT_NE(nested_model_file.find(" 200 "), std::string::npos) << nested_model_file;
+    EXPECT_NE(nested_model_file.find("{\"fixture\":true}"), std::string::npos);
 
     const std::string private_page =
         http_get(server.port(), "/repository?id=" + private_repository->id);

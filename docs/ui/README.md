@@ -1,5 +1,8 @@
 # The web UI
 
+Drive browsing, preview, history, sharing, and documented Linux client states are in
+[`drive.md`](drive.md).
+
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on the two passkey
 pages that call `navigator.credentials`, unit-tested as strings. The navigation is on every page:
