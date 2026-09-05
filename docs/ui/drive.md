@@ -1,10 +1,62 @@
 # Drive pages
 
-The drive pages are server-rendered, self-contained HTML. A repository page links to its drive.
-Folder rows link to another folder; supported files link to preview; every path links to history.
-Folder sharing displays direct and inherited effective access, explains live/link/copy delivery,
-creates expiring links, and revokes links with POST forms. No sharing state is inferred in the
-renderer: the page receives the capability result.
+**Status: implemented for lake #43.** The drive is a server-rendered repository view for people
+who work with folders and files. It uses the same liquid paths, stable node identifiers, blobs,
+changes, conflicts, policy checks, and audit records as every API caller.
+
+## Browse and mutate
+
+`GET /drive?repository_id=<id>&ref=<ref>&path=<path>` provides breadcrumbs and immediate children.
+The display control selects list or grid and sorts folders and files by name, size, or last
+structural change. List view exposes size and modified columns; grid view carries the same values
+on cards.
+
+Signed-in users receive these capability-backed controls:
+
+| Control | Route | Capability | History behavior |
+|---|---|---|---|
+| New folder | `POST /drive/folder` | `create_drive_folder` | Commits a folder marker as a new change |
+| Upload | `POST /drive/upload` | `upload_drive_files` | Commits all selected files in one change |
+| Rename | `POST /drive/rename` | `move_drive_path` | Moves the stable node in a new change |
+| Move | `POST /drive/move` | `move_drive_path` | Moves the stable node in a new change |
+| Delete | `POST /drive/delete` | `delete_drive_path` | Removes the current path in a new change |
+
+Upload is an ordinary multipart form. A small progressive-enhancement island adds drag and drop,
+submits through that form, and contains no authorization or repository logic. Empty folders use a
+reserved `.lake-folder` marker hidden from drive results. Deleting or moving a current path never
+removes its prior versions from liquid history.
+
+## Preview and download
+
+`GET /drive/preview` chooses a renderer from `DriveFormatRegistry`. Markdown is rendered and HTML
+escaped on the server. Text, CSV, and JSON remain server-rendered; images use an image element;
+PDF uses the browser's native document object; video and audio use native media controls. An
+unregistered format shows its size and digest and offers `GET /drive/download` instead of guessing.
+
+The current extension table is deliberately local. When liquid #29's format registry lands, its
+codec metadata plugs into `DriveFormatRegistry::defaults()` as the renderer selection source. The
+page and capability contracts do not change.
+
+## History and conflicts
+
+`GET /drive/history` lists only changes whose structural diff touches the selected old or new
+path. Each available version can be restored with `POST /drive/history/restore`; restore creates a
+new change. Selecting two text versions opens `GET /drive/history/diff`, which reads both immutable
+revisions and renders their structural line difference.
+
+The repository conflicts page links each path to `GET /drive/conflict`. That page states that both
+values are preserved, identifies each by digest and size, and shows a structural text difference
+when both values have a text renderer. Other formats retain the two-value presentation without
+claiming a textual comparison.
+
+## Rendering contract
+
+All drive page functions in `include/lake/api/web_ui.hpp` are pure string renderers. Capability
+tests cover repository reads, writes, policy routing, audit intent, version comparison, and
+conflict bytes. String tests cover escaped Markdown, all built-in preview families, list/grid
+controls, mutation forms, history selection, and conflict presentation. The seeded fixture takes
+light and dark screenshots of folder list, folder grid, preview, history, text comparison,
+conflict, sharing, and public link pages through the production HTTP routes.
 
 Linux desktop presentation remains a liquid client concern. Lake documents the shared states:
 

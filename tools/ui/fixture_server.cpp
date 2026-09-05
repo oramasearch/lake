@@ -109,8 +109,8 @@ void write_manifest(const std::filesystem::path& path,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::println(stderr, "usage: lake-ui-fixture STORE_ROOT MANIFEST");
+    if (argc != 3 && argc != 4) {
+        std::println(stderr, "usage: lake-ui-fixture STORE_ROOT MANIFEST [PORT]");
         return 2;
     }
     const std::filesystem::path store_root = argv[1];
@@ -259,8 +259,22 @@ int main(int argc, char** argv) {
                 "docs/architecture.md",
                 bytes("# Architecture\n\nServer-rendered pages and liquid data.\n"))),
             "write architecture document");
-    require(liquid::runtime::block_on(liquid_repository.cut("Initial repository content")),
-            "record initial change");
+    require(liquid::runtime::block_on(
+                liquid_repository.write("conflict.txt", bytes("primary version\nshared line\n"))),
+            "write conflict source");
+    require(liquid::runtime::block_on(
+                liquid_repository.write("document.pdf", bytes("%PDF-1.7\n%%EOF\n"))),
+            "write PDF fixture");
+    require(liquid::runtime::block_on(liquid_repository.write("clip.mp4", bytes("fixture video"))),
+            "write video fixture");
+    require(liquid::runtime::block_on(liquid_repository.write("sound.mp3", bytes("fixture audio"))),
+            "write audio fixture");
+    require(
+        liquid::runtime::block_on(liquid_repository.write("archive.zip", bytes("fixture archive"))),
+        "write fallback fixture");
+    const auto initial_change =
+        require(liquid::runtime::block_on(liquid_repository.cut("Initial repository content")),
+                "record initial change");
     require(liquid::runtime::block_on(liquid_repository.write(
                 "README.md", bytes("# Lake fixture\n\nA searchable Orama repository.\n"))),
             "update README.md");
@@ -313,6 +327,27 @@ int main(int argc, char** argv) {
     const auto artifact = require(liquid::runtime::block_on(liquid::build::record_remote_result(
                                       liquid_repository, build_input, result_value)),
                                   "record artifact");
+    auto conflict_repository = require(
+        liquid::runtime::block_on(liquid::repository::create(
+            store_root / organization_customer.id / "repositories" / (repository.id + "-conflict"),
+            repository_options)),
+        "create conflict repository");
+    require(liquid::runtime::block_on(conflict_repository.write(
+                "conflict.txt", bytes("alternate version\nshared line\n"))),
+            "write alternate conflict value");
+    require(liquid::runtime::block_on(conflict_repository.cut("Alternate conflict value")),
+            "record alternate conflict value");
+    require(liquid::runtime::block_on(
+                liquid_repository.combine(std::move(conflict_repository), "conflict.txt")),
+            "combine conflict value");
+    require(liquid::runtime::block_on(liquid_repository.cut("Record conflict values")),
+            "record conflict values");
+    const auto conflicts =
+        require(liquid::runtime::block_on(liquid_repository.conflicts()), "read conflict values");
+    if (conflicts.size() != 1U || conflicts.front().path != "conflict.txt") {
+        std::println(stderr, "lake-ui-fixture: conflict fixture was not preserved");
+        return 1;
+    }
     const auto references =
         require(liquid::runtime::block_on(liquid_repository.refs()), "read references");
     const std::string ref = references.front().name;
@@ -532,12 +567,26 @@ int main(int argc, char** argv) {
         {"drive",
          operator_token,
          std::format("/drive?repository_id={}&ref={}&path=docs", repository.id, ref)},
+        {"drive-grid",
+         operator_token,
+         std::format("/drive?repository_id={}&ref={}&path=&view=grid", repository.id, ref)},
         {"drive-preview",
          operator_token,
          std::format("/drive/preview?repository_id={}&ref={}&path=README.md", repository.id, ref)},
         {"drive-history",
          operator_token,
          std::format("/drive/history?repository_id={}&path=README.md", repository.id)},
+        {"drive-version-diff",
+         operator_token,
+         std::format("/drive/history/diff?repository_id={}&ref={}&path=README.md&left={}&right={}",
+                     repository.id,
+                     ref,
+                     liquid::to_string(initial_change.value),
+                     liquid::to_string(change.value))},
+        {"drive-conflict",
+         operator_token,
+         std::format(
+             "/drive/conflict?repository_id={}&ref={}&path=conflict.txt", repository.id, ref)},
         {"drive-share",
          operator_token,
          std::format("/drive/share?repository_id={}&ref={}&path=docs", repository.id, ref)},
@@ -547,7 +596,7 @@ int main(int argc, char** argv) {
 
     lake::api::ServerOptions options;
     options.listen_address = "127.0.0.1";
-    options.port = 4902;
+    options.port = argc == 4 ? static_cast<unsigned short>(std::stoul(argv[3])) : 4902;
     options.node_name = "ui-fixture";
     options.admin_token = admin_token;
     options.instance_kek = instance_kek;

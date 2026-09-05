@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <expected>
 #include <format>
+#include <iterator>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <openssl/evp.h>
 #include <openssl/hmac.h>
 
 #include "lake/api/drive.hpp"
@@ -78,18 +82,18 @@ repository_tree(const json& input, ApiContext& context, control::Repository& rep
     return *entries;
 }
 
-std::expected<DriveLocation, ApiError> nearest_drive_location(const json& input,
-                                                              ApiContext& context) {
+std::expected<DriveLocation, ApiError>
+nearest_drive_location(const json& input, ApiContext& context, bool require_path = true) {
     control::Repository repository;
     const auto entries = repository_tree(input, context, repository);
     if (!entries) {
         return std::unexpected(entries.error());
     }
     std::string path = input.value("path", "");
-    if (!path.empty() && !find_entry(*entries, path)) {
+    if (require_path && !path.empty() && !find_entry(*entries, path)) {
         return std::unexpected(ApiError{"not_found", "no drive path " + path, "/path"});
     }
-    std::string candidate = path;
+    std::string candidate = find_entry(*entries, path) ? path : parent_path(path);
     while (!candidate.empty()) {
         const RepositoryTreeEntry* entry = find_entry(*entries, candidate);
         if (entry && !entry->node_id.empty()) {
@@ -170,6 +174,14 @@ std::expected<std::string, ApiError> drive_object(const json& input, ApiContext&
     return location->object.id;
 }
 
+std::expected<std::string, ApiError> drive_history_object(const json& input, ApiContext& context) {
+    const auto location = nearest_drive_location(input, context, false);
+    if (!location) {
+        return std::unexpected(location.error());
+    }
+    return location->object.id;
+}
+
 std::expected<std::string, ApiError> link_object(const json& input, ApiContext& context) {
     if (!context.store) {
         return std::unexpected(
@@ -205,7 +217,8 @@ std::vector<RepositoryTreeEntry> folder_children(const std::vector<RepositoryTre
         }
         const std::string_view remaining(entry.path.data() + prefix.size(),
                                          entry.path.size() - prefix.size());
-        if (!remaining.empty() && remaining.find('/') == std::string_view::npos) {
+        if (!remaining.empty() && remaining != ".lake-folder" &&
+            remaining.find('/') == std::string_view::npos) {
             output.push_back(entry);
         }
     }
@@ -217,7 +230,174 @@ json tree_entry_json(const RepositoryTreeEntry& entry) {
             {"kind", entry.kind},
             {"blob", entry.blob},
             {"mode", entry.mode},
-            {"node_id", entry.node_id}};
+            {"node_id", entry.node_id},
+            {"size", entry.size},
+            {"stored_size", entry.stored_size},
+            {"modified_at", entry.last_changed_at}};
+}
+
+std::string path_name(std::string_view path) {
+    const std::size_t slash = path.find_last_of('/');
+    return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
+}
+
+std::string path_join(std::string_view folder, std::string_view name) {
+    return folder.empty() ? std::string(name) : std::string(folder) + "/" + std::string(name);
+}
+
+bool valid_path_name(std::string_view name) {
+    return !name.empty() && name != "." && name != ".." && name != ".lake-folder" &&
+           name.find('/') == std::string_view::npos && name.find('\\') == std::string_view::npos;
+}
+
+bool valid_drive_path(std::string_view path) {
+    if (path.empty() || path.front() == '/' || path.back() == '/' ||
+        path.find('\\') != std::string_view::npos) {
+        return false;
+    }
+    std::size_t offset = 0;
+    while (offset < path.size()) {
+        const std::size_t slash = path.find('/', offset);
+        const std::size_t end = slash == std::string_view::npos ? path.size() : slash;
+        if (!valid_path_name(path.substr(offset, end - offset))) {
+            return false;
+        }
+        offset = end + 1;
+    }
+    return true;
+}
+
+bool path_touches(std::string_view changed, std::string_view entry) {
+    return changed == entry || (changed.size() > entry.size() && changed.starts_with(entry) &&
+                                changed[entry.size()] == '/');
+}
+
+std::expected<std::vector<RepositoryTreeEntry>, ApiError>
+folder_entries(const json& input,
+               ApiContext& context,
+               const control::Repository& repository,
+               const std::vector<RepositoryTreeEntry>& tree) {
+    std::vector<RepositoryTreeEntry> entries = folder_children(tree, input.value("path", ""));
+    const auto changes = context.sync_store->repository_log(repository.customer_id, repository.id);
+    if (!changes) {
+        return std::unexpected(ApiError{changes.error().code, changes.error().message, {}});
+    }
+    for (const RepositoryChange& change : *changes) {
+        const auto differences =
+            context.sync_store->repository_diff(repository.customer_id, repository.id, change.id);
+        if (!differences) {
+            return std::unexpected(
+                ApiError{differences.error().code, differences.error().message, {}});
+        }
+        for (RepositoryTreeEntry& entry : entries) {
+            const bool touched = std::ranges::any_of(*differences, [&](const auto& difference) {
+                return path_touches(difference.path, entry.path) ||
+                       path_touches(difference.old_path, entry.path);
+            });
+            if (touched && change.occurred_at > entry.last_changed_at) {
+                entry.last_changed_at = change.occurred_at;
+            }
+        }
+    }
+    const std::string sort = input.value("sort", "name");
+    const bool descending = input.value("direction", "asc") == "desc";
+    std::ranges::sort(
+        entries, [&](const RepositoryTreeEntry& left, const RepositoryTreeEntry& right) {
+            if ((left.kind == "tree") != (right.kind == "tree")) {
+                return left.kind == "tree";
+            }
+            if (left.path == right.path) {
+                return false;
+            }
+            int order = 0;
+            if (sort == "size" && left.size != right.size) {
+                order = left.size < right.size ? -1 : 1;
+            } else if (sort == "modified" && left.last_changed_at != right.last_changed_at) {
+                order = left.last_changed_at < right.last_changed_at ? -1 : 1;
+            } else {
+                order = path_name(left.path) < path_name(right.path) ? -1 : 1;
+            }
+            return descending ? order > 0 : order < 0;
+        });
+    return entries;
+}
+
+std::expected<std::vector<std::byte>, ApiError> decode_base64(std::string_view input,
+                                                              std::string path) {
+    if (input.empty()) {
+        return std::vector<std::byte>{};
+    }
+    if (input.size() % 4 != 0) {
+        return std::unexpected(ApiError{"invalid_input", "invalid base64 data", std::move(path)});
+    }
+    std::vector<std::byte> output((input.size() / 4) * 3);
+    const int size = EVP_DecodeBlock(reinterpret_cast<unsigned char*>(output.data()),
+                                     reinterpret_cast<const unsigned char*>(input.data()),
+                                     static_cast<int>(input.size()));
+    if (size < 0) {
+        return std::unexpected(ApiError{"invalid_input", "invalid base64 data", std::move(path)});
+    }
+    std::size_t padding = 0;
+    if (input.back() == '=') {
+        ++padding;
+    }
+    if (input.size() > 1 && input[input.size() - 2] == '=') {
+        ++padding;
+    }
+    output.resize(static_cast<std::size_t>(size) - padding);
+    return output;
+}
+
+json file_json(const RepositoryFile& file) {
+    return {{"path", file.path}, {"blob", file.blob}, {"size", file.size}};
+}
+
+json diff_json(const DriveVersionDiff& difference) {
+    json lines = json::array();
+    for (const DriveDiffLine& line : difference.lines) {
+        lines.push_back({{"kind", line.kind}, {"text", line.text}});
+    }
+    return {{"left", file_json(difference.left)},
+            {"right", file_json(difference.right)},
+            {"lines", std::move(lines)}};
+}
+
+std::expected<void, ApiError> require_drive_write(const json& input, ApiContext& context) {
+    if (context.operator_credential || context.acting_identity == "admin") {
+        return {};
+    }
+    const auto location = nearest_drive_location(input, context);
+    if (!location) {
+        return std::unexpected(location.error());
+    }
+    const auto decision = control::authorize(*context.store,
+                                             context.acting_identity,
+                                             location->object.id,
+                                             "write",
+                                             context.authorization_cache);
+    if (!decision) {
+        return std::unexpected(ApiError{decision.error().code, decision.error().message, {}});
+    }
+    if (!decision->allowed) {
+        return std::unexpected(
+            ApiError{"unauthorized", "principal is not allowed to write here", {}});
+    }
+    return {};
+}
+
+ApiResult committed_drive_change(const control::Repository& repository,
+                                 std::string_view audit_kind,
+                                 std::string_view audit_path,
+                                 SyncStoreResult<std::string> committed,
+                                 ApiContext& context) {
+    if (!committed) {
+        return sync_error(committed.error());
+    }
+    context.audit_customer_id = repository.customer_id;
+    context.audit_kind = std::string(audit_kind);
+    context.audit_object = "repository/" + repository.id + "/path/" + std::string(audit_path);
+    context.audit_details = {{"path", audit_path}, {"change", *committed}};
+    return ApiResult::success({{"change", *committed}, {"path", audit_path}});
 }
 
 json change_json(const RepositoryChange& change) {
@@ -302,7 +482,9 @@ json drive_input_schema(bool path_required) {
             {"properties",
              {{"repository_id", {{"type", "string"}}},
               {"ref", {{"type", "string"}}},
-              {"path", {{"type", "string"}}}}},
+              {"path", {{"type", "string"}}},
+              {"sort", {{"type", "string"}, {"enum", json::array({"name", "size", "modified"})}}},
+              {"direction", {{"type", "string"}, {"enum", json::array({"asc", "desc"})}}}}},
             {"required", std::move(required)},
             {"additionalProperties", false}};
 }
@@ -332,7 +514,12 @@ void register_drive_capabilities(Registry& registry) {
                 return ApiResult::failure(
                     entries.error().code, entries.error().message, entries.error().path);
             }
-            return browse_result(*location, *entries, context, context.acting_identity);
+            const auto children = folder_entries(input, context, repository, *entries);
+            if (!children) {
+                return ApiResult::failure(
+                    children.error().code, children.error().message, children.error().path);
+            }
+            return browse_result(*location, *children, context, context.acting_identity);
         }});
 
     registry.add(Capability{
@@ -373,6 +560,247 @@ void register_drive_capabilities(Registry& registry) {
         }});
 
     registry.add(Capability{
+        .name = "download_drive_file",
+        .title = "Download drive file",
+        .description = "Read one drive file as bytes with its digest and media type.",
+        .input_schema = drive_input_schema(true),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "drive file",
+        .action = "read",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto repository = context.store->get_repository(input.at("repository_id"));
+            if (!repository) {
+                return store_error(repository.error());
+            }
+            const auto file = context.sync_store->repository_file(
+                repository->customer_id, repository->id, input.at("ref"), input.at("path"));
+            if (!file) {
+                return sync_error(file.error());
+            }
+            context.sync_response = file->raw_contents;
+            if (context.sync_response.empty() && !file->contents.empty()) {
+                context.sync_response.reserve(file->contents.size());
+                std::ranges::transform(file->contents,
+                                       std::back_inserter(context.sync_response),
+                                       [](char value) { return static_cast<std::byte>(value); });
+            }
+            context.audit_customer_id = repository->customer_id;
+            context.audit_kind = "drive.file.downloaded";
+            context.audit_object = "repository/" + repository->id + "/path/" + file->path;
+            context.audit_details = {{"blob", file->blob}, {"path", file->path}};
+            return ApiResult::success({{"path", file->path},
+                                       {"blob", file->blob},
+                                       {"size", file->size},
+                                       {"media_type", "application/octet-stream"}});
+        }});
+
+    registry.add(Capability{
+        .name = "create_drive_folder",
+        .title = "Create drive folder",
+        .description = "Create an empty drive folder as a new liquid change.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"repository_id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"path", {{"type", "string"}}},
+                           {"name", {{"type", "string"}}}}},
+                         {"required", json::array({"repository_id", "ref", "path", "name"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "drive folder",
+        .action = "write",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const std::string name = input.at("name");
+            if (!valid_path_name(name)) {
+                return ApiResult::failure("invalid_input", "folder name is invalid", "/name");
+            }
+            control::Repository repository;
+            const auto entries = repository_tree(input, context, repository);
+            if (!entries) {
+                return ApiResult::failure(
+                    entries.error().code, entries.error().message, entries.error().path);
+            }
+            const std::string target = path_join(input.at("path").get<std::string>(), name);
+            if (find_entry(*entries, target)) {
+                return ApiResult::failure(
+                    "conflict", "a drive path already has that name", "/name");
+            }
+            std::vector<RepositoryWriteOperation> operations{
+                {.kind = RepositoryWriteKind::Folder, .path = target}};
+            return committed_drive_change(
+                repository,
+                "drive.folder.created",
+                target,
+                context.sync_store->commit_repository_files(repository.customer_id,
+                                                            repository.id,
+                                                            input.at("ref"),
+                                                            "Create folder " + target,
+                                                            std::move(operations)),
+                context);
+        }});
+
+    registry.add(Capability{
+        .name = "upload_drive_files",
+        .title = "Upload drive files",
+        .description = "Upload files into a drive folder as one liquid change.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"repository_id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"path", {{"type", "string"}}},
+                           {"files", {{"type", "array"}}}}},
+                         {"required", json::array({"repository_id", "ref", "path", "files"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "drive folder",
+        .action = "write",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!input.at("files").is_array() || input.at("files").empty()) {
+                return ApiResult::failure(
+                    "invalid_input", "at least one file is required", "/files");
+            }
+            const auto repository = context.store->get_repository(input.at("repository_id"));
+            if (!repository) {
+                return store_error(repository.error());
+            }
+            std::vector<RepositoryWriteOperation> operations;
+            for (std::size_t index = 0; index < input.at("files").size(); ++index) {
+                const json& value = input.at("files").at(index);
+                const std::string name = value.value("name", "");
+                if (!valid_path_name(name)) {
+                    return ApiResult::failure("invalid_input",
+                                              "uploaded file name is invalid",
+                                              "/files/" + std::to_string(index) + "/name");
+                }
+                const auto contents = decode_base64(value.value("content", ""),
+                                                    "/files/" + std::to_string(index) + "/content");
+                if (!contents) {
+                    return ApiResult::failure(
+                        contents.error().code, contents.error().message, contents.error().path);
+                }
+                operations.push_back({.kind = RepositoryWriteKind::File,
+                                      .path = path_join(input.at("path").get<std::string>(), name),
+                                      .contents = std::move(*contents)});
+            }
+            const std::string audit_path = input.at("path");
+            return committed_drive_change(
+                *repository,
+                "drive.files.uploaded",
+                audit_path,
+                context.sync_store->commit_repository_files(repository->customer_id,
+                                                            repository->id,
+                                                            input.at("ref"),
+                                                            "Upload drive files",
+                                                            std::move(operations)),
+                context);
+        }});
+
+    registry.add(Capability{
+        .name = "move_drive_path",
+        .title = "Move drive path",
+        .description = "Rename or move a drive path while retaining its stable node and history.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"repository_id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"path", {{"type", "string"}}},
+                           {"destination", {{"type", "string"}}}}},
+                         {"required", json::array({"repository_id", "ref", "path", "destination"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "drive path",
+        .action = "write",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            control::Repository repository;
+            const auto entries = repository_tree(input, context, repository);
+            if (!entries) {
+                return ApiResult::failure(
+                    entries.error().code, entries.error().message, entries.error().path);
+            }
+            const std::string source = input.at("path");
+            const std::string destination = input.at("destination");
+            const RepositoryTreeEntry* source_entry = find_entry(*entries, source);
+            if (!source_entry) {
+                return ApiResult::failure("not_found", "drive path does not exist", "/path");
+            }
+            if (!valid_drive_path(destination) || find_entry(*entries, destination)) {
+                return ApiResult::failure(
+                    "conflict", "move destination is invalid or already exists", "/destination");
+            }
+            if (source_entry->kind == "tree" && destination.starts_with(source + "/")) {
+                return ApiResult::failure(
+                    "invalid_input", "a folder cannot be moved inside itself", "/destination");
+            }
+            json target_input = input;
+            target_input["path"] = parent_path(destination);
+            target_input.erase("destination");
+            const auto target_access = require_drive_write(target_input, context);
+            if (!target_access) {
+                return ApiResult::failure(target_access.error().code,
+                                          target_access.error().message,
+                                          target_access.error().path);
+            }
+            std::vector<RepositoryWriteOperation> operations{
+                {.kind = RepositoryWriteKind::Moved, .path = destination, .source_path = source}};
+            return committed_drive_change(
+                repository,
+                "drive.path.moved",
+                destination,
+                context.sync_store->commit_repository_files(repository.customer_id,
+                                                            repository.id,
+                                                            input.at("ref"),
+                                                            "Move " + source + " to " + destination,
+                                                            std::move(operations)),
+                context);
+        }});
+
+    registry.add(Capability{
+        .name = "delete_drive_path",
+        .title = "Delete drive path",
+        .description = "Remove a drive path in a new liquid change without erasing its history.",
+        .input_schema = drive_input_schema(true),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "drive path",
+        .action = "write",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            control::Repository repository;
+            const auto entries = repository_tree(input, context, repository);
+            if (!entries) {
+                return ApiResult::failure(
+                    entries.error().code, entries.error().message, entries.error().path);
+            }
+            const std::string path = input.at("path");
+            const RepositoryTreeEntry* entry = find_entry(*entries, path);
+            if (!entry) {
+                return ApiResult::failure("not_found", "drive path does not exist", "/path");
+            }
+            const RepositoryWriteKind kind = entry->kind == "tree"
+                                                 ? RepositoryWriteKind::DeletedFolder
+                                                 : RepositoryWriteKind::DeletedFile;
+            std::vector<RepositoryWriteOperation> operations{{.kind = kind, .path = path}};
+            return committed_drive_change(
+                repository,
+                "drive.path.deleted",
+                path,
+                context.sync_store->commit_repository_files(repository.customer_id,
+                                                            repository.id,
+                                                            input.at("ref"),
+                                                            "Delete " + path,
+                                                            std::move(operations)),
+                context);
+        }});
+
+    registry.add(Capability{
         .name = "drive_history",
         .title = "Drive path history",
         .description = "List only changes whose structural diff touches one path.",
@@ -381,7 +809,7 @@ void register_drive_capabilities(Registry& registry) {
         .kind = CapabilityKind::Read,
         .object = "drive path",
         .action = "read",
-        .resolve_object = drive_object,
+        .resolve_object = drive_history_object,
         .handler = [](const json& input, ApiContext& context) {
             const auto repository = context.store->get_repository(input.at("repository_id"));
             if (!repository) {
@@ -426,6 +854,117 @@ void register_drive_capabilities(Registry& registry) {
         }});
 
     registry.add(Capability{
+        .name = "diff_drive_versions",
+        .title = "Diff drive versions",
+        .description = "Compare two text versions of one drive path.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"repository_id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"path", {{"type", "string"}}},
+                           {"left", {{"type", "string"}}},
+                           {"right", {{"type", "string"}}}}},
+                         {"required",
+                          json::array({"repository_id", "ref", "path", "left", "right"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "drive path versions",
+        .action = "read",
+        .resolve_object = drive_history_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto repository = context.store->get_repository(input.at("repository_id"));
+            if (!repository) {
+                return store_error(repository.error());
+            }
+            auto left = context.sync_store->repository_file(
+                repository->customer_id, repository->id, input.at("left"), input.at("path"));
+            if (!left) {
+                return sync_error(left.error());
+            }
+            auto right = context.sync_store->repository_file(
+                repository->customer_id, repository->id, input.at("right"), input.at("path"));
+            if (!right) {
+                return sync_error(right.error());
+            }
+            const auto left_preview = DriveFormatRegistry::defaults().preview(*left);
+            const auto right_preview = DriveFormatRegistry::defaults().preview(*right);
+            if (!left_preview || !right_preview || !drive_preview_is_text(*left_preview) ||
+                !drive_preview_is_text(*right_preview)) {
+                return ApiResult::failure(
+                    "invalid_input", "only text versions can be compared", "/path");
+            }
+            const DriveVersionDiff difference =
+                drive_text_diff(std::move(*left), std::move(*right));
+            context.audit_customer_id = repository->customer_id;
+            context.audit_kind = "drive.versions.diffed";
+            context.audit_object =
+                "repository/" + repository->id + "/path/" + input.at("path").get<std::string>();
+            context.audit_details = {{"path", input.at("path")},
+                                     {"left", input.at("left")},
+                                     {"right", input.at("right")}};
+            json result = diff_json(difference);
+            result["repository"] = control::to_json(*repository);
+            return ApiResult::success(std::move(result));
+        }});
+
+    registry.add(Capability{
+        .name = "drive_conflict",
+        .title = "Present drive conflict",
+        .description = "Show preserved conflict versions and their text difference.",
+        .input_schema = drive_input_schema(true),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "drive conflict",
+        .action = "read",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto repository = context.store->get_repository(input.at("repository_id"));
+            if (!repository) {
+                return store_error(repository.error());
+            }
+            const auto conflicts =
+                context.sync_store->repository_conflicts(repository->customer_id, repository->id);
+            if (!conflicts) {
+                return sync_error(conflicts.error());
+            }
+            const std::string path = input.at("path");
+            const auto found = std::ranges::find(*conflicts, path, &RepositoryConflict::path);
+            if (found == conflicts->end() || found->blobs.size() < 2) {
+                return ApiResult::failure(
+                    "not_found", "no two-version conflict exists for this path", "/path");
+            }
+            std::vector<RepositoryFile> versions;
+            for (const std::string& blob : found->blobs) {
+                auto version = context.sync_store->repository_blob(
+                    repository->customer_id, repository->id, path, blob);
+                if (!version) {
+                    return sync_error(version.error());
+                }
+                versions.push_back(std::move(*version));
+            }
+            json values = json::array();
+            for (const RepositoryFile& version : versions) {
+                values.push_back(file_json(version));
+            }
+            json result{{"repository", control::to_json(*repository)},
+                        {"path", path},
+                        {"versions", std::move(values)}};
+            const auto left_preview = DriveFormatRegistry::defaults().preview(versions[0]);
+            const auto right_preview = DriveFormatRegistry::defaults().preview(versions[1]);
+            if (left_preview && right_preview && drive_preview_is_text(*left_preview) &&
+                drive_preview_is_text(*right_preview)) {
+                result["difference"] =
+                    diff_json(drive_text_diff(std::move(versions[0]), std::move(versions[1])));
+            }
+            context.audit_customer_id = repository->customer_id;
+            context.audit_kind = "drive.conflict.read";
+            context.audit_object = "repository/" + repository->id + "/path/" + path;
+            context.audit_details = {{"path", path}, {"versions", found->blobs.size()}};
+            return ApiResult::success(std::move(result));
+        }});
+
+    registry.add(Capability{
         .name = "restore_drive_version",
         .title = "Restore drive file version",
         .description = "Write a historical file version and record a new liquid change.",
@@ -441,7 +980,7 @@ void register_drive_capabilities(Registry& registry) {
         .kind = CapabilityKind::Action,
         .object = "drive file",
         .action = "write",
-        .resolve_object = drive_object,
+        .resolve_object = drive_history_object,
         .handler = [](const json& input, ApiContext& context) {
             const auto repository = context.store->get_repository(input.at("repository_id"));
             if (!repository) {

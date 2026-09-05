@@ -1,6 +1,7 @@
 #include "lake/api/web_ui.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <format>
 #include <optional>
@@ -253,7 +254,8 @@ bool navigation_is_current(std::string_view title, std::string_view key) {
                title == "lake — artifacts" || title == "lake — artifact" ||
                title == "lake — conflicts" || title == "lake — exports" ||
                title == "lake — drive" || title == "lake — preview" ||
-               title == "lake — drive history" || title == "lake — drive sharing" ||
+               title == "lake — drive history" || title == "lake — drive version diff" ||
+               title == "lake — drive conflict" || title == "lake — drive sharing" ||
                title == "lake — shared drive folder" ||
                title.starts_with("lake — ") && title.find('/') != std::string_view::npos;
     }
@@ -641,6 +643,109 @@ std::string mode_text(const std::optional<std::uint32_t>& mode) {
 std::string parent_path(std::string_view path) {
     const std::size_t slash = path.find_last_of('/');
     return slash == std::string_view::npos ? std::string{} : std::string(path.substr(0, slash));
+}
+
+std::string path_name(std::string_view path) {
+    const std::size_t slash = path.find_last_of('/');
+    return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
+}
+
+std::string
+drive_query(const control::Repository& repository, std::string_view ref, std::string_view path) {
+    return "repository_id=" + url_component(repository.id) + "&ref=" + url_component(ref) +
+           "&path=" + url_component(path);
+}
+
+std::string drive_breadcrumbs(const control::Repository& repository,
+                              std::string_view ref,
+                              std::string_view path) {
+    std::string output = "<nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\">";
+    output += row_link("/drive?" + drive_query(repository, ref, ""), repository_name(repository));
+    std::size_t offset = 0;
+    while (offset < path.size()) {
+        const std::size_t slash = path.find('/', offset);
+        const std::size_t end = slash == std::string_view::npos ? path.size() : slash;
+        const std::string prefix(path.substr(0, end));
+        output += "<span aria-hidden=\"true\">/</span>";
+        if (end == path.size()) {
+            output += "<span aria-current=\"page\">" +
+                      web_ui_escape(path.substr(offset, end - offset)) + "</span>";
+        } else {
+            output += row_link("/drive?" + drive_query(repository, ref, prefix),
+                               path.substr(offset, end - offset));
+        }
+        if (slash == std::string_view::npos) {
+            break;
+        }
+        offset = slash + 1;
+    }
+    output += "</nav>";
+    return output;
+}
+
+std::string display_size(std::uint64_t size) {
+    static constexpr std::array<std::string_view, 4> units{"B", "KiB", "MiB", "GiB"};
+    double value = static_cast<double>(size);
+    std::size_t unit = 0;
+    while (value >= 1024.0 && unit + 1 < units.size()) {
+        value /= 1024.0;
+        ++unit;
+    }
+    return unit == 0 ? std::format("{} {}", size, units[unit])
+                     : std::format("{:.1f} {}", value, units[unit]);
+}
+
+std::string drive_diff_markup(const DriveVersionDiff& difference) {
+    std::string output = "<pre class=\"diff-hunk drive-version-diff\">";
+    for (const DriveDiffLine& line : difference.lines) {
+        const std::string marker = line.kind == "removed" ? "-" : line.kind == "added" ? "+" : " ";
+        const std::string modifier = line.kind == "removed" ? " class=\"diff-remove\""
+                                     : line.kind == "added" ? " class=\"diff-add\""
+                                                            : "";
+        output += "<span" + modifier + ">" + marker + web_ui_escape(line.text) + "</span>";
+    }
+    output += "</pre>";
+    return output;
+}
+
+std::string drive_hidden_context(const control::Repository& repository,
+                                 std::string_view ref,
+                                 std::string_view path) {
+    return std::format(
+        "<input type=\"hidden\" name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
+        "name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\">",
+        web_ui_escape(repository.id),
+        web_ui_escape(ref),
+        web_ui_escape(path));
+}
+
+std::string drive_entry_actions(const control::Repository& repository,
+                                std::string_view ref,
+                                const RepositoryTreeEntry& entry,
+                                bool signed_in) {
+    const std::string query = drive_query(repository, ref, entry.path);
+    std::string output = "<div class=\"drive-item-actions\">";
+    output += row_link("/drive/history?" + query, "History");
+    if (!signed_in) {
+        return output + "</div>";
+    }
+    output += "<details><summary>Manage</summary><div class=\"drive-manage\">";
+    output += "<form method=\"post\" action=\"/drive/rename\" class=\"stack\">";
+    output += drive_hidden_context(repository, ref, entry.path);
+    output += "<label>New name<input name=\"name\" required value=\"" +
+              web_ui_escape(path_name(entry.path)) +
+              "\"></label><button type=\"submit\">Rename</button>"
+              "</form>";
+    output += "<form method=\"post\" action=\"/drive/move\" class=\"stack\">";
+    output += drive_hidden_context(repository, ref, entry.path);
+    output +=
+        "<label>Destination folder<input name=\"destination_folder\" placeholder=\"team/archive\">"
+        "</label><button type=\"submit\">Move</button></form>";
+    output += "<form method=\"post\" action=\"/drive/delete\" class=\"inline\">";
+    output += drive_hidden_context(repository, ref, entry.path);
+    output +=
+        "<button class=\"danger\" type=\"submit\">Delete</button></form></div></details></div>";
+    return output;
 }
 
 bool hidden_reformatting_entry(const RepositoryDiffEntry& entry) {
@@ -1626,7 +1731,8 @@ std::string web_ui_repository_conflicts(const control::Repository& repository,
     if (conflicts.empty()) {
         content += "<div class=\"panel empty\">No unresolved conflict values.</div>";
     } else {
-        content += "<table><thead><tr><th>Path</th><th>Conflicting blobs</th></tr></thead><tbody>";
+        content += "<table><thead><tr><th>Path</th><th>Conflicting blobs</th><th>Comparison</th>"
+                   "</tr></thead><tbody>";
         for (const RepositoryConflict& conflict : conflicts) {
             std::string blobs;
             for (const std::string& blob : conflict.blobs) {
@@ -1635,9 +1741,13 @@ std::string web_ui_repository_conflicts(const control::Repository& repository,
                 }
                 blobs += blob;
             }
-            content += std::format("<tr><td><code>{}</code></td><td><code>{}</code></td></tr>",
+            content += std::format("<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td>"
+                                   "</tr>",
                                    web_ui_escape(conflict.path),
-                                   web_ui_escape(blobs));
+                                   web_ui_escape(blobs),
+                                   row_link("/drive/conflict?repository_id=" + repository.id +
+                                                "&ref=main&path=" + url_component(conflict.path),
+                                            "Compare versions"));
         }
         content += "</tbody></table>";
     }
@@ -2805,46 +2915,124 @@ std::string web_ui_drive_folder(const control::Repository& repository,
                                 std::string_view ref,
                                 std::string_view path,
                                 const std::vector<RepositoryTreeEntry>& entries,
+                                const DriveFolderOptions& options,
                                 bool signed_in) {
+    const std::string query = drive_query(repository, ref, path);
     const std::string base = "/drive?repository_id=" + url_component(repository.id) +
                              "&ref=" + url_component(ref) + "&path=";
-    std::string content = std::format(
-        "<p class=\"eyebrow\">drive</p><h1>{}</h1><p class=\"sub\">Folder <code>{}</code> "
-        "at <code>{}</code>. The same content remains a liquid repository.</p><div "
-        "class=\"actions\"><a href=\"/drive/history?repository_id={}&ref={}&path={}\">History"
-        "</a><a href=\"/drive/share?repository_id={}&ref={}&path={}\">Share</a><a "
-        "href=\"/conflicts?repository_id={}\">Conflicts</a></div>",
-        web_ui_escape(repository_name(repository)),
-        web_ui_escape(path.empty() ? "/" : path),
-        web_ui_escape(ref),
-        url_component(repository.id),
-        url_component(ref),
-        url_component(path),
-        url_component(repository.id),
-        url_component(ref),
-        url_component(path),
-        url_component(repository.id));
+    std::string content = "<p class=\"eyebrow\">drive</p>";
+    content += drive_breadcrumbs(repository, ref, path);
     content +=
-        "<table><thead><tr><th>Name</th><th>Kind</th><th>Size identity</th></tr></thead><tbody>";
+        "<h1>" + web_ui_escape(path.empty() ? repository_name(repository) : path_name(path)) +
+        "</h1><p class=\"sub\">Folder <code>" + web_ui_escape(path.empty() ? "/" : path) +
+        "</code> at <code>" + web_ui_escape(ref) +
+        "</code>. Moves and deletes create new history; prior versions remain available.</p>";
+    content += "<div class=\"actions\">";
+    content += row_link("/drive/history?" + query, "History");
+    content += row_link("/drive/share?" + query, "Share");
+    content += row_link("/conflicts?repository_id=" + url_component(repository.id), "Conflicts");
+    content += "</div>";
+    content +=
+        "<form class=\"filters\" method=\"get\" action=\"/drive\" aria-label=\"Folder display\">";
+    content += "<input type=\"hidden\" name=\"repository_id\" value=\"" +
+               web_ui_escape(repository.id) + "\"><input type=\"hidden\" name=\"ref\" value=\"" +
+               web_ui_escape(ref) + "\"><input type=\"hidden\" name=\"path\" value=\"" +
+               web_ui_escape(path) + "\">";
+    content += "<label>View<select name=\"view\"><option value=\"list\"";
+    content += options.view == "list" ? " selected" : "";
+    content += ">List</option><option value=\"grid\"";
+    content += options.view == "grid" ? " selected" : "";
+    content += ">Grid</option></select></label><label>Sort<select name=\"sort\">";
+    for (const std::string_view value : {"name", "size", "modified"}) {
+        content += "<option value=\"" + std::string(value) + "\"";
+        content += options.sort == value ? " selected" : "";
+        content += ">" + web_ui_escape(value) + "</option>";
+    }
+    content += "</select></label><label>Direction<select name=\"direction\">";
+    content += options.descending ? "<option value=\"asc\">Ascending</option><option "
+                                    "value=\"desc\" selected>Descending</option>"
+                                  : "<option value=\"asc\" selected>Ascending</option><option "
+                                    "value=\"desc\">Descending</option>";
+    content += "</select></label><button type=\"submit\">Apply</button></form>";
+    if (signed_in) {
+        content += "<div class=\"drive-create grid\"><section class=\"panel\"><h2>New folder</h2>"
+                   "<form class=\"stack\" method=\"post\" action=\"/drive/folder\">";
+        content += drive_hidden_context(repository, ref, path);
+        content +=
+            "<label>Name<input name=\"name\" required></label><button type=\"submit\">Create folder"
+            "</button></form></section><section class=\"panel\"><h2>Upload</h2><form "
+            "id=\"drive-upload\" class=\"stack\" method=\"post\" action=\"/drive/upload\" "
+            "enctype=\"multipart/form-data\">";
+        content += drive_hidden_context(repository, ref, path);
+        content +=
+            "<label id=\"drive-drop-zone\" class=\"drive-drop-zone\">Choose files or drop them here"
+            "<input id=\"drive-files\" type=\"file\" name=\"files\" multiple required></label>"
+            "<button type=\"submit\">Upload files</button></form></section></div>";
+    }
+    if (options.view == "grid") {
+        content += "<div class=\"drive-grid\">";
+    } else {
+        content += "<div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>Size</th>"
+                   "<th>Modified</th><th>Actions</th></tr></thead><tbody>";
+    }
     for (const RepositoryTreeEntry& entry : entries) {
-        const std::size_t slash = entry.path.find_last_of('/');
-        const std::string name =
-            slash == std::string::npos ? entry.path : entry.path.substr(slash + 1);
+        const std::string name = path_name(entry.path);
         const std::string href =
             entry.kind == "tree"
                 ? base + url_component(entry.path)
                 : "/drive/preview?repository_id=" + url_component(repository.id) +
                       "&ref=" + url_component(ref) + "&path=" + url_component(entry.path);
-        content += std::format("<tr><td>{}</td><td><span class=\"badge\">{}</span></td>"
-                               "<td><code>{}</code></td></tr>",
-                               row_link(href, name),
-                               web_ui_escape(entry.kind),
-                               web_ui_escape(entry.blob));
+        const std::string size = entry.kind == "tree" ? "—" : display_size(entry.size);
+        const std::string modified = entry.last_changed_at.empty() ? "—" : entry.last_changed_at;
+        if (options.view == "grid") {
+            content += "<article class=\"card drive-card\"><p>" + badge_markup(entry.kind) +
+                       "</p><h2>" + row_link(href, name) + "</h2><p class=\"muted\">" +
+                       web_ui_escape(size) + " · " + web_ui_escape(modified) + "</p>" +
+                       drive_entry_actions(repository, ref, entry, signed_in) + "</article>";
+        } else {
+            content += "<tr><td>" + row_link(href, name) + " " + badge_markup(entry.kind) +
+                       "</td><td>" + web_ui_escape(size) + "</td><td>" + web_ui_escape(modified) +
+                       "</td><td>" + drive_entry_actions(repository, ref, entry, signed_in) +
+                       "</td></tr>";
+        }
     }
     if (entries.empty()) {
-        content += "<tr><td colspan=\"3\" class=\"empty\">This folder is empty.</td></tr>";
+        content += options.view == "grid"
+                       ? "<div class=\"panel empty\">This folder is empty.</div>"
+                       : "<tr><td colspan=\"4\" class=\"empty\">This folder is empty.</td></tr>";
     }
-    content += "</tbody></table>";
+    content += options.view == "grid" ? "</div>" : "</tbody></table></div>";
+    if (signed_in) {
+        content += R"html(<script id="drive-drop-island">
+(() => {
+  const zone = document.getElementById('drive-drop-zone');
+  const input = document.getElementById('drive-files');
+  const form = document.getElementById('drive-upload');
+  if (!zone || !input || !form) {
+    return;
+  }
+  for (const name of ['dragenter', 'dragover']) {
+    zone.addEventListener(name, event => {
+      event.preventDefault();
+      zone.dataset.active = 'true';
+    });
+  }
+  for (const name of ['dragleave', 'drop']) {
+    zone.addEventListener(name, event => {
+      event.preventDefault();
+      delete zone.dataset.active;
+    });
+  }
+  zone.addEventListener('drop', event => {
+    if (!event.dataTransfer.files.length) {
+      return;
+    }
+    input.files = event.dataTransfer.files;
+    form.requestSubmit();
+  });
+})();
+</script>)html";
+    }
     return web_ui_shell("lake — drive", repository_name(repository), content, signed_in);
 }
 
@@ -2854,17 +3042,26 @@ std::string web_ui_drive_preview(const control::Repository& repository,
                                  const DrivePreview& preview,
                                  bool signed_in) {
     const std::string parent = parent_path(file.path);
-    const std::string content = std::format(
-        "<p class=\"eyebrow\">drive preview</p><h1>{}</h1><p class=\"sub\"><span "
-        "class=\"badge\">{}</span> {} bytes · <a href=\"/drive?repository_id={}&ref={}&path={}\">"
-        "Back to folder</a></p><div class=\"panel\">{}</div>",
-        web_ui_escape(file.path),
-        web_ui_escape(preview.format),
-        file.size,
-        url_component(repository.id),
-        url_component(ref),
-        url_component(parent),
-        preview.html);
+    const std::string download = "/drive/download?" + drive_query(repository, ref, file.path);
+    const std::string content =
+        drive_breadcrumbs(repository, ref, file.path) +
+        std::format(
+            "<p class=\"eyebrow\">drive preview</p><h1>{}</h1><p class=\"sub\"><span "
+            "class=\"badge\">{}</span> {} · digest <code>{}</code></p><div class=\"actions\"><a "
+            "href=\"/drive?repository_id={}&ref={}&path={}\">Back to folder</a><a href=\"{}\" "
+            "download>Download</a><a href=\"/drive/history?{}\">History</a></div><div "
+            "class=\"panel\">"
+            "{}</div>",
+            web_ui_escape(file.path),
+            web_ui_escape(preview.format),
+            web_ui_escape(display_size(file.size)),
+            web_ui_escape(file.blob),
+            url_component(repository.id),
+            url_component(ref),
+            url_component(parent),
+            web_ui_escape(download),
+            web_ui_escape(drive_query(repository, ref, file.path)),
+            preview.html);
     return web_ui_shell("lake — preview", repository_name(repository), content, signed_in);
 }
 
@@ -2873,35 +3070,122 @@ std::string web_ui_drive_history(const control::Repository& repository,
                                  std::string_view path,
                                  const std::vector<nlohmann::json>& changes,
                                  bool signed_in) {
-    std::string content = std::format(
+    std::string content = drive_breadcrumbs(repository, ref, parent_path(path));
+    content += std::format(
         "<p class=\"eyebrow\">drive history</p><h1>{}</h1><p class=\"sub\">Every version is "
         "a history query. Restoring writes a new change and does not rewrite prior versions.</p>",
         web_ui_escape(path));
-    content += "<table><thead><tr><th>When</th><th>Change</th><th>What changed</th><th></th>"
+    content += "<div class=\"actions\">";
+    content +=
+        row_link("/drive?" + drive_query(repository, ref, parent_path(path)), "Back to folder");
+    content += "</div><form method=\"get\" action=\"/drive/history/diff\">";
+    content += drive_hidden_context(repository, ref, path);
+    content += "<div class=\"table-wrap\"><table><thead><tr><th>When</th><th>Change</th>"
+               "<th>What changed</th><th>Compare from</th><th>Compare to</th><th>Restore</th>"
                "</tr></thead><tbody>";
+    std::size_t version = 0;
     for (const nlohmann::json& change : changes) {
         std::vector<std::string> kinds = change.value("changes", std::vector<std::string>{});
-        content += std::format(
-            "<tr><td>{}</td><td><code>{}</code><br>{}</td><td>{}</td><td><form "
-            "class=\"inline\" method=\"post\" action=\"/drive/history/restore\"><input "
-            "type=\"hidden\" name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
-            "name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\">"
-            "<input type=\"hidden\" name=\"change_id\" value=\"{}\"><button type=\"submit\">"
-            "Restore</button></form></td></tr>",
-            web_ui_escape(change.value("occurred_at", "")),
-            web_ui_escape(change.value("id", "")),
-            web_ui_escape(change.value("message", "")),
-            web_ui_escape(joined(kinds)),
-            web_ui_escape(repository.id),
-            web_ui_escape(ref),
-            web_ui_escape(path),
-            web_ui_escape(change.value("id", "")));
+        const std::string change_id = change.value("id", "");
+        const bool has_file = !change.value("new_blob", "").empty();
+        content += "<tr><td>" + web_ui_escape(change.value("occurred_at", "")) + "</td><td><code>" +
+                   web_ui_escape(change_id) + "</code><br>" +
+                   web_ui_escape(change.value("message", "")) + "</td><td>" +
+                   web_ui_escape(joined(kinds)) + "</td>";
+        if (has_file) {
+            content += "<td><input aria-label=\"Compare from " + web_ui_escape(change_id) +
+                       "\" type=\"radio\" name=\"left\" value=\"" + web_ui_escape(change_id) + "\"";
+            content += version == 1 ? " checked" : "";
+            content += "></td><td><input aria-label=\"Compare to " + web_ui_escape(change_id) +
+                       "\" type=\"radio\" name=\"right\" value=\"" + web_ui_escape(change_id) +
+                       "\"";
+            content += version == 0 ? " checked" : "";
+            content += "></td><td>";
+            if (signed_in) {
+                content += "<button type=\"submit\" form=\"restore-" + std::to_string(version) +
+                           "\">Restore</button>";
+            } else {
+                content += "—";
+            }
+            content += "</td>";
+            ++version;
+        } else {
+            content += "<td>—</td><td>—</td><td>Deleted</td>";
+        }
+        content += "</tr>";
     }
     if (changes.empty()) {
-        content += "<tr><td colspan=\"4\" class=\"empty\">No changes touch this path.</td></tr>";
+        content += "<tr><td colspan=\"6\" class=\"empty\">No changes touch this path.</td></tr>";
     }
-    content += "</tbody></table>";
+    content += "</tbody></table></div>";
+    if (version >= 2) {
+        content += "<p><button type=\"submit\">Compare selected text versions</button></p>";
+    }
+    content += "</form>";
+    if (signed_in) {
+        version = 0;
+        for (const nlohmann::json& change : changes) {
+            if (change.value("new_blob", "").empty()) {
+                continue;
+            }
+            content += "<form hidden id=\"restore-" + std::to_string(version) +
+                       "\" method=\"post\" action=\"/drive/history/restore\">";
+            content += drive_hidden_context(repository, ref, path);
+            content += "<input type=\"hidden\" name=\"change_id\" value=\"" +
+                       web_ui_escape(change.value("id", "")) + "\"></form>";
+            ++version;
+        }
+    }
     return web_ui_shell("lake — drive history", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_drive_version_diff(const control::Repository& repository,
+                                      std::string_view ref,
+                                      std::string_view path,
+                                      std::string_view left_revision,
+                                      std::string_view right_revision,
+                                      const DriveVersionDiff& difference,
+                                      bool signed_in) {
+    std::string content = "<p class=\"eyebrow\">drive version comparison</p><h1>" +
+                          web_ui_escape(path) +
+                          "</h1><p class=\"sub\">Two preserved text versions. "
+                          "Neither version is changed by this comparison.</p>";
+    content += "<div class=\"actions\">" +
+               row_link("/drive/history?repository_id=" + url_component(repository.id) +
+                            "&ref=" + url_component(ref) + "&path=" + url_component(path),
+                        "Back to history") +
+               "</div><div class=\"grid\"><section class=\"panel\"><h2>From</h2><code>" +
+               web_ui_escape(left_revision) + "</code><p>" + display_size(difference.left.size) +
+               " · <code>" + web_ui_escape(difference.left.blob) +
+               "</code></p></section><section class=\"panel\"><h2>To</h2><code>" +
+               web_ui_escape(right_revision) + "</code><p>" + display_size(difference.right.size) +
+               " · <code>" + web_ui_escape(difference.right.blob) + "</code></p></section></div>";
+    content += drive_diff_markup(difference);
+    return web_ui_shell(
+        "lake — drive version diff", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_drive_conflict(const control::Repository& repository,
+                                  std::string_view path,
+                                  const std::vector<RepositoryFile>& versions,
+                                  const std::optional<DriveVersionDiff>& difference,
+                                  bool signed_in) {
+    std::string content = "<p class=\"eyebrow\">drive conflict</p><h1>Two versions of " +
+                          web_ui_escape(path) +
+                          "</h1><p class=\"sub\">Both versions are preserved. Compare them before "
+                          "choosing how to reconcile the file.</p><div class=\"grid\">";
+    for (std::size_t index = 0; index < versions.size(); ++index) {
+        content += "<section class=\"panel\"><h2>Version " + std::to_string(index + 1) +
+                   "</h2><dl><dt>Digest</dt><dd><code>" + web_ui_escape(versions[index].blob) +
+                   "</code></dd><dt>Size</dt><dd>" + display_size(versions[index].size) +
+                   "</dd></dl></section>";
+    }
+    content += "</div><h2>What differs</h2>";
+    content += difference
+                   ? drive_diff_markup(*difference)
+                   : "<div class=\"panel\">A structural preview is not registered for this "
+                     "format. The digests and sizes above identify both preserved values.</div>";
+    return web_ui_shell("lake — drive conflict", repository_name(repository), content, signed_in);
 }
 
 std::string web_ui_drive_share(const control::Repository& repository,

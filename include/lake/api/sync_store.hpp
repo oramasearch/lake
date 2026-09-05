@@ -181,11 +181,12 @@ struct RepositoryArtifactPage {
     bool done = false;
 };
 
-enum class RepositoryWriteKind { File, LfsFile, DeletedFile, DeletedFolder };
+enum class RepositoryWriteKind { File, LfsFile, Folder, Moved, DeletedFile, DeletedFolder };
 
 struct RepositoryWriteOperation {
     RepositoryWriteKind kind = RepositoryWriteKind::File;
     std::string path;
+    std::string source_path;
     std::vector<std::byte> contents;
     std::string oid;
     std::uint64_t size = 0;
@@ -275,6 +276,13 @@ public:
                                                             const std::string& repository_id,
                                                             const std::string& ref,
                                                             const std::string& path) = 0;
+    virtual SyncStoreResult<RepositoryFile> repository_blob(const std::string&,
+                                                            const std::string&,
+                                                            const std::string&,
+                                                            const std::string&) {
+        return std::unexpected(
+            SyncStoreError{"unsupported", "repository blob reads are unavailable"});
+    }
     virtual SyncStoreResult<std::vector<RepositoryChange>>
     repository_log(const std::string& customer_id, const std::string& repository_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryDiffEntry>>

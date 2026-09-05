@@ -587,6 +587,110 @@ std::string form_field(std::string_view body, std::string_view name) {
     return {};
 }
 
+struct MultipartFile {
+    std::string name;
+    std::vector<std::byte> contents;
+};
+
+struct MultipartForm {
+    std::map<std::string, std::string> fields;
+    std::vector<MultipartFile> files;
+    std::string error;
+};
+
+std::string disposition_parameter(std::string_view disposition, std::string_view name) {
+    const std::string marker = std::string(name) + "=\"";
+    const std::size_t start = disposition.find(marker);
+    if (start == std::string_view::npos) {
+        return {};
+    }
+    const std::size_t value_start = start + marker.size();
+    const std::size_t end = disposition.find('"', value_start);
+    return end == std::string_view::npos
+               ? std::string{}
+               : std::string(disposition.substr(value_start, end - value_start));
+}
+
+std::string uploaded_name(std::string name) {
+    const std::size_t slash = name.find_last_of("/\\");
+    return slash == std::string::npos ? name : name.substr(slash + 1);
+}
+
+MultipartForm parse_multipart(std::string_view body, std::string_view content_type) {
+    MultipartForm output;
+    const std::string marker = "boundary=";
+    const std::size_t boundary_start = content_type.find(marker);
+    if (boundary_start == std::string_view::npos) {
+        output.error = "multipart boundary is missing";
+        return output;
+    }
+    std::string boundary(content_type.substr(boundary_start + marker.size()));
+    if (!boundary.empty() && boundary.front() == '"' && boundary.back() == '"') {
+        boundary = boundary.substr(1, boundary.size() - 2);
+    }
+    const std::string delimiter = "--" + boundary;
+    std::size_t position = 0;
+    while ((position = body.find(delimiter, position)) != std::string_view::npos) {
+        position += delimiter.size();
+        if (body.substr(position, 2) == "--") {
+            break;
+        }
+        if (body.substr(position, 2) != "\r\n") {
+            output.error = "multipart delimiter is invalid";
+            return output;
+        }
+        position += 2;
+        const std::size_t header_end = body.find("\r\n\r\n", position);
+        if (header_end == std::string_view::npos) {
+            output.error = "multipart headers are incomplete";
+            return output;
+        }
+        const std::string_view headers = body.substr(position, header_end - position);
+        const std::size_t disposition_start = headers.find("Content-Disposition:");
+        if (disposition_start == std::string_view::npos) {
+            output.error = "multipart content disposition is missing";
+            return output;
+        }
+        const std::size_t disposition_end = headers.find("\r\n", disposition_start);
+        const std::string_view disposition = headers.substr(
+            disposition_start,
+            disposition_end == std::string_view::npos ? std::string_view::npos
+                                                      : disposition_end - disposition_start);
+        const std::string name = disposition_parameter(disposition, "name");
+        const std::string filename = uploaded_name(disposition_parameter(disposition, "filename"));
+        const std::size_t value_start = header_end + 4;
+        const std::size_t next = body.find("\r\n" + delimiter, value_start);
+        if (next == std::string_view::npos) {
+            output.error = "multipart body is incomplete";
+            return output;
+        }
+        const std::string_view value = body.substr(value_start, next - value_start);
+        if (!filename.empty()) {
+            std::vector<std::byte> contents(value.size());
+            std::ranges::transform(
+                value, contents.begin(), [](char byte) { return static_cast<std::byte>(byte); });
+            output.files.push_back({filename, std::move(contents)});
+        } else if (!name.empty()) {
+            output.fields[name] = std::string(value);
+        }
+        position = next + 2;
+    }
+    if (output.files.empty()) {
+        output.error = "at least one uploaded file is required";
+    }
+    return output;
+}
+
+std::string path_parent(std::string_view path) {
+    const std::size_t slash = path.find_last_of('/');
+    return slash == std::string_view::npos ? std::string{} : std::string(path.substr(0, slash));
+}
+
+std::string path_filename(std::string_view path) {
+    const std::size_t slash = path.find_last_of('/');
+    return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
+}
+
 bool request_is_https(const boost::http::route_params& route) {
     return route.req.count("x-forwarded-proto") != 0 &&
            std::string_view(route.req.at("x-forwarded-proto")) == "https";
@@ -923,13 +1027,15 @@ RepositoryContentRef repository_content_ref_from_json(const nlohmann::json& valu
 }
 
 RepositoryTreeEntry repository_tree_entry_from_json(const nlohmann::json& value) {
-    return {json_string(value, "path"),
-            json_string(value, "kind"),
-            json_string(value, "blob"),
-            value.value("mode", 0U),
-            json_string(value, "node_id"),
-            value.value("size", std::uint64_t{0}),
-            value.value("stored_size", std::uint64_t{0})};
+    RepositoryTreeEntry output{json_string(value, "path"),
+                               json_string(value, "kind"),
+                               json_string(value, "blob"),
+                               value.value("mode", 0U),
+                               json_string(value, "node_id"),
+                               value.value("size", std::uint64_t{0}),
+                               value.value("stored_size", std::uint64_t{0})};
+    output.last_changed_at = json_string(value, "modified_at");
+    return output;
 }
 
 RepositoryFile repository_file_from_json(const nlohmann::json& value) {
@@ -937,6 +1043,16 @@ RepositoryFile repository_file_from_json(const nlohmann::json& value) {
             json_string(value, "blob"),
             json_string(value, "contents"),
             value.value("size", std::uint64_t{0})};
+}
+
+DriveVersionDiff drive_version_diff_from_json(const nlohmann::json& value) {
+    DriveVersionDiff difference{repository_file_from_json(value.at("left")),
+                                repository_file_from_json(value.at("right")),
+                                {}};
+    for (const nlohmann::json& line : value.at("lines")) {
+        difference.lines.push_back({json_string(line, "kind"), json_string(line, "text")});
+    }
+    return difference;
 }
 
 RepositoryChange repository_change_from_json(const nlohmann::json& value) {
@@ -1520,6 +1636,30 @@ public:
                               *bytes};
     }
 
+    SyncStoreResult<RepositoryFile> repository_blob(const std::string& customer_id,
+                                                    const std::string& repository_id,
+                                                    const std::string& path,
+                                                    const std::string& blob) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto parsed = liquid::parse_digest(blob);
+        if (!parsed) {
+            return std::unexpected(error_of(parsed.error()));
+        }
+        const auto contents = liquid::runtime::block_on((*repository)->subject->blob(*parsed));
+        if (!contents) {
+            return std::unexpected(error_of(contents.error()));
+        }
+        return RepositoryFile{path,
+                              blob,
+                              display_contents(*contents),
+                              static_cast<std::uint64_t>(contents->size()),
+                              *contents};
+    }
+
     SyncStoreResult<std::vector<RepositoryChange>>
     repository_log(const std::string& customer_id, const std::string& repository_id) override {
         std::lock_guard lock(mutex_);
@@ -1804,13 +1944,34 @@ public:
         if (!conflicts) {
             return std::unexpected(error_of(conflicts.error()));
         }
+        std::vector<liquid::conflict> visible_conflicts = *conflicts;
+        if (visible_conflicts.empty()) {
+            const auto history = liquid::runtime::block_on((*repository)->subject->log());
+            if (!history) {
+                return std::unexpected(error_of(history.error()));
+            }
+            if (!history->empty()) {
+                visible_conflicts = history->front().conflicts;
+            }
+        }
         std::vector<RepositoryConflict> output;
-        output.reserve(conflicts->size());
-        for (const liquid::conflict& conflict : *conflicts) {
+        output.reserve(visible_conflicts.size());
+        for (const liquid::conflict& conflict : visible_conflicts) {
             std::vector<std::string> blobs;
             blobs.reserve(conflict.refs.size());
             for (const liquid::digest& blob : conflict.refs) {
-                blobs.push_back(liquid::to_string(blob));
+                const auto contents = liquid::runtime::block_on((*repository)->subject->blob(blob));
+                if (contents) {
+                    blobs.push_back(liquid::to_string(blob));
+                    continue;
+                }
+                const auto tree = liquid::runtime::block_on((*repository)->subject->tree(blob));
+                if (!tree) {
+                    blobs.push_back(liquid::to_string(blob));
+                    continue;
+                }
+                const auto entry = find_file(*(*repository)->subject, *tree, conflict.path);
+                blobs.push_back(entry ? liquid::to_string(entry->ref) : liquid::to_string(blob));
             }
             output.push_back({conflict.path, std::move(blobs)});
         }
@@ -1905,10 +2066,11 @@ public:
         }
         if (revision != "main") {
             return std::unexpected(
-                SyncStoreError{"conflict", "Hub-compatible commits currently update main only"});
+                SyncStoreError{"conflict", "repository changes currently update main only"});
         }
         std::set<std::string> target_paths;
         std::set<std::string> staged_uploads;
+        std::set<std::string> source_paths;
         for (const RepositoryWriteOperation& operation : operations) {
             if (!valid_repository_path(operation.path)) {
                 return std::unexpected(
@@ -1917,6 +2079,12 @@ public:
             if (!target_paths.insert(operation.path).second) {
                 return std::unexpected(SyncStoreError{
                     "invalid_input", "each commit operation must have a distinct path"});
+            }
+            if (operation.kind == RepositoryWriteKind::Moved &&
+                (!valid_repository_path(operation.source_path) ||
+                 !source_paths.insert(operation.source_path).second)) {
+                return std::unexpected(SyncStoreError{
+                    "invalid_input", "each move must name a distinct valid source path"});
             }
             if (operation.kind != RepositoryWriteKind::LfsFile) {
                 continue;
@@ -1942,6 +2110,22 @@ public:
                     liquid::runtime::block_on((*state)->subject->remove(operation.path));
                 if (!removed && removed.error().code != liquid::errc::not_found) {
                     return std::unexpected(error_of(removed.error()));
+                }
+                continue;
+            }
+            if (operation.kind == RepositoryWriteKind::Folder) {
+                const auto written = liquid::runtime::block_on(
+                    (*state)->subject->write(operation.path + "/.lake-folder", {}));
+                if (!written) {
+                    return std::unexpected(error_of(written.error()));
+                }
+                continue;
+            }
+            if (operation.kind == RepositoryWriteKind::Moved) {
+                const auto moved = liquid::runtime::block_on(
+                    (*state)->subject->move(operation.source_path, operation.path));
+                if (!moved) {
+                    return std::unexpected(error_of(moved.error()));
                 }
                 continue;
             }
@@ -2785,7 +2969,8 @@ private:
 
     static bool valid_repository_path(std::string_view path) {
         if (path.empty() || path.front() == '/' || path.back() == '/' ||
-            path.starts_with(".lake-hub-upload/")) {
+            path.starts_with(".lake-hub-upload/") || path == ".lake-folder" ||
+            path.ends_with("/.lake-folder")) {
             return false;
         }
         std::size_t offset = 0;
@@ -3750,7 +3935,15 @@ struct ApiServer::Impl {
             "/artifact",
             "/drive",
             "/drive/preview",
+            "/drive/download",
             "/drive/history",
+            "/drive/history/diff",
+            "/drive/conflict",
+            "/drive/folder",
+            "/drive/upload",
+            "/drive/rename",
+            "/drive/move",
+            "/drive/delete",
             "/drive/share",
             "/search",
             "/metering",
@@ -6301,12 +6494,22 @@ struct ApiServer::Impl {
         const std::string ref =
             query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
         const std::string path = query_value(route, "path");
+        DriveFolderOptions folder_options;
+        folder_options.view = query_value(route, "view") == "grid" ? "grid" : "list";
+        const std::string requested_sort = query_value(route, "sort");
+        folder_options.sort =
+            requested_sort == "size" || requested_sort == "modified" ? requested_sort : "name";
+        folder_options.descending = query_value(route, "direction") == "desc";
         if (repository_id.empty()) {
             return redirect(route, "/repositories");
         }
         const ApiResult result =
             registry.call("drive_browse",
-                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          {{"repository_id", repository_id},
+                           {"ref", ref},
+                           {"path", path},
+                           {"sort", folder_options.sort},
+                           {"direction", folder_options.descending ? "desc" : "asc"}},
                           context);
         if (!result.ok) {
             return serve_repository_page_error(route, context, result);
@@ -6321,6 +6524,7 @@ struct ApiServer::Impl {
                                              ref,
                                              path,
                                              entries,
+                                             folder_options,
                                              context.authorized),
                          "text/html; charset=utf-8",
                          "no-store");
@@ -6357,6 +6561,31 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_drive_download(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        const ApiResult result =
+            registry.call("download_drive_file",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        std::string filename = path_filename(path);
+        std::ranges::replace(filename, '"', '_');
+        std::ranges::replace(filename, '\r', '_');
+        std::ranges::replace(filename, '\n', '_');
+        route.res.set("content-disposition", "attachment; filename=\"" + filename + "\"");
+        co_return co_await send_bytes(route,
+                                      boost::http::status::ok,
+                                      json_string(result.value, "media_type"),
+                                      context.sync_response,
+                                      "\"" + json_string(result.value, "blob") + "\"");
+    }
+
     boost::http::route_task serve_drive_history_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         const std::string repository_id = query_value(route, "repository_id");
@@ -6381,6 +6610,70 @@ struct ApiServer::Impl {
                                               path,
                                               changes,
                                               context.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_drive_history_diff(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        const std::string left = query_value(route, "left");
+        const std::string right = query_value(route, "right");
+        const ApiResult result = registry.call("diff_drive_versions",
+                                               {{"repository_id", repository_id},
+                                                {"ref", ref},
+                                                {"path", path},
+                                                {"left", left},
+                                                {"right", right}},
+                                               context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_drive_version_diff(repository_from_json(result.value.at("repository")),
+                                      ref,
+                                      path,
+                                      left,
+                                      right,
+                                      drive_version_diff_from_json(result.value),
+                                      context.authorized),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_drive_conflict_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        const ApiResult result =
+            registry.call("drive_conflict",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        std::vector<RepositoryFile> versions;
+        for (const nlohmann::json& value : result.value.at("versions")) {
+            versions.push_back(repository_file_from_json(value));
+        }
+        std::optional<DriveVersionDiff> difference;
+        if (result.value.contains("difference")) {
+            difference = drive_version_diff_from_json(result.value.at("difference"));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_drive_conflict(repository_from_json(result.value.at("repository")),
+                                               path,
+                                               versions,
+                                               difference,
+                                               context.authorized),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6533,6 +6826,147 @@ struct ApiServer::Impl {
             route,
             "/drive/history?repository_id=" + oauth_url_encode(repository_id) +
                 "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path));
+    }
+
+    boost::http::route_task serve_drive_folder_create(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const ApiResult result = registry.call("create_drive_folder",
+                                               {{"repository_id", repository_id},
+                                                {"ref", ref},
+                                                {"path", path},
+                                                {"name", form_field(body, "name")}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        co_return co_await redirect(route,
+                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
+                                        "&ref=" + oauth_url_encode(ref) +
+                                        "&path=" + oauth_url_encode(path));
+    }
+
+    boost::http::route_task serve_drive_upload(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        const std::string content_type = route.req.count(http::field::content_type) == 0
+                                             ? std::string{}
+                                             : std::string(route.req.at(http::field::content_type));
+        MultipartForm form = parse_multipart(body, content_type);
+        ApiContext context = context_for(route);
+        if (!form.error.empty()) {
+            co_return co_await serve_repository_page_error(
+                route, context, ApiResult::failure("invalid_input", form.error));
+        }
+        nlohmann::json files = nlohmann::json::array();
+        for (const MultipartFile& file : form.files) {
+            files.push_back({{"name", file.name}, {"content", base64_encode(file.contents)}});
+        }
+        const std::string repository_id = form.fields["repository_id"];
+        const std::string ref = form.fields["ref"];
+        const std::string path = form.fields["path"];
+        const ApiResult result = registry.call("upload_drive_files",
+                                               {{"repository_id", repository_id},
+                                                {"ref", ref},
+                                                {"path", path},
+                                                {"files", std::move(files)}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        co_return co_await redirect(route,
+                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
+                                        "&ref=" + oauth_url_encode(ref) +
+                                        "&path=" + oauth_url_encode(path));
+    }
+
+    boost::http::route_task serve_drive_rename(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const std::string destination = path_parent(path).empty()
+                                            ? form_field(body, "name")
+                                            : path_parent(path) + "/" + form_field(body, "name");
+        const ApiResult result = registry.call("move_drive_path",
+                                               {{"repository_id", repository_id},
+                                                {"ref", ref},
+                                                {"path", path},
+                                                {"destination", destination}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        co_return co_await redirect(route,
+                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
+                                        "&ref=" + oauth_url_encode(ref) +
+                                        "&path=" + oauth_url_encode(path_parent(destination)));
+    }
+
+    boost::http::route_task serve_drive_move(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const std::string folder = form_field(body, "destination_folder");
+        const std::string destination =
+            folder.empty() ? path_filename(path) : folder + "/" + path_filename(path);
+        const ApiResult result = registry.call("move_drive_path",
+                                               {{"repository_id", repository_id},
+                                                {"ref", ref},
+                                                {"path", path},
+                                                {"destination", destination}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        co_return co_await redirect(route,
+                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
+                                        "&ref=" + oauth_url_encode(ref) +
+                                        "&path=" + oauth_url_encode(folder));
+    }
+
+    boost::http::route_task serve_drive_delete(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const ApiResult result =
+            registry.call("delete_drive_path",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        co_return co_await redirect(route,
+                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
+                                        "&ref=" + oauth_url_encode(ref) +
+                                        "&path=" + oauth_url_encode(path_parent(path)));
     }
 
     boost::http::route_task serve_drive_share_link(boost::http::route_params& route) {
@@ -8120,6 +8554,12 @@ bool ApiServer::start() {
                        route, "/drive/preview", impl.serve_drive_preview_page(route));
                });
     router.add(http::method::get,
+               "/drive/download",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/download", impl.serve_drive_download(route));
+               });
+    router.add(http::method::get,
                "/drive/history",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -8130,6 +8570,46 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/history/restore", impl.serve_drive_restore(route));
+               });
+    router.add(http::method::get,
+               "/drive/history/diff",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/history/diff", impl.serve_drive_history_diff(route));
+               });
+    router.add(http::method::get,
+               "/drive/conflict",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/conflict", impl.serve_drive_conflict_page(route));
+               });
+    router.add(http::method::post,
+               "/drive/folder",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/folder", impl.serve_drive_folder_create(route));
+               });
+    router.add(http::method::post,
+               "/drive/upload",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/upload", impl.serve_drive_upload(route));
+               });
+    router.add(http::method::post,
+               "/drive/rename",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/rename", impl.serve_drive_rename(route));
+               });
+    router.add(
+        http::method::post, "/drive/move", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/drive/move", impl.serve_drive_move(route));
+        });
+    router.add(http::method::post,
+               "/drive/delete",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/delete", impl.serve_drive_delete(route));
                });
     router.add(
         http::method::get, "/drive/share", [&impl](http::route_params& route) -> http::route_task {

@@ -275,9 +275,11 @@ through structural line hunks until liquid #174 provides the batched `map_anchor
 policies are evaluated from the proposed ref update once liquid #177 supplies it to the sync
 authorizer; CI is the build engine, not a product (#30). **Drive and model status (#7, #8, #43,
 #44, #45): implemented on the lake side.** Stable liquid node ids bind folder policy objects;
-live grants and expiring links use `authorize`; browse, preview, sharing, history and restore are
-server-rendered. Models and datasets remain repositories. Their native liquid sync path provides
-resumable chunk transfer and unique-byte metering, while the Hugging Face-compatible adapter
+live grants and expiring links use `authorize`; list/grid browse, upload, folder creation,
+rename/move/delete, browser-native previews, version comparison, conflict presentation, sharing,
+history, and restore are server-rendered and capability-backed. Models and datasets remain
+repositories. Their native liquid sync path provides resumable chunk transfer and unique-byte
+metering, while the Hugging Face-compatible adapter
 provides repository creation, regular and basic-LFS commits, listings, metadata, and named or
 immutable downloads. Model reads expose revision/file storage savings and the verified
 dataset-to-model training chain alongside `sbom/1` and `slsa_provenance/1` build evidence. The
