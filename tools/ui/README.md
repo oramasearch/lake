@@ -8,7 +8,8 @@ Its live mode reads a tab-separated page manifest, fetches each page from a runn
 manifest's session cookie, and records light and dark PNGs. `lake-ui-fixture` runs the production
 HTTP server over an in-memory control plane and an on-disk libliquid repository populated with two
 changes and a build result. It covers public pages, operator pages, identity pages, repository
-content, secrets, sharing, metering, and audit data without adding a fixture route to `lake`.
+content, hosted application identity, secrets, sharing, metering, and audit data without adding a
+fixture route to `lake`.
 
 ```sh
 cmake --build build --target lake-ui-fixture

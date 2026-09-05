@@ -87,6 +87,11 @@ std::string web_ui_icon(std::string_view name) {
 
 namespace {
 
+constexpr std::string_view theme_preference_script =
+    R"(<script id="theme-preference">(()=>{try{const t=localStorage.getItem('lake-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch{}})();</script>)";
+constexpr std::string_view theme_toggle_script =
+    R"(<script id="theme-toggle-script">(()=>{const b=document.querySelector('[data-theme-toggle]');if(!b)return;const current=()=>document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');const label=()=>{const t=current();b.setAttribute('aria-label',`Use ${t==='dark'?'light':'dark'} theme`);b.setAttribute('aria-pressed',String(t==='dark'));};b.addEventListener('click',()=>{const t=current()==='dark'?'light':'dark';document.documentElement.dataset.theme=t;try{localStorage.setItem('lake-theme',t);}catch{}label();});label();})();</script>)";
+
 bool navigation_is_current(std::string_view title, std::string_view key) {
     if (key == "home") {
         return title == "lake — hello";
@@ -256,14 +261,24 @@ std::string application_shell(const control::Application& application,
     std::string html =
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<meta name=\"color-scheme\" content=\"light dark\">"
         "<title>" +
-        web_ui_escape(title) +
-        "</title><link rel=\"stylesheet\" href=\"/style.css\"><style>:root{--accent:" + accent +
-        ";--paper:" + background +
-        "}</style></head><body><header><span "
-        "class=\"brand\">" +
-        web_ui_escape(application.name) + "</span></header><main>" + std::string(content) +
-        "</main></body></html>";
+        web_ui_escape(title) + "</title>" + std::string(theme_preference_script) +
+        "<link rel=\"stylesheet\" href=\"/style.css\"><style>:root{--accent:" + accent +
+        ";--paper:" + background + ";--app-accent:" + accent + ";--app-background:" + background +
+        "}</style></head><body class=\"hosted-shell\">"
+        "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
+        "<header class=\"hosted-header\"><span class=\"hosted-brand\"><span "
+        "class=\"hosted-brand-mark\" aria-hidden=\"true\"></span>" +
+        web_ui_escape(application.name) +
+        "</span><button class=\"theme-toggle\" type=\"button\" data-theme-toggle "
+        "aria-label=\"Toggle theme\">" +
+        web_ui_icon("theme") +
+        "<span class=\"sr-only\">Toggle theme</span></button></header>"
+        "<main class=\"hosted-main\" id=\"main-content\" tabindex=\"-1\"><div "
+        "class=\"hosted-card\">" +
+        std::string(content) + "</div></main>" + std::string(theme_toggle_script) +
+        "</body></html>";
     return html;
 }
 
@@ -273,10 +288,6 @@ std::string web_ui_shell(std::string_view title,
                          std::string_view meta,
                          std::string_view content,
                          bool signed_in) {
-    static constexpr std::string_view theme_preference =
-        R"(<script id="theme-preference">(()=>{try{const t=localStorage.getItem('lake-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch{}})();</script>)";
-    static constexpr std::string_view theme_toggle =
-        R"(<script id="theme-toggle-script">(()=>{const b=document.querySelector('[data-theme-toggle]');if(!b)return;const current=()=>document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');const label=()=>{const t=current();b.setAttribute('aria-label',`Use ${t==='dark'?'light':'dark'} theme`);b.setAttribute('aria-pressed',String(t==='dark'));};b.addEventListener('click',()=>{const t=current()==='dark'?'light':'dark';document.documentElement.dataset.theme=t;try{localStorage.setItem('lake-theme',t);}catch{}label();});label();})();</script>)";
     return std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -293,14 +304,14 @@ std::string web_ui_shell(std::string_view title,
         "</button>{}</div></header><main id=\"main-content\" tabindex=\"-1\">"
         "<div class=\"page-container\">{}</div></main></div></div>{}</body></html>",
         web_ui_escape(title),
-        theme_preference,
+        theme_preference_script,
         web_ui_icon("lake"),
         nav(signed_in, title),
         web_ui_escape(meta),
         web_ui_icon("theme"),
         session_control(signed_in),
         content,
-        theme_toggle);
+        theme_toggle_script);
 }
 
 std::string web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in) {
@@ -1585,7 +1596,8 @@ std::string web_ui_application(const control::Application& application) {
         "\">Users</a> · <a href=\"/application/organizations?id=" + id +
         "\">Organizations</a> · <a href=\"/application/events?id=" + id +
         "\">Webhook events</a> · <a href=\"/apps/" + id + "/sign-in\">Hosted sign-in</a></p>";
-    return web_ui_shell("lake — " + application.name, application.pool_id, content, true);
+    return web_ui_shell(
+        "lake — application: " + application.name, application.pool_id, content, true);
 }
 
 std::string web_ui_application_users(const control::Application& application,

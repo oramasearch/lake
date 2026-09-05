@@ -21,6 +21,7 @@
 #include <liquid/liquid.hpp>
 
 #include "lake/api/server.hpp"
+#include "lake/control/apps.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/search/index.hpp"
 
@@ -136,6 +137,42 @@ int main(int argc, char** argv) {
     const auto organization_customer =
         require(store->create_customer({"organization", "", organization.id, "orama-research"}),
                 "create organization customer");
+    const std::string application_id = lake::control::new_uuid_v4();
+    auto application_key = lake::control::apps::generate_signing_key(application_id, 1);
+    if (!application_key) {
+        std::println(
+            stderr, "lake-ui-fixture: create application signing key: {}", application_key.error());
+        return 1;
+    }
+    const auto application =
+        require(store->create_application(
+                    {.id = application_id,
+                     .customer_id = organization_customer.id,
+                     .pool_id = "app:" + application_id,
+                     .name = "Orama Console",
+                     .allowed_origins = {"https://console.example.test"},
+                     .redirect_uris = {"https://console.example.test/callback"},
+                     .custom_sign_in_domain = "login.console.example.test",
+                     .theme = {{"accent_color", "#0f62fe"}, {"background_color", "#f8f8fa"}},
+                     .signing_key = *application_key}),
+                "create application");
+    require(store->sign_up_password({application.pool_id,
+                                     "app-user@example.test",
+                                     "correct horse battery staple",
+                                     "Application User",
+                                     "fixture browser",
+                                     "{}"}),
+            "create application user");
+    require(store->create_application_organization({application.id,
+                                                    "taap:1:ed25519:ui-fixture-app-organization",
+                                                    "Example Workspace",
+                                                    {{"plan", "enterprise"}}}),
+            "create application organization");
+    require(store->create_application_webhook_event(
+                application.id,
+                "user.created",
+                {{"email", "app-user@example.test"}, {"source", "ui-fixture"}}),
+            "create application event");
     const auto repository =
         require(store->create_repository({organization_customer.id,
                                           "lake-design",
@@ -333,6 +370,21 @@ int main(int argc, char** argv) {
         {"tokens", issued.secret, "/tokens"},
         {"customers", operator_token, "/customers"},
         {"organizations", operator_token, "/organizations"},
+        {"applications", operator_token, "/applications"},
+        {"application", operator_token, std::format("/application?id={}", application.id)},
+        {"application-users",
+         operator_token,
+         std::format("/application/users?id={}", application.id)},
+        {"application-organizations",
+         operator_token,
+         std::format("/application/organizations?id={}", application.id)},
+        {"application-events",
+         operator_token,
+         std::format("/application/events?id={}", application.id)},
+        {"application-sign-up", "-", std::format("/apps/{}/sign-up", application.id)},
+        {"application-sign-in", "-", std::format("/apps/{}/sign-in", application.id)},
+        {"application-mfa", "-", std::format("/apps/{}/mfa", application.id)},
+        {"application-passkey", "-", std::format("/apps/{}/passkey-sign-in", application.id)},
         {"teams", operator_token, std::format("/teams?organization_id={}", organization.id)},
         {"sso",
          operator_token,

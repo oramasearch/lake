@@ -61,8 +61,13 @@ The component contract covers panels and cards; primary, secondary, and destruct
 text, select, checkbox, and textarea controls; compact tables with sticky headers, hover rows,
 sort indicators, and expandable identifiers; neutral and semantic badges with status dots; tabs,
 empty states, notices, toasts, code blocks, diffs, pagination, breadcrumbs, and inline SVG icons.
-Existing page markup uses these shared selectors, so all 38 routes move together without adding
-renderer-side CSS.
+Existing page markup uses these shared selectors, so the operator and Lake identity routes move
+together without adding renderer-side CSS.
+
+Hosted application identity pages use a compact version of the same token, font, form, focus,
+theme, and motion contracts. Their validated application accent is a decorative rule and their
+background color is mixed lightly into the governed canvas; readable text and controls retain the
+design-system roles in both themes.
 
 `web_ui_icon(name)` returns decorative, focus-disabled SVG for the approved navigation and theme
 names. Accessible names stay on the surrounding link or button. Unknown names return an empty
@@ -136,19 +141,21 @@ The live mode of `tools/ui/screenshot.sh` then fetches every page in the generat
 renders both themes at 1440 by 900. Session values and generated identifiers remain under
 `.cache`; only the PNG evidence is checked in.
 
-The baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. It contains light and dark
-captures for all 38 pages in the fixture manifest:
+The baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. The fixture manifest covers
+all 47 pages below in light and dark:
 
 ```text
 home login sign-up sign-in mfa passkey-sign-in sessions passkeys tokens
 customers organizations teams sso members invitations grants access
+applications application application-users application-organizations application-events
+application-sign-up application-sign-in application-mfa application-passkey
 repositories repository exports repository-tree file changes change conflicts
 artifacts artifact search secret-mounts secrets encryption-keys metering audit
 drive drive-preview drive-history drive-share shared-link
 ```
 
 The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
-path-for-path pair. Both directories contain 76 PNG files, and every after image is 1440 by 900.
+path-for-path pair. Every capture is 1440 by 900.
 The three primary review screens are the
 [repository](screenshots/after/repository-light.png),
 [change](screenshots/after/change-light.png), and

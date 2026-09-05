@@ -78,6 +78,48 @@ a:hover {
   clip-path: inset(50%);
 }
 
+.hosted-shell {
+  min-height: 100vh;
+  background: color-mix(in srgb, var(--app-background) 8%, var(--lake-canvas));
+}
+.hosted-header {
+  min-height: var(--lake-topbar-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lake-space-4);
+  padding: 0 var(--lake-page-gutter);
+  border-bottom: var(--lake-border-width) solid var(--lake-border-subtle);
+  background: var(--lake-surface);
+}
+.hosted-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-2);
+  font-size: var(--lake-text-16);
+  font-weight: var(--lake-weight-semibold);
+}
+.hosted-brand-mark {
+  width: 0.25rem;
+  height: 1.25rem;
+  background: var(--app-accent);
+}
+.hosted-main {
+  width: min(100%, 34rem);
+  margin: 0 auto;
+  padding: var(--lake-space-8) var(--lake-page-gutter) 4rem;
+}
+.hosted-card {
+  padding: var(--lake-space-6);
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-top: 0.1875rem solid var(--app-accent);
+  background: var(--lake-surface);
+}
+.hosted-card form + p,
+.hosted-card p + form {
+  margin-top: var(--lake-space-6);
+}
+
 .skip-link {
   position: fixed;
   z-index: calc(var(--lake-z-toast) + 1);
@@ -709,6 +751,8 @@ dd {
 
 @media (max-width: 40rem) {
   .topbar,
+  .hosted-header,
+  .hosted-main,
   .page-container {
     padding-right: var(--lake-page-gutter-compact);
     padding-left: var(--lake-page-gutter-compact);
