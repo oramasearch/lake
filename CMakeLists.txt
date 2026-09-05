@@ -105,6 +105,9 @@ add_library(lake-core STATIC
   src/api/github_import_capabilities.cpp
   src/api/pki_capabilities.cpp
   src/api/metering_capabilities.cpp
+  src/api/drive.cpp
+  src/api/drive_capabilities.cpp
+  src/api/model_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp

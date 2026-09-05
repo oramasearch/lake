@@ -49,6 +49,7 @@ form.login input,.filters input,form.search input{font:inherit;padding:.5rem .6r
 form.inline{display:inline}form.inline button{background:transparent;color:var(--accent);padding:0}.error{color:#a12a2a;margin:0 0 .5rem}dl{display:grid;grid-template-columns:max-content 1fr;gap:.35rem 1rem;margin:0}dt{color:var(--muted)}dd{margin:0}
 .filters{display:flex;flex-wrap:wrap;gap:.75rem;align-items:end;margin:0 0 1.5rem}.filters label{display:grid;gap:.2rem;color:var(--muted);font-size:.8rem}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef1f4;padding:1rem;border-radius:6px}
+.image-preview{display:block;max-width:100%;max-height:40rem;margin:auto}.table-wrap{overflow:auto}.file-preview{max-height:40rem;overflow:auto}
 .diff-entry{margin-top:1rem}.diff-entry h2{font-size:1rem;margin:0 0 .75rem}.diff-entry .badge{margin-left:.35rem}.diff-hunk{margin:.75rem 0 0}.diff-hunk span{display:block}.diff-remove{color:#8b1a1a}.diff-add{color:#176b35}
 form.stack{display:grid;gap:.75rem;max-width:36rem}form.stack label{display:grid;gap:.25rem;color:var(--muted)}
 form.stack input,form.stack textarea,form.stack select{font:inherit;padding:.5rem .6rem;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
@@ -124,6 +125,11 @@ std::string joined(const std::vector<std::string>& values) {
 
 std::string mode_text(const std::optional<std::uint32_t>& mode) {
     return mode ? std::format("{:o}", *mode) : "—";
+}
+
+std::string parent_path(std::string_view path) {
+    const std::size_t slash = path.find_last_of('/');
+    return slash == std::string_view::npos ? std::string{} : std::string(path.substr(0, slash));
 }
 
 bool hidden_reformatting_entry(const RepositoryDiffEntry& entry) {
@@ -288,11 +294,15 @@ std::string web_ui_repository(const control::Repository& repository,
         }
         content += "</ul>";
     }
-    content += std::format("<p>{} · {} · {} · {}</p></div>",
-                           row_link("/changes?repository_id=" + repository.id, "Change log"),
-                           row_link("/artifacts?repository_id=" + repository.id, "Artifacts"),
-                           row_link("/conflicts?repository_id=" + repository.id, "Conflicts"),
-                           row_link("/repository/access?id=" + repository.id, "Effective access"));
+    const std::string drive_ref = refs.empty() ? "main" : refs.front().name;
+    content += std::format(
+        "<p>{} · {} · {} · {} · {}</p></div>",
+        row_link("/drive?repository_id=" + repository.id + "&ref=" + url_component(drive_ref),
+                 "Drive"),
+        row_link("/changes?repository_id=" + repository.id, "Change log"),
+        row_link("/artifacts?repository_id=" + repository.id, "Artifacts"),
+        row_link("/conflicts?repository_id=" + repository.id, "Conflicts"),
+        row_link("/repository/access?id=" + repository.id, "Effective access"));
     return web_ui_shell("lake — " + owner_name + "/" + repository.name,
                         owner_name + "/" + repository.name,
                         content,
@@ -1324,6 +1334,205 @@ std::string web_ui_exports(const control::Repository& repository,
     }
     content += "</tbody></table>";
     return web_ui_shell("lake — exports", repository_name(repository), content, true);
+}
+
+std::string web_ui_drive_folder(const control::Repository& repository,
+                                std::string_view ref,
+                                std::string_view path,
+                                const std::vector<RepositoryTreeEntry>& entries,
+                                bool signed_in) {
+    const std::string base = "/drive?repository_id=" + url_component(repository.id) +
+                             "&ref=" + url_component(ref) + "&path=";
+    std::string content = std::format(
+        "<p class=\"eyebrow\">drive</p><h1>{}</h1><p class=\"sub\">Folder <code>{}</code> "
+        "at <code>{}</code>. The same content remains a liquid repository.</p><div "
+        "class=\"actions\"><a href=\"/drive/history?repository_id={}&ref={}&path={}\">History"
+        "</a><a href=\"/drive/share?repository_id={}&ref={}&path={}\">Share</a><a "
+        "href=\"/conflicts?repository_id={}\">Conflicts</a></div>",
+        web_ui_escape(repository_name(repository)),
+        web_ui_escape(path.empty() ? "/" : path),
+        web_ui_escape(ref),
+        url_component(repository.id),
+        url_component(ref),
+        url_component(path),
+        url_component(repository.id),
+        url_component(ref),
+        url_component(path),
+        url_component(repository.id));
+    content +=
+        "<table><thead><tr><th>Name</th><th>Kind</th><th>Size identity</th></tr></thead><tbody>";
+    for (const RepositoryTreeEntry& entry : entries) {
+        const std::size_t slash = entry.path.find_last_of('/');
+        const std::string name =
+            slash == std::string::npos ? entry.path : entry.path.substr(slash + 1);
+        const std::string href =
+            entry.kind == "tree"
+                ? base + url_component(entry.path)
+                : "/drive/preview?repository_id=" + url_component(repository.id) +
+                      "&ref=" + url_component(ref) + "&path=" + url_component(entry.path);
+        content += std::format("<tr><td>{}</td><td><span class=\"badge\">{}</span></td>"
+                               "<td><code>{}</code></td></tr>",
+                               row_link(href, name),
+                               web_ui_escape(entry.kind),
+                               web_ui_escape(entry.blob));
+    }
+    if (entries.empty()) {
+        content += "<tr><td colspan=\"3\" class=\"empty\">This folder is empty.</td></tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell("lake — drive", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_drive_preview(const control::Repository& repository,
+                                 std::string_view ref,
+                                 const RepositoryFile& file,
+                                 const DrivePreview& preview,
+                                 bool signed_in) {
+    const std::string parent = parent_path(file.path);
+    const std::string content = std::format(
+        "<p class=\"eyebrow\">drive preview</p><h1>{}</h1><p class=\"sub\"><span "
+        "class=\"badge\">{}</span> {} bytes · <a href=\"/drive?repository_id={}&ref={}&path={}\">"
+        "Back to folder</a></p><div class=\"panel\">{}</div>",
+        web_ui_escape(file.path),
+        web_ui_escape(preview.format),
+        file.size,
+        url_component(repository.id),
+        url_component(ref),
+        url_component(parent),
+        preview.html);
+    return web_ui_shell("lake — preview", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_drive_history(const control::Repository& repository,
+                                 std::string_view ref,
+                                 std::string_view path,
+                                 const std::vector<nlohmann::json>& changes,
+                                 bool signed_in) {
+    std::string content = std::format(
+        "<p class=\"eyebrow\">drive history</p><h1>{}</h1><p class=\"sub\">Every version is "
+        "a history query. Restoring writes a new change and does not rewrite prior versions.</p>",
+        web_ui_escape(path));
+    content += "<table><thead><tr><th>When</th><th>Change</th><th>What changed</th><th></th>"
+               "</tr></thead><tbody>";
+    for (const nlohmann::json& change : changes) {
+        std::vector<std::string> kinds = change.value("changes", std::vector<std::string>{});
+        content += std::format(
+            "<tr><td>{}</td><td><code>{}</code><br>{}</td><td>{}</td><td><form "
+            "class=\"inline\" method=\"post\" action=\"/drive/history/restore\"><input "
+            "type=\"hidden\" name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
+            "name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"change_id\" value=\"{}\"><button type=\"submit\">"
+            "Restore</button></form></td></tr>",
+            web_ui_escape(change.value("occurred_at", "")),
+            web_ui_escape(change.value("id", "")),
+            web_ui_escape(change.value("message", "")),
+            web_ui_escape(joined(kinds)),
+            web_ui_escape(repository.id),
+            web_ui_escape(ref),
+            web_ui_escape(path),
+            web_ui_escape(change.value("id", "")));
+    }
+    if (changes.empty()) {
+        content += "<tr><td colspan=\"4\" class=\"empty\">No changes touch this path.</td></tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell("lake — drive history", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_drive_share(const control::Repository& repository,
+                               std::string_view ref,
+                               std::string_view path,
+                               const std::vector<control::EffectiveAccessEntry>& access,
+                               const std::vector<nlohmann::json>& links,
+                               std::string_view created_link,
+                               std::string_view error) {
+    std::string content = std::format(
+        "<p class=\"eyebrow\">drive sharing</p><h1>Share {}</h1><p class=\"sub\">Before sharing, "
+        "review who can access this folder, what they can do, whether access is inherited, and "
+        "whether the recipient gets a live object, a continuing link, or an independent copy.</p>",
+        web_ui_escape(path));
+    content += error_markup(error);
+    if (!created_link.empty()) {
+        content += "<p class=\"notice\">Copy this link now: <code>" + web_ui_escape(created_link) +
+                   "</code></p>";
+    }
+    content += "<h2>Effective access</h2><table><thead><tr><th>Who</th><th>Role</th><th>Can do</th>"
+               "<th>Source</th></tr></thead><tbody>";
+    for (const control::EffectiveAccessEntry& entry : access) {
+        content += std::format("<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                               web_ui_escape(entry.principal_taap_id),
+                               web_ui_escape(entry.role),
+                               web_ui_escape(joined(entry.actions)),
+                               entry.inherited ? "inherited" : "direct");
+    }
+    if (access.empty()) {
+        content += "<tr><td colspan=\"4\" class=\"empty\">No grants.</td></tr>";
+    }
+    content += "</tbody></table><div class=\"grid\"><section class=\"panel\"><h2>Live object</h2>"
+               "<p>Updates, moves, and revocation continue to apply.</p><form class=\"stack\" "
+               "method=\"post\" action=\"/drive/share/direct\">";
+    const std::string hidden = std::format(
+        "<input type=\"hidden\" name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
+        "name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" value=\"{}\">",
+        web_ui_escape(repository.id),
+        web_ui_escape(ref),
+        web_ui_escape(path));
+    content += hidden;
+    content +=
+        "<label>Recipient TAAP identity<input name=\"principal_taap_id\" required></label>"
+        "<label>Role<select name=\"role\"><option>read</option><option>write</option>"
+        "<option>share</option></select></label><label>Attestation digest<input "
+        "name=\"attestation_digest\" required></label><button class=\"primary\" "
+        "type=\"submit\">Share live folder</button></form></section><section class=\"panel\">"
+        "<h2>Link</h2><p>Scope, role, expiry, and revocation continue to apply.</p><form "
+        "class=\"stack\" method=\"post\" action=\"/drive/share/link\">" +
+        hidden +
+        "<label>Role<select name=\"role\"><option>read</option><option>write</option>"
+        "</select></label><label>Expires at (UTC)<input name=\"expires_at\" "
+        "placeholder=\"2030-01-01T00:00:00Z\" required></label><button class=\"primary\" "
+        "type=\"submit\">Create link</button></form></section><section class=\"panel\">"
+        "<h2>Independent copy</h2><p>Downloaded bytes stop being a live object. They cannot "
+        "be updated or recalled by changing access here.</p></section></div>";
+    content += "<h2>Share links</h2><table><thead><tr><th>Role</th><th>Expires</th><th>Status</th>"
+               "<th></th></tr></thead><tbody>";
+    for (const nlohmann::json& link : links) {
+        content += std::format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td><form class=\"inline\" method=\"post\" "
+            "action=\"/drive/share/revoke\"><input type=\"hidden\" name=\"link_id\" "
+            "value=\"{}\"><input type=\"hidden\" name=\"repository_id\" value=\"{}\"><input "
+            "type=\"hidden\" name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" "
+            "value=\"{}\"><button type=\"submit\">Revoke</button></form></td></tr>",
+            web_ui_escape(link.value("role", "")),
+            web_ui_escape(link.value("expires_at", "")),
+            link.value("active", false) ? "active" : "expired or revoked",
+            web_ui_escape(link.value("id", "")),
+            web_ui_escape(repository.id),
+            web_ui_escape(ref),
+            web_ui_escape(path));
+    }
+    if (links.empty()) {
+        content += "<tr><td colspan=\"4\" class=\"empty\">No links.</td></tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell("lake — drive sharing", repository_name(repository), content, true);
+}
+
+std::string web_ui_drive_link(std::string_view path,
+                              const std::vector<RepositoryTreeEntry>& entries,
+                              std::string_view error) {
+    std::string content = "<p class=\"eyebrow\">shared drive folder</p><h1>" + web_ui_escape(path) +
+                          "</h1>" + error_markup(error);
+    content += "<table><thead><tr><th>Name</th><th>Kind</th></tr></thead><tbody>";
+    for (const RepositoryTreeEntry& entry : entries) {
+        content += std::format("<tr><td>{}</td><td>{}</td></tr>",
+                               web_ui_escape(entry.path),
+                               web_ui_escape(entry.kind));
+    }
+    if (entries.empty() && error.empty()) {
+        content += "<tr><td colspan=\"2\" class=\"empty\">This folder is empty.</td></tr>";
+    }
+    content += "</tbody></table>";
+    return web_ui_shell("lake — shared drive folder", "share link", content, false);
 }
 
 } // namespace lake::api

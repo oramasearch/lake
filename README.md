@@ -58,6 +58,10 @@ liquid is the tool. lake is where it collects.
 > Caller exchanges persist verified non-secret metadata, while root-recovery ceremonies persist
 > quorum, expiry, completion, and one-way share evidence. OIDC/JWT claim policy comes from the
 > shared federation issuer store. All remain on the signed audit path.
+> Drive presents the same repositories as folders with stable-node ACLs, server-rendered previews,
+> effective-access sharing, expiring links, path history, and restore-as-a-new-change. Model
+> repositories expose model cards, exact file resolution, and verified SBOM/SLSA build provenance
+> through Hugging Face-compatible reads. Migration `0015_drive` stores link expiry and revocation.
 
 ## Build and run
 
@@ -86,6 +90,8 @@ ctest --test-dir build
 | `GET /sessions`, `/passkeys`, `/tokens` | authenticated session/device, passkey and scoped-token management pages |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
+| `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
+| `GET /api/models/:id`, `/models/:id/resolve/:revision/:file` | compatible model metadata, verified build provenance, and exact revision file bytes |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |

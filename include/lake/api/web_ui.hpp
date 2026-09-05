@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 
+#include "lake/api/drive.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
@@ -101,5 +102,30 @@ std::string web_ui_metering(const nlohmann::json& usage);
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter);
 std::string web_ui_exports(const control::Repository& repository,
                            const std::vector<control::ForgeRecord>& exports);
+std::string web_ui_drive_folder(const control::Repository& repository,
+                                std::string_view ref,
+                                std::string_view path,
+                                const std::vector<RepositoryTreeEntry>& entries,
+                                bool signed_in);
+std::string web_ui_drive_preview(const control::Repository& repository,
+                                 std::string_view ref,
+                                 const RepositoryFile& file,
+                                 const DrivePreview& preview,
+                                 bool signed_in);
+std::string web_ui_drive_history(const control::Repository& repository,
+                                 std::string_view ref,
+                                 std::string_view path,
+                                 const std::vector<nlohmann::json>& changes,
+                                 bool signed_in);
+std::string web_ui_drive_share(const control::Repository& repository,
+                               std::string_view ref,
+                               std::string_view path,
+                               const std::vector<control::EffectiveAccessEntry>& access,
+                               const std::vector<nlohmann::json>& links,
+                               std::string_view created_link,
+                               std::string_view error);
+std::string web_ui_drive_link(std::string_view path,
+                              const std::vector<RepositoryTreeEntry>& entries,
+                              std::string_view error);
 
 } // namespace lake::api

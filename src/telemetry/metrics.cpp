@@ -342,6 +342,29 @@ public:
         return call("list_grants",
                     [&] { return store_->list_grants(object_ids, principal_taap_id, limit); });
     }
+    control::Result<control::DriveShareLink>
+    create_drive_share_link(const control::NewDriveShareLink& value) override {
+        return call("create_drive_share_link",
+                    [&] { return store_->create_drive_share_link(value); });
+    }
+    control::Result<control::DriveShareLink> get_drive_share_link(const std::string& id) override {
+        return call("get_drive_share_link", [&] { return store_->get_drive_share_link(id); });
+    }
+    control::Result<control::DriveShareLink>
+    get_drive_share_link_by_token_hash(const std::string& token_hash) override {
+        return call("get_drive_share_link_by_token_hash",
+                    [&] { return store_->get_drive_share_link_by_token_hash(token_hash); });
+    }
+    control::Result<std::vector<control::DriveShareLink>> list_drive_share_links(
+        const std::string& repository_id, const std::string& object_id, int limit) override {
+        return call("list_drive_share_links", [&] {
+            return store_->list_drive_share_links(repository_id, object_id, limit);
+        });
+    }
+    control::Result<control::DriveShareLink>
+    revoke_drive_share_link(const std::string& id) override {
+        return call("revoke_drive_share_link", [&] { return store_->revoke_drive_share_link(id); });
+    }
     audit::Result<audit::Identity> current_lake_identity() override {
         return call("current_lake_identity", [&] { return store_->current_lake_identity(); });
     }

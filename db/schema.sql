@@ -919,3 +919,32 @@ CREATE TABLE IF NOT EXISTS metering_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0014_metering') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Drive sharing (migration 0015): expiring, scoped link capabilities over path policy objects.
+-- Direct recipient shares remain ordinary grants on the same objects.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS drive_share_links (
+    id                    uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    repository_id         uuid        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    object_id             uuid        NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+    node_id               text        NOT NULL,
+    path                  text        NOT NULL,
+    role                  text        NOT NULL,
+    token_hash            text        NOT NULL UNIQUE,
+    expires_at            timestamptz NOT NULL,
+    revoked_at            timestamptz,
+    created_by_taap_id    text        NOT NULL,
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT drive_share_links_role_check CHECK (role IN ('read', 'write')),
+    CONSTRAINT drive_share_links_node_check CHECK (length(node_id) = 32),
+    CONSTRAINT drive_share_links_expiry_check CHECK (expires_at > created_at)
+);
+CREATE INDEX IF NOT EXISTS drive_share_links_repository_object_idx
+    ON drive_share_links (repository_id, object_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS drive_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0015_drive') ON CONFLICT DO NOTHING;

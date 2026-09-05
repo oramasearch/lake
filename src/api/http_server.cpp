@@ -783,7 +783,8 @@ RepositoryTreeEntry repository_tree_entry_from_json(const nlohmann::json& value)
     return {json_string(value, "path"),
             json_string(value, "kind"),
             json_string(value, "blob"),
-            value.value("mode", 0U)};
+            value.value("mode", 0U),
+            json_string(value, "node_id")};
 }
 
 RepositoryFile repository_file_from_json(const nlohmann::json& value) {
@@ -1290,7 +1291,8 @@ public:
         return RepositoryFile{path,
                               liquid::to_string(entry->ref),
                               display_contents(*bytes),
-                              static_cast<std::uint64_t>(bytes->size())};
+                              static_cast<std::uint64_t>(bytes->size()),
+                              *bytes};
     }
 
     SyncStoreResult<std::vector<RepositoryChange>>
@@ -1588,6 +1590,53 @@ public:
             output.push_back({conflict.path, std::move(blobs)});
         }
         return output;
+    }
+
+    SyncStoreResult<RepositoryChange> restore_repository_file(const std::string& customer_id,
+                                                              const std::string& repository_id,
+                                                              const std::string& change_id,
+                                                              const std::string& path) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto parsed = liquid::parse_digest(change_id);
+        if (!parsed) {
+            return std::unexpected(error_of(parsed.error()));
+        }
+        const liquid::change_id selected{*parsed};
+        const auto snapshot = liquid::runtime::block_on((*repository)->subject->at(selected));
+        if (!snapshot) {
+            return std::unexpected(error_of(snapshot.error()));
+        }
+        const auto entry = find_file(*(*repository)->subject, snapshot->root, path);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        const auto contents = liquid::runtime::block_on((*repository)->subject->blob(entry->ref));
+        if (!contents) {
+            return std::unexpected(error_of(contents.error()));
+        }
+        const auto parent = liquid::runtime::block_on((*repository)->subject->head());
+        if (!parent) {
+            return std::unexpected(error_of(parent.error()));
+        }
+        const auto written = liquid::runtime::block_on(
+            (*repository)->subject->write(path, *contents, {.mode = entry->mode}));
+        if (!written) {
+            return std::unexpected(error_of(written.error()));
+        }
+        const std::string message = "Restore " + path + " from " + change_id;
+        const auto restored = liquid::runtime::block_on((*repository)->subject->cut(message));
+        if (!restored) {
+            return std::unexpected(error_of(restored.error()));
+        }
+        return RepositoryChange{liquid::to_string(restored->value),
+                                {liquid::to_string(parent->value)},
+                                "",
+                                message,
+                                log_timestamp()};
     }
 
     SyncStoreResult<RepositoryPortableData> export_portable(const std::string& customer_id,
@@ -2168,6 +2217,15 @@ private:
         return "object";
     }
 
+    static std::string node_id_text(const liquid::node_id& node) {
+        std::string output;
+        output.reserve(node.size() * 2);
+        for (const std::byte value : node) {
+            output += std::format("{:02x}", std::to_integer<unsigned int>(value));
+        }
+        return output;
+    }
+
     static std::string tree_diff_kind_name(liquid::tree_diff_kind kind) {
         switch (kind) {
         case liquid::tree_diff_kind::added:
@@ -2234,8 +2292,11 @@ private:
                                            std::vector<RepositoryTreeEntry>& output) {
         for (const liquid::tree_entry& entry : tree.entries) {
             const std::string path = prefix.empty() ? entry.name : prefix + "/" + entry.name;
-            output.push_back(
-                {path, node_kind_name(entry.kind), liquid::to_string(entry.ref), entry.mode});
+            output.push_back({path,
+                              node_kind_name(entry.kind),
+                              liquid::to_string(entry.ref),
+                              entry.mode,
+                              node_id_text(entry.node)});
             if (entry.kind != liquid::node_kind::tree) {
                 continue;
             }
@@ -2777,6 +2838,10 @@ struct ApiServer::Impl {
             "/change",
             "/conflicts",
             "/artifact",
+            "/drive",
+            "/drive/preview",
+            "/drive/history",
+            "/drive/share",
             "/search",
             "/metering",
             "/secret-mounts",
@@ -4434,6 +4499,319 @@ struct ApiServer::Impl {
             "no-store");
     }
 
+    boost::http::route_task serve_drive_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        if (repository_id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult result =
+            registry.call("drive_browse",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        std::vector<RepositoryTreeEntry> entries;
+        for (const nlohmann::json& value : result.value.at("items")) {
+            entries.push_back(repository_tree_entry_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_drive_folder(repository_from_json(result.value.at("repository")),
+                                             ref,
+                                             path,
+                                             entries,
+                                             context.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_drive_preview_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        const ApiResult result =
+            registry.call("drive_preview",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        const RepositoryFile file{json_string(result.value, "path"),
+                                  json_string(result.value, "blob"),
+                                  "",
+                                  result.value.value("size", std::uint64_t{0})};
+        const DrivePreview preview{json_string(result.value, "format"),
+                                   json_string(result.value, "media_type"),
+                                   json_string(result.value, "html")};
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_drive_preview(repository_from_json(result.value.at("repository")),
+                                              ref,
+                                              file,
+                                              preview,
+                                              context.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_drive_history_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        const std::string path = query_value(route, "path");
+        const ApiResult result =
+            registry.call("drive_history",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        std::vector<nlohmann::json> changes;
+        for (const nlohmann::json& value : result.value.at("items")) {
+            changes.push_back(value);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_drive_history(repository_from_json(result.value.at("repository")),
+                                              ref,
+                                              path,
+                                              changes,
+                                              context.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task render_drive_share_page(boost::http::route_params& route,
+                                                    ApiContext context,
+                                                    const std::string& repository_id,
+                                                    const std::string& ref,
+                                                    const std::string& path,
+                                                    std::string created_link = {},
+                                                    std::string error = {}) {
+        const ApiResult result =
+            registry.call("drive_effective_access",
+                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
+                          context);
+        if (!result.ok) {
+            return serve_repository_page_error(route, context, result);
+        }
+        std::vector<control::EffectiveAccessEntry> access;
+        for (const nlohmann::json& value : result.value.at("items")) {
+            access.push_back(access_from_json(value));
+        }
+        std::vector<nlohmann::json> links;
+        for (const nlohmann::json& value : result.value.at("links")) {
+            links.push_back(value);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_drive_share(repository_from_json(result.value.at("repository")),
+                                            ref,
+                                            path,
+                                            access,
+                                            links,
+                                            created_link,
+                                            error),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_drive_share_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        return render_drive_share_page(route,
+                                       std::move(context),
+                                       query_value(route, "repository_id"),
+                                       ref,
+                                       query_value(route, "path"));
+    }
+
+    boost::http::route_task serve_drive_share_direct(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const ApiResult result =
+            registry.call("share_drive_folder",
+                          {{"repository_id", repository_id},
+                           {"ref", ref},
+                           {"path", path},
+                           {"principal_taap_id", form_field(body, "principal_taap_id")},
+                           {"role", form_field(body, "role")},
+                           {"attestation_digest", form_field(body, "attestation_digest")}},
+                          context);
+        if (!result.ok) {
+            co_return co_await render_drive_share_page(
+                route, context, repository_id, ref, path, {}, result.error.message);
+        }
+        co_return co_await redirect(
+            route,
+            "/drive/share?repository_id=" + oauth_url_encode(repository_id) +
+                "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path));
+    }
+
+    boost::http::route_task serve_drive_share_link_create(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const ApiResult result = registry.call("create_drive_share_link",
+                                               {{"repository_id", repository_id},
+                                                {"ref", ref},
+                                                {"path", path},
+                                                {"role", form_field(body, "role")},
+                                                {"expires_at", form_field(body, "expires_at")}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await render_drive_share_page(
+                route, context, repository_id, ref, path, {}, result.error.message);
+        }
+        co_return co_await render_drive_share_page(
+            route, context, repository_id, ref, path, json_string(result.value, "url"));
+    }
+
+    boost::http::route_task serve_drive_share_link_revoke(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call(
+            "revoke_drive_share_link", {{"link_id", form_field(body, "link_id")}}, context);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        if (!result.ok) {
+            co_return co_await render_drive_share_page(
+                route, context, repository_id, ref, path, {}, result.error.message);
+        }
+        co_return co_await redirect(
+            route,
+            "/drive/share?repository_id=" + oauth_url_encode(repository_id) +
+                "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path));
+    }
+
+    boost::http::route_task serve_drive_restore(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const ApiResult result = registry.call("restore_drive_version",
+                                               {{"repository_id", repository_id},
+                                                {"ref", ref},
+                                                {"path", path},
+                                                {"change_id", form_field(body, "change_id")}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        co_return co_await redirect(
+            route,
+            "/drive/history?repository_id=" + oauth_url_encode(repository_id) +
+                "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path));
+    }
+
+    boost::http::route_task serve_drive_share_link(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string ref =
+            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
+        const ApiResult result =
+            registry.call("resolve_drive_share_link",
+                          {{"token", route_value(route, "token")}, {"ref", ref}},
+                          context);
+        if (!result.ok) {
+            return send_text(route,
+                             boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                             web_ui_drive_link("Shared folder", {}, result.error.message),
+                             "text/html; charset=utf-8",
+                             "no-store");
+        }
+        std::vector<RepositoryTreeEntry> entries;
+        for (const nlohmann::json& value : result.value.at("items")) {
+            entries.push_back(repository_tree_entry_from_json(value));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_drive_link(json_string(result.value, "path"), entries, ""),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_model(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call(
+            "get_model", {{"id", route_value(route, "id")}, {"revision", "main"}}, context);
+        if (!result.ok) {
+            const boost::http::status status =
+                result.error.code == "not_found"      ? boost::http::status::not_found
+                : result.error.code == "unauthorized" ? boost::http::status::forbidden
+                : result.error.code == "conflict"     ? boost::http::status::conflict
+                                                      : boost::http::status::bad_request;
+            return send_text(route,
+                             status,
+                             error_body(result.error.code, result.error.message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         result.value.dump(),
+                         "application/json; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_model_file(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call("resolve_model_file",
+                                               {{"id", route_value(route, "id")},
+                                                {"revision", route_value(route, "revision")},
+                                                {"path", route_value(route, "file")}},
+                                               context);
+        if (!result.ok) {
+            const boost::http::status status = result.error.code == "not_found"
+                                                   ? boost::http::status::not_found
+                                                   : boost::http::status::forbidden;
+            return send_text(route,
+                             status,
+                             error_body(result.error.code, result.error.message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         json_string(result.value, "contents"),
+                         "application/octet-stream",
+                         "no-store");
+    }
+
     boost::http::route_task serve_search_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
@@ -5214,6 +5592,64 @@ bool ApiServer::start() {
         http::method::get, "/artifact", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/artifact", impl.serve_artifact_page(route));
         });
+    router.add(http::method::get, "/drive", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/drive", impl.serve_drive_page(route));
+    });
+    router.add(http::method::get,
+               "/drive/preview",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/preview", impl.serve_drive_preview_page(route));
+               });
+    router.add(http::method::get,
+               "/drive/history",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/history", impl.serve_drive_history_page(route));
+               });
+    router.add(http::method::post,
+               "/drive/history/restore",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/history/restore", impl.serve_drive_restore(route));
+               });
+    router.add(
+        http::method::get, "/drive/share", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/drive/share", impl.serve_drive_share_page(route));
+        });
+    router.add(http::method::post,
+               "/drive/share/direct",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/share/direct", impl.serve_drive_share_direct(route));
+               });
+    router.add(http::method::post,
+               "/drive/share/link",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/share/link", impl.serve_drive_share_link_create(route));
+               });
+    router.add(http::method::post,
+               "/drive/share/revoke",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/drive/share/revoke", impl.serve_drive_share_link_revoke(route));
+               });
+    router.add(
+        http::method::get, "/share/:token", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/share/:token", impl.serve_drive_share_link(route));
+        });
+    router.add(http::method::get,
+               "/api/models/:id",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route, "/api/models/:id", impl.serve_model(route));
+               });
+    router.add(http::method::get,
+               "/models/:id/resolve/:revision/*file",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/models/:id/resolve/:revision/*file", impl.serve_model_file(route));
+               });
     router.add(
         http::method::get, "/search", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/search", impl.serve_search_page(route));

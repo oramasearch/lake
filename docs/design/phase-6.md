@@ -268,9 +268,14 @@ Change review attaches to liquid's change identity. Migration `0012_forge_export
 stores each review anchor as a value and maps its initial `(change, path, line, column)` shape
 through structural line hunks until liquid #174 provides the batched `map_anchor` API. Forge ref
 policies are evaluated from the proposed ref update once liquid #177 supplies it to the sync
-authorizer; CI is the build engine, not a product (#30). The drive is the same
-repositories with per-folder ACLs, share links and a web surface through the format registry
-(#8, #43, #44, #45). Models and datasets are repositories with training provenance (#7).
+authorizer; CI is the build engine, not a product (#30). **Drive and model status (#7, #8, #43,
+#44, #45): implemented on the lake side.** Stable liquid node ids bind folder policy objects;
+live grants and expiring links use `authorize`; browse, preview, sharing, history and restore are
+server-rendered. Models and datasets remain repositories, and the Hugging Face-compatible read
+surface exposes model cards, files, and verified `sbom/1` plus `slsa_provenance/1` build evidence.
+The liquid drive client and Linux shell integration are tracked in liquid #195 and #196. Contracts
+are [`../api/drive.md`](../api/drive.md), [`../api/sharing.md`](../api/sharing.md), and
+[`../api/models.md`](../api/models.md).
 **Metering status (#33): implemented.** Hourly rows combine exact unique stored bytes from each
 customer store, transfer bytes on sync paths, and build-record compute seconds. Integer pricing is
 configuration. Over-quota writes are warned and throttled while reads remain complete; content is

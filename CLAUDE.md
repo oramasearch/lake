@@ -82,6 +82,11 @@ Caller exchanges persist verified non-secret identity metadata before returning 
 credential, and OIDC/JWT claims resolve through `federation_issuers`. Root-recovery ceremonies
 persist quorum, expiry, completion, and one-way share evidence while keeping shares and
 reconstructed root material out of storage. Both use the signed registry audit path.
+Drive and models add migration `0015_drive`, stable-node folder ACLs, live recipient grants,
+expiring and revocable links, format-registry previews, per-path history and restore, and the
+server-rendered browse/share/history pages. Model repositories expose cards, exact revision files,
+and verified `sbom/1` plus `slsa_provenance/1` build evidence through compatible metadata and
+resolve routes. The liquid sync client and Linux desktop work are tracked in liquid #195 and #196.
 
 ## Where to read Zetta
 
@@ -144,7 +149,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `offline_recovery_guard` today, versioned by content hash).
+  `drive_guard` today, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
