@@ -26,6 +26,7 @@
 #include <optional>
 #include <print>
 #include <ranges>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -1015,7 +1016,8 @@ public:
 
     SyncStoreResult<void> write(const std::string& customer_id,
                                 const std::string& digest_text,
-                                std::vector<std::byte> contents) override {
+                                std::vector<std::byte> contents,
+                                std::uint64_t storage_quota_bytes) override {
         std::lock_guard lock(mutex_);
         const auto expected = liquid::parse_digest(digest_text);
         if (!expected) {
@@ -1024,6 +1026,17 @@ public:
         auto store = open_customer(customer_id);
         if (!store) {
             return std::unexpected(store.error());
+        }
+        const auto present = liquid::runtime::block_on((*store)->contains(*expected));
+        if (!present) {
+            return std::unexpected(error_of(present.error()));
+        }
+        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        if (!stored_bytes) {
+            return std::unexpected(stored_bytes.error());
+        }
+        if (!*present && exceeds_quota(*stored_bytes, contents.size(), storage_quota_bytes)) {
+            return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
         }
         const auto stored = liquid::runtime::block_on((*store)->put(std::move(contents)));
         if (!stored) {
@@ -1052,6 +1065,15 @@ public:
             return std::unexpected(error_of(contents.error()));
         }
         return *contents;
+    }
+
+    SyncStoreResult<std::uint64_t> unique_stored_bytes(const std::string& customer_id) override {
+        std::lock_guard lock(mutex_);
+        auto store = open_customer(customer_id);
+        if (!store) {
+            return std::unexpected(store.error());
+        }
+        return unique_stored_bytes_locked(customer_id);
     }
 
     SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
@@ -1089,11 +1111,19 @@ public:
     SyncStoreResult<std::vector<std::byte>> push(const std::string& customer_id,
                                                  const std::string& repository_id,
                                                  std::span<const std::byte> request,
-                                                 SyncPushAuthorizer authorize) override {
+                                                 SyncPushAuthorizer authorize,
+                                                 std::uint64_t storage_quota_bytes) override {
         std::lock_guard lock(mutex_);
         auto state = open_repository(customer_id, repository_id);
         if (!state) {
             return std::unexpected(state.error());
+        }
+        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        if (!stored_bytes) {
+            return std::unexpected(stored_bytes.error());
+        }
+        if (storage_quota_bytes != 0 && *stored_bytes >= storage_quota_bytes) {
+            return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
         }
         liquid::sync_server_options options;
         options.authorize =
@@ -1140,16 +1170,32 @@ public:
         return from_liquid(liquid::runtime::block_on(server.handle_pull(request)));
     }
 
-    SyncStoreResult<void> upload_chunks(const std::string& customer_id,
-                                        const std::string& repository_id,
-                                        std::span<const std::byte> request) override {
+    SyncStoreResult<std::uint64_t> upload_chunks(const std::string& customer_id,
+                                                 const std::string& repository_id,
+                                                 std::span<const std::byte> request,
+                                                 std::uint64_t storage_quota_bytes) override {
         std::lock_guard lock(mutex_);
         auto state = open_repository(customer_id, repository_id);
         if (!state) {
             return std::unexpected(state.error());
         }
+        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        if (!stored_bytes) {
+            return std::unexpected(stored_bytes.error());
+        }
+        auto incoming_bytes = unique_incoming_bytes(*(*state)->objects, request);
+        if (!incoming_bytes) {
+            return std::unexpected(incoming_bytes.error());
+        }
+        if (exceeds_quota(*stored_bytes, *incoming_bytes, storage_quota_bytes)) {
+            return std::unexpected(quota_error(*stored_bytes, storage_quota_bytes));
+        }
         auto server = liquid::sync_server{*(*state)->subject, *(*state)->objects};
-        return from_liquid(liquid::runtime::block_on(server.handle_chunks(request)));
+        auto stored = from_liquid(liquid::runtime::block_on(server.handle_chunks(request)));
+        if (!stored) {
+            return std::unexpected(stored.error());
+        }
+        return unique_stored_bytes_locked(customer_id);
     }
 
     SyncStoreResult<std::vector<std::byte>> read_chunk(const std::string& customer_id,
@@ -1796,6 +1842,134 @@ private:
     static SyncStoreError error_of(const liquid::error& error) {
         const std::string code(liquid::to_string(error.code));
         return SyncStoreError{code, error.message, error.context};
+    }
+
+    static std::uint32_t u32_le(std::span<const std::byte> bytes, std::size_t offset) {
+        return std::to_integer<std::uint32_t>(bytes[offset]) |
+               std::to_integer<std::uint32_t>(bytes[offset + 1]) << 8U |
+               std::to_integer<std::uint32_t>(bytes[offset + 2]) << 16U |
+               std::to_integer<std::uint32_t>(bytes[offset + 3]) << 24U;
+    }
+
+    static bool frame_magic(std::span<const std::byte> bytes) {
+        constexpr std::array<std::byte, 7> prefix{std::byte{'L'},
+                                                  std::byte{'Q'},
+                                                  std::byte{'F'},
+                                                  std::byte{'R'},
+                                                  std::byte{'A'},
+                                                  std::byte{'M'},
+                                                  std::byte{1}};
+        return bytes.size() >= 8 && std::ranges::equal(prefix, bytes.first(prefix.size())) &&
+               (bytes[7] == std::byte{0} || bytes[7] == std::byte{1});
+    }
+
+    static std::string frame_key(std::span<const std::byte> header) {
+        return std::string(reinterpret_cast<const char*>(header.data() + 16), 33);
+    }
+
+    static bool exceeds_quota(std::uint64_t stored, std::uint64_t additional, std::uint64_t quota) {
+        return quota != 0 && additional != 0 && (stored >= quota || additional > quota - stored);
+    }
+
+    static SyncStoreError quota_error(std::uint64_t stored, std::uint64_t quota) {
+        return SyncStoreError{"busy",
+                              "storage quota exceeded; new writes are throttled while existing "
+                              "content remains complete and readable",
+                              std::format("stored_bytes={} quota_bytes={}", stored, quota),
+                              "storage_quota"};
+    }
+
+    static SyncStoreResult<std::uint64_t>
+    unique_incoming_bytes(liquid::store& store, std::span<const std::byte> request) {
+        constexpr std::size_t header_size = 49;
+        std::set<std::string> counted;
+        std::uint64_t total = 0;
+        std::size_t offset = 0;
+        while (offset < request.size()) {
+            if (request.size() - offset < header_size || !frame_magic(request.subspan(offset))) {
+                return std::unexpected(
+                    SyncStoreError{"invalid_argument", "invalid pack frame", "sync server"});
+            }
+            const std::uint32_t raw_size = u32_le(request, offset + 8);
+            const std::uint32_t compressed_size = u32_le(request, offset + 12);
+            if (compressed_size > request.size() - offset - header_size) {
+                return std::unexpected(
+                    SyncStoreError{"invalid_argument", "invalid pack frame length", "sync server"});
+            }
+            liquid::digest digest{};
+            digest.alg =
+                static_cast<liquid::algorithm>(std::to_integer<std::uint8_t>(request[offset + 16]));
+            std::ranges::copy_n(request.begin() + static_cast<std::ptrdiff_t>(offset + 17),
+                                digest.bytes.size(),
+                                digest.bytes.begin());
+            const std::string key = frame_key(request.subspan(offset, header_size));
+            if (counted.insert(key).second) {
+                const auto present = liquid::runtime::block_on(store.contains(digest));
+                if (!present) {
+                    return std::unexpected(error_of(present.error()));
+                }
+                if (!*present) {
+                    total += raw_size;
+                }
+            }
+            offset += header_size + compressed_size;
+        }
+        return total;
+    }
+
+    SyncStoreResult<std::uint64_t>
+    unique_stored_bytes_locked(const std::string& customer_id) const {
+        if (!path_component_is_safe(customer_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid customer location"});
+        }
+        const std::filesystem::path packs =
+            std::filesystem::path(root_) / customer_id / "store" / "packs";
+        std::error_code filesystem_error;
+        if (!std::filesystem::exists(packs, filesystem_error)) {
+            if (filesystem_error) {
+                return std::unexpected(SyncStoreError{
+                    "io", "could not inspect customer store: " + filesystem_error.message()});
+            }
+            return std::uint64_t{0};
+        }
+        std::set<std::string> counted;
+        std::uint64_t total = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(packs, filesystem_error)) {
+            if (filesystem_error) {
+                break;
+            }
+            if (!entry.is_regular_file() || entry.path().extension() != ".pack") {
+                continue;
+            }
+            std::ifstream input(entry.path(), std::ios::binary);
+            input.seekg(16);
+            for (;;) {
+                std::array<std::byte, 49> header{};
+                input.read(reinterpret_cast<char*>(header.data()), header.size());
+                if (input.gcount() == 0) {
+                    break;
+                }
+                if (input.gcount() != static_cast<std::streamsize>(header.size()) ||
+                    !frame_magic(header)) {
+                    break;
+                }
+                const std::uint32_t raw_size = u32_le(header, 8);
+                const std::uint32_t compressed_size = u32_le(header, 12);
+                if (counted.insert(frame_key(header)).second) {
+                    total += raw_size;
+                }
+                input.seekg(compressed_size, std::ios::cur);
+                if (!input) {
+                    return std::unexpected(SyncStoreError{
+                        "io", "could not read customer pack", entry.path().string()});
+                }
+            }
+        }
+        if (filesystem_error) {
+            return std::unexpected(SyncStoreError{
+                "io", "could not enumerate customer store: " + filesystem_error.message()});
+        }
+        return total;
     }
 
     static liquid::error liquid_error(const SyncStoreError& error) {
@@ -2604,6 +2778,7 @@ struct ApiServer::Impl {
             "/conflicts",
             "/artifact",
             "/search",
+            "/metering",
             "/secret-mounts",
             "/secrets",
             "/encryption-keys",
@@ -2664,6 +2839,7 @@ struct ApiServer::Impl {
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
         ctx.sync_store = &sync_store;
+        ctx.metering = options.metering;
         ctx.public_host = options.public_host;
         if (route.req.count(boost::http::field::user_agent) != 0) {
             ctx.device = std::string(route.req.at(boost::http::field::user_agent));
@@ -4315,6 +4491,28 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_metering_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string customer_id = query_value(route, "customer_id");
+        nlohmann::json usage{{"customer_id", customer_id}, {"items", nlohmann::json::array()}};
+        if (!customer_id.empty()) {
+            const ApiResult result =
+                registry.call("metering_usage", {{"customer_id", customer_id}}, context);
+            if (!result.ok) {
+                return serve_page_error(route, result);
+            }
+            usage = result.value;
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_metering(usage),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
     boost::http::route_task serve_audit_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
@@ -5019,6 +5217,10 @@ bool ApiServer::start() {
     router.add(
         http::method::get, "/search", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/search", impl.serve_search_page(route));
+        });
+    router.add(
+        http::method::get, "/metering", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/metering", impl.serve_metering_page(route));
         });
     router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/audit", impl.serve_audit_page(route));

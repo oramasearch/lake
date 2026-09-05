@@ -316,6 +316,48 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     EXPECT_EQ(scan_event->draft.details.value("mode", ""), "scan");
 }
 
+TEST(PostgresMetering, AggregatesHourlyUsageAndRecordsBuildOnce) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:meter-" + suffix, "meter-" + suffix + "@example.com", "Meter"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "meter-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const std::string hour = "2026-09-04T10:00:00Z";
+    const auto transfer = store->upsert_metering_usage({.customer_id = customer->id,
+                                                        .hour = hour,
+                                                        .stored_bytes = 4096,
+                                                        .transfer_in_bytes = 10,
+                                                        .transfer_out_bytes = 20});
+    ASSERT_TRUE(transfer) << transfer.error().message;
+    EXPECT_EQ(transfer->stored_bytes, 4096);
+    const auto first = store->record_metered_build({.customer_id = customer->id,
+                                                    .result_id = "result-" + suffix,
+                                                    .hour = hour,
+                                                    .compute_seconds = 3});
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_TRUE(*first);
+    const auto duplicate = store->record_metered_build({.customer_id = customer->id,
+                                                        .result_id = "result-" + suffix,
+                                                        .hour = hour,
+                                                        .compute_seconds = 3});
+    ASSERT_TRUE(duplicate) << duplicate.error().message;
+    EXPECT_FALSE(*duplicate);
+    const auto usage = store->list_metering_usage(customer->id, hour, hour, 10);
+    ASSERT_TRUE(usage) << usage.error().message;
+    ASSERT_EQ(usage->size(), 1U);
+    EXPECT_EQ(usage->front().transfer_in_bytes, 10);
+    EXPECT_EQ(usage->front().transfer_out_bytes, 20);
+    EXPECT_EQ(usage->front().compute_seconds, 3);
+}
+
 TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
     const char* uri = std::getenv("LAKE_TEST_DB_URI");
     if (uri == nullptr || std::string(uri).empty()) {

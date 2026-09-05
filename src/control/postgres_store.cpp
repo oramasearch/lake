@@ -2614,6 +2614,87 @@ public:
         });
     }
 
+    Result<MeteringUsage> upsert_metering_usage(const MeteringUpdate& update) override {
+        return with_tx<MeteringUsage>([&](pqxx::work& tx) -> Result<MeteringUsage> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO metering_usage "
+                "(customer_id, hour, stored_bytes, transfer_in_bytes, transfer_out_bytes) "
+                "VALUES ($1::uuid, $2::timestamptz, COALESCE($3::bigint, 0), $4, $5) "
+                "ON CONFLICT (customer_id, hour) DO UPDATE SET "
+                "stored_bytes = COALESCE($3::bigint, metering_usage.stored_bytes), "
+                "transfer_in_bytes = metering_usage.transfer_in_bytes + "
+                "EXCLUDED.transfer_in_bytes, "
+                "transfer_out_bytes = metering_usage.transfer_out_bytes + "
+                "EXCLUDED.transfer_out_bytes "
+                "RETURNING customer_id::text, "
+                "to_char(hour AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+                "stored_bytes, transfer_in_bytes, transfer_out_bytes, compute_seconds",
+                update.customer_id,
+                update.hour,
+                update.stored_bytes,
+                update.transfer_in_bytes,
+                update.transfer_out_bytes);
+            return MeteringUsage{.customer_id = rows[0][0].as<std::string>(),
+                                 .hour = rows[0][1].as<std::string>(),
+                                 .stored_bytes = rows[0][2].as<std::uint64_t>(),
+                                 .transfer_in_bytes = rows[0][3].as<std::uint64_t>(),
+                                 .transfer_out_bytes = rows[0][4].as<std::uint64_t>(),
+                                 .compute_seconds = rows[0][5].as<std::uint64_t>()};
+        });
+    }
+
+    Result<bool> record_metered_build(const MeteredBuild& build) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result inserted = tx.exec_params(
+                "WITH inserted AS ("
+                "INSERT INTO metering_build_records "
+                "(customer_id, result_id, hour, compute_seconds) "
+                "VALUES ($1::uuid, $2, $3::timestamptz, $4) "
+                "ON CONFLICT DO NOTHING RETURNING customer_id, hour, compute_seconds), "
+                "usage AS ("
+                "INSERT INTO metering_usage (customer_id, hour, compute_seconds) "
+                "SELECT customer_id, hour, compute_seconds FROM inserted "
+                "ON CONFLICT (customer_id, hour) DO UPDATE SET "
+                "compute_seconds = metering_usage.compute_seconds + EXCLUDED.compute_seconds "
+                "RETURNING 1) SELECT count(*) FROM inserted",
+                build.customer_id,
+                build.result_id,
+                build.hour,
+                build.compute_seconds);
+            return inserted[0][0].as<int>() == 1;
+        });
+    }
+
+    Result<std::vector<MeteringUsage>> list_metering_usage(const std::string& customer_id,
+                                                           const std::string& from_hour,
+                                                           const std::string& to_hour,
+                                                           int limit) override {
+        return with_tx<std::vector<MeteringUsage>>(
+            [&](pqxx::work& tx) -> Result<std::vector<MeteringUsage>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT customer_id::text, "
+                    "to_char(hour AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+                    "stored_bytes, transfer_in_bytes, transfer_out_bytes, compute_seconds "
+                    "FROM metering_usage WHERE customer_id = $1::uuid "
+                    "AND ($2 = '' OR hour >= $2::timestamptz) "
+                    "AND ($3 = '' OR hour <= $3::timestamptz) ORDER BY hour ASC LIMIT $4",
+                    customer_id,
+                    from_hour,
+                    to_hour,
+                    limit);
+                std::vector<MeteringUsage> usage;
+                for (const pqxx::row& row : rows) {
+                    usage.push_back(MeteringUsage{.customer_id = row[0].as<std::string>(),
+                                                  .hour = row[1].as<std::string>(),
+                                                  .stored_bytes = row[2].as<std::uint64_t>(),
+                                                  .transfer_in_bytes = row[3].as<std::uint64_t>(),
+                                                  .transfer_out_bytes = row[4].as<std::uint64_t>(),
+                                                  .compute_seconds = row[5].as<std::uint64_t>()});
+                }
+                return usage;
+            });
+    }
+
     Result<IssuedSession> sign_up_password(const NewPasswordUser& in) override {
         if (in.pool_id.empty() || in.email.empty() || in.password.size() < 12) {
             return std::unexpected(StoreError{

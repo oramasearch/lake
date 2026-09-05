@@ -372,6 +372,22 @@ public:
         return call("set_audit_retention_days",
                     [&] { return store_->set_audit_retention_days(customer_id, days); });
     }
+    control::Result<control::MeteringUsage>
+    upsert_metering_usage(const control::MeteringUpdate& update) override {
+        return call("upsert_metering_usage", [&] { return store_->upsert_metering_usage(update); });
+    }
+    control::Result<bool> record_metered_build(const control::MeteredBuild& build) override {
+        return call("record_metered_build", [&] { return store_->record_metered_build(build); });
+    }
+    control::Result<std::vector<control::MeteringUsage>>
+    list_metering_usage(const std::string& customer_id,
+                        const std::string& from_hour,
+                        const std::string& to_hour,
+                        int limit) override {
+        return call("list_metering_usage", [&] {
+            return store_->list_metering_usage(customer_id, from_hour, to_hour, limit);
+        });
+    }
     control::Result<control::PkiAuthorityRecord>
     create_pki_authority(const control::NewPkiAuthorityRecord& value,
                          const std::string& instance_kek) override {

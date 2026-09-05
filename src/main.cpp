@@ -1,4 +1,5 @@
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -26,6 +27,17 @@ void on_signal(int) {
 std::string env_or(const char* name, std::string fallback) {
     const char* value = std::getenv(name);
     return value && *value ? std::string(value) : std::move(fallback);
+}
+
+std::uint64_t env_u64(const char* name) {
+    const std::string value = env_or(name, "0");
+    std::uint64_t parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+        std::println(stderr, "lake: {} must be an unsigned integer", name);
+        std::exit(2);
+    }
+    return parsed;
 }
 
 int usage() {
@@ -59,6 +71,12 @@ int main(int argc, char** argv) {
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
+    opts.metering.currency = env_or("LAKE_PRICE_CURRENCY", "USD");
+    opts.metering.storage_quota_bytes = env_u64("LAKE_STORAGE_QUOTA_BYTES");
+    opts.metering.storage_gib_hour_micros = env_u64("LAKE_PRICE_STORAGE_GIB_HOUR_MICROS");
+    opts.metering.transfer_in_gib_micros = env_u64("LAKE_PRICE_TRANSFER_IN_GIB_MICROS");
+    opts.metering.transfer_out_gib_micros = env_u64("LAKE_PRICE_TRANSFER_OUT_GIB_MICROS");
+    opts.metering.compute_second_micros = env_u64("LAKE_PRICE_COMPUTE_SECOND_MICROS");
     bool memory_store = false;
 
     for (int i = 1; i < argc; ++i) {

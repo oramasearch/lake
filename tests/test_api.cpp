@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
@@ -8,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -61,18 +63,23 @@ struct Surface {
 
 struct RepositoryFixtureStore final : SyncStore {
     std::map<std::string, RepositoryPortableData> imported;
+    std::uint64_t unique_bytes = 123;
     SyncStoreResult<std::vector<std::string>>
     find_missing(const std::string&, const std::vector<std::string>&) override {
         return std::vector<std::string>{};
     }
 
     SyncStoreResult<void>
-    write(const std::string&, const std::string&, std::vector<std::byte>) override {
+    write(const std::string&, const std::string&, std::vector<std::byte>, std::uint64_t) override {
         return {};
     }
 
     SyncStoreResult<std::vector<std::byte>> read(const std::string&, const std::string&) override {
         return std::vector<std::byte>{};
+    }
+
+    SyncStoreResult<std::uint64_t> unique_stored_bytes(const std::string&) override {
+        return unique_bytes;
     }
 
     SyncStoreResult<std::vector<RepositoryContentRef>>
@@ -113,13 +120,16 @@ struct RepositoryFixtureStore final : SyncStore {
 
     SyncStoreResult<RepositoryArtifactPage> repository_artifacts(
         const std::string&, const std::string&, const RepositoryArtifactFilter&) override {
-        return RepositoryArtifactPage{.items = {{.id = "result-1",
-                                                 .action = "action-1",
-                                                 .outputs = {{"build/app", 0755, "blob-3"}},
-                                                 .cache_status = "hit",
-                                                 .worker = "worker-1",
-                                                 .observed_at = "2026-09-04T00:00:00Z"}},
-                                      .done = true};
+        return RepositoryArtifactPage{
+            .items =
+                {{.id = "result-1",
+                  .action = "action-1",
+                  .outputs = {{"build/app", 0755, "blob-3"}},
+                  .timing = {.sandbox_ms = 250, .exec_ms = 1000, .hash_ms = 250, .store_ms = 250},
+                  .cache_status = "hit",
+                  .worker = "worker-1",
+                  .observed_at = "2026-09-04T00:00:00Z"}},
+            .done = true};
     }
 
     SyncStoreResult<RepositoryArtifact> repository_artifact(const std::string&,
@@ -188,7 +198,8 @@ struct RepositoryFixtureStore final : SyncStore {
     SyncStoreResult<std::vector<std::byte>> push(const std::string&,
                                                  const std::string&,
                                                  std::span<const std::byte>,
-                                                 SyncPushAuthorizer authorize) override {
+                                                 SyncPushAuthorizer authorize,
+                                                 std::uint64_t) override {
         const auto authorized =
             authorize({.kind = SyncPushItemKind::Change, .change_id = "change-refused"}, {});
         if (!authorized) {
@@ -202,9 +213,11 @@ struct RepositoryFixtureStore final : SyncStore {
         return std::vector<std::byte>{};
     }
 
-    SyncStoreResult<void>
-    upload_chunks(const std::string&, const std::string&, std::span<const std::byte>) override {
-        return {};
+    SyncStoreResult<std::uint64_t> upload_chunks(const std::string&,
+                                                 const std::string&,
+                                                 std::span<const std::byte>,
+                                                 std::uint64_t) override {
+        return 0;
     }
 
     SyncStoreResult<std::vector<std::byte>> read_chunk(const std::string&,
@@ -215,6 +228,37 @@ struct RepositoryFixtureStore final : SyncStore {
         return std::vector<std::byte>{};
     }
 };
+
+TEST(Metering, CapabilityReportsExactStorageAndIdempotentBuildCompute) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    surface.ctx.metering = {
+        .currency = "USD", .storage_quota_bytes = 100, .compute_second_micros = 5};
+    const ApiResult user =
+        surface.call("create_user", {{"email", "meter@example.com"}, {"display_name", "Meter"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value.at("id")}, {"name", "meter"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value.at("id")}, {"name", "usage"}});
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+
+    const json input{{"customer_id", customer.value.at("id")}};
+    const ApiResult first = surface.call("metering_usage", input);
+    ASSERT_TRUE(first.ok) << first.error.message;
+    ASSERT_FALSE(first.value.at("items").empty());
+    EXPECT_EQ(first.value.at("items").back().at("stored_bytes"), 123);
+    EXPECT_EQ(first.value.at("items").front().at("compute_seconds"), 2);
+    EXPECT_EQ(first.value.at("cost_micros"), 10);
+    EXPECT_TRUE(first.value.at("over_quota"));
+
+    const ApiResult second = surface.call("metering_usage", input);
+    ASSERT_TRUE(second.ok) << second.error.message;
+    EXPECT_EQ(second.value.at("items").front().at("compute_seconds"), 2);
+}
 
 class TemporaryRepositoryRoot {
 public:
@@ -274,6 +318,39 @@ std::vector<std::byte> sync_bytes(std::string_view value) {
         output.push_back(static_cast<std::byte>(character));
     }
     return output;
+}
+
+std::uint32_t test_u32_le(const std::array<std::byte, 49>& header, std::size_t offset) {
+    return std::to_integer<std::uint32_t>(header[offset]) |
+           std::to_integer<std::uint32_t>(header[offset + 1]) << 8U |
+           std::to_integer<std::uint32_t>(header[offset + 2]) << 16U |
+           std::to_integer<std::uint32_t>(header[offset + 3]) << 24U;
+}
+
+std::uint64_t unique_pack_raw_bytes(const std::filesystem::path& packs) {
+    std::set<std::string> digests;
+    std::uint64_t total = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(packs)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".pack") {
+            continue;
+        }
+        std::ifstream input(entry.path(), std::ios::binary);
+        input.seekg(16);
+        for (;;) {
+            std::array<std::byte, 49> header{};
+            input.read(reinterpret_cast<char*>(header.data()), header.size());
+            if (input.gcount() != static_cast<std::streamsize>(header.size()) ||
+                std::string_view(reinterpret_cast<const char*>(header.data()), 6) != "LQFRAM") {
+                break;
+            }
+            const std::string digest(reinterpret_cast<const char*>(header.data() + 16), 33);
+            if (digests.insert(digest).second) {
+                total += test_u32_le(header, 8);
+            }
+            input.seekg(test_u32_le(header, 12), std::ios::cur);
+        }
+    }
+    return total;
 }
 
 std::vector<std::string> tree_fingerprint(const liquid::tree& tree) {
@@ -2043,6 +2120,67 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
     }));
 }
 
+TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {
+    TemporarySyncRoot temporary;
+    auto control = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = control->create_user(
+        {"taap:1:ed25519:quota-owner", "quota-owner@example.test", "Quota Owner"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = control->create_customer({"individual", user->id, "", "quota-owner"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository =
+        control->create_repository({customer->id, "quota-project", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    auto source =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "quota-source"));
+    ASSERT_TRUE(source) << source.error().message;
+    const std::string original(32 * 1024, 'a');
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("original.txt", sync_bytes(original))));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("original")));
+
+    ServerOptions options;
+    options.port = 0;
+    options.admin_token = "quota-admin";
+    options.instance_kek = "quota-instance-kek";
+    options.store_root = (temporary.path() / "lake").string();
+    options.store = control;
+    ApiServer initial(options);
+    ASSERT_TRUE(initial.start()) << initial.reason();
+    const std::string initial_url =
+        "http://127.0.0.1:" + std::to_string(initial.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint initial_endpoint(
+        initial_url, liquid::sync_endpoint_options{.bearer_token = "quota-admin"});
+    const auto first_push = liquid::runtime::block_on(initial_endpoint.push(*source));
+    ASSERT_TRUE(first_push) << first_push.error().message;
+    initial.stop();
+
+    ASSERT_TRUE(liquid::runtime::block_on(
+        source->write("refused.txt", sync_bytes(std::string(32 * 1024, 'b')))));
+    ASSERT_TRUE(liquid::runtime::block_on(source->cut("refused")));
+    options.metering.storage_quota_bytes = 1;
+    ApiServer limited(options);
+    ASSERT_TRUE(limited.start()) << limited.reason();
+    const std::string limited_url =
+        "http://127.0.0.1:" + std::to_string(limited.port()) + "/v1/repositories/" + repository->id;
+    liquid::sync_endpoint limited_endpoint(
+        limited_url, liquid::sync_endpoint_options{.bearer_token = "quota-admin"});
+    const auto refused = liquid::runtime::block_on(limited_endpoint.push(*source));
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().code, liquid::errc::busy);
+
+    auto destination = liquid::runtime::block_on(
+        liquid::repository::create(temporary.path() / "quota-destination"));
+    ASSERT_TRUE(destination) << destination.error().message;
+    const auto pulled = liquid::runtime::block_on(limited_endpoint.pull(*destination));
+    ASSERT_TRUE(pulled) << pulled.error().message;
+    const auto retained = liquid::runtime::block_on(destination->read("original.txt"));
+    ASSERT_TRUE(retained) << retained.error().message;
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(retained->data()), retained->size()),
+              original);
+    EXPECT_FALSE(liquid::runtime::block_on(destination->read("refused.txt")));
+    limited.stop();
+}
+
 TEST(SyncHttp, PushWithoutWriteAccessIsRejectedAndAudited) {
     TemporarySyncRoot temporary;
     auto control = std::make_shared<lake::control::InMemoryStore>();
@@ -2155,6 +2293,22 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     ASSERT_TRUE(destination) << destination.error().message;
     const auto pulled = liquid::runtime::block_on(endpoint.pull(*destination));
     ASSERT_TRUE(pulled) << pulled.error().message;
+    const std::string metering_response = http_get(server.port(),
+                                                   "/v1/metering_usage?customer_id=" + customer->id,
+                                                   "Bearer postgres-sync-admin");
+    EXPECT_NE(metering_response.find(" 200 "), std::string::npos) << metering_response;
+    const json metering = response_json(metering_response);
+    ASSERT_TRUE(metering.value("ok", false)) << metering.dump();
+    ASSERT_FALSE(metering.at("value").at("items").empty());
+    const std::uint64_t accounted =
+        unique_pack_raw_bytes(temporary.path() / "lake" / customer->id / "store" / "packs");
+    EXPECT_GT(accounted, 0U);
+    EXPECT_EQ(metering.at("value").at("items").back().at("stored_bytes").get<std::uint64_t>(),
+              accounted);
+    EXPECT_GT(metering.at("value").at("items").back().at("transfer_in_bytes").get<std::uint64_t>(),
+              0U);
+    EXPECT_GT(metering.at("value").at("items").back().at("transfer_out_bytes").get<std::uint64_t>(),
+              0U);
     server.stop();
 
     const auto source_tree = liquid::runtime::block_on(source->root());

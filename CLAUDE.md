@@ -63,6 +63,10 @@ snapshots, exact changes, and complete history; reports `hot`, `snapshot`, or `s
 atomically publishes through its manifest; filters candidates with batched policy authorization;
 and records the signed query outcome through `Registry::call`. REST, OpenAPI, MCP, and the
 `/search` page expose the same capability.
+Metering migration `0014_metering` stores hourly unique-byte gauges, sync transfer counters, and
+idempotent build-compute counters. `metering_usage` and `/metering` expose configured integer
+pricing. `LAKE_STORAGE_QUOTA_BYTES` throttles new writes at the customer-store boundary while
+existing content remains complete and readable. The contract is `docs/api/metering.md`.
 Static secrets and encryption add migration `0009_secrets`: customer-namespaced organization
 mounts; immutable JSON versions with soft delete, restore and destroy; named keys with rotation,
 encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivation; and customer-KEK

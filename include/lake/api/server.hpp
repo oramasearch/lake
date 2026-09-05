@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 
+#include "lake/api/registry.hpp"
+
 namespace lake::search {
 class Service;
 }
@@ -58,6 +60,7 @@ struct ServerOptions {
     // The operator-provided PersistentVolume mount. Each customer store lives
     // at <root>/<customer id>/store. Empty disables data-plane storage.
     std::string store_root;
+    MeteringConfig metering;
 };
 
 class ApiServer {

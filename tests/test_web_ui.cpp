@@ -28,10 +28,32 @@ TEST(WebUi, NavigationAndSession) {
     EXPECT_NE(out.find("href=\"/customers\""), std::string::npos);
     EXPECT_NE(out.find("href=\"/repositories\""), std::string::npos);
     EXPECT_NE(out.find("href=\"/organizations\""), std::string::npos);
+    EXPECT_NE(out.find("href=\"/metering\""), std::string::npos);
     EXPECT_NE(out.find("href=\"/sign-in\""), std::string::npos);
     const std::string in = lake::api::web_ui_hello("n", "0.0.1", true);
     EXPECT_NE(in.find("action=\"/logout\""), std::string::npos);
     EXPECT_EQ(in.find("<script"), std::string::npos);
+}
+
+TEST(WebUi, MeteringRendersQuotaWarningAndHourlyUsage) {
+    const nlohmann::json usage{{"customer_id", "customer<&>"},
+                               {"currency", "USD"},
+                               {"quota_bytes", 10},
+                               {"over_quota", true},
+                               {"warning", "Storage quota exceeded"},
+                               {"cost_micros", 7},
+                               {"items",
+                                nlohmann::json::array({{{"hour", "2026-09-04T00:00:00Z"},
+                                                        {"stored_bytes", 10},
+                                                        {"transfer_in_bytes", 2},
+                                                        {"transfer_out_bytes", 3},
+                                                        {"compute_seconds", 4},
+                                                        {"cost_micros", 7}}})}};
+    const std::string html = lake::api::web_ui_metering(usage);
+    EXPECT_NE(html.find("Storage quota exceeded"), std::string::npos);
+    EXPECT_NE(html.find("2026-09-04T00:00:00Z"), std::string::npos);
+    EXPECT_NE(html.find("customer&lt;&amp;&gt;"), std::string::npos);
+    EXPECT_EQ(html.find("customer<&>"), std::string::npos);
 }
 
 TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
