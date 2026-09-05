@@ -11,7 +11,7 @@ capability as REST and MCP, so authorization and audit recording have one path.
 | Tree | `GET /repository/tree?id=<id>&ref=<ref>` | `repository_tree` | paths, kinds, blobs, modes, stable nodes, and sizes at the ref |
 | File | `GET /file?repository_id=<id>&ref=<ref>&path=<path>` | `repository_file`, `list_changes`, `change_diff` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download links |
 | Change log | `GET /changes?repository_id=<id>` | `list_changes` | libliquid change identities and metadata |
-| Change | `GET /change?repository_id=<id>&id=<change>` | `get_change`, `change_diff` | change identity and its first-parent structural diff, including text hunks |
+| Change | `GET /change?repository_id=<id>&id=<change>` | `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` | review title/message, compact identities, state, file stats, text-hunk views, anchored comments, conflict values, checks, and attestations |
 | Conflicts | `GET /conflicts?repository_id=<id>` | `list_conflicts` | unresolved conflict paths and their blob values |
 | Artifacts | `GET /artifacts?repository_id=<id>` | `list_artifacts` | filtered cursor pages of libliquid build results |
 | Artifact | `GET /artifact?repository_id=<id>&id=<result>` | `get_artifact` | one result, outputs, timing, cache/divergence state, verified attestations and trace summary |
@@ -31,6 +31,12 @@ its added, removed, modified, moved, mode-changed, and conflicted status; old an
 digests remain visible. Text hunks include their old/new ranges and escaped removed/added lines.
 Conflict digests are values on the path instead of an error state. A change with no visible hunks
 renders the explicit empty state.
+
+The change view groups those values into a forge review. Unified text is the server-rendered
+default, while one small script switches to an already-rendered side-by-side representation and
+copies the full change identity. Comments remain bound to their liquid text anchor. Review state,
+per-file statistics, check outcomes, and verified attestation counts are readable without that
+script.
 
 The file browser resolves each path's newest change from those structural diffs. File pages map
 text-hunk ranges onto numbered source lines for blame. C and C++ source is parsed with liquid's

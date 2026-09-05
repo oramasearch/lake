@@ -65,7 +65,9 @@ Existing page markup uses these shared selectors, so the operator and Lake ident
 together without adding renderer-side CSS.
 The public transparency monitor uses the same shell and the two shared theme scripts; it adds no
 page-specific script. File pages add one local script for line-range selection. The page remains
-readable, and each individual line anchor works, when that script does not run.
+readable, and each individual line anchor works, when that script does not run. Change pages add
+one local script for the diff-layout toggle and full-identity copy control; unified review and
+hover disclosure remain available without it.
 
 Hosted application identity pages use a compact version of the same token, font, form, focus,
 theme, and motion contracts. Their validated application accent is a decorative rule and their

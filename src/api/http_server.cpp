@@ -5932,11 +5932,51 @@ struct ApiServer::Impl {
         for (const nlohmann::json& value : diff_result.value.at("items")) {
             differences.push_back(repository_diff_entry_from_json(value));
         }
+        ChangeReviewData review;
+        const ApiResult reviews_result =
+            registry.call("list_reviews", {{"repository_id", id}, {"limit", 100}}, ctx);
+        if (!reviews_result.ok) {
+            return serve_repository_page_error(route, ctx, reviews_result);
+        }
+        std::set<std::string> review_ids;
+        for (const nlohmann::json& value : reviews_result.value.at("items")) {
+            control::ForgeRecord item = forge_record_from_json(value);
+            if (item.value.value("change_id", "") != change_id) {
+                continue;
+            }
+            review_ids.insert(item.id);
+            review.reviews.push_back(std::move(item));
+        }
+        const ApiResult comments_result =
+            registry.call("list_review_comments", {{"repository_id", id}, {"limit", 1000}}, ctx);
+        if (!comments_result.ok) {
+            return serve_repository_page_error(route, ctx, comments_result);
+        }
+        for (const nlohmann::json& value : comments_result.value.at("items")) {
+            control::ForgeRecord item = forge_record_from_json(value);
+            const nlohmann::json anchor = item.value.value("anchor", nlohmann::json::object());
+            if (!review_ids.contains(item.value.value("review_id", "")) ||
+                anchor.value("change", "") != change_id) {
+                continue;
+            }
+            review.comments.push_back(std::move(item));
+        }
+        const ApiResult checks_result =
+            registry.call("list_artifacts", {{"id", id}, {"limit", 100}}, ctx);
+        if (!checks_result.ok) {
+            return serve_repository_page_error(route, ctx, checks_result);
+        }
+        review.checks.next_cursor = json_string(checks_result.value, "next_cursor");
+        review.checks.done = checks_result.value.value("done", false);
+        for (const nlohmann::json& value : checks_result.value.at("items")) {
+            review.checks.items.push_back(repository_artifact_from_json(value));
+        }
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_change(repository_from_json(repository_result.value),
                                        repository_change_from_json(change_result.value),
                                        differences,
+                                       review,
                                        ctx.authorized),
                          "text/html; charset=utf-8",
                          "no-store");

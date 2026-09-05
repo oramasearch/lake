@@ -46,21 +46,38 @@ liquid's bundled frontends. Parsed source units and a small token renderer add s
 recognized extension list matches those frontends. Every other extension uses the same numbered
 source layout with fully escaped plain text.
 
+## Change review
+
+`GET /change?repository_id=<id>&id=<change>` makes the first message line the review title and
+renders the remaining Markdown on the server with the same raw-HTML prohibition as README files.
+It shows compact change, author, parent, and blob identities; review state and reviewers; per-file
+and aggregate addition/removal counts; structural conflict values; line-addressable text hunks and
+their anchored comments; and repository checks with attestation counts. Reviews and comments are
+selected by change and review identity after their capability reads.
+
+The unified diff is the no-script view. One page-local vanilla script switches to the side-by-side
+representation and copies the complete change identity. If the script is unavailable, every file,
+hunk, comment, conflict, check, attestation count, and full identity remains present. Full
+identities are also available on hover through `title`.
+
 ## Keyboard and no-script behavior
 
 Source order is skip link, primary navigation, top-bar controls, breadcrumbs, repository tabs,
 primary content, then supporting details. All links, native disclosure controls, line anchors, and
 theme controls are keyboard focusable. Without JavaScript the repository, tree, and file views
 remain readable and navigable. The file-range island only adds shift-click range selection and
-range highlighting; individual line anchors remain ordinary links without it.
+range highlighting; individual line anchors remain ordinary links without it. Change review uses
+one further island for its view toggle and copy control; unified review remains the default.
 
 ## Verify
 
 Run `lake-tests --gtest_filter='WebUi.Markdown*:WebUi.Repositories*:WebUi.RepositoryContent*'`.
 The string tests prove raw HTML is escaped, heading anchors are stable, repository sections are
 present, tree rows carry last-change context, known source is highlighted, line anchors and blame
-are rendered, long identities are compact, and the shared shell remains intact. The seeded visual
-proof is generated through `tools/ui/screenshot.sh` and recorded in `docs/ui/screenshots/`.
+are rendered, review Markdown is sanitized, review state and comments are anchored, checks and
+attestations are present, long identities are compact, and the shared shell remains intact. The
+seeded visual proof is generated through `tools/ui/screenshot.sh` and recorded in
+`docs/ui/screenshots/`.
 
 ## Change
 

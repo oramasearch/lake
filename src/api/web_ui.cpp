@@ -61,22 +61,31 @@ std::string markdown_inline(std::string_view text) {
     std::string output;
     std::size_t offset = 0;
     while (offset < text.size()) {
-        const std::size_t marker = text.find('`', offset);
-        if (marker == std::string_view::npos) {
-            output += web_ui_escape(text.substr(offset));
-            break;
-        }
-        output += web_ui_escape(text.substr(offset, marker - offset));
-        const std::size_t end = text.find('`', marker + 1);
-        if (end == std::string_view::npos) {
-            output += "&#96;";
-            offset = marker + 1;
+        if (text[offset] == '`') {
+            const std::size_t end = text.find('`', offset + 1);
+            if (end == std::string_view::npos) {
+                output += "&#96;";
+                ++offset;
+                continue;
+            }
+            output += "<code>";
+            output += web_ui_escape(text.substr(offset + 1, end - offset - 1));
+            output += "</code>";
+            offset = end + 1;
             continue;
         }
-        output += "<code>";
-        output += web_ui_escape(text.substr(marker + 1, end - marker - 1));
-        output += "</code>";
-        offset = end + 1;
+        if (text.substr(offset).starts_with("**")) {
+            const std::size_t end = text.find("**", offset + 2);
+            if (end != std::string_view::npos) {
+                output += "<strong>";
+                output += web_ui_escape(text.substr(offset + 2, end - offset - 2));
+                output += "</strong>";
+                offset = end + 2;
+                continue;
+            }
+        }
+        output += web_ui_escape(text.substr(offset, 1));
+        ++offset;
     }
     return output;
 }
@@ -1081,6 +1090,7 @@ std::string web_ui_repository_log(const control::Repository& repository,
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
+                          const ChangeReviewData& review,
                           bool signed_in) {
     std::string parents;
     for (const std::string& parent : change.parents) {
@@ -1089,37 +1099,109 @@ std::string web_ui_change(const control::Repository& repository,
         }
         parents += parent;
     }
+    const std::size_t newline = change.message.find('\n');
+    std::string title = change.message.substr(0, newline);
+    if (title.starts_with("# ")) {
+        title.erase(0, 2);
+    }
+    const std::string body = newline == std::string::npos ? "" : change.message.substr(newline + 1);
     std::string content = std::format(
-        "<p class=\"eyebrow\">change</p><h1>{}</h1><p class=\"sub\">{}</p>"
-        "<div class=\"panel\"><dl><dt>author</dt><dd><code>{}</code></dd><dt>created</dt>"
-        "<dd>{}</dd><dt>parents</dt><dd><code>{}</code></dd></dl></div>",
+        "<p class=\"eyebrow\">change review</p><h1>{}</h1><p class=\"sub\">{}</p>{}"
+        "<div class=\"change-toolbar\"><span>{}</span><button class=\"button secondary copy-id\" "
+        "type=\"button\" data-copy=\"{}\">Copy identifier</button><div class=\"view-toggle\" "
+        "role=\"group\" aria-label=\"Diff layout\"><button type=\"button\" data-view=\"unified\" "
+        "aria-pressed=\"true\">Unified</button><button type=\"button\" data-view=\"split\" "
+        "aria-pressed=\"false\">Side by side</button></div></div>"
+        "<div class=\"panel\"><dl><dt>author</dt><dd>{}</dd><dt>created</dt>"
+        "<dd>{}</dd><dt>parents</dt><dd>{}</dd></dl></div>",
+        web_ui_escape(title.empty() ? "Untitled change" : title),
+        web_ui_escape(repository_name(repository)),
+        forge_tabs(repository, "changes"),
+        identifier_markup(change.id),
         web_ui_escape(change.id),
-        web_ui_escape(change.message),
-        web_ui_escape(change.author),
+        identifier_markup(change.author),
         web_ui_escape(change.occurred_at),
-        web_ui_escape(parents));
+        identifier_markup(parents));
+    if (!body.empty()) {
+        content +=
+            std::format("<section class=\"panel change-message\"><h2>Description</h2>{}</section>",
+                        web_ui_markdown(body));
+    }
+    content += "<section class=\"review-summary\"><h2>Review</h2>";
+    if (review.reviews.empty()) {
+        content += "<div class=\"panel empty\">No review has been requested.</div>";
+    } else {
+        for (const control::ForgeRecord& item : review.reviews) {
+            content += std::format(
+                "<div class=\"panel review-state\"><div><strong>{}</strong> "
+                "{}</div><p class=\"sub\">Reviewers: {}</p></div>",
+                web_ui_escape(item.value.value("state", "open")),
+                badge_markup(item.value.value("state", "open")),
+                web_ui_escape(joined(item.value.value("reviewers", std::vector<std::string>{}))));
+        }
+    }
+    content += "</section>";
+    content += "<section><h2>Files changed</h2>";
     std::size_t visible = 0;
+    std::uint64_t total_added = 0;
+    std::uint64_t total_removed = 0;
+    std::string file_summary;
     for (const RepositoryDiffEntry& entry : differences) {
         if (hidden_reformatting_entry(entry)) {
             continue;
         }
         ++visible;
+        std::uint64_t added = 0;
+        std::uint64_t removed = 0;
+        if (entry.line_hunks) {
+            for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
+                added += hunk.added_lines.size();
+                removed += hunk.removed_lines.size();
+            }
+        }
+        total_added += added;
+        total_removed += removed;
+        file_summary += std::format(
+            "<li><a href=\"#diff-{}\"><code>{}</code></a><span class=\"diff-stats\">"
+            "<span class=\"additions\">+{}</span> <span class=\"deletions\">−{}</span></span></li>",
+            web_ui_escape(markdown_slug(entry.path)),
+            web_ui_escape(entry.path),
+            added,
+            removed);
+    }
+    if (visible != 0) {
+        content += std::format("<div class=\"panel file-summary\"><strong>{} files</strong> "
+                               "<span class=\"additions\">+{}</span> "
+                               "<span class=\"deletions\">−{}</span><ul>{}</ul></div>",
+                               visible,
+                               total_added,
+                               total_removed,
+                               file_summary);
+    }
+    for (const RepositoryDiffEntry& entry : differences) {
+        if (hidden_reformatting_entry(entry)) {
+            continue;
+        }
         std::string badges;
         for (const std::string& status : entry.changes) {
             badges += badge_markup(status);
         }
-        content += std::format("<section class=\"panel diff-entry\"><h2><code>{}</code>{}</h2><dl>"
-                               "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
-                               "<dt>mode</dt><dd><code>{} → {}</code></dd><dt>blobs</dt>"
-                               "<dd><code>{} → {}</code></dd></dl>",
-                               web_ui_escape(entry.path),
-                               badges,
-                               web_ui_escape(entry.kind),
-                               web_ui_escape(entry.old_path.empty() ? "—" : entry.old_path),
-                               mode_text(entry.old_mode),
-                               mode_text(entry.new_mode),
-                               web_ui_escape(entry.old_blob.empty() ? "—" : entry.old_blob),
-                               web_ui_escape(entry.new_blob.empty() ? "—" : entry.new_blob));
+        content +=
+            std::format("<section class=\"panel diff-entry\" id=\"diff-{}\"><h3><code>{}</code>"
+                        "{}{}</h3><dl>"
+                        "<dt>kind</dt><dd>{}</dd><dt>old path</dt><dd><code>{}</code></dd>"
+                        "<dt>mode</dt><dd><code>{} → {}</code></dd><dt>blobs</dt>"
+                        "<dd>{} → {}</dd></dl>",
+                        web_ui_escape(markdown_slug(entry.path)),
+                        web_ui_escape(entry.path),
+                        badges,
+                        "",
+                        web_ui_escape(entry.kind),
+                        web_ui_escape(entry.old_path.empty() ? "—" : entry.old_path),
+                        mode_text(entry.old_mode),
+                        mode_text(entry.new_mode),
+                        identifier_markup(entry.old_blob.empty() ? "—" : entry.old_blob),
+                        identifier_markup(entry.new_blob.empty() ? "—" : entry.new_blob));
         if (!entry.old_conflicts.empty() || !entry.new_conflicts.empty()) {
             content += std::format("<div class=\"notice\"><strong>Conflict values</strong><br>old: "
                                    "<code>{}</code><br>new: <code>{}</code></div>",
@@ -1127,29 +1209,108 @@ std::string web_ui_change(const control::Repository& repository,
                                    web_ui_escape(joined(entry.new_conflicts)));
         }
         if (entry.line_hunks) {
+            content += "<div class=\"diff-view unified-diff\" data-diff-view=\"unified\">";
             for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
-                content += std::format("<pre class=\"diff-hunk\"><span>@@ -{},{} +{},{} @@</span>",
+                content += std::format("<div class=\"diff-hunk\"><div class=\"hunk-heading\">"
+                                       "@@ -{},{} +{},{} @@</div>",
                                        hunk.old_line,
                                        hunk.old_count,
                                        hunk.new_line,
                                        hunk.new_count);
+                std::uint64_t old_line = hunk.old_line;
                 for (const std::string& line : hunk.removed_lines) {
-                    content +=
-                        std::format("<span class=\"diff-remove\">-{}</span>", web_ui_escape(line));
+                    content += std::format("<div class=\"diff-line diff-remove\" id=\"{}-old-{}\">"
+                                           "<a href=\"#{}-old-{}\">{}</a><code>-{}</code></div>",
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           old_line,
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           old_line,
+                                           old_line,
+                                           web_ui_escape(line));
+                    ++old_line;
                 }
+                std::uint64_t new_line = hunk.new_line;
                 for (const std::string& line : hunk.added_lines) {
-                    content +=
-                        std::format("<span class=\"diff-add\">+{}</span>", web_ui_escape(line));
+                    content += std::format("<div class=\"diff-line diff-add\" id=\"{}-new-{}\">"
+                                           "<a href=\"#{}-new-{}\">{}</a><code>+{}</code></div>",
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           new_line,
+                                           web_ui_escape(markdown_slug(entry.path)),
+                                           new_line,
+                                           new_line,
+                                           web_ui_escape(line));
+                    for (const control::ForgeRecord& comment : review.comments) {
+                        const nlohmann::json anchor =
+                            comment.value.value("anchor", nlohmann::json::object());
+                        if (anchor.value("path", "") != entry.path ||
+                            anchor.value("line", std::uint64_t{0}) != new_line) {
+                            continue;
+                        }
+                        content += std::format("<article class=\"review-comment\"><p "
+                                               "class=\"sub\">{} · line {}</p>{}</article>",
+                                               identifier_markup(comment.id),
+                                               new_line,
+                                               web_ui_markdown(comment.value.value("body", "")));
+                    }
+                    ++new_line;
                 }
-                content += "</pre>";
+                content += "</div>";
             }
+            content += "</div><div class=\"diff-view split-diff\" data-diff-view=\"split\" hidden>";
+            for (const RepositoryLineHunk& hunk : *entry.line_hunks) {
+                const std::size_t rows =
+                    std::max(hunk.removed_lines.size(), hunk.added_lines.size());
+                content += std::format("<div class=\"hunk-heading\">@@ -{},{} +{},{} @@</div>",
+                                       hunk.old_line,
+                                       hunk.old_count,
+                                       hunk.new_line,
+                                       hunk.new_count);
+                for (std::size_t index = 0; index < rows; ++index) {
+                    const std::string old_text = index < hunk.removed_lines.size()
+                                                     ? web_ui_escape(hunk.removed_lines[index])
+                                                     : "";
+                    const std::string new_text = index < hunk.added_lines.size()
+                                                     ? web_ui_escape(hunk.added_lines[index])
+                                                     : "";
+                    content +=
+                        std::format("<div class=\"split-row\"><code class=\"diff-remove\">{}</code>"
+                                    "<code class=\"diff-add\">{}</code></div>",
+                                    old_text,
+                                    new_text);
+                }
+            }
+            content += "</div>";
         }
         content += "</section>";
     }
     if (visible == 0) {
         content += "<div class=\"panel empty diff-entry\">No changes to display.</div>";
     }
+    content += "</section><section><h2>Checks and attestations</h2>";
+    if (review.checks.items.empty()) {
+        content += "<div class=\"panel empty\">No checks have reported for this change.</div>";
+    } else {
+        content += "<div class=\"stack\">";
+        for (const RepositoryArtifact& check : review.checks.items) {
+            content += std::format("<article class=\"panel check-row\"><strong>{}</strong>{}"
+                                   "<span>{} attestations</span><span>{}</span></article>",
+                                   web_ui_escape(check.action),
+                                   badge_markup(check.exit_code == 0 ? "passed" : "failed"),
+                                   check.attestations.size(),
+                                   identifier_markup(check.id));
+        }
+        content += "</div>";
+    }
+    content +=
+        R"(</section><script id="change-review-script">(()=>{const views=[...document.querySelectorAll('[data-diff-view]')];document.addEventListener('click',async event=>{const copy=event.target.closest('[data-copy]');if(copy){await navigator.clipboard.writeText(copy.dataset.copy);copy.textContent='Copied';return;}const toggle=event.target.closest('[data-view]');if(!toggle)return;views.forEach(view=>{view.hidden=view.dataset.diffView!==toggle.dataset.view;});document.querySelectorAll('[data-view]').forEach(button=>{button.setAttribute('aria-pressed',String(button===toggle));});});})();</script>)";
     return web_ui_shell("lake — change", repository_name(repository), content, signed_in);
+}
+
+std::string web_ui_change(const control::Repository& repository,
+                          const RepositoryChange& change,
+                          const std::vector<RepositoryDiffEntry>& differences,
+                          bool signed_in) {
+    return web_ui_change(repository, change, differences, {}, signed_in);
 }
 
 std::string web_ui_repository_conflicts(const control::Repository& repository,

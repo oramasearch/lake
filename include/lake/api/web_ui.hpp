@@ -117,6 +117,17 @@ std::string web_ui_repository_file(const control::Repository& repository,
 std::string web_ui_repository_log(const control::Repository& repository,
                                   const std::vector<RepositoryChange>& changes,
                                   bool signed_in);
+struct ChangeReviewData {
+    std::vector<control::ForgeRecord> reviews;
+    std::vector<control::ForgeRecord> comments;
+    RepositoryArtifactPage checks;
+};
+
+std::string web_ui_change(const control::Repository& repository,
+                          const RepositoryChange& change,
+                          const std::vector<RepositoryDiffEntry>& differences,
+                          const ChangeReviewData& review,
+                          bool signed_in);
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,

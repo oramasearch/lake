@@ -410,9 +410,15 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     expect_theme_scripts(source_page, 1);
 
     const lake::api::RepositoryChange change{
-        "change-1", {"parent-1"}, "taap:1:ed25519:author", "<message>", "2026-09-04T00:00:00Z"};
+        "blake3:change-identifier-0123456789",
+        {"parent-1"},
+        "taap:1:ed25519:author",
+        "<message>\n\nReview **carefully**. <script>x</script>",
+        "2026-09-04T00:00:00Z"};
     const std::string log = lake::api::web_ui_repository_log(repository, {change}, false);
-    EXPECT_NE(log.find("href=\"/change?repository_id=r1&amp;id=change-1\""), std::string::npos);
+    EXPECT_NE(log.find("href=\"/change?repository_id=r1&amp;id=blake3%3Achange-identifier-"
+                       "0123456789\""),
+              std::string::npos);
     EXPECT_NE(log.find("&lt;message&gt;"), std::string::npos);
 
     const lake::api::RepositoryDiffEntry difference{
@@ -429,15 +435,52 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
         .old_conflicts = {"left"},
         .new_conflicts = {"left", "right"},
     };
+    const lake::control::ForgeRecord review_record{
+        "review-1",
+        "r1",
+        "review",
+        "created",
+        "updated",
+        {{"change_id", change.id}, {"state", "approved"}, {"reviewers", {"taap:1:reviewer"}}}};
+    const lake::control::ForgeRecord comment_record{
+        "comment-1",
+        "r1",
+        "review_comment",
+        "created",
+        "updated",
+        {{"review_id", "review-1"},
+         {"body", "Looks **good**. <img src=x>"},
+         {"anchor", {{"change", change.id}, {"path", "<readme>.md"}, {"line", 2}, {"column", 0}}}}};
+    const lake::api::RepositoryArtifact check{
+        .id = "result-long-identifier-0123456789",
+        .action = "test",
+        .exit_code = 0,
+        .attestations = {{"attestation-1", "profile", "subject", "issuer", true, ""}},
+    };
+    const lake::api::ChangeReviewData review_data{
+        .reviews = {review_record},
+        .comments = {comment_record},
+        .checks = {.items = {check}, .done = true},
+    };
     const std::string change_page =
-        lake::api::web_ui_change(repository, change, {difference}, false);
+        lake::api::web_ui_change(repository, change, {difference}, review_data, false);
     EXPECT_NE(change_page.find("&lt;message&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("&lt;readme&gt;.md"), std::string::npos);
     EXPECT_NE(change_page.find("@@ -2,1 +2,1 @@"), std::string::npos);
     EXPECT_NE(change_page.find("-&lt;old&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("+&lt;new&gt;"), std::string::npos);
     EXPECT_NE(change_page.find("Conflict values"), std::string::npos);
-    expect_theme_scripts(change_page);
+    EXPECT_NE(change_page.find("Side by side"), std::string::npos);
+    EXPECT_NE(change_page.find("data-full-identifier=\"blake3:change-identifier-0123456789\""),
+              std::string::npos);
+    EXPECT_NE(change_page.find("Copy identifier"), std::string::npos);
+    EXPECT_NE(change_page.find("approved"), std::string::npos);
+    EXPECT_NE(change_page.find("Looks <strong>good</strong>. &lt;img src=x&gt;"),
+              std::string::npos);
+    EXPECT_NE(change_page.find("1 attestations"), std::string::npos);
+    EXPECT_EQ(change_page.find("<script>x</script>"), std::string::npos);
+    EXPECT_NE(change_page.find("id=\"change-review-script\""), std::string::npos);
+    expect_theme_scripts(change_page, 1);
 
     const lake::api::RepositoryDiffEntry reformatting{
         .path = "readme.md",
