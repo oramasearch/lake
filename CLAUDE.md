@@ -64,7 +64,7 @@ pages render metadata only. Every operation uses policy authorization and the si
 audit path, including denials.
 Customer PKI adds persisted private roots and online intermediates, SPIFFE X.509 and JWT SVIDs,
 client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555 ACME
-HTTP-01 flow. Migration `0012_pki` holds the durable state. ACME consumes one-use nonces, verifies
+HTTP-01 flow. Migration `0013_pki` holds the durable state. ACME consumes one-use nonces, verifies
 ES256 account JWS and the final CSR, and runs every resource operation through its registry
 transport for signed audit.
 Caller exchanges persist verified non-secret identity metadata before returning a bearer
