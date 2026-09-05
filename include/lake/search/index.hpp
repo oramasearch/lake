@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lake::control {
@@ -18,11 +21,18 @@ struct Error {
 
 template <class T> using Result = std::expected<T, Error>;
 
+enum class PublicationKind { BranchTip, TagSnapshot };
+
+enum class QueryMode { Hot, Snapshot, Scan };
+
+[[nodiscard]] std::string_view to_string(QueryMode mode);
+
 struct Publish {
     std::string customer;
     std::string repository;
     std::string ref;
     std::string change;
+    PublicationKind kind = PublicationKind::BranchTip;
 };
 
 struct Query {
@@ -31,6 +41,8 @@ struct Query {
     std::string repository;
     std::string ref;
     int limit = 20;
+    std::string change;
+    bool history = false;
 };
 
 struct Hit {
@@ -42,12 +54,18 @@ struct Hit {
     double score = 0.0;
 };
 
+struct QueryResult {
+    QueryMode mode = QueryMode::Hot;
+    std::size_t scanned_changes = 0;
+    std::vector<Hit> items;
+};
+
 class Service {
 public:
     explicit Service(std::filesystem::path store_root);
 
     [[nodiscard]] Result<void> publish(const Publish& change);
-    [[nodiscard]] Result<std::vector<Hit>>
+    [[nodiscard]] Result<QueryResult>
     query(const Query& query, const std::string& principal, control::Store& store) const;
 
 private:

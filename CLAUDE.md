@@ -57,10 +57,12 @@ two-administrator organization recovery, per-device notices, and designated cust
 client-wrapped repository trust-domain keys. Account recovery restores sign-in but cannot recreate
 a repository key held only on a lost device. The full contracts are `docs/api/offline.md` and
 `docs/api/recovery.md`.
-Hot branch-tip search persists blob-deduplicated BM25F and positional-trigram segments at
-`LAKE_STORE_ROOT/<customer>/index/`, atomically publishes each change through its manifest,
-filters candidates with batched policy authorization, and records the signed query outcome
-through `Registry::call`. REST, OpenAPI, MCP, and the `/search` page expose the same capability.
+Repository search persists blob-deduplicated BM25F and positional-trigram segments at
+`LAKE_STORE_ROOT/<customer>/index/`. It serves hot branch tips, immutable release and tag
+snapshots, exact changes, and complete history; reports `hot`, `snapshot`, or `scan` mode;
+atomically publishes through its manifest; filters candidates with batched policy authorization;
+and records the signed query outcome through `Registry::call`. REST, OpenAPI, MCP, and the
+`/search` page expose the same capability.
 Static secrets and encryption add migration `0009_secrets`: customer-namespaced organization
 mounts; immutable JSON versions with soft delete, restore and destroy; named keys with rotation,
 encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivation; and customer-KEK

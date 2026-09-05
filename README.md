@@ -34,13 +34,14 @@ liquid is the tool. lake is where it collects.
 > reviews, and workflow documents with an explicit fidelity report.
 > Migration `0011_offline_recovery` adds bounded cached-read grants, recovery codes, 24-hour email
 > recovery, two-administrator organization recovery, device notices, and designated custody of
-> client-wrapped repository keys. Account recovery does not recreate a lost repository key. Hot branch-tip
-> search is available over those stores through the registry, including REST, OpenAPI, MCP, and
-> the `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
-> `LAKE_STORE_ROOT/<customer>/index/`, publishes a change through atomic manifest replacement,
-> filters candidates with the batched policy engine, and records the signed query outcome through
-> the registry. Change pages render libliquid's per-path structural diff, text hunks, modes, blob
-> identities, moves, and conflict values. Artifact pages provide filtered cursor pages of results
+> client-wrapped repository keys. Account recovery does not recreate a lost repository key.
+> Repository search is available over hot branch tips, immutable release and tag snapshots, exact
+> changes, and complete history through the registry, including REST, OpenAPI, MCP, and the
+> `/search` page. It persists blob-deduplicated BM25F and positional-trigram segments at
+> `LAKE_STORE_ROOT/<customer>/index/`, reports `hot`, `snapshot`, or `scan` mode, publishes through
+> atomic manifest replacement, filters candidates with the batched policy engine, and records the
+> signed query outcome through the registry. Change pages render libliquid's per-path structural
+> diff, text hunks, modes, blob identities, moves, and conflict values. Artifact pages provide filtered cursor pages of results
 > plus result outputs, timing, cache state, verified attestations, and retained trace summaries.
 > Migration `0009_secrets` adds customer-namespaced organization mounts, versioned
 > static secrets with delete/restore/destroy history, and named encryption keys with rotation,

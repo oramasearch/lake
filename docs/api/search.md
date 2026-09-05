@@ -2,8 +2,8 @@
 
 `GET /v1/search` is the authenticated repository-search capability. It is registered once and is
 therefore also present in `GET /v1/openapi.json` and `POST /mcp` as the `search` tool. The
-server-rendered page is `GET /search`; it accepts the same `query` value and never exposes a
-result that the capability would reject.
+server-rendered page is `GET /search`; it accepts the capability's scope values and never exposes
+a result that the capability would reject.
 
 ## Request and result
 
@@ -12,16 +12,34 @@ result that the capability would reject.
 | `query` | Required. Plain text is ranked BM25F; quoted text is an exact substring; `/expression/` is an ECMAScript regex. |
 | `customer` | Optional customer-store directory name. Empty searches all opened customer stores. |
 | `repository` | Optional repository id. |
-| `ref` | Optional branch or tag name; the hot manifest supplies branch tips. |
+| `ref` | Optional branch or tag name. An immutable tag snapshot takes precedence over a branch with the same name. |
+| `change` | Optional exact change digest. Requires `customer` and `repository`, cannot be combined with `ref` or `history`, and uses scan mode. |
+| `history` | Optional boolean. Walk every change in one `customer` and `repository`; cannot be combined with `ref` or `change`. |
 | `limit` | Optional result count, default 20 and maximum 1000. |
 
-The value is `{items:[{customer,repository,path,change,snippet,score}]}`. Hits are score-descending
-and then repository/path ordered for stable ties. A quoted query and regex query return score `1`;
-ranked text returns the combined content and path BM25F score.
+The value is
+`{mode,scanned_changes,items:[{customer,repository,path,change,snippet,score}]}`. `mode` explains
+which corpus answered the request:
+
+| Mode | Corpus |
+|---|---|
+| `hot` | Current branch-tip segments. This is the default when neither `ref`, `change`, nor `history` selects another corpus. |
+| `snapshot` | The immutable segment built once for the requested release or tag. |
+| `scan` | An exact change or the repository's complete change log. `scanned_changes` reports how many snapshots were examined. |
+
+Hits are score-descending and then repository/path ordered for stable ties. A quoted query and
+regex query return score `1`; ranked text returns the combined content and path BM25F score.
 
 ```sh
 curl -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" \
   --get --data-urlencode 'query="connection refused"' \
+  http://127.0.0.1:4900/v1/search
+
+curl -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" \
+  --get --data-urlencode 'query=connection' \
+  --data-urlencode 'customer=<customer-id>' \
+  --data-urlencode 'repository=<repository-id>' \
+  --data-urlencode 'history=true' \
   http://127.0.0.1:4900/v1/search
 ```
 
@@ -34,14 +52,27 @@ single deduplicated blob catalogue:
 <root>/<customer>/
   repositories/<repository-id>/       liquid repository, opened through libliquid
   index/blobs.json                    blob digest → UTF-8 content, indexed once
-  index/segment-<repository>-<change>.json
-  index/manifest.json                 active {repository,ref,change,segment} entries
+  index/segment-<repository>-<change>-<kind>-<hex-ref>.json
+  index/manifest.json                 active {repository,ref,change,kind,segment} entries
 ```
 
 `blobs.json` is append-only. A change segment contains its `{path,blob}` occurrences, not another
 copy of blob text. On startup lake reloads the catalogue and the manifest-selected segments into
-oramacore-cpp's in-memory BM25F adapters. Content is indexed once per customer; paths are rebuilt
-from the active occurrence mappings so path scores stay current without copying blob content.
+oramacore-cpp's in-memory BM25F adapters. Content is indexed once per customer. Path scores are
+built from the occurrence mappings selected for each query, so a tag or historical change cannot
+inherit paths from a different snapshot.
+
+Sync publication replaces the segment for a branch tip. Release creation publishes a
+`TagSnapshot` before recording the release: the same tag and change is idempotent, while attempting
+to move a tag to another change returns `conflict`. A request for that ref reads only its cold
+snapshot, even when a branch has the same name. The version 2 manifest and segments record the
+publication kind and collision-safe filename. The loader retains support for version 1 documents,
+which are interpreted as branch-tip publications until existing stores have migrated.
+
+Scan mode does not add every historical path mapping to the hot manifest. It asks libliquid for the
+requested change or log, walks each snapshot's tree, and uses the change-to-blob mapping as the
+query corpus. New blob text is added to the customer catalogue once by digest; later scans and
+repositories reuse it. The response names the originating change for every matching path.
 
 The manifest is written to a sibling temporary file, flushed, and renamed over `manifest.json`.
 Segments and the append-only blob catalogue are written before that replacement. A query holds one
@@ -66,10 +97,15 @@ registry rejects an unauthenticated request before the query executes. Search th
 #40's query-time filtering and anonymous-public-read decision.
 
 Every REST, MCP, and server-rendered-page search call passes through `Registry::call`, which writes
-one signed `audit_events` record for the query outcome. Sync publication and search open the same
-repository identity through `repository_options.store` over
+one signed `audit_events` record for the query outcome. The audit details record `mode` and
+`scanned_changes`. Sync publication and search open the same repository identity through
+`repository_options.store` over
 `LAKE_STORE_ROOT/<customer-id>/store`. Push records its route and per-change authorization outcomes;
 index publication remains a separate search lifecycle hook.
+
+The `/search` page exposes query, customer, repository, branch or tag, exact change, and complete
+history fields. It labels every result set with its query mode and reports the number of examined
+changes for a scan.
 
 ## Verify
 
@@ -80,8 +116,10 @@ ctest --test-dir build --output-on-failure
 ```
 
 `Search.*` covers deduplication across repositories, reload from the persisted manifest, atomic
-publication, batched filtering, substring/regex matching, and ranked order. The Postgres fixture
-also proves that a real policy-store batch hides a denied repository from search results.
+publication, immutable tag-only results, a matching change among 1,000 scanned changes, batched
+filtering, substring/regex matching, and ranked order. The Postgres fixture invokes the registered
+capability for hot and exact-change scan requests and proves that a real policy-store batch hides a
+denied repository from search results.
 
 ## 10,000-file measurement
 

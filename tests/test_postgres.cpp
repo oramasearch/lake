@@ -277,11 +277,43 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     ASSERT_TRUE(service.publish({customer, allowed_repository, "main", allowed_change}));
     ASSERT_TRUE(service.publish({customer, denied_repository, "main", denied_change}));
 
-    const auto hits =
-        service.query({"postgres searchable", customer, "", "", 20}, "reader", *store);
-    ASSERT_TRUE(hits) << hits.error().message;
-    ASSERT_EQ(hits->size(), 1U);
-    EXPECT_EQ(hits->front().repository, allowed_repository);
+    Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    ApiContext context;
+    context.store = store.get();
+    context.search = &service;
+    context.authorized = true;
+    context.acting_identity = "reader";
+    context.request_id = "postgres-search-" + suffix;
+    context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const ApiResult result = registry.call(
+        "search", {{"query", "postgres searchable"}, {"customer", customer}}, context);
+    ASSERT_TRUE(result.ok) << result.error.message;
+    EXPECT_EQ(result.value.at("mode"), "hot");
+    ASSERT_EQ(result.value.at("items").size(), 1U);
+    EXPECT_EQ(result.value.at("items").front().at("repository"), allowed_repository);
+
+    context.request_id = "postgres-search-scan-" + suffix;
+    const ApiResult scan = registry.call("search",
+                                         {{"query", "postgres searchable"},
+                                          {"customer", customer},
+                                          {"repository", allowed_repository},
+                                          {"change", allowed_change}},
+                                         context);
+    ASSERT_TRUE(scan.ok) << scan.error.message;
+    EXPECT_EQ(scan.value.at("mode"), "scan");
+    EXPECT_EQ(scan.value.at("scanned_changes"), 1U);
+    ASSERT_EQ(scan.value.at("items").size(), 1U);
+    EXPECT_EQ(scan.value.at("items").front().at("change"), allowed_change);
+
+    const auto events = store->list_audit_events({.principal = "reader", .limit = 100});
+    ASSERT_TRUE(events) << events.error().message;
+    const auto scan_event = std::find_if(events->begin(), events->end(), [&](const auto& event) {
+        return event.draft.request_id == context.request_id;
+    });
+    ASSERT_NE(scan_event, events->end());
+    EXPECT_EQ(scan_event->draft.action, "search");
+    EXPECT_EQ(scan_event->draft.details.value("mode", ""), "scan");
 }
 
 TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {

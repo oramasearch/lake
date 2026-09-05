@@ -232,6 +232,14 @@ from the compiler (liquid's build graph knows every translation unit) arrive whe
 incremental engine lands. Search-index storage is specified by the search work; repository content
 and its liquid-owned metadata remain on the customer store volume.
 
+History-search status (#41): implemented. Branch publication maintains the hot tip segments;
+release creation builds an immutable cold tag snapshot once; and exact-change or complete-history
+requests walk libliquid snapshots in explicit `scan` mode. Results report `hot`, `snapshot`, or
+`scan` plus the number of changes examined, retain the originating change id, and apply the shared
+policy filter at query time. The customer blob catalogue remains content-addressed, so scanning a
+previously seen blob reuses its one indexed copy. Searching inside published artifact contents is
+separate #42 work and is not part of this status.
+
 ## Secrets, encryption and PKI (decision §12)
 
 Clean capabilities, namespaced by customer, mounted per organization: static secrets (versioned
@@ -286,8 +294,8 @@ waves that do not collide:
    **secrets, encryption, certificates, callers, break-glass** (#24 to #28), **web UI** (#9),
    **query-time filtering** (#40).
 3. **Transparency log** (#34 to #39), **forge, export, import** (#30 to #32), **drive and models**
-   (#7, #8, #43 to #45), **search over history and inside artifacts** (#41, #42), **metering**
-   (#33), **auth as a service** (#51).
+   (#7, #8, #43 to #45), **search over history (implemented) and inside artifacts** (#41, #42),
+   **metering** (#33), **auth as a service** (#51).
 
 Each wave rebases onto the previous; the schema grows by numbered, idempotent migrations. Until
 the operator's incremental-migration follow-up lands, its vendored schema copy and guard table

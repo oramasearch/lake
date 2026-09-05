@@ -395,12 +395,20 @@ json search_schema() {
               {"score", {{"type", "number"}}}}}};
 }
 
-ApiResult search_result(search::Result<std::vector<search::Hit>> hits) {
-    if (!hits) {
-        return ApiResult::failure(hits.error().code, hits.error().message);
+json search_output_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"mode", {{"type", "string"}}},
+              {"scanned_changes", {{"type", "integer"}}},
+              {"items", {{"type", "array"}, {"items", search_schema()}}}}}};
+}
+
+ApiResult search_result(search::Result<search::QueryResult> result) {
+    if (!result) {
+        return ApiResult::failure(result.error().code, result.error().message);
     }
     json values = json::array();
-    for (const search::Hit& hit : *hits) {
+    for (const search::Hit& hit : result->items) {
         values.push_back({{"customer", hit.customer},
                           {"repository", hit.repository},
                           {"path", hit.path},
@@ -408,7 +416,9 @@ ApiResult search_result(search::Result<std::vector<search::Hit>> hits) {
                           {"snippet", hit.snippet},
                           {"score", hit.score}});
     }
-    return ApiResult::success({{"items", std::move(values)}});
+    return ApiResult::success({{"mode", search::to_string(result->mode)},
+                               {"scanned_changes", result->scanned_changes},
+                               {"items", std::move(values)}});
 }
 
 std::expected<std::string, ApiError> global_object(const json&, ApiContext&) {
@@ -3694,42 +3704,55 @@ void register_policy_capabilities(Registry& registry) {
 }
 
 void register_search_capability(Registry& registry) {
-    registry.add(
-        Capability{.name = "search",
-                   .title = "Search repositories",
-                   .description = "Ranked BM25F search; quoted text is a substring query and "
-                                  "/expression/ is a regex query.",
-                   .input_schema = {{"type", "object"},
-                                    {"properties",
-                                     {{"query", {{"type", "string"}}},
-                                      {"customer", {{"type", "string"}}},
-                                      {"repository", {{"type", "string"}}},
-                                      {"ref", {{"type", "string"}}},
-                                      {"limit", {{"type", "integer"}}}}},
-                                    {"required", json::array({"query"})},
-                                    {"additionalProperties", false}},
-                   .output_schema = list_schema(search_schema()),
-                   .kind = CapabilityKind::Read,
-                   .object = "repository search results",
-                   .action = "read",
-                   .resolve_object = global_object,
-                   .authorizes_candidates = true,
-                   .handler = [](const json& input, ApiContext& context) {
-                       if (!context.search) {
-                           return no_search();
-                       }
-                       if (!context.store) {
-                           return no_store();
-                       }
-                       return search_result(
-                           context.search->query(search::Query{input.at("query").get<std::string>(),
-                                                               input.value("customer", ""),
-                                                               input.value("repository", ""),
-                                                               input.value("ref", ""),
-                                                               limit_of(input)},
-                                                 context.acting_identity,
-                                                 *context.store));
-                   }});
+    registry.add(Capability{
+        .name = "search",
+        .title = "Search repositories",
+        .description = "Ranked BM25F search; quoted text is a substring query and "
+                       "/expression/ is a regex query. Historical changes use scan "
+                       "mode.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"query", {{"type", "string"}}},
+                           {"customer", {{"type", "string"}}},
+                           {"repository", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"change", {{"type", "string"}}},
+                           {"history", {{"type", "boolean"}}},
+                           {"limit", {{"type", "integer"}}}}},
+                         {"required", json::array({"query"})},
+                         {"additionalProperties", false}},
+        .output_schema = search_output_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "repository search results",
+        .action = "read",
+        .resolve_object = global_object,
+        .authorizes_candidates = true,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.search) {
+                return no_search();
+            }
+            if (!context.store) {
+                return no_store();
+            }
+            auto result = context.search->query(search::Query{input.at("query").get<std::string>(),
+                                                              input.value("customer", ""),
+                                                              input.value("repository", ""),
+                                                              input.value("ref", ""),
+                                                              limit_of(input),
+                                                              input.value("change", ""),
+                                                              input.value("history", false)},
+                                                context.acting_identity,
+                                                *context.store);
+            if (result) {
+                context.audit_object =
+                    input.value("repository", "").empty()
+                        ? "repository/search"
+                        : "repository/" + input.at("repository").get<std::string>();
+                context.audit_details = {{"mode", search::to_string(result->mode)},
+                                         {"scanned_changes", result->scanned_changes}};
+            }
+            return search_result(std::move(result));
+        }});
 }
 
 } // namespace

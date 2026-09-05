@@ -12,6 +12,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
+#include "lake/search/index.hpp"
 
 namespace lake::api {
 namespace {
@@ -265,6 +266,17 @@ ApiResult create_release(const json& input, ApiContext& context) {
     value.erase("repository_id");
     value.erase("artifact_ids");
     value["artifacts"] = std::move(artifacts);
+    if (context.search) {
+        const auto published =
+            context.search->publish(search::Publish{repository->customer_id,
+                                                    repository_id,
+                                                    input.at("tag").get<std::string>(),
+                                                    input.at("change_id").get<std::string>(),
+                                                    search::PublicationKind::TagSnapshot});
+        if (!published) {
+            return ApiResult::failure(published.error().code, published.error().message);
+        }
+    }
     return create_record(
         "release", {{"repository_id", repository_id}, {"value", std::move(value)}}, context);
 }

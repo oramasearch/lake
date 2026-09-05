@@ -96,7 +96,7 @@ std::string web_ui_grants(const control::PolicyObject& object,
                           const std::vector<control::Grant>& grants);
 std::string web_ui_effective_access(const control::PolicyObject& object,
                                     const std::vector<control::EffectiveAccessEntry>& entries);
-std::string web_ui_search(std::string_view query, const std::vector<search::Hit>& hits);
+std::string web_ui_search(const search::Query& query, const search::QueryResult& result);
 std::string web_ui_audit(const std::vector<audit::Event>& events, const audit::Filter& filter);
 std::string web_ui_exports(const control::Repository& repository,
                            const std::vector<control::ForgeRecord>& exports);
