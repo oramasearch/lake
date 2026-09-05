@@ -6,7 +6,8 @@ Drive browsing, preview, history, sharing, and documented Linux client states ar
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one stylesheet at `/style.css`, with inline script only on passkey pages
 that call `navigator.credentials`, unit-tested as strings. The navigation is on every operator page:
-Home, Customers, Organizations, Repositories, Applications, Exports, Search, Secrets, Audit, SSO, API
+Home, Customers, Organizations, Repositories, Applications, Exports, Search, Secrets,
+Transparency, Audit, SSO, API
 (`/v1/openapi.json`), and Sign in / Sign out.
 
 | Page | Route | Shows |
@@ -36,6 +37,7 @@ Home, Customers, Organizations, Repositories, Applications, Exports, Search, Sec
 | Artifacts | `GET /artifacts?repository_id=<uuid>[&action=<digest>&output=<path>&content=<digest>&cursor=<cursor>&limit=<n>]` | filtered cursor pages of build results |
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |
 | Search | `GET /search?query=<text>[&customer=<id>&repository=<id>&ref=<name>&change=<digest>&history=1]` | authorized hot branch-tip, immutable tag-snapshot, exact-change, or complete-history results with the selected query mode |
+| Transparency monitor | `GET /transparency?identity=<taap-id>` | public checkpoint-verified bulk-tile scan and every matching TAAP attestation |
 | Secret mounts | `GET /secret-mounts[?customer_id=<uuid>&organization_id=<uuid>]` | mounts the caller may read, with links to static secrets and named keys |
 | Static secrets | `GET /secrets?mount_id=<uuid>[&name=<name>]` | custom metadata and version lifecycle; never secret values |
 | Encryption keys | `GET /encryption-keys?mount_id=<uuid>` | key names, current versions and derivation parent; never key material |
@@ -49,6 +51,8 @@ the UI never has a second auth path. User sign-in forms call registry capabiliti
 same cookie. A wrong operator token answers `401` with the form and a message.
 Public repository routes are the deliberate exception: they render without a session only after
 the repository capability verifies `visibility=public`; other object pages redirect to sign-in.
+The transparency monitor is also public because independent checkpoint and tile verification must
+not depend on a Lake account.
 
 **Data.** Data pages call the same registry capabilities as REST and MCP, with the session's
 principal and one per-request authorization cache. Lists are capped by their capability limits

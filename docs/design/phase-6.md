@@ -315,8 +315,12 @@ checkpoints become current only after valid distinct witness cosignatures meet t
 quorum; anchored checkpoints additionally retain an OpenTimestamps-style aggregation proof.
 `transparency_log_configuration` exposes the effective public configuration and `/audit` renders
 it through that capability. The operator maps Lake CR fields under the contract in
-[`../control-plane/log.md`](../control-plane/log.md). Trusted timestamps, tile monitoring,
-replication, and agent session keys remain #36–#39.
+[`../control-plane/log.md`](../control-plane/log.md). **Bulk-tile monitoring status (#37):
+implemented on the lake side.** Each append decodes and verifies canonical TAAP attestations,
+advances the RFC 6962-style Merkle root, and publishes immutable 1,024-entry tile versions. The
+public hosted monitor recomputes the checkpoint root from those tiles before returning identity
+matches and detects a changed tile. Complete client proof verification is tracked in liquid #207.
+Trusted timestamps, replication, and agent session keys remain #36, #38, and #39.
 
 ## Waves
 

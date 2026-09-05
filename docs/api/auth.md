@@ -13,7 +13,8 @@ Successful browser-session REST capabilities also set that secret as an `HttpOnl
 cookie (`Secure` behind HTTPS). This lets the passkey page use the REST capability without exposing
 the session secret to its inline script.
 
-- Every capability except the documented identity entry points and `server_info` requires a
+- Every capability except the documented identity entry points, public transparency-monitoring
+  reads, and `server_info` requires a
   resolved credential, on REST and on MCP `tools/call` alike (`Registry::call` enforces
   `requires_auth`).
 - `GET /metrics` uses the same resolution code: either the bearer or the UI's `lake_session`

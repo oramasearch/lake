@@ -7,6 +7,7 @@
 
 #include "lake/audit/audit.hpp"
 #include "lake/transparency/checkpoint.hpp"
+#include "lake/transparency/log.hpp"
 #include "lake/transparency/tuf.hpp"
 
 namespace lake::api {
@@ -26,6 +27,11 @@ ApiResult no_transparency() {
 ApiResult no_checkpoint_service() {
     return ApiResult::failure("store_unavailable",
                               "no transparency checkpoint service is configured (LAKE_STORE_ROOT)");
+}
+
+ApiResult no_tiled_log() {
+    return ApiResult::failure("store_unavailable",
+                              "no tiled transparency log is configured (LAKE_STORE_ROOT)");
 }
 
 std::expected<std::string, ApiError> instance_object(const json&, ApiContext&) {
@@ -58,6 +64,42 @@ json checkpoint_output_schema() {
     return {{"type", "object"}};
 }
 
+json append_value(const transparency::AppendResult& appended) {
+    return {{"first_index", appended.first_index},
+            {"root_hash", appended.root_hash},
+            {"tile_width", transparency::transparency_tile_width},
+            {"tiles_published", appended.tiles_published},
+            {"tree_size", appended.tree_size}};
+}
+
+json tile_value(const transparency::Tile& tile) {
+    return {{"encoding", "base64url"},
+            {"entries", tile.width},
+            {"index", tile.index},
+            {"sha256", tile.sha256},
+            {"tile", tile.encoded},
+            {"version", "lake_tile/1"}};
+}
+
+json scan_value(const transparency::IdentityScan& scan) {
+    json matches = json::array();
+    for (const transparency::IdentityMatch& match : scan.matches) {
+        matches.push_back({{"attestation", match.attestation},
+                           {"index", match.index},
+                           {"issuer", match.issuer},
+                           {"profile", match.profile},
+                           {"subject", match.subject}});
+    }
+    return {{"duration_ms", scan.duration_ms},
+            {"entries_scanned", scan.entries_scanned},
+            {"identity", scan.identity},
+            {"matches", std::move(matches)},
+            {"root_hash", scan.root_hash},
+            {"tiles_scanned", scan.tiles_scanned},
+            {"tree_size", scan.tree_size},
+            {"verified", true}};
+}
+
 std::expected<nlohmann::json, transparency::Error> sign_checkpoint(const nlohmann::json& checkpoint,
                                                                    ApiContext& context) {
     if (!context.store) {
@@ -78,6 +120,133 @@ std::expected<nlohmann::json, transparency::Error> sign_checkpoint(const nlohman
 } // namespace
 
 void register_transparency_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "append_transparency_entries",
+        .title = "Append transparency entries",
+        .description =
+            "Verify canonical TAAP attestations and append them to immutable bulk tiles.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"attestations", {{"type", "array"}}}}},
+                         {"required", json::array({"attestations"})},
+                         {"additionalProperties", false}},
+        .output_schema = checkpoint_output_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "transparency log",
+        .action = "admin",
+        .resolve_object = instance_object,
+        .handler = [](const json& input, ApiContext& context) {
+            set_audit_fields(context, "append_entries");
+            if (!context.transparency_log) {
+                return no_tiled_log();
+            }
+            const json& input_attestations = input.at("attestations");
+            std::vector<std::string> attestations;
+            attestations.reserve(input_attestations.size());
+            for (std::size_t index = 0; index < input_attestations.size(); ++index) {
+                if (!input_attestations[index].is_string()) {
+                    return ApiResult::failure("invalid_input",
+                                              "attestation must be a base64url string",
+                                              "/attestations/" + std::to_string(index));
+                }
+                attestations.push_back(input_attestations[index].get<std::string>());
+            }
+            const auto appended = context.transparency_log->append(attestations);
+            if (!appended) {
+                return from_transparency_error(appended.error());
+            }
+            context.audit_details["first_index"] = appended->first_index;
+            context.audit_details["tree_size"] = appended->tree_size;
+            context.audit_details["entries_appended"] = attestations.size();
+            return ApiResult::success(append_value(*appended));
+        }});
+    registry.add(Capability{
+        .name = "transparency_tile",
+        .title = "Fetch transparency tile",
+        .description = "Fetch one immutable bulk entry tile for public monitoring.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"index", {{"type", "integer"}}}, {"width", {{"type", "integer"}}}}},
+                         {"required", json::array({"index", "width"})},
+                         {"additionalProperties", false}},
+        .output_schema = checkpoint_output_schema(),
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "transparency log",
+        .action = "read",
+        .resolve_object = instance_object,
+        .handler = [](const json& input, ApiContext& context) {
+            set_audit_fields(context, "read_tile");
+            if (!context.transparency_log) {
+                return no_tiled_log();
+            }
+            const std::int64_t index = input.at("index").get<std::int64_t>();
+            const std::int64_t width = input.at("width").get<std::int64_t>();
+            if (index < 0) {
+                return ApiResult::failure("invalid_input", "index must not be negative", "/index");
+            }
+            if (width <= 0 ||
+                width > static_cast<std::int64_t>(transparency::transparency_tile_width)) {
+                return ApiResult::failure(
+                    "invalid_input", "width must be between 1 and 1024", "/width");
+            }
+            const auto tile = context.transparency_log->tile(static_cast<std::uint64_t>(index),
+                                                             static_cast<std::size_t>(width));
+            if (!tile) {
+                return from_transparency_error(tile.error());
+            }
+            context.audit_details["tile_index"] = tile->index;
+            context.audit_details["tile_width"] = tile->width;
+            return ApiResult::success(tile_value(*tile));
+        }});
+    registry.add(Capability{
+        .name = "transparency_identity_scan",
+        .title = "Scan transparency identity",
+        .description =
+            "Verify checkpoint-bound bulk tiles and return every attestation naming one identity.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"identity", {{"type", "string"}}}}},
+                         {"required", json::array({"identity"})},
+                         {"additionalProperties", false}},
+        .output_schema = checkpoint_output_schema(),
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "transparency log",
+        .action = "read",
+        .resolve_object = instance_object,
+        .handler = [](const json& input, ApiContext& context) {
+            set_audit_fields(context, "identity_scan");
+            if (!context.transparency_log) {
+                return no_tiled_log();
+            }
+            if (!context.checkpoints) {
+                return no_checkpoint_service();
+            }
+            const auto current = context.checkpoints->current();
+            if (!current) {
+                return from_transparency_error(current.error());
+            }
+            if (!current->contains("checkpoint") || !current->at("checkpoint").is_object() ||
+                !current->at("checkpoint").contains("tree_size") ||
+                !current->at("checkpoint").at("tree_size").is_number_unsigned() ||
+                !current->at("checkpoint").contains("root_hash") ||
+                !current->at("checkpoint").at("root_hash").is_string()) {
+                return ApiResult::failure("unrecoverable",
+                                          "current checkpoint has no tiled-log commitment");
+            }
+            const json& checkpoint = current->at("checkpoint");
+            const std::string identity = input.at("identity").get<std::string>();
+            const auto scan = context.transparency_log->scan_identity(
+                identity,
+                checkpoint.at("tree_size").get<std::uint64_t>(),
+                checkpoint.at("root_hash").get<std::string>());
+            if (!scan) {
+                return from_transparency_error(scan.error());
+            }
+            context.audit_details["identity"] = identity;
+            context.audit_details["entries_scanned"] = scan->entries_scanned;
+            context.audit_details["matches"] = scan->matches.size();
+            return ApiResult::success(scan_value(*scan));
+        }});
     registry.add(Capability{
         .name = "initialize_tuf",
         .title = "Initialize TUF trust",
@@ -210,6 +379,7 @@ void register_transparency_capabilities(Registry& registry) {
                          {"additionalProperties", false}},
         .output_schema = checkpoint_output_schema(),
         .kind = CapabilityKind::Read,
+        .requires_auth = false,
         .object = "transparency log",
         .action = "read",
         .resolve_object = instance_object,
@@ -223,8 +393,7 @@ void register_transparency_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "publish_transparency_checkpoint",
         .title = "Publish transparency checkpoint",
-        .description =
-            "Sign the current TUF metadata state and publish it after witness and anchor checks.",
+        .description = "Sign the current TUF and tiled-log state after witness and anchor checks.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
@@ -241,6 +410,9 @@ void register_transparency_capabilities(Registry& registry) {
             if (!context.checkpoints) {
                 return no_checkpoint_service();
             }
+            if (!context.transparency_log) {
+                return no_tiled_log();
+            }
             const auto root = context.transparency->metadata("root");
             if (!root) {
                 return from_transparency_error(root.error());
@@ -249,10 +421,17 @@ void register_transparency_capabilities(Registry& registry) {
             if (!timestamp) {
                 return from_transparency_error(timestamp.error());
             }
+            const auto log_state = context.transparency_log->state();
+            if (!log_state) {
+                return from_transparency_error(log_state.error());
+            }
             const json checkpoint{{"root", root->document},
                                   {"root_version", root->version},
+                                  {"root_hash", log_state->root_hash},
                                   {"timestamp", timestamp->document},
                                   {"timestamp_version", timestamp->version},
+                                  {"tile_width", transparency::transparency_tile_width},
+                                  {"tree_size", log_state->tree_size},
                                   {"version", "lake_checkpoint/1"}};
             const auto published = context.checkpoints->publish(
                 checkpoint,
@@ -263,6 +442,7 @@ void register_transparency_capabilities(Registry& registry) {
             }
             context.audit_details["checkpoint_sequence"] = published->at("sequence");
             context.audit_details["mode"] = context.checkpoints->configuration().at("mode");
+            context.audit_details["tree_size"] = log_state->tree_size;
             return ApiResult::success(*published);
         }});
     registry.add(Capability{
@@ -275,6 +455,7 @@ void register_transparency_capabilities(Registry& registry) {
                          {"additionalProperties", false}},
         .output_schema = checkpoint_output_schema(),
         .kind = CapabilityKind::Read,
+        .requires_auth = false,
         .object = "transparency log",
         .action = "read",
         .resolve_object = instance_object,

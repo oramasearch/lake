@@ -1,14 +1,25 @@
-# Transparency and TUF metadata
+# Transparency log and TUF metadata
 
 ## What
 
 Lake serves the four top-level roles from The Update Framework (TUF) 1.0: `root`, `targets`,
 `snapshot`, and `timestamp`. The roles protect repository clients from key compromise, stale
 metadata, rollback, and combinations of metadata from different publication states. A signed
-checkpoint binds the current root and timestamp metadata. Its configured mode determines whether
-Lake may serve it immediately, must first obtain witness cosignatures, or must also retain an
-OpenTimestamps-style aggregation proof. Trusted timestamps, tile monitoring, replication, and
-agent session keys remain lake #36–#39.
+checkpoint binds the current root and timestamp metadata together with the tiled attestation log's
+Merkle root and tree size. Its configured mode determines whether Lake may serve it immediately,
+must first obtain witness cosignatures, or must also retain an OpenTimestamps-style aggregation
+proof. Trusted timestamps, replication, and agent session keys remain lake #36, #38, and #39.
+
+The log accepts batches of canonical-CBOR TAAP attestations encoded as base64url. Lake decodes each
+entry through libliquid, verifies its registered profile and TAAP signature, hashes it as an RFC
+6962-style leaf, and advances the append-only SHA-256 Merkle tree. Entry objects are grouped into
+immutable bulk tiles of 1,024 entries. Partial tiles are versioned by their exact width, so a tile
+object that a monitor has fetched is never replaced.
+
+Append validates the signed envelope and registered profile at the attestation's stated time. It
+does not discard a historically valid statement because its freshness window later elapsed or its
+status later changed; status evidence remains a consumer policy input and revocation statements
+must themselves remain visible in the append-only history.
 
 Lake never accepts a private TUF key. Root and targets signing can remain offline, and the online
 snapshot and timestamp signers can live in a separate operator-owned process. The API accepts
@@ -17,7 +28,9 @@ bindings pass.
 
 The implementation follows the [TUF specification](https://theupdateframework.github.io/specification/latest/).
 The liquid client verifier is tracked in
-[`oramasearch/liquid#186`](https://github.com/oramasearch/liquid/issues/186).
+[`oramasearch/liquid#186`](https://github.com/oramasearch/liquid/issues/186). Complete checkpoint,
+tile, inclusion, and consistency-proof verification is tracked in
+[`oramasearch/liquid#207`](https://github.com/oramasearch/liquid/issues/207).
 
 ## Storage
 
@@ -28,11 +41,21 @@ LAKE_STORE_ROOT/<instance>/log/tuf/<version>.root.json
 LAKE_STORE_ROOT/<instance>/log/tuf/<version>.targets.json
 LAKE_STORE_ROOT/<instance>/log/tuf/<version>.snapshot.json
 LAKE_STORE_ROOT/<instance>/log/tuf/<version>.timestamp.json
+LAKE_STORE_ROOT/<instance>/log/append.lock
+LAKE_STORE_ROOT/<instance>/log/tree.json
+LAKE_STORE_ROOT/<instance>/log/tiles/entries/<tile-index>/<width>.tile
 ```
 
 The instance name must be one safe path component. A write uses a sibling temporary file and an
 atomic rename. An existing version is never replaced. Reading without a version selects the
 highest stored version for that role; reading with a version returns that immutable object.
+
+`tree.json` is the atomically replaced publication state: `tree_size`, `root_hash`, tile width, and
+the Merkle frontier needed for the next append. `append.lock` serializes writers across Lake
+processes. Each binary tile starts with `LAKE-TILE-1`, followed by big-endian 32-bit lengths and
+exact canonical attestation bytes. A complete tile is stored as `1024.tile`; the final partial tile
+uses its entry count. Tile publication never replaces an existing path. When a partial tile grows,
+Lake writes a new width path and retains every earlier path for checkpoints at prior tree sizes.
 
 Checkpoints are immutable objects beside TUF metadata:
 
@@ -43,9 +66,10 @@ LAKE_STORE_ROOT/<instance>/log/checkpoints/current.json
 ```
 
 `current.json` is atomically replaced only after its configured requirements succeed. A checkpoint
-contains the exact current root and timestamp metadata, its SHA-256 hash, Lake's TAAP identity
-signature, and valid witness signatures. An anchored checkpoint also records the aggregation
-endpoint and its opaque proof; the same proof is retained in the adjacent `.ots.json` object.
+contains the exact current root and timestamp metadata, the attestation `tree_size`, `root_hash`,
+and `tile_width`, its SHA-256 hash, Lake's TAAP identity signature, and valid witness signatures.
+An anchored checkpoint also records the aggregation endpoint and its opaque proof; the same proof
+is retained in the adjacent `.ots.json` object.
 
 The API returns both the parsed `metadata` object and `encoded`, the exact compact JSON bytes that
 were signed, hashed, and stored. Clients use `encoded` for length and digest checks rather than
@@ -89,6 +113,40 @@ SHA-256 digest. Timestamp metadata binds `snapshot.json` the same way. These che
 TUF protects metadata selection. Each targets entry still names the length and digest of a TAAP
 attestation object; complete attestation and target verification belongs to the liquid client.
 
+## Bulk-tile monitoring
+
+`transparency_tile` returns one exact tile object as base64url plus its SHA-256 digest. The tile
+index starts at zero; `width` must equal the immutable version the caller wants. Given checkpoint
+tree size `N`, a monitor fetches `N / 1024` complete tiles and, when needed, one final tile whose
+width is `N % 1024`. The capability, current checkpoint, and log configuration are public because
+independent monitoring cannot depend on a Lake account.
+
+`transparency_identity_scan` is Lake's hosted monitor for every customer and every other observer.
+It reads the current signed checkpoint, fetches its exact tile versions, decodes and verifies every
+TAAP attestation, and recomputes every leaf and parent hash through the committed Merkle root. It
+returns an entry when the requested TAAP identifier is the issuer or an exact text/list attribute,
+which covers authorship, review, membership, delegation, and registered profile identity fields.
+The response reports tree size, root, tiles and entries read, matching indexes, profiles, issuers,
+subjects, exact base64url attestations, and measured scan duration.
+
+The root check happens after all tile bytes are read. A modified entry, changed order, missing
+entry, substituted partial tile, malformed record, invalid attestation, or changed tile header
+causes `unrecoverable`; the monitor returns no partial results. Earlier partial tile versions stay
+available, so a monitor can verify an older checkpoint even after later appends fill that tile.
+
+Lake's monitor verifies inclusion in the selected checkpoint by recomputing the complete root.
+Compact inclusion proofs, consistency proofs between checkpoints, witness and Lake signature
+verification in the client library, and hash-parent tiles are the liquid #207 work. Lake does not
+claim client proof enforcement before that issue lands.
+
+### Measured monitoring cost
+
+The Release acceptance test on the arm64 Apple M3 Max development machine on 2026-09-05 appended
+100,000 entries in 100 batches in 969.419 ms, then scanned and verified the 98 bulk tiles in
+289.977 ms. The scan found 100 matching entries and read each logged entry once. The executable
+test requires scan duration to remain below measured log-growth duration; it also changes one tile
+byte and requires the next scan to fail as `unrecoverable`.
+
 ## Runtime configuration and checkpoint protocol
 
 When `LAKE_STORE_ROOT` is configured, Lake reads these runtime values at startup:
@@ -125,9 +183,9 @@ anchor supplements it and does not replace its quorum.
 
 ## Capabilities
 
-All transparency capabilities use the single registry, require normal authentication, declare the
-instance authorization object, and record one signed `transparency` audit event through
-`Registry::call` and `audit::record`.
+All transparency capabilities use the single registry and record one signed `transparency` audit
+event through `Registry::call` and `audit::record`. Administrative publication uses the instance
+authorization object and `authorize`. Public monitoring reads are deliberately unauthenticated.
 
 | Capability | Kind | Input | Result |
 |---|---|---|---|
@@ -135,17 +193,23 @@ instance authorization object, and record one signed `transparency` audit event 
 | `publish_tuf_metadata` | action | `{targets, snapshot, timestamp}` | the root and three appended versions |
 | `rotate_tuf_root` | action | `{root}` | the verified successor root |
 | `tuf_metadata` | read | `role`, optional positive `version` | latest or named immutable role object |
+| `append_transparency_entries` | action | `{attestations: [base64url canonical CBOR]}` | first index, resulting tree size/root, tile width, and tile objects published |
 | `transparency_log_configuration` | read | `{}` | effective mode, public witness set, quorum, and anchored aggregation endpoint when configured |
 | `publish_transparency_checkpoint` | action | `{}` | the signed current checkpoint after its mode's requirements complete |
 | `transparency_checkpoint` | read | `{}` | current signed checkpoint, or `not_found` before one has met the requirements |
+| `transparency_tile` | read | non-negative `index`, `width` from 1 through 1,024 | immutable binary tile as base64url with exact width and SHA-256 |
+| `transparency_identity_scan` | read | TAAP `identity` | verified checkpoint/root, scan measurements, and every matching attestation |
 
-The first three and checkpoint publication require `admin` on the instance transparency log. Reads require `read`. The
-operator credential follows the registry's existing explicit administrative bypass; row-resolved
-credentials go through `authorize`.
+TUF initialization/publication/rotation, attestation append, and checkpoint publication require
+`admin` on the instance transparency log. TUF metadata reads require `read`. The operator credential
+follows the registry's existing explicit administrative bypass; row-resolved credentials go through
+`authorize`. Configuration, checkpoint, tile, and identity-scan reads are public.
 
 `GET /audit` displays the effective mode and witness quorum through
 `transparency_log_configuration`; it does not read configuration outside the registry. Every
 configuration read and checkpoint publication records a signed `transparency` audit event.
+`GET /transparency?identity=<taap-id>` is the public server-rendered monitor. It calls
+`transparency_identity_scan` and does not read tile storage directly.
 
 ## Key-compromise recovery
 
@@ -185,17 +249,24 @@ cmake --build build
 
 `TransparencyTuf.AppendsThresholdSignedMetadataAndRejectsRepositoryAttacks` covers append, exact
 fetch, unique-key thresholds, expired timestamps, rollback, and mixed metadata.
+`TransparencyLog.BulkTilesDetectTamperingAndScanOneHundredThousandEntries` measures 100,000-entry
+growth and identity scanning, fetches full and partial tiles, proves the scan is cheaper than log
+growth, and detects a modified tile against the checkpoint root.
+`TransparencyLog.ConcurrentWritersPreserveEveryEntry` verifies that two Lake writers sharing an
+instance serialize their appends without losing entries.
 `TransparencyCheckpoint.ValidatesRuntimeConfiguration` covers startup configuration refusal.
 `TransparencyCheckpoint.AirGappedSignsAndServesWithoutOutboundCalls` proves air-gapped checkpoint
 publication does not invoke its outbound client. The witnessed and anchored test verifies a
 threshold of valid Ed25519 witness cosignatures, refuses a checkpoint below that threshold, and
 retains an aggregation proof beside the anchored checkpoint. The registry test proves configuration
-and checkpoint capability dispatch with signed audit. `PostgresTransparency` repeats the TUF
-capabilities with the Postgres control store and verifies the resulting audit chain.
+and checkpoint capability dispatch with signed audit. `PostgresTransparency` repeats TUF, append,
+tile fetch, identity scan, configuration, and checkpoint capabilities with the Postgres control
+store and verifies the resulting audit chain.
 
 ## How to change
 
 Keep private signing keys outside lake. A new key or hash algorithm updates the root validation,
-attack fixtures, schema above, and liquid verifier issue together. A new capability belongs in the
-single registry and this page. Do not add an unsigned recovery path or overwrite a stored metadata
-version.
+attack fixtures, tile hashing, schema above, and liquid verifier issue together. A tile format or
+width change gets a new format version and retains readers for published tile objects. A new
+capability belongs in the single registry and this page. Do not add an unsigned recovery path or
+overwrite a stored metadata or tile version.

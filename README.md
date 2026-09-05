@@ -13,7 +13,8 @@ liquid is the tool. lake is where it collects.
 > reading through libliquid, the pages to explore them, the OpenAPI
 > document and MCP over Zetta's serving stack (Beast2 on Capy/Corosio), operational probes,
 > Prometheus metrics and JSON request logs. Protected operations accept the operator bearer or a
-> row-resolved user credential; probes and documented identity entry points are unauthenticated.
+> row-resolved user credential; probes and documented identity and transparency-monitoring reads
+> are unauthenticated.
 > The specification lives in
 > [`oramasearch/liquid`](https://github.com/oramasearch/liquid) under `docs/features/` —
 > principally [`18-lake-service.md`](https://github.com/oramasearch/liquid/blob/main/docs/features/18-lake-service.md).
@@ -76,6 +77,10 @@ liquid is the tool. lake is where it collects.
 > (the runtime default) requires configured witness cosignatures; anchored additionally retains
 > an aggregation proof. `/v1/transparency_log_configuration` and `/audit` expose the effective
 > public configuration. The operator handoff is [`docs/control-plane/log.md`](docs/control-plane/log.md).
+> Canonical TAAP attestations append to immutable 1,024-entry bulk tiles under the instance log.
+> Signed checkpoints commit to their Merkle root. Public tile fetches and the hosted
+> `/transparency` identity monitor recompute that root before returning matches, so a modified
+> tile is refused.
 
 > Application authentication migration `0016_auth_apps` adds isolated user pools, hosted and
 > custom-domain identity pages, per-application JWT signing and JWKS, lifecycle webhooks, and
@@ -111,11 +116,12 @@ ctest --test-dir build
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |
 | `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /transparency?identity=<taap-id>` | public hosted identity monitor over checkpoint-verified bulk tiles |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/conflicts`, `/artifacts`, `/artifact` | repository pages; public repositories are readable without a session, while other repository visibility levels redirect to sign-in. Change diffs and paged artifact results include their libliquid records. |
 | `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points and application JWKS |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
@@ -166,7 +172,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
-| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, and root rotation |
+| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata, threshold verification, checkpoint-bound Merkle entry tiles, and identity monitoring |
 | `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |

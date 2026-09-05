@@ -20,8 +20,8 @@ namespace lake::api {
 std::string web_ui_escape(std::string_view text);
 std::string web_ui_stylesheet();
 
-// The page frame: title, the navigation (Home, Customers, Repositories, API;
-// Sign in/out), the page content. signed_in switches the session link.
+// The page frame: title, shared navigation, and page content. signed_in switches
+// the session link.
 std::string web_ui_shell(std::string_view title,
                          std::string_view meta,
                          std::string_view content,
@@ -120,6 +120,7 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
                                     const std::vector<control::EffectiveAccessEntry>& entries);
 std::string web_ui_search(const search::Query& query, const search::QueryResult& result);
 std::string web_ui_metering(const nlohmann::json& usage);
+std::string web_ui_transparency(std::string_view identity, const nlohmann::json& scan);
 std::string web_ui_audit(const std::vector<audit::Event>& events,
                          const audit::Filter& filter,
                          const nlohmann::json& log_configuration = nlohmann::json::object());

@@ -14,7 +14,8 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 the Postgres control plane (schema `0001` + `0002` applied); server-rendered pages for customers
 and repositories behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
-`server_info`; probes are unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
+`server_info` and documented public identity and transparency-monitoring reads; probes are
+unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
 is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
 credential resolution in place of the single admin token (lake #4), repositories with content
 once liquid Phase 1 lands, incremental migrations (operator #126). The codebase also includes
@@ -100,6 +101,9 @@ optional aggregation endpoint at startup. Air-gapped checkpoints make no outboun
 and anchored checkpoints require the configured distinct witness quorum before they become current;
 anchored checkpoints retain an aggregation proof. The effective configuration is a read capability
 and appears on `/audit`; the Lake-CR environment mapping is `docs/control-plane/log.md`.
+Canonical TAAP attestations append to immutable 1,024-entry bulk tiles, and checkpoints bind their
+Merkle root and tree size. Public tile fetches and the hosted `/transparency` identity monitor
+verify the complete checkpoint root before returning matches and refuse modified tiles.
 
 Application authentication adds migration `0016_auth_apps`, isolated identity pools, themed
 hosted and custom-domain entry pages, per-application Ed25519 JWTs and JWKS, signed lifecycle
