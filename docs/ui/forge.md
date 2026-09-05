@@ -5,6 +5,11 @@ view is a pure C++ renderer: it receives typed values, returns one HTML document
 I/O. The HTTP adapter obtains every value through `Registry::call`, so the page follows the same
 authorization and audit path as REST, OpenAPI, and MCP.
 
+Anonymous visitors can read issues, reviews, review comments, and releases for public
+repositories. Private and organization repositories retain their policy checks. Webhook
+configuration, delivery history, and branch protection evidence still require an authenticated
+reader.
+
 ## Repository home
 
 `GET /repository?id=<id>` presents a repository as a working forge rather than a metadata record.
