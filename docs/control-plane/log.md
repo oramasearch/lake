@@ -19,6 +19,11 @@ The operator must not inject witness private keys, an aggregator credential, or 
 the pod mint a witness cosignature; Lake verifies externally supplied cosignatures with configured
 public keys.
 
+There are no transparency-log Secret mappings: every field in the table is emitted as a literal
+environment value, and witness public keys are deliberately public configuration. Lake does not
+accept per-witness or per-aggregator credentials in this contract. The operator continues to map
+Lake's existing identity-secret inputs independently; they are not `spec.transparencyLog` fields.
+
 ## Example
 
 ```yaml
