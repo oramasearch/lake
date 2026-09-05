@@ -19,6 +19,13 @@ struct LogState {
     std::string root_hash;
 };
 
+struct LogReplicationBatch {
+    LogState base;
+    LogState head;
+    std::uint64_t source_tree_size = 0;
+    std::vector<std::string> attestations;
+};
+
 struct AppendResult {
     std::uint64_t first_index = 0;
     std::uint64_t tree_size = 0;
@@ -58,6 +65,9 @@ public:
     Result<AppendResult> append(const std::vector<std::string>& attestations);
     Result<Tile> tile(std::uint64_t index, std::size_t width) const;
     Result<LogState> state() const;
+    Result<LogState> state_at(std::uint64_t tree_size) const;
+    Result<LogReplicationBatch> replication_batch(std::uint64_t after_tree_size) const;
+    Result<AppendResult> apply_replication_batch(const LogReplicationBatch& batch);
     Result<IdentityScan> scan_identity(const std::string& identity,
                                        std::uint64_t tree_size,
                                        const std::string& root_hash) const;

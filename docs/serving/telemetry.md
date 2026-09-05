@@ -32,8 +32,8 @@ to `store_unavailable`.
 
 Every completed request writes one JSON object to stdout with RFC 3339 UTC `ts`, `method`,
 query-free `path`, `route`, `status`, `duration_ms` and `node`. Startup is also one JSON object and
-records `admin_token_set` as `yes` or `no`, never the token. Authorization and cookie values are
-never logged.
+records `admin_token_set` and `replication_token_set` as `yes` or `no`, never either token.
+Authorization and cookie values are never logged.
 
 ## Why
 

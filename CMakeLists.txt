@@ -126,6 +126,7 @@ add_library(lake-core STATIC
   src/api/model_capabilities.cpp
   src/api/transparency_capabilities.cpp
   src/api/timestamp_capabilities.cpp
+  src/api/replication_capabilities.cpp
   src/api/app_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp

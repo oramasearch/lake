@@ -53,6 +53,8 @@ int usage() {
     std::println("  --store-root   customer and instance data root (default $LAKE_STORE_ROOT)");
     std::println("  --admin-token  bearer for /v1 capabilities and MCP tools "
                  "(default $LAKE_ADMIN_TOKEN)");
+    std::println("  LAKE_REPLICATION_TOKEN bearer presented to peer lake instances "
+                 "(default $LAKE_ADMIN_TOKEN)");
     std::println("  --identity-seed base64 Ed25519 seed for lake's TAAP identity "
                  "(default $LAKE_IDENTITY_SEED)");
     std::println("  --instance-kek key-encryption key for a generated identity "
@@ -76,6 +78,7 @@ int main(int argc, char** argv) {
     lake::api::ServerOptions opts;
     std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
     opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");
+    opts.replication_token = env_or("LAKE_REPLICATION_TOKEN", "");
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
@@ -170,6 +173,10 @@ int main(int argc, char** argv) {
         return usage();
     }
 
+    if (opts.replication_token.empty()) {
+        opts.replication_token = opts.admin_token;
+    }
+
     std::string store_kind = "none";
     if (memory_store) {
         opts.store = std::make_shared<lake::control::InMemoryStore>();
@@ -202,6 +209,7 @@ int main(int argc, char** argv) {
             {"log_mode", lake::transparency::to_string(opts.log_configuration.mode)},
             {"tsa_configured", opts.tsa_endpoint.empty() ? "no" : "yes"},
             {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
+            {"replication_token_set", opts.replication_token.empty() ? "no" : "yes"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}
             .dump());

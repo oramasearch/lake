@@ -81,6 +81,11 @@ liquid is the tool. lake is where it collects.
 > Signed checkpoints commit to their Merkle root. Public tile fetches and the hosted
 > `/transparency` identity monitor recompute that root before returning matches, so a modified
 > tile is refused.
+> Active/standby Lake instances also replicate customer repositories through durable liquid
+> cursors and replicate the transparency log only from a matching Merkle prefix. Signed
+> checkpoints are verified and adopted without rollback. The consistency model and operator
+> handoff are in [`docs/api/replication.md`](docs/api/replication.md) and
+> [`docs/control-plane/replication.md`](docs/control-plane/replication.md).
 
 > A configured RFC 3161 TSA timestamps checkpoint signature values into DER RFC 4998 evidence
 > records under `LAKE_STORE_ROOT/<instance>/log/timestamps/`. Lake verifies TSA trust, nonce, imprint
@@ -126,7 +131,7 @@ ctest --test-dir build
 | `GET /drive`, `/drive/preview`, `/drive/history`, `/drive/share`, `/share/:token` | server-rendered drive browsing, previews, path history, effective access, and scoped links; mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
+| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
 | `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
@@ -140,6 +145,8 @@ ctest --test-dir build
 `--node NAME` names the node. `--control-db URI` (default `$LAKE_CONTROL_DB_URI`) selects the
 Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-token`
 (default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
+`LAKE_REPLICATION_TOKEN` is the bearer presented to peer Lake instances and defaults to the admin
+token when omitted.
 Metering and quota configuration uses the `LAKE_PRICE_*` and `LAKE_STORAGE_QUOTA_BYTES`
 environment variables documented in [`docs/api/metering.md`](docs/api/metering.md).
 Trusted timestamping uses `LAKE_TSA_URL`, optional PEM `LAKE_TSA_TRUST_CERT`, and the

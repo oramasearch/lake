@@ -122,6 +122,9 @@ Result<void> verify_offline_grant(control::Store& store,
 Result<nlohmann::json> sign_transparency_checkpoint(control::Store& store,
                                                     const nlohmann::json& checkpoint,
                                                     const IdentityOptions& options);
+Result<void> verify_transparency_checkpoint(control::Store& store,
+                                            const nlohmann::json& checkpoint,
+                                            const nlohmann::json& signature);
 
 // Signs the canonical CBOR form of a portable-export manifest with the lake
 // identity. The verification input carries the source identity document, so a
