@@ -91,6 +91,8 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 add_library(lake-core STATIC
   src/control/lake_identity.cpp
   src/control/saml.cpp
+  src/control/callers.cpp
+  src/control/pki.cpp
   src/version.cpp
   src/api/web_ui.cpp
   src/api/oauth.cpp
@@ -99,6 +101,7 @@ add_library(lake-core STATIC
   src/api/mcp.cpp
   src/api/capabilities.cpp
   src/api/forge_capabilities.cpp
+  src/api/pki_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp
@@ -137,5 +140,5 @@ if(LAKE_BUILD_TESTS)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
   enable_testing()
-  add_subdirectory(tests)
+add_subdirectory(tests)
 endif()

@@ -59,6 +59,7 @@
 #include <boost/http/server/router.hpp>
 #include <boost/json.hpp>
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
@@ -68,7 +69,9 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/callers.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/pki.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
@@ -375,6 +378,43 @@ std::string route_value(const boost::http::route_params& route, std::string_view
         }
     }
     return {};
+}
+
+std::expected<std::string, std::string> decode_base64url(std::string value) {
+    for (char& character : value) {
+        if (character == '-') {
+            character = '+';
+        } else if (character == '_') {
+            character = '/';
+        }
+    }
+    while (value.size() % 4 != 0) {
+        value += '=';
+    }
+    std::string decoded((value.size() / 4) * 3, '\0');
+    const int written = EVP_DecodeBlock(reinterpret_cast<unsigned char*>(decoded.data()),
+                                        reinterpret_cast<const unsigned char*>(value.data()),
+                                        static_cast<int>(value.size()));
+    if (written < 0) {
+        return std::unexpected("base64url value is invalid");
+    }
+    std::size_t padding = 0;
+    if (!value.empty() && value.ends_with('=')) {
+        ++padding;
+    }
+    if (value.size() > 1 && value.ends_with("==")) {
+        ++padding;
+    }
+    decoded.resize(static_cast<std::size_t>(written) - padding);
+    return decoded;
+}
+
+std::string request_origin(const boost::http::route_params& route) {
+    const std::string scheme = request_is_https(route) ? "https" : "http";
+    const std::string host = route.req.count(boost::http::field::host) == 0
+                                 ? "localhost"
+                                 : std::string(route.req.at(boost::http::field::host));
+    return scheme + "://" + host;
 }
 
 std::optional<std::uint64_t> decimal_value(std::string_view value) {
@@ -1979,6 +2019,9 @@ struct ApiServer::Impl {
     telemetry::Metrics metrics;
     mutable LiquidCustomerStores sync_store;
     Registry registry;
+    mutable control::pki::Service pki;
+    std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
+    std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
     OutboundHttpClient outbound_http;
     struct CachedJwks {
@@ -2003,6 +2046,15 @@ struct ApiServer::Impl {
                           1.0);
         metrics.set_gauge("lake_up", {}, 0.0);
         options.store = telemetry::instrument_store(std::move(options.store), metrics);
+        store_federation_policy =
+            std::make_unique<control::callers::StoreFederationIssuerPolicy>(options.store.get());
+        control::callers::FederationIssuerPolicy* issuer_policy =
+            options.federation_issuer_policy ? options.federation_issuer_policy
+                                             : store_federation_policy.get();
+        callers = std::make_unique<control::callers::Service>(options.token_reviewer,
+                                                              options.jwt_verifier,
+                                                              options.cloud_identity_verifier,
+                                                              issuer_policy);
     }
 
     void record_request(const boost::http::route_params& route,
@@ -2121,6 +2173,8 @@ struct ApiServer::Impl {
         ApiContext ctx;
         ctx.store = options.store.get();
         ctx.search = options.search.get();
+        ctx.pki = &pki;
+        ctx.callers = callers.get();
         ctx.node_name = options.node_name;
         ctx.identity_seed = options.identity_seed;
         ctx.instance_kek = options.instance_kek;
@@ -2188,6 +2242,279 @@ struct ApiServer::Impl {
             .instance_kek = context.instance_kek,
         };
         return audit::record(*context.store, event, identity_options).has_value();
+    }
+
+    struct VerifiedAcmeJws {
+        nlohmann::json payload = nlohmann::json::object();
+        std::string account_id;
+        std::optional<control::pki::AcmeJwk> jwk;
+    };
+
+    std::expected<VerifiedAcmeJws, control::pki::Error>
+    verify_acme_jws(std::string_view body,
+                    std::string_view customer_id,
+                    std::string_view expected_url,
+                    bool new_account) {
+        const nlohmann::json jws = nlohmann::json::parse(body, nullptr, false);
+        if (jws.is_discarded() || !jws.is_object() || !jws.contains("protected") ||
+            !jws.contains("payload") || !jws.contains("signature") ||
+            !jws.at("protected").is_string() || !jws.at("payload").is_string() ||
+            !jws.at("signature").is_string()) {
+            return std::unexpected(
+                control::pki::Error{"invalid_input", "ACME request must be a flattened JWS"});
+        }
+        const std::string protected_value = jws.at("protected").get<std::string>();
+        auto decoded_protected = decode_base64url(protected_value);
+        if (!decoded_protected) {
+            return std::unexpected(control::pki::Error{"invalid_input", decoded_protected.error()});
+        }
+        const nlohmann::json header = nlohmann::json::parse(*decoded_protected, nullptr, false);
+        if (header.is_discarded() || !header.is_object() || header.value("alg", "") != "ES256" ||
+            header.value("url", "") != expected_url || header.value("nonce", "").empty()) {
+            return std::unexpected(
+                control::pki::Error{"invalid_input", "ACME protected header is invalid"});
+        }
+        auto consumed = pki.consume_acme_nonce(header.at("nonce").get<std::string>());
+        if (!consumed) {
+            return std::unexpected(consumed.error());
+        }
+        VerifiedAcmeJws verified;
+        if (new_account) {
+            if (!header.contains("jwk") || !header.at("jwk").is_object()) {
+                return std::unexpected(
+                    control::pki::Error{"invalid_input", "newAccount requires a JWK"});
+            }
+            const nlohmann::json& jwk = header.at("jwk");
+            if (jwk.value("kty", "") != "EC" || jwk.value("crv", "") != "P-256" ||
+                jwk.value("x", "").empty() || jwk.value("y", "").empty() ||
+                header.contains("kid")) {
+                return std::unexpected(
+                    control::pki::Error{"invalid_input", "newAccount requires a P-256 JWK"});
+            }
+            verified.jwk = control::pki::AcmeJwk{jwk.at("x").get<std::string>(),
+                                                 jwk.at("y").get<std::string>()};
+        } else {
+            const std::string kid = header.value("kid", "");
+            const std::string marker = "/acme/" + std::string(customer_id) + "/account/";
+            const std::size_t marker_at = kid.find(marker);
+            if (marker_at == std::string::npos || header.contains("jwk")) {
+                return std::unexpected(
+                    control::pki::Error{"invalid_input", "ACME account URL is invalid"});
+            }
+            verified.account_id = kid.substr(marker_at + marker.size());
+            if (verified.account_id.empty() || verified.account_id.contains('/')) {
+                return std::unexpected(
+                    control::pki::Error{"invalid_input", "ACME account URL is invalid"});
+            }
+        }
+        const std::string payload_value = jws.at("payload").get<std::string>();
+        const std::string signing_input = protected_value + "." + payload_value;
+        auto signature = pki.verify_acme_signature(verified.account_id,
+                                                   verified.jwk,
+                                                   signing_input,
+                                                   jws.at("signature").get<std::string>());
+        if (!signature) {
+            return std::unexpected(signature.error());
+        }
+        auto decoded_payload = decode_base64url(payload_value);
+        if (!decoded_payload) {
+            return std::unexpected(control::pki::Error{"invalid_input", decoded_payload.error()});
+        }
+        if (!decoded_payload->empty()) {
+            verified.payload = nlohmann::json::parse(*decoded_payload, nullptr, false);
+            if (verified.payload.is_discarded()) {
+                return std::unexpected(
+                    control::pki::Error{"invalid_input", "ACME JWS payload is invalid JSON"});
+            }
+        }
+        return verified;
+    }
+
+    boost::http::route_task send_acme(boost::http::route_params& route,
+                                      boost::http::status status,
+                                      std::string body,
+                                      std::string_view content_type,
+                                      std::string_view location = {}) {
+        auto nonce = pki.new_acme_nonce();
+        if (!nonce) {
+            co_return co_await send_text(route,
+                                         boost::http::status::internal_server_error,
+                                         error_body(nonce.error().code, nonce.error().message),
+                                         "application/problem+json",
+                                         "no-store");
+        }
+        route.res.set("Replay-Nonce", *nonce);
+        if (!location.empty()) {
+            route.res.set(boost::http::field::location, location);
+        }
+        co_return co_await send_text(route, status, std::move(body), content_type, "no-store");
+    }
+
+    boost::http::route_task acme_problem(boost::http::route_params& route,
+                                         const control::pki::Error& error) {
+        const bool bad_nonce = error.message.find("nonce") != std::string::npos;
+        const std::string problem = bad_nonce ? "badNonce" : "malformed";
+        const boost::http::status status = error.code == "not_found"
+                                               ? boost::http::status::not_found
+                                               : boost::http::status::bad_request;
+        return send_acme(route,
+                         status,
+                         nlohmann::json{{"type", "urn:ietf:params:acme:error:" + problem},
+                                        {"detail", error.message},
+                                        {"status", static_cast<unsigned>(status)}}
+                             .dump(),
+                         "application/problem+json");
+    }
+
+    boost::http::route_task serve_acme_directory(boost::http::route_params& route) {
+        const std::string customer_id = route_value(route, "customer_id");
+        const std::string base = request_origin(route) + "/acme/" + customer_id;
+        return send_acme(route,
+                         boost::http::status::ok,
+                         nlohmann::json{{"newNonce", base + "/new-nonce"},
+                                        {"newAccount", base + "/new-account"},
+                                        {"newOrder", base + "/new-order"}}
+                             .dump(),
+                         "application/json");
+    }
+
+    boost::http::route_task serve_acme_nonce(boost::http::route_params& route) {
+        return send_acme(route, boost::http::status::ok, "", "application/octet-stream");
+    }
+
+    boost::http::route_task serve_acme_http01(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        context.authentication_method = "acme-http-01";
+        const ApiResult result = registry.call(
+            "acme_http01_response", {{"token", route_value(route, "token")}}, context);
+        if (!result.ok) {
+            return acme_problem(route,
+                                control::pki::Error{result.error.code, result.error.message});
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         result.value.at("key_authorization").get<std::string>(),
+                         "application/octet-stream",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_acme_post(boost::http::route_params& route,
+                                            std::string capability_name) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        const std::string customer_id = route_value(route, "customer_id");
+        const std::string expected_url = request_origin(route) + std::string(route.url.path());
+        const bool new_account = capability_name == "acme_new_account";
+        auto verified = verify_acme_jws(body, customer_id, expected_url, new_account);
+        if (!verified) {
+            co_return co_await acme_problem(route, verified.error());
+        }
+        ApiContext context = context_for(route);
+        context.authentication_method = "acme";
+        context.acting_identity =
+            verified->account_id.empty() ? "acme-new-account" : "acme/" + verified->account_id;
+        nlohmann::json input{{"customer_id", customer_id}};
+        if (verified->jwk) {
+            input["x"] = verified->jwk->x;
+            input["y"] = verified->jwk->y;
+        }
+        if (!verified->account_id.empty()) {
+            input["account_id"] = verified->account_id;
+        }
+        const std::string order_id = route_value(route, "order_id");
+        const std::string authorization_id = route_value(route, "authorization_id");
+        if (!order_id.empty()) {
+            input["order_id"] = order_id;
+        }
+        if (!authorization_id.empty()) {
+            input["authorization_id"] = authorization_id;
+        }
+        if (capability_name == "acme_new_order") {
+            if (!verified->payload.is_object() || !verified->payload.contains("identifiers") ||
+                !verified->payload.at("identifiers").is_array() ||
+                verified->payload.at("identifiers").size() != 1 ||
+                verified->payload.at("identifiers").at(0).value("type", "") != "dns") {
+                co_return co_await acme_problem(
+                    route,
+                    control::pki::Error{"invalid_input", "ACME order requires one DNS identifier"});
+            }
+            input["identifier"] = verified->payload.at("identifiers").at(0).value("value", "");
+        }
+        if (capability_name == "acme_finalize_order") {
+            input["csr"] = verified->payload.value("csr", "");
+        }
+        const ApiResult result = registry.call(capability_name, input, context);
+        if (!result.ok) {
+            co_return co_await acme_problem(
+                route, control::pki::Error{result.error.code, result.error.message});
+        }
+        const std::string base = request_origin(route) + "/acme/" + customer_id;
+        if (capability_name == "acme_new_account") {
+            const std::string account =
+                base + "/account/" + result.value.at("account_id").get<std::string>();
+            co_return co_await send_acme(route,
+                                         boost::http::status::created,
+                                         nlohmann::json{{"status", "valid"}}.dump(),
+                                         "application/json",
+                                         account);
+        }
+        if (capability_name == "acme_new_order") {
+            const std::string created_order = result.value.at("order_id").get<std::string>();
+            const std::string created_authorization =
+                result.value.at("authorization_id").get<std::string>();
+            co_return co_await send_acme(
+                route,
+                boost::http::status::created,
+                nlohmann::json{
+                    {"status", result.value.at("status")},
+                    {"identifiers",
+                     nlohmann::json::array({{{"type", "dns"}, {"value", input.at("identifier")}}})},
+                    {"authorizations",
+                     nlohmann::json::array({base + "/authorization/" + created_authorization})},
+                    {"finalize", base + "/finalize/" + created_order}}
+                    .dump(),
+                "application/json",
+                base + "/order/" + created_order);
+        }
+        if (capability_name == "acme_authorization") {
+            const std::string challenge =
+                base + "/challenge/" + result.value.at("authorization_id").get<std::string>();
+            co_return co_await send_acme(
+                route,
+                boost::http::status::ok,
+                nlohmann::json{
+                    {"status", result.value.at("status")},
+                    {"identifier", {{"type", "dns"}, {"value", result.value.at("identifier")}}},
+                    {"challenges",
+                     nlohmann::json::array({{{"type", "http-01"},
+                                             {"url", challenge},
+                                             {"token", result.value.at("token")},
+                                             {"status", result.value.at("status")}}})}}
+                    .dump(),
+                "application/json");
+        }
+        if (capability_name == "acme_http01_challenge") {
+            co_return co_await send_acme(
+                route,
+                boost::http::status::ok,
+                nlohmann::json{{"type", "http-01"}, {"status", result.value.at("status")}}.dump(),
+                "application/json");
+        }
+        if (capability_name == "acme_certificate") {
+            co_return co_await send_acme(route,
+                                         boost::http::status::ok,
+                                         result.value.at("certificate_pem").get<std::string>(),
+                                         "application/pem-certificate-chain");
+        }
+        const std::string current_order = result.value.value("order_id", order_id);
+        nlohmann::json order_document{{"status", result.value.at("status")}};
+        if (result.value.value("has_certificate", capability_name == "acme_finalize_order")) {
+            order_document["certificate"] = base + "/certificate/" + current_order;
+        }
+        co_return co_await send_acme(
+            route, boost::http::status::ok, order_document.dump(), "application/json");
     }
 
     boost::http::route_task serve_web_root(boost::http::route_params& route) {
@@ -4214,6 +4541,39 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/v1/openapi.json", impl.serve_openapi(route));
                });
+    router.add(http::method::get,
+               "/acme/:customer_id/directory",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/acme/:customer_id/directory", impl.serve_acme_directory(route));
+               });
+    router.add(http::method::head,
+               "/acme/:customer_id/new-nonce",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/acme/:customer_id/new-nonce", impl.serve_acme_nonce(route));
+               });
+    router.add(http::method::get,
+               "/.well-known/acme-challenge/:token",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/.well-known/acme-challenge/:token", impl.serve_acme_http01(route));
+               });
+    const auto add_acme_post = [&router, &impl](std::string path, std::string capability_name) {
+        router.add(http::method::post,
+                   path,
+                   [&impl, path, capability_name](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, path, impl.serve_acme_post(route, capability_name));
+                   });
+    };
+    add_acme_post("/acme/:customer_id/new-account", "acme_new_account");
+    add_acme_post("/acme/:customer_id/new-order", "acme_new_order");
+    add_acme_post("/acme/:customer_id/order/:order_id", "acme_order");
+    add_acme_post("/acme/:customer_id/authorization/:authorization_id", "acme_authorization");
+    add_acme_post("/acme/:customer_id/challenge/:authorization_id", "acme_http01_challenge");
+    add_acme_post("/acme/:customer_id/finalize/:order_id", "acme_finalize_order");
+    add_acme_post("/acme/:customer_id/certificate/:order_id", "acme_certificate");
     const auto add_sync_post = [&router, &impl](std::string path, std::string capability_name) {
         router.add(http::method::post,
                    path,

@@ -96,6 +96,15 @@ repository and its content; all other repository visibility levels remain protec
 | `create_encryption_key`, `list_encryption_keys`, `get_encryption_key`, `rotate_encryption_key` | action/read | mount and key name | named-key metadata only | [encryption.md](encryption.md) |
 | `encrypt`, `decrypt`, `rewrap`, `sign`, `verify`, `hmac`, `derive_encryption_key` | action | mount, key and base64url payload fields | protected result and key version | [encryption.md](encryption.md) |
 | `rotate_customer_kek` | action | `customer_id` | KEK version and rewrapped-key count | [encryption.md](encryption.md) |
+| `create_pki_authority` | action | `customer_id` | customer root certificate and intermediate chain | [pki.md](pki.md) |
+| `issue_x509_svid` | action | customer, SPIFFE ID, optional lifetime | short-lived X.509 SVID, private key, and chain | [pki.md](pki.md) |
+| `issue_jwt_svid` | action | customer, SPIFFE ID, audience, optional lifetime | short-lived ES256 JWT SVID | [pki.md](pki.md) |
+| `issue_client_certificate`, `issue_device_certificate` | action | customer, subject, optional lifetime | short-lived client or device X.509 certificate, private key, and chain | [pki.md](pki.md) |
+| `issue_ssh_user_certificate`, `issue_ssh_host_certificate` | action | customer, Ed25519 public key, key ID, principals, optional lifetime | short-lived OpenSSH certificate and CA public key | [pki.md](pki.md) |
+| `acme_new_account`, `acme_new_order`, `acme_order`, `acme_authorization`, `acme_http01_challenge`, `acme_finalize_order`, `acme_certificate`, `acme_http01_response` | ACME transport | RFC 8555 JWS, account, order, authorization, challenge and CSR fields | customer-scoped ACME state and certificate chain | [pki.md](pki.md) |
+| `begin_root_recovery`, `complete_root_recovery` | action | customer, configured quorum; then ceremony and shares | recovery shares, then rehearsal confirmation | [break-glass.md](break-glass.md) |
+| `exchange_kubernetes_attestation` | action, public entry | customer, organization, projected token, workload TAAP ID, audiences | durable caller ID and short-lived workload credential | [callers.md](callers.md) |
+| `exchange_jwt_attestation`, `exchange_cloud_attestation` | action, public entry | customer, federation assertion or AWS/Azure evidence, workload TAAP ID | durable caller ID and short-lived workload credential | [callers.md](callers.md) |
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.

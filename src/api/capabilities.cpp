@@ -16,6 +16,7 @@
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/saml.hpp"
+#include "lake/control/pki.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 
@@ -3823,6 +3824,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_secret_capabilities(registry);
     register_offline_recovery_capabilities(registry);
     register_forge_capabilities(registry);
+    register_pki_capabilities(registry);
 }
 
 } // namespace lake::api

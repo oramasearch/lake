@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -83,6 +84,22 @@ public:
     Result<audit::Event> latest_audit_event() override;
     Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) override;
     Result<void> set_audit_retention_days(const std::string& customer_id, int days) override;
+    Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
+                                                    const std::string& instance_kek) override;
+    Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
+                                                   const std::string& instance_kek) override;
+    Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& value) override;
+    Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
+                                                          int limit) override;
+    Result<PkiRecoveryCeremonyRecord>
+    create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& value) override;
+    Result<PkiRecoveryCeremonyRecord>
+    get_pki_recovery_ceremony(const std::string& customer_id,
+                              const std::string& ceremony_id) override;
+    Result<PkiRecoveryCeremonyRecord>
+    complete_pki_recovery_ceremony(const std::string& customer_id,
+                                   const std::string& ceremony_id,
+                                   const std::vector<PkiRecoveryShareEvidence>& evidence) override;
     Result<SecretMount> create_secret_mount(const NewSecretMount& value,
                                             const std::string& instance_kek) override;
     Result<std::vector<SecretMount>> list_secret_mounts(const std::string& customer_id,
@@ -211,6 +228,9 @@ public:
     Result<FederationIssuer> create_federation_issuer(const NewFederationIssuer&) override;
     Result<std::vector<FederationIssuer>>
     list_federation_issuers(const std::string& organization_id, int limit) override;
+    Result<bool> allows_federation_claim(const std::string& organization_id,
+                                         const std::string& issuer,
+                                         const std::string& claim) override;
     Result<IssuedSession> sign_in_sso(const SsoIdentity&) override;
     Result<std::vector<ScimUser>> list_scim_users(const std::string& provider_id,
                                                   int limit) override;
@@ -253,6 +273,10 @@ private:
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
+    std::vector<PkiAuthorityRecord> pki_authorities_;
+    std::vector<PkiCallerRecord> pki_callers_;
+    std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
+    std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {
         std::string customer_id;
         std::string key;
