@@ -150,9 +150,14 @@ and a build result.
 The live mode of `tools/ui/screenshot.sh` then fetches every page in the generated manifest and
 renders both themes at 1440 by 900. Session values and generated identifiers remain under
 `.cache`; only the PNG evidence is checked in.
+Each capture gives DOM-ready followed by network idle a combined 30-second budget. The Puppeteer
+driver records responses and failed requests in `.cache/ui-render/<page>-<theme>-network.json`.
+On timeout it writes the partial image, appends the page and network evidence to
+`docs/ui/screenshots/after/failures.tsv`, continues the manifest, and fails at the end when that
+list is non-empty. This prevents a resource that never settles from blocking the proof run.
 
 The baseline set is in `docs/ui/screenshots/before/<page>-<theme>.png`. The fixture manifest covers
-all 57 pages below in light and dark:
+all 60 pages below in light and dark:
 
 ```text
 home login sign-up sign-in mfa passkey-sign-in settings sessions passkeys tokens
@@ -162,11 +167,11 @@ application-sign-up application-sign-in application-mfa application-passkey
 repositories repository exports repository-tree file changes change issues issue releases webhooks
 protection conflicts
 artifacts artifact search secret-mounts secrets encryption-keys metering audit transparency
-drive drive-preview drive-history drive-share shared-link
+drive drive-grid drive-preview drive-history drive-version-diff drive-conflict drive-share shared-link
 ```
 
 The after set uses the same names under `docs/ui/screenshots/after/`, making every comparison a
-path-for-path pair. Both directories contain 114 PNG files, and every capture is 1440 by 900.
+path-for-path pair. Both directories contain 120 PNG files, and every capture is 1440 by 900.
 The routes introduced after a baseline use the closest prior list or detail page in that baseline
 slot, so the comparison still records the layout that preceded the new page.
 The three primary review screens are the
