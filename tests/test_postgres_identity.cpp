@@ -23,6 +23,9 @@
 
 namespace {
 
+constexpr std::string_view test_instance_kek =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
 std::string base64url(const std::vector<std::byte>& bytes) {
     const auto* input = reinterpret_cast<const unsigned char*>(bytes.data());
     const std::size_t size = bytes.size();
@@ -70,7 +73,8 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
 
-    std::unique_ptr<lake::control::Store> store = lake::control::make_postgres_store(uri);
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
     const std::string email = "postgres-identity-" + std::to_string(getpid()) + "@example.test";
     const auto sign_up = store->sign_up_password({"lake",
                                                   email,
@@ -218,9 +222,8 @@ TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
-    setenv(
-        "LAKE_INSTANCE_KEK", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1);
-    std::unique_ptr<lake::control::Store> store = lake::control::make_postgres_store(uri);
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
     const auto organization = store->create_organization(
         {"taap:1:ed25519:sso-org-" + suffix, "SSO integration organization", ""});
@@ -320,9 +323,8 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
-    setenv(
-        "LAKE_INSTANCE_KEK", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 1);
-    std::unique_ptr<lake::control::Store> store = lake::control::make_postgres_store(uri);
+    std::unique_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(test_instance_kek));
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");

@@ -82,7 +82,8 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
 
-    auto store = lake::control::make_postgres_store(uri);
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     Registry registry;
     lake::api::register_core_capabilities(registry, "test");
@@ -233,7 +234,8 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
 
-    auto store = lake::control::make_postgres_store(uri);
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
     const std::string customer = "search-customer-" + suffix;
@@ -288,7 +290,8 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
 
-    auto store = lake::control::make_postgres_store(uri);
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     Registry registry;
     lake::api::register_core_capabilities(registry, "test");

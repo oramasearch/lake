@@ -9,13 +9,13 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
-#include <cstdlib>
 #include <format>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -1550,7 +1550,8 @@ EncryptionKey encryption_key_of(const pqxx::row& row) {
 
 class PostgresStore final : public Store {
 public:
-    explicit PostgresStore(std::string uri) : uri_(std::move(uri)) {}
+    PostgresStore(std::string uri, std::string instance_kek)
+        : uri_(std::move(uri)), instance_kek_(std::move(instance_kek)) {}
     std::string kind() const override {
         return "postgres";
     }
@@ -3415,6 +3416,20 @@ public:
             });
     }
 
+    Result<bool> allows_federation_claim(const std::string& organization_id,
+                                         const std::string& issuer,
+                                         const std::string& claim) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            return !tx.exec_params("SELECT 1 FROM federation_issuers "
+                                   "WHERE organization_id = $1::uuid AND issuer = $2 "
+                                   "AND claim = $3",
+                                   organization_id,
+                                   issuer,
+                                   claim)
+                        .empty();
+        });
+    }
+
     Result<IssuedSession> sign_in_sso(const SsoIdentity& input) override {
         if (input.provider_id.empty() || input.issuer.empty() || input.subject.empty() ||
             !input.claims.is_object()) {
@@ -3869,6 +3884,271 @@ public:
                 }
                 return logs;
             });
+    }
+
+    Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& input,
+                                                    const std::string& instance_kek) override {
+        if (input.customer_id.empty() || input.root_certificate_pem.empty() ||
+            input.intermediate_chain_pem.empty() || input.root_private_key_pem.empty() ||
+            input.intermediate_private_key_pem.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "customer and authority material are required"});
+        }
+        return with_tx<PkiAuthorityRecord>([&](pqxx::work& tx) -> Result<PkiAuthorityRecord> {
+            auto customer_key = customer_kek_tx(tx, input.customer_id, instance_kek, true);
+            if (!customer_key) {
+                return std::unexpected(customer_key.error());
+            }
+            const std::string root_associated = "lake pki authority/" + input.customer_id + "/root";
+            const std::string intermediate_associated =
+                "lake pki authority/" + input.customer_id + "/intermediate";
+            auto root =
+                secrets_crypto::seal(*customer_key, input.root_private_key_pem, root_associated);
+            auto intermediate = secrets_crypto::seal(
+                *customer_key, input.intermediate_private_key_pem, intermediate_associated);
+            secrets_crypto::cleanse(*customer_key);
+            if (!root || !intermediate) {
+                return std::unexpected(!root ? root.error() : intermediate.error());
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO pki_authorities "
+                "(customer_id, root_key_ciphertext, intermediate_ciphertext, "
+                "root_certificate_pem, intermediate_chain_pem) "
+                "VALUES ($1::uuid, $2, $3, $4, $5) "
+                "ON CONFLICT (customer_id) DO NOTHING "
+                "RETURNING id::text, customer_id::text, root_certificate_pem, "
+                "intermediate_chain_pem, root_key_ciphertext, intermediate_ciphertext, "
+                "created_at::text, updated_at::text",
+                input.customer_id,
+                *root,
+                *intermediate,
+                input.root_certificate_pem,
+                input.intermediate_chain_pem);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"conflict", "customer authority already exists"});
+            }
+            return PkiAuthorityRecord{rows[0][0].as<std::string>(),
+                                      rows[0][1].as<std::string>(),
+                                      rows[0][2].as<std::string>(),
+                                      rows[0][3].as<std::string>(),
+                                      rows[0][4].as<std::string>(),
+                                      rows[0][5].as<std::string>(),
+                                      rows[0][6].as<std::string>(),
+                                      rows[0][7].as<std::string>()};
+        });
+    }
+
+    Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
+                                                   const std::string& instance_kek) override {
+        return with_tx<PkiAuthorityMaterial>([&](pqxx::work& tx) -> Result<PkiAuthorityMaterial> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT root_certificate_pem, intermediate_chain_pem, root_key_ciphertext, "
+                "intermediate_ciphertext FROM pki_authorities WHERE customer_id = $1::uuid",
+                customer_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "customer authority does not exist"});
+            }
+            auto customer_key = customer_kek_tx(tx, customer_id, instance_kek, false);
+            if (!customer_key) {
+                return std::unexpected(customer_key.error());
+            }
+            const std::string root_associated = "lake pki authority/" + customer_id + "/root";
+            const std::string intermediate_associated =
+                "lake pki authority/" + customer_id + "/intermediate";
+            auto root =
+                secrets_crypto::open(*customer_key, rows[0][2].as<std::string>(), root_associated);
+            auto intermediate = secrets_crypto::open(
+                *customer_key, rows[0][3].as<std::string>(), intermediate_associated);
+            secrets_crypto::cleanse(*customer_key);
+            if (!root || !intermediate) {
+                return std::unexpected(!root ? root.error() : intermediate.error());
+            }
+            return PkiAuthorityMaterial{customer_id,
+                                        rows[0][0].as<std::string>(),
+                                        rows[0][1].as<std::string>(),
+                                        std::move(*root),
+                                        std::move(*intermediate)};
+        });
+    }
+
+    Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& input) override {
+        if (input.customer_id.empty() || input.workload_taap_id.empty() ||
+            input.attestation_type.empty() || input.subject.empty() ||
+            !input.attributes.is_object() || input.expires_at.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "caller record is invalid"});
+        }
+        return with_tx<PkiCallerRecord>([&](pqxx::work& tx) -> Result<PkiCallerRecord> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO pki_callers "
+                "(customer_id, workload_taap_id, attestation_type, issuer, subject, attributes, "
+                "expires_at) VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::timestamptz) "
+                "RETURNING id::text, customer_id::text, workload_taap_id, attestation_type, "
+                "issuer, subject, attributes::text, expires_at::text, issued_at::text",
+                input.customer_id,
+                input.workload_taap_id,
+                input.attestation_type,
+                input.issuer,
+                input.subject,
+                input.attributes.dump(),
+                input.expires_at);
+            return PkiCallerRecord{rows[0][0].as<std::string>(),
+                                   rows[0][1].as<std::string>(),
+                                   rows[0][2].as<std::string>(),
+                                   rows[0][3].as<std::string>(),
+                                   rows[0][4].as<std::string>(),
+                                   rows[0][5].as<std::string>(),
+                                   nlohmann::json::parse(rows[0][6].as<std::string>()),
+                                   rows[0][7].as<std::string>(),
+                                   rows[0][8].as<std::string>()};
+        });
+    }
+
+    Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
+                                                          int limit) override {
+        if (limit < 1 || limit > 100) {
+            return std::unexpected(StoreError{"invalid_input", "limit must be between 1 and 100"});
+        }
+        return with_tx<std::vector<PkiCallerRecord>>(
+            [&](pqxx::work& tx) -> Result<std::vector<PkiCallerRecord>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text, customer_id::text, workload_taap_id, attestation_type, "
+                    "issuer, subject, attributes::text, expires_at::text, issued_at::text "
+                    "FROM pki_callers WHERE customer_id = $1::uuid "
+                    "ORDER BY issued_at DESC, id DESC LIMIT $2",
+                    customer_id,
+                    limit);
+                std::vector<PkiCallerRecord> output;
+                output.reserve(rows.size());
+                for (const pqxx::row& row : rows) {
+                    output.push_back(
+                        PkiCallerRecord{row[0].as<std::string>(),
+                                        row[1].as<std::string>(),
+                                        row[2].as<std::string>(),
+                                        row[3].as<std::string>(),
+                                        row[4].as<std::string>(),
+                                        row[5].as<std::string>(),
+                                        nlohmann::json::parse(row[6].as<std::string>()),
+                                        row[7].as<std::string>(),
+                                        row[8].as<std::string>()});
+                }
+                return output;
+            });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    create_pki_recovery_ceremony(const NewPkiRecoveryCeremonyRecord& input) override {
+        if (input.id.empty() || input.customer_id.empty() || input.threshold < 2 ||
+            input.share_count < input.threshold || input.share_count > 255 ||
+            input.expires_at.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "recovery ceremony is invalid"});
+        }
+        return with_tx<PkiRecoveryCeremonyRecord>(
+            [&](pqxx::work& tx) -> Result<PkiRecoveryCeremonyRecord> {
+                const pqxx::result rows = tx.exec_params(
+                    "INSERT INTO pki_recovery_ceremonies "
+                    "(id, customer_id, authority_id, threshold, share_count, expires_at) "
+                    "SELECT $1::uuid, $2::uuid, id, $3, $4, $5::timestamptz "
+                    "FROM pki_authorities WHERE customer_id = $2::uuid "
+                    "RETURNING id::text, customer_id::text, authority_id::text, threshold, "
+                    "share_count, recovered_at::text, expires_at::text, created_at::text",
+                    input.id,
+                    input.customer_id,
+                    input.threshold,
+                    input.share_count,
+                    input.expires_at);
+                if (rows.empty()) {
+                    return std::unexpected(
+                        StoreError{"not_found", "customer authority does not exist"});
+                }
+                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
+                                                 rows[0][1].as<std::string>(),
+                                                 rows[0][2].as<std::string>(),
+                                                 rows[0][3].as<int>(),
+                                                 rows[0][4].as<int>(),
+                                                 std::nullopt,
+                                                 rows[0][6].as<std::string>(),
+                                                 rows[0][7].as<std::string>()};
+            });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    get_pki_recovery_ceremony(const std::string& customer_id,
+                              const std::string& ceremony_id) override {
+        return with_tx<PkiRecoveryCeremonyRecord>(
+            [&](pqxx::work& tx) -> Result<PkiRecoveryCeremonyRecord> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text, customer_id::text, authority_id::text, threshold, "
+                    "share_count, recovered_at::text, expires_at::text, created_at::text "
+                    "FROM pki_recovery_ceremonies WHERE customer_id = $1::uuid AND id = $2::uuid",
+                    customer_id,
+                    ceremony_id);
+                if (rows.empty()) {
+                    return std::unexpected(
+                        StoreError{"not_found", "recovery ceremony does not exist"});
+                }
+                const std::optional<std::string> recovered =
+                    rows[0][5].is_null() ? std::nullopt
+                                         : std::optional<std::string>(rows[0][5].as<std::string>());
+                return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
+                                                 rows[0][1].as<std::string>(),
+                                                 rows[0][2].as<std::string>(),
+                                                 rows[0][3].as<int>(),
+                                                 rows[0][4].as<int>(),
+                                                 recovered,
+                                                 rows[0][6].as<std::string>(),
+                                                 rows[0][7].as<std::string>()};
+            });
+    }
+
+    Result<PkiRecoveryCeremonyRecord>
+    complete_pki_recovery_ceremony(const std::string& customer_id,
+                                   const std::string& ceremony_id,
+                                   const std::vector<PkiRecoveryShareEvidence>& evidence) override {
+        return with_tx<PkiRecoveryCeremonyRecord>([&](pqxx::work& tx)
+                                                      -> Result<PkiRecoveryCeremonyRecord> {
+            const pqxx::result active = tx.exec_params(
+                "SELECT threshold FROM pki_recovery_ceremonies "
+                "WHERE customer_id = $1::uuid AND id = $2::uuid AND recovered_at IS NULL "
+                "AND expires_at > now() FOR UPDATE",
+                customer_id,
+                ceremony_id);
+            if (active.empty()) {
+                return std::unexpected(StoreError{"conflict", "recovery ceremony is not active"});
+            }
+            if (static_cast<int>(evidence.size()) < active[0][0].as<int>()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "recovery quorum is not present"});
+            }
+            std::set<int> indices;
+            for (const PkiRecoveryShareEvidence& share : evidence) {
+                if (share.index < 1 || share.digest.empty() ||
+                    !indices.insert(share.index).second) {
+                    return std::unexpected(
+                        StoreError{"invalid_input", "recovery evidence is invalid"});
+                }
+                tx.exec_params("INSERT INTO pki_recovery_shares "
+                               "(ceremony_id, share_index, share_digest) "
+                               "VALUES ($1::uuid, $2, $3)",
+                               ceremony_id,
+                               share.index,
+                               share.digest);
+            }
+            const pqxx::result rows =
+                tx.exec_params("UPDATE pki_recovery_ceremonies SET recovered_at = now() "
+                               "WHERE id = $1::uuid RETURNING id::text, customer_id::text, "
+                               "authority_id::text, threshold, share_count, recovered_at::text, "
+                               "expires_at::text, created_at::text",
+                               ceremony_id);
+            return PkiRecoveryCeremonyRecord{rows[0][0].as<std::string>(),
+                                             rows[0][1].as<std::string>(),
+                                             rows[0][2].as<std::string>(),
+                                             rows[0][3].as<int>(),
+                                             rows[0][4].as<int>(),
+                                             rows[0][5].as<std::string>(),
+                                             rows[0][6].as<std::string>(),
+                                             rows[0][7].as<std::string>()};
+        });
     }
 
     Result<SecretMount> create_secret_mount(const NewSecretMount& input,
@@ -4529,6 +4809,38 @@ public:
                                key_version,
                                *wrapped);
             }
+            const pqxx::result authorities =
+                tx.exec_params("SELECT id::text, root_key_ciphertext, intermediate_ciphertext "
+                               "FROM pki_authorities WHERE customer_id = $1::uuid FOR UPDATE",
+                               customer_id);
+            for (const pqxx::row& row : authorities) {
+                const std::string root_associated = "lake pki authority/" + customer_id + "/root";
+                const std::string intermediate_associated =
+                    "lake pki authority/" + customer_id + "/intermediate";
+                auto root =
+                    secrets_crypto::open(*old_key, row[1].as<std::string>(), root_associated);
+                auto intermediate = secrets_crypto::open(
+                    *old_key, row[2].as<std::string>(), intermediate_associated);
+                if (!root || !intermediate) {
+                    secrets_crypto::cleanse(*old_key);
+                    secrets_crypto::cleanse(*new_key);
+                    return std::unexpected(!root ? root.error() : intermediate.error());
+                }
+                auto wrapped_root = secrets_crypto::seal(*new_key, *root, root_associated);
+                auto wrapped_intermediate =
+                    secrets_crypto::seal(*new_key, *intermediate, intermediate_associated);
+                if (!wrapped_root || !wrapped_intermediate) {
+                    secrets_crypto::cleanse(*old_key);
+                    secrets_crypto::cleanse(*new_key);
+                    return std::unexpected(!wrapped_root ? wrapped_root.error()
+                                                         : wrapped_intermediate.error());
+                }
+                tx.exec_params("UPDATE pki_authorities SET root_key_ciphertext = $2, "
+                               "intermediate_ciphertext = $3 WHERE id = $1::uuid",
+                               row[0].as<std::string>(),
+                               *wrapped_root,
+                               *wrapped_intermediate);
+            }
             secrets_crypto::cleanse(*old_key);
             const std::string raw_new(reinterpret_cast<const char*>(new_key->data()),
                                       new_key->size());
@@ -4546,7 +4858,9 @@ public:
                            *wrapped_customer,
                            version);
             return CustomerKekRotation{
-                customer_id, version, static_cast<std::uint64_t>(data_keys.size())};
+                customer_id,
+                version,
+                static_cast<std::uint64_t>(data_keys.size() + authorities.size())};
         });
     }
 
@@ -5339,12 +5653,11 @@ private:
     }
 
     Result<std::array<unsigned char, 32>> instance_kek() const {
-        const char* configured = std::getenv("LAKE_INSTANCE_KEK");
-        if (configured == nullptr) {
+        if (instance_kek_.empty()) {
             return std::unexpected(StoreError{
                 "store_error", "LAKE_INSTANCE_KEK is required for encrypted credentials"});
         }
-        const auto decoded = decode_hex(configured);
+        const auto decoded = decode_hex(instance_kek_);
         if (!decoded || decoded->size() != 32) {
             return std::unexpected(
                 StoreError{"store_error", "LAKE_INSTANCE_KEK must be 32 bytes of hexadecimal"});
@@ -5556,14 +5869,15 @@ private:
     }
 
     std::string uri_;
+    std::string instance_kek_;
     std::mutex mutex_;
     std::unique_ptr<pqxx::connection> connection_;
 };
 
 } // namespace
 
-std::unique_ptr<Store> make_postgres_store(std::string connection_uri) {
-    return std::make_unique<PostgresStore>(std::move(connection_uri));
+std::unique_ptr<Store> make_postgres_store(std::string connection_uri, std::string instance_kek) {
+    return std::make_unique<PostgresStore>(std::move(connection_uri), std::move(instance_kek));
 }
 
 } // namespace lake::control

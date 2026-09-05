@@ -10,6 +10,12 @@ class Service;
 namespace lake::control {
 class Store;
 }
+namespace lake::control::callers {
+class TokenReviewer;
+class JwtVerifier;
+class CloudIdentityVerifier;
+class FederationIssuerPolicy;
+} // namespace lake::control::callers
 
 // The embedded HTTP server, in Zetta's shape (zetta/api/server.hpp): Beast2 on
 // the capy/corosio runtime, confined entirely to the adapter TU
@@ -43,6 +49,12 @@ struct ServerOptions {
     std::string identity_seed;
     // Customer-independent key-encryption key for the generated identity seed.
     std::string instance_kek;
+    // Configured external attestation verifiers. Lake owns their invocation but
+    // callers retain their lifetime for the server lifetime.
+    control::callers::TokenReviewer* token_reviewer = nullptr;
+    control::callers::JwtVerifier* jwt_verifier = nullptr;
+    control::callers::CloudIdentityVerifier* cloud_identity_verifier = nullptr;
+    control::callers::FederationIssuerPolicy* federation_issuer_policy = nullptr;
     // The operator-provided PersistentVolume mount. Each customer store lives
     // at <root>/<customer id>/store. Empty disables data-plane storage.
     std::string store_root;

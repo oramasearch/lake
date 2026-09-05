@@ -65,6 +65,15 @@ encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivatio
 rotation that rewraps data keys without rewriting secret ciphertext. The mount, secret and key
 pages render metadata only. Every operation uses policy authorization and the signed registry
 audit path, including denials.
+Customer PKI adds persisted private roots and online intermediates, SPIFFE X.509 and JWT SVIDs,
+client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555 ACME
+HTTP-01 flow. Migration `0013_pki` holds the durable state. ACME consumes one-use nonces, verifies
+ES256 account JWS and the final CSR, and runs every resource operation through its registry
+transport for signed audit.
+Caller exchanges persist verified non-secret identity metadata before returning a bearer
+credential, and OIDC/JWT claims resolve through `federation_issuers`. Root-recovery ceremonies
+persist quorum, expiry, completion, and one-way share evidence while keeping shares and
+reconstructed root material out of storage. Both use the signed registry audit path.
 
 ## Where to read Zetta
 

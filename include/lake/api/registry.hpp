@@ -20,6 +20,12 @@ class Store;
 namespace lake::search {
 class Service;
 }
+namespace lake::control::pki {
+class Service;
+}
+namespace lake::control::callers {
+class Service;
+}
 
 // The capability registry — lake's control surface in Zetta's shape: one
 // registry rendered as HTTP and OpenAPI. JSON capabilities are also MCP tools;
@@ -52,7 +58,7 @@ using WebhookSender = std::function<WebhookDeliveryResult(
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
-enum class CapabilityTransport { Json, LiquidSync };
+enum class CapabilityTransport { Json, LiquidSync, Acme };
 
 struct ApiContext {
     control::Store* store = nullptr; // null = no control-plane store configured
@@ -74,6 +80,8 @@ struct ApiContext {
     std::string offline_grant_id;
     nlohmann::json reauthorization_results = nlohmann::json::array();
     search::Service* search = nullptr;
+    control::pki::Service* pki = nullptr;
+    control::callers::Service* callers = nullptr;
     bool authorized = false;
     bool operator_credential = false;
     bool session_credential = false;

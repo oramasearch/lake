@@ -245,8 +245,11 @@ for its store. Every operation is an audit event.
 versioned static-secret lifecycle, named key rotation, encrypt/decrypt/rewrap, Ed25519 sign/verify,
 HMAC-SHA-256, stored child-key derivation and customer-KEK rotation. The API, authorization,
 signed audit fields and pages are documented in [`../api/secrets.md`](../api/secrets.md) and
-[`../api/encryption.md`](../api/encryption.md). Certificate profiles, caller federation and
-break-glass remain in #26–#28.
+[`../api/encryption.md`](../api/encryption.md). PKI authority custody, SPIFFE X.509 and JWT SVIDs,
+client and device profiles, OpenSSH user and host certificates, and the customer-scoped RFC 8555
+ACME HTTP-01 flow, durable caller metadata, and durable recovery-ceremony evidence are implemented
+on the #26 branch. OIDC/JWT caller exchange resolves each asserted claim through the shared
+`federation_issuers` store from #15 and #21.
 
 ## The forge, the drive, models, metering, migration
 
@@ -283,8 +286,11 @@ waves that do not collide:
    (#7, #8, #43 to #45), **search over history and inside artifacts** (#41, #42), **metering**
    (#33), **auth as a service** (#51).
 
-Each wave rebases onto the previous; the schema grows by numbered migrations (the operator's
-incremental-migration follow-up is a prerequisite for wave 2 and is raised there).
+Each wave rebases onto the previous; the schema grows by numbered, idempotent migrations. Until
+the operator's incremental-migration follow-up lands, its vendored schema copy and guard table
+are updated once per wave in a separate operator pull request. This wave-level waiver preserves
+the control-plane migration contract without making the operator follow-up a prerequisite for
+lake work.
 
 ## How to verify
 
