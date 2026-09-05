@@ -131,7 +131,11 @@ prepare_live() {
         "$response_file" >"$render_file"
     temporary_files+=("$response_file" "$render_file")
 
-    printf '%s\t%s\t%s\t%s\n' "$slug-$theme" "$render_file" "$output_file" "$network_log"
+    printf '%s\t%s\t%s\t%s\n' \
+        "$slug-$theme" \
+        "${render_file#"$repo_root/"}" \
+        "${output_file#"$repo_root/"}" \
+        "${network_log#"$repo_root/"}"
 }
 
 if [[ -n $live_manifest || -n $base_url || -n $live_output_dir ]]; then

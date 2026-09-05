@@ -151,7 +151,8 @@ The live mode of `tools/ui/screenshot.sh` then fetches every page in the generat
 renders both themes at 1440 by 900. Session values and generated identifiers remain under
 `.cache`; only the PNG evidence is checked in.
 Each capture gives DOM-ready followed by network idle a combined 30-second budget. The Puppeteer
-driver records responses and failed requests in `.cache/ui-render/<page>-<theme>-network.json`.
+driver records responses and failed requests in `.cache/ui-render/<page>-<theme>-network.json` using
+worktree-relative paths inside its container.
 On timeout it writes the partial image, appends the page and network evidence to
 `docs/ui/screenshots/after/failures.tsv`, continues the manifest, and fails at the end when that
 list is non-empty. This prevents a resource that never settles from blocking the proof run.
