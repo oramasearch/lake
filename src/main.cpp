@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
         opts.store = std::make_shared<lake::control::InMemoryStore>();
         store_kind = "memory";
     } else if (!control_db.empty()) {
-        opts.store = lake::control::make_postgres_store(control_db);
+        opts.store = lake::control::make_postgres_store(control_db, opts.instance_kek);
         store_kind = "postgres";
     }
     if (!opts.store_root.empty()) {

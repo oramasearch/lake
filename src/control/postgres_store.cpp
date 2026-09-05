@@ -9,7 +9,6 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
-#include <cstdlib>
 #include <format>
 #include <limits>
 #include <map>
@@ -1551,7 +1550,8 @@ EncryptionKey encryption_key_of(const pqxx::row& row) {
 
 class PostgresStore final : public Store {
 public:
-    explicit PostgresStore(std::string uri) : uri_(std::move(uri)) {}
+    PostgresStore(std::string uri, std::string instance_kek)
+        : uri_(std::move(uri)), instance_kek_(std::move(instance_kek)) {}
     std::string kind() const override {
         return "postgres";
     }
@@ -5653,12 +5653,11 @@ private:
     }
 
     Result<std::array<unsigned char, 32>> instance_kek() const {
-        const char* configured = std::getenv("LAKE_INSTANCE_KEK");
-        if (configured == nullptr) {
+        if (instance_kek_.empty()) {
             return std::unexpected(StoreError{
                 "store_error", "LAKE_INSTANCE_KEK is required for encrypted credentials"});
         }
-        const auto decoded = decode_hex(configured);
+        const auto decoded = decode_hex(instance_kek_);
         if (!decoded || decoded->size() != 32) {
             return std::unexpected(
                 StoreError{"store_error", "LAKE_INSTANCE_KEK must be 32 bytes of hexadecimal"});
@@ -5870,14 +5869,15 @@ private:
     }
 
     std::string uri_;
+    std::string instance_kek_;
     std::mutex mutex_;
     std::unique_ptr<pqxx::connection> connection_;
 };
 
 } // namespace
 
-std::unique_ptr<Store> make_postgres_store(std::string connection_uri) {
-    return std::make_unique<PostgresStore>(std::move(connection_uri));
+std::unique_ptr<Store> make_postgres_store(std::string connection_uri, std::string instance_kek) {
+    return std::make_unique<PostgresStore>(std::move(connection_uri), std::move(instance_kek));
 }
 
 } // namespace lake::control

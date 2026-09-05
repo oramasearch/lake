@@ -144,7 +144,8 @@ TEST(PostgresCallers, PersistsKubernetesAndFederatedCredentialMetadata) {
     StubTokenReviewer reviewer;
     StubJwtVerifier jwt;
     StubCloudVerifier cloud;
-    auto store = lake::control::make_postgres_store(uri);
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
     const auto organization =

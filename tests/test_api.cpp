@@ -988,7 +988,8 @@ TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
-    auto store = lake::control::make_postgres_store(database_uri);
+    auto store = lake::control::make_postgres_store(
+        database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     const auto ready = store->ping();
     ASSERT_TRUE(ready) << ready.error().message;
     const auto before = store->list_audit_events(lake::audit::Filter{.limit = 1000000});
@@ -1980,8 +1981,8 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
     TemporarySyncRoot temporary;
-    std::shared_ptr<lake::control::Store> control =
-        lake::control::make_postgres_store(database_uri);
+    std::shared_ptr<lake::control::Store> control = lake::control::make_postgres_store(
+        database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     const auto ready = control->ping();
     ASSERT_TRUE(ready) << ready.error().message;
     const std::string suffix = lake::control::new_uuid_v4();

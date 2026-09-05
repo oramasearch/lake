@@ -8,6 +8,6 @@ namespace lake::control {
 
 // The production store over the Postgres the operator provisions (LAKE_CONTROL_DB_URI). Calls
 // block on libpq for the duration of one statement; they run inline on the caller's thread.
-std::unique_ptr<Store> make_postgres_store(std::string connection_uri);
+std::unique_ptr<Store> make_postgres_store(std::string connection_uri, std::string instance_kek);
 
 }  // namespace lake::control

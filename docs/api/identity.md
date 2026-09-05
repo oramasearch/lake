@@ -30,6 +30,10 @@ with a purpose-specific random data key; `keystore` stores that key wrapped unde
 32-byte hexadecimal `LAKE_INSTANCE_KEK`. Recovery codes use independent Argon2id hashes and are
 revoked as they are consumed. OAuth client secrets use the same envelope format.
 
+The server passes its configured instance key to the Postgres store when it is created. The store
+uses that fixed configuration for every encrypted credential operation and never re-reads mutable
+process environment state after startup.
+
 `register_oauth_provider` records the issuer, client id, encrypted client secret, and requested
 scopes for a provider in a user pool. `start_oauth` creates a five-minute, one-use state record,
 stores its RFC 7636 verifier encrypted, and returns the provider authorization URL with an S256
