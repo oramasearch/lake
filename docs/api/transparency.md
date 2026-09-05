@@ -13,9 +13,9 @@ Replication and agent session keys remain lake #38 and #39.
 
 The log accepts batches of canonical-CBOR TAAP attestations encoded as base64url. Lake decodes each
 entry through libliquid, verifies its registered profile and TAAP signature, hashes it as an RFC
-6962-style leaf, and advances the append-only SHA-256 Merkle tree. Entry objects are grouped into
-immutable bulk tiles of 1,024 entries. Partial tiles are versioned by their exact width, so a tile
-object that a monitor has fetched is never replaced.
+6962-style leaf, and advances the append-only SHA-256 Merkle tree. Entry objects and interior
+Merkle hashes are grouped into immutable tiles of 1,024 values. Partial tiles are versioned by
+their exact width, so a tile object that a monitor has fetched is never replaced.
 
 Append validates the signed envelope and registered profile at the attestation's stated time. It
 does not discard a historically valid statement because its freshness window later elapsed or its
@@ -47,6 +47,7 @@ LAKE_STORE_ROOT/<instance>/log/tuf/<version>.timestamp.json
 LAKE_STORE_ROOT/<instance>/log/append.lock
 LAKE_STORE_ROOT/<instance>/log/tree.json
 LAKE_STORE_ROOT/<instance>/log/tiles/entries/<tile-index>/<width>.tile
+LAKE_STORE_ROOT/<instance>/log/tiles/hashes/<level>/<tile-index>/<width>.tile
 LAKE_STORE_ROOT/<instance>/log/timestamps/<checkpoint-sha256>.ers
 ```
 
@@ -56,10 +57,12 @@ highest stored version for that role; reading with a version returns that immuta
 
 `tree.json` is the atomically replaced publication state: `tree_size`, `root_hash`, tile width, and
 the Merkle frontier needed for the next append. `append.lock` serializes writers across Lake
-processes. Each binary tile starts with `LAKE-TILE-1`, followed by big-endian 32-bit lengths and
-exact canonical attestation bytes. A complete tile is stored as `1024.tile`; the final partial tile
-uses its entry count. Tile publication never replaces an existing path. When a partial tile grows,
-Lake writes a new width path and retains every earlier path for checkpoints at prior tree sizes.
+processes. A complete tile is stored as `1024.tile`; the final partial tile uses its value count.
+Tile publication never replaces an existing path. When a partial tile grows, Lake writes a new
+width path and retains every earlier path for checkpoints at prior tree sizes. A log created before
+hash tiles existed is backfilled from its immutable entry tiles on the first hash-tile or proof
+read, after the recomputed root matches `tree.json`. When an older checkpoint needs a narrower
+partial hash tile, Lake publishes the immutable prefix under that checkpoint's exact width.
 
 Checkpoints are immutable objects beside TUF metadata:
 
@@ -71,7 +74,8 @@ LAKE_STORE_ROOT/<instance>/log/checkpoints/current.json
 
 `current.json` is atomically replaced only after its configured requirements succeed. A checkpoint
 contains the exact current root and timestamp metadata, the attestation `tree_size`, `root_hash`,
-and `tile_width`, its SHA-256 hash, Lake's TAAP identity signature, and valid witness signatures.
+`tile_width`, `hash_tile_width`, and `hash_algorithm`, its SHA-256 hash, Lake's TAAP identity
+signature, and valid witness signatures.
 An anchored checkpoint also records the aggregation endpoint and its opaque proof; the same proof
 is retained in the adjacent `.ots.json` object.
 
@@ -159,13 +163,105 @@ SHA-256 digest. Timestamp metadata binds `snapshot.json` the same way. These che
 TUF protects metadata selection. Each targets entry still names the length and digest of a TAAP
 attestation object; complete attestation and target verification belongs to the liquid client.
 
-## Bulk-tile monitoring
+## Tile and proof format
 
-`transparency_tile` returns one exact tile object as base64url plus its SHA-256 digest. The tile
-index starts at zero; `width` must equal the immutable version the caller wants. Given checkpoint
-tree size `N`, a monitor fetches `N / 1024` complete tiles and, when needed, one final tile whose
-width is `N % 1024`. The capability, current checkpoint, and log configuration are public because
-independent monitoring cannot depend on a Lake account.
+The Merkle tree uses the RFC 6962 domain separation rules. All integer indexes and sizes in the API
+are JSON integers. All hashes in JSON are 32-byte values encoded as 64 lowercase hexadecimal
+characters:
+
+```text
+MTH({}) = SHA256("")
+MTH({entry}) = SHA256(0x00 || entry)
+MTH(entries[0:n]) = SHA256(0x01 || MTH(entries[0:k]) || MTH(entries[k:n]))
+```
+
+For the last rule, `k` is the largest power of two strictly less than `n`. `entry` is the exact
+decoded canonical-CBOR byte string, not its base64url text. Concatenation has no length prefix.
+
+`transparency_tile` returns one exact tile object as unpadded base64url plus the lowercase SHA-256
+digest of the complete decoded tile, including its header. `index` and `level` start at zero;
+`level` defaults to zero for compatibility. Level zero is the entry stream. Positive level `L`
+contains hashes for complete subtrees of `2^L` consecutive leaves. Hash number `j` at that level is
+stored at tile index `floor(j / 1024)`, offset `j % 1024`.
+
+For checkpoint tree size `N`, the level-zero value count is `N`. The value count at positive level
+`L` is `floor(N / 2^L)`. For either kind, tile `i` exists when `i * 1024` is less than that value
+count, and its required width is:
+
+```text
+min(1024, value_count - i * 1024)
+```
+
+Callers must request that exact width. A partial width names an immutable checkpoint-era version;
+later appends publish a new width without replacing it. Width 1,024 is final and is never replaced.
+There is no tile for an empty level. The capability, checkpoints, proofs, and log configuration are
+public because independent monitoring cannot depend on a Lake account.
+
+An entry tile is byte-for-byte:
+
+```text
+12 bytes: ASCII "LAKE-TILE-1\n"
+repeated width times:
+  4 bytes: unsigned entry length, network byte order; must be greater than zero
+  length bytes: exact canonical-CBOR attestation
+EOF: no padding, count field, or trailer
+```
+
+A hash tile is byte-for-byte:
+
+```text
+17 bytes: ASCII "LAKE-HASH-TILE-1\n"
+repeated width times:
+  32 bytes: raw SHA-256 interior-node hash
+EOF: no padding, count field, length field, or trailer
+```
+
+Level zero returns `version: "lake_tile/1"`, `kind: "entries"`, `entries: width`, `level: 0`,
+`index`, `encoding: "base64url"`, `tile`, and `sha256`. A positive level returns
+`version: "lake_hash_tile/1"`, `kind: "hashes"`, `hashes: width`, `level`, `index`, `encoding`,
+`tile`, and `sha256`.
+
+### Checkpoint-bound inclusion proofs
+
+`transparency_inclusion_proof` takes `leaf_index` and positive `tree_size`. Lake selects the
+highest-sequence immutable checkpoint whose embedded checkpoint has that exact tree size. Selecting
+by size is intentional: a metadata-only publication can create more than one checkpoint for the
+same log root. If no checkpoint has the requested size, Lake returns `not_found`; if its root does
+not match the log's proof root, Lake returns `unrecoverable`.
+
+The result has `version: "lake_inclusion_proof/1"`, `hash_algorithm: "sha256"`, `leaf_index`,
+`tree_size`, `root_hash`, `audit_path`, and `checkpoint`. `checkpoint` is the complete immutable
+checkpoint record, including `sequence`, `checkpoint_hash_sha256`, Lake `signature`, and
+`witness_signatures`. Each audit-path member is one lowercase hexadecimal hash. Members are ordered
+from the leaf toward the root. Recursively, append the right-subtree root when the leaf is left of
+the split; append the left-subtree root when the leaf is right of the split. The path is empty for a
+one-leaf tree.
+
+### Checkpoint-bound consistency proofs
+
+`transparency_consistency_proof` takes non-negative `old_tree_size` and `new_tree_size`, with old no
+greater than new. Lake selects and embeds the highest-sequence checkpoint for the exact new size.
+The result has `version: "lake_consistency_proof/1"`, `hash_algorithm: "sha256"`, both sizes,
+`old_root_hash`, `new_root_hash`, `audit_path`, and the complete new checkpoint record. A verifier
+must compare `old_root_hash` with its independently trusted old checkpoint and `new_root_hash` with
+the embedded signed checkpoint before evaluating the path. The path is empty for an old size of
+zero or equal sizes.
+
+For `0 < m < n`, Lake emits the RFC 6962 path below. `MTH(start,count)` applies the rules above to
+that entry range; `k` is the largest power of two strictly less than `n`; `||` joins path arrays:
+
+```text
+SUBPROOF(m, n, start, complete):
+  if m = n: [] when complete, otherwise [MTH(start, n)]
+  if m <= k: SUBPROOF(m, k, start, complete) || [MTH(start + k, n - k)]
+  otherwise: SUBPROOF(m - k, n - k, start + k, false) || [MTH(start, k)]
+```
+
+The exact proof routes are `GET /v1/transparency_inclusion_proof` and
+`GET /v1/transparency_consistency_proof`. The registry also exposes both operations as MCP tools,
+and its OpenAPI document describes their query parameters and response envelopes.
+
+## Hosted monitoring
 
 `transparency_identity_scan` is Lake's hosted monitor for every customer and every other observer.
 It reads the current signed checkpoint, fetches its exact tile versions, decodes and verifies every
@@ -181,9 +277,15 @@ causes `unrecoverable`; the monitor returns no partial results. Earlier partial 
 available, so a monitor can verify an older checkpoint even after later appends fill that tile.
 
 Lake's monitor verifies inclusion in the selected checkpoint by recomputing the complete root.
-Compact inclusion proofs, consistency proofs between checkpoints, witness and Lake signature
-verification in the client library, and hash-parent tiles are the liquid #207 work. Lake does not
-claim client proof enforcement before that issue lands.
+Lake serves the compact proofs and hash tiles described above. Witness, Lake-signature, tile, and
+proof verification in the client library remains liquid #207; Lake does not claim client proof
+enforcement before that issue lands.
+
+The deterministic conformance vector is
+[`../../tests/fixtures/transparency/fixture.json`](../../tests/fixtures/transparency/fixture.json).
+It contains one signed, witnessed checkpoint, every tile for seven entries, inclusion proofs for
+all leaves, and a size-3 to size-7 consistency proof. Run
+`./tests/fixtures/transparency/regenerate.py --check` to prove the checked-in bytes are current.
 
 ### Measured monitoring cost
 
@@ -239,11 +341,13 @@ authorization object and `authorize`. Public monitoring reads are deliberately u
 | `publish_tuf_metadata` | action | `{targets, snapshot, timestamp}` | the root and three appended versions |
 | `rotate_tuf_root` | action | `{root}` | the verified successor root |
 | `tuf_metadata` | read | `role`, optional positive `version` | latest or named immutable role object |
-| `append_transparency_entries` | action | `{attestations: [base64url canonical CBOR]}` | first index, resulting tree size/root, tile width, and tile objects published |
+| `append_transparency_entries` | action | `{attestations: [base64url canonical CBOR]}` | first index, resulting tree size/root, tile width, and entry/hash tile objects published |
 | `transparency_log_configuration` | read | `{}` | effective mode, public witness set, quorum, and anchored aggregation endpoint when configured |
 | `publish_transparency_checkpoint` | action | `{}` | the signed current checkpoint after its mode's requirements complete |
 | `transparency_checkpoint` | read | `{}` | current signed checkpoint, or `not_found` before one has met the requirements |
-| `transparency_tile` | read | non-negative `index`, `width` from 1 through 1,024 | immutable binary tile as base64url with exact width and SHA-256 |
+| `transparency_tile` | read | non-negative `index`, optional `level` from 0 through 63, exact `width` from 1 through 1,024 | immutable entry or interior-hash tile as base64url with SHA-256 |
+| `transparency_inclusion_proof` | read | non-negative `leaf_index`, positive checkpoint `tree_size` | compact audit path and complete named checkpoint record |
+| `transparency_consistency_proof` | read | non-negative `old_tree_size` and `new_tree_size`, old no greater than new | compact audit path and complete named new-checkpoint record |
 | `transparency_identity_scan` | read | TAAP `identity` | verified checkpoint/root, scan measurements, and every matching attestation |
 | `timestamp_checkpoint` | action | `{}` | new RFC 4998 evidence record for the current checkpoint signature |
 | `renew_timestamp_evidence` | action | `checkpoint_digest` | evidence record with one appended archive timestamp |
@@ -253,7 +357,7 @@ TUF initialization/publication/rotation, attestation append, checkpoint publicat
 creation, and timestamp renewal require `admin` on the instance transparency log. TUF metadata and
 timestamp-evidence reads require `read`. The operator credential follows the registry's existing
 explicit administrative bypass; row-resolved credentials go through `authorize`. Configuration,
-checkpoint, tile, and identity-scan reads are public.
+checkpoint, tile, proof, and identity-scan reads are public.
 
 `GET /audit` displays the effective mode and witness quorum through
 `transparency_log_configuration`; it does not read configuration outside the registry. Every

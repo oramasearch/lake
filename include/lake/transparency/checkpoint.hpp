@@ -57,6 +57,7 @@ public:
                                    const TransparencySubmitter& submitter);
     Result<nlohmann::json> adopt(const nlohmann::json& record);
     Result<nlohmann::json> current() const;
+    Result<nlohmann::json> at_tree_size(std::uint64_t tree_size) const;
     [[nodiscard]] nlohmann::json configuration() const;
     [[nodiscard]] const std::filesystem::path& directory() const;
 

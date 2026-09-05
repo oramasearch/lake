@@ -1511,6 +1511,13 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/chunks/{digest}"));
     EXPECT_TRUE(doc["paths"].contains("/v1/attach_model_provenance"));
     EXPECT_TRUE(doc["paths"].contains("/v1/verify_model_provenance"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/transparency_inclusion_proof"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/transparency_consistency_proof"));
+    const json& inclusion_value =
+        doc["paths"]["/v1/transparency_inclusion_proof"]["get"]["responses"]["200"]["content"]
+           ["application/json"]["schema"]["properties"]["value"];
+    EXPECT_EQ(inclusion_value["properties"]["audit_path"]["items"]["pattern"], "^[0-9a-f]{64}$");
+    EXPECT_EQ(inclusion_value["properties"]["checkpoint"]["type"], "object");
     EXPECT_TRUE(doc["paths"].contains("/mcp"));
     EXPECT_TRUE(doc["paths"]["/v1/server_info"]["get"]["security"].empty());
     const json& push = doc["paths"]["/v1/repositories/{repository_id}/sync/push"]["post"];
@@ -1633,6 +1640,15 @@ TEST(Mcp, InitializeListAndCall) {
     }));
     EXPECT_TRUE(std::ranges::any_of(tools["result"]["tools"], [](const json& tool) {
         return tool.value("name", "") == "verify_model_provenance";
+    }));
+    const auto inclusion_tool =
+        std::ranges::find_if(tools["result"]["tools"], [](const json& tool) {
+            return tool.value("name", "") == "transparency_inclusion_proof";
+        });
+    ASSERT_NE(inclusion_tool, tools["result"]["tools"].end());
+    EXPECT_TRUE(inclusion_tool->at("outputSchema").at("properties").contains("audit_path"));
+    EXPECT_TRUE(std::ranges::any_of(tools["result"]["tools"], [](const json& tool) {
+        return tool.value("name", "") == "transparency_consistency_proof";
     }));
 
     const json call = {

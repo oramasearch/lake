@@ -104,9 +104,10 @@ optional aggregation endpoint at startup. Air-gapped checkpoints make no outboun
 and anchored checkpoints require the configured distinct witness quorum before they become current;
 anchored checkpoints retain an aggregation proof. The effective configuration is a read capability
 and appears on `/audit`; the Lake-CR environment mapping is `docs/control-plane/log.md`.
-Canonical TAAP attestations append to immutable 1,024-entry bulk tiles, and checkpoints bind their
-Merkle root and tree size. Public tile fetches and the hosted `/transparency` identity monitor
-verify the complete checkpoint root before returning matches and refuse modified tiles.
+Canonical TAAP attestations append to immutable 1,024-entry and interior-hash tiles, and checkpoints
+bind their Merkle root and tree size. Public tile and compact inclusion/consistency-proof
+capabilities bind responses to exact signed checkpoints. The hosted `/transparency` identity
+monitor verifies the complete checkpoint root before returning matches and refuses modified tiles.
 Customer repositories and the transparency log replicate asynchronously from one active Lake to
 standbys. Repository pulls persist per-source liquid cursors after successful import. Log pulls
 require the destination's exact Merkle prefix, verify the proposed head and signed checkpoint, and

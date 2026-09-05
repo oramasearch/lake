@@ -529,6 +529,9 @@ TEST(TransparencyLog, BulkTilesDetectTamperingAndScanOneHundredThousandEntries) 
     const auto final_tile =
         log.tile(entry_count / lake::transparency::transparency_tile_width, final_width);
     ASSERT_TRUE(final_tile) << final_tile.error().message;
+    const auto full_hash_tile = log.hash_tile(1, 0, lake::transparency::transparency_tile_width);
+    ASSERT_TRUE(full_hash_tile) << full_hash_tile.error().message;
+    EXPECT_EQ(full_hash_tile->level, 1U);
 
     const auto scan = log.scan_identity(monitored_identity, state->tree_size, state->root_hash);
     ASSERT_TRUE(scan) << scan.error().message;
@@ -555,6 +558,71 @@ TEST(TransparencyLog, BulkTilesDetectTamperingAndScanOneHundredThousandEntries) 
     const auto tampered = log.scan_identity(monitored_identity, state->tree_size, state->root_hash);
     EXPECT_FALSE(tampered);
     EXPECT_EQ(tampered.error().code, "unrecoverable");
+}
+
+TEST(TransparencyLog, PublishesParentTilesAndBuildsCompactProofs) {
+    TemporaryRoot temporary;
+    lake::transparency::TiledLog log(temporary.path(), "proof-instance");
+    const std::string first = signed_attestation("taap:1:ed25519:proof-first", 21);
+    const std::string second = signed_attestation("taap:1:ed25519:proof-second", 22);
+    const std::vector<std::string> entries = {
+        first,
+        second,
+        first,
+        second,
+        first,
+        second,
+        first,
+    };
+    const auto old_append =
+        log.append(std::vector<std::string>(entries.begin(), entries.begin() + 3));
+    ASSERT_TRUE(old_append) << old_append.error().message;
+    EXPECT_EQ(old_append->hash_tiles_published, 1U);
+    const auto old_state = log.state();
+    ASSERT_TRUE(old_state) << old_state.error().message;
+    const auto old_parent_tile = log.hash_tile(1, 0, 1);
+    ASSERT_TRUE(old_parent_tile) << old_parent_tile.error().message;
+
+    const auto new_append =
+        log.append(std::vector<std::string>(entries.begin() + 3, entries.end()));
+    ASSERT_TRUE(new_append) << new_append.error().message;
+    EXPECT_EQ(new_append->hash_tiles_published, 2U);
+    const auto new_state = log.state();
+    ASSERT_TRUE(new_state) << new_state.error().message;
+    ASSERT_EQ(new_state->tree_size, 7U);
+    const auto parent_tile = log.hash_tile(1, 0, 3);
+    ASSERT_TRUE(parent_tile) << parent_tile.error().message;
+    EXPECT_EQ(parent_tile->width, 3U);
+    const auto grandparent_tile = log.hash_tile(2, 0, 1);
+    ASSERT_TRUE(grandparent_tile) << grandparent_tile.error().message;
+
+    for (std::uint64_t leaf_index = 0; leaf_index < new_state->tree_size; ++leaf_index) {
+        const auto proof = log.inclusion_proof(leaf_index, new_state->tree_size);
+        ASSERT_TRUE(proof) << proof.error().message;
+        EXPECT_EQ(proof->root_hash, new_state->root_hash);
+        EXPECT_FALSE(proof->audit_path.empty());
+    }
+    const auto historical = log.inclusion_proof(2, old_state->tree_size);
+    ASSERT_TRUE(historical) << historical.error().message;
+    EXPECT_EQ(historical->root_hash, old_state->root_hash);
+    const auto consistency = log.consistency_proof(old_state->tree_size, new_state->tree_size);
+    ASSERT_TRUE(consistency) << consistency.error().message;
+    EXPECT_EQ(consistency->old_root_hash, old_state->root_hash);
+    EXPECT_EQ(consistency->new_root_hash, new_state->root_hash);
+    EXPECT_EQ(consistency->audit_path.size(), 4U);
+    EXPECT_FALSE(log.inclusion_proof(new_state->tree_size, new_state->tree_size));
+    EXPECT_FALSE(log.consistency_proof(new_state->tree_size, old_state->tree_size));
+
+    std::filesystem::remove_all(log.directory() / "tiles" / "hashes");
+    const auto rebuilt = log.hash_tile(1, 0, 3);
+    ASSERT_TRUE(rebuilt) << rebuilt.error().message;
+    EXPECT_EQ(rebuilt->sha256, parent_tile->sha256);
+    const auto rebuilt_historical = log.hash_tile(1, 0, 1);
+    ASSERT_TRUE(rebuilt_historical) << rebuilt_historical.error().message;
+    EXPECT_EQ(rebuilt_historical->sha256, old_parent_tile->sha256);
+    const auto rebuilt_historical_proof = log.inclusion_proof(2, old_state->tree_size);
+    ASSERT_TRUE(rebuilt_historical_proof) << rebuilt_historical_proof.error().message;
+    EXPECT_EQ(rebuilt_historical_proof->root_hash, old_state->root_hash);
 }
 
 TEST(TransparencyLog, ConcurrentWritersPreserveEveryEntry) {
@@ -741,9 +809,20 @@ TEST(TransparencyCheckpoint, AirGappedSignsAndServesWithoutOutboundCalls) {
     EXPECT_EQ(published->at("sequence"), 1);
     EXPECT_TRUE(published->at("witness_signatures").empty());
     EXPECT_EQ(published->at("signature").at("signer"), "taap:1:ed25519:lake");
+    json refreshed_body = checkpoint_body();
+    refreshed_body["metadata_version"] = 2;
+    const auto refreshed = service.publish(refreshed_body, checkpoint_signer(), {});
+    ASSERT_TRUE(refreshed) << refreshed.error().message;
+    EXPECT_EQ(refreshed->at("sequence"), 2);
     const auto current = service.current();
     ASSERT_TRUE(current) << current.error().message;
-    EXPECT_EQ(*current, *published);
+    EXPECT_EQ(*current, *refreshed);
+    const auto selected = service.at_tree_size(12);
+    ASSERT_TRUE(selected) << selected.error().message;
+    EXPECT_EQ(*selected, *refreshed);
+    const auto missing = service.at_tree_size(11);
+    EXPECT_FALSE(missing);
+    EXPECT_EQ(missing.error().code, "not_found");
     EXPECT_FALSE(std::filesystem::exists(service.directory() / "1.ots.json"));
 }
 
@@ -1148,8 +1227,8 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
     const std::string monitored_identity = "taap:1:ed25519:registry-monitor";
     const std::string attestation = signed_attestation(monitored_identity, 3);
     context.request_id.clear();
-    const auto appended =
-        registry.call("append_transparency_entries", {{"attestations", {attestation}}}, context);
+    const auto appended = registry.call(
+        "append_transparency_entries", {{"attestations", {attestation, attestation}}}, context);
     ASSERT_TRUE(appended.ok) << appended.error.message;
     context.request_id.clear();
     const auto configuration =
@@ -1161,16 +1240,33 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
         registry.call("publish_transparency_checkpoint", nlohmann::json::object(), context);
     ASSERT_TRUE(checkpoint.ok) << checkpoint.error.message;
     EXPECT_EQ(checkpoint.value.at("sequence"), 1);
-    EXPECT_EQ(checkpoint.value.at("checkpoint").at("tree_size"), 1);
+    EXPECT_EQ(checkpoint.value.at("checkpoint").at("tree_size"), 2);
     context.request_id.clear();
-    const auto tile = registry.call("transparency_tile", {{"index", 0}, {"width", 1}}, context);
+    const auto tile = registry.call("transparency_tile", {{"index", 0}, {"width", 2}}, context);
     ASSERT_TRUE(tile.ok) << tile.error.message;
-    EXPECT_EQ(tile.value.at("entries"), 1);
+    EXPECT_EQ(tile.value.at("entries"), 2);
+    context.request_id.clear();
+    const auto hash_tile =
+        registry.call("transparency_tile", {{"index", 0}, {"level", 1}, {"width", 1}}, context);
+    ASSERT_TRUE(hash_tile.ok) << hash_tile.error.message;
+    EXPECT_EQ(hash_tile.value.at("hashes"), 1);
+    context.request_id.clear();
+    const auto inclusion = registry.call(
+        "transparency_inclusion_proof", {{"leaf_index", 0}, {"tree_size", 2}}, context);
+    ASSERT_TRUE(inclusion.ok) << inclusion.error.message;
+    EXPECT_EQ(inclusion.value.at("checkpoint").at("sequence"), 1);
+    EXPECT_EQ(inclusion.value.at("audit_path").size(), 1U);
+    context.request_id.clear();
+    const auto consistency = registry.call(
+        "transparency_consistency_proof", {{"old_tree_size", 1}, {"new_tree_size", 2}}, context);
+    ASSERT_TRUE(consistency.ok) << consistency.error.message;
+    EXPECT_EQ(consistency.value.at("checkpoint").at("sequence"), 1);
+    EXPECT_EQ(consistency.value.at("audit_path").size(), 1U);
     context.request_id.clear();
     const auto scan =
         registry.call("transparency_identity_scan", {{"identity", monitored_identity}}, context);
     ASSERT_TRUE(scan.ok) << scan.error.message;
-    EXPECT_EQ(scan.value.at("matches").size(), 1U);
+    EXPECT_EQ(scan.value.at("matches").size(), 2U);
     context.request_id.clear();
     const auto fetched = registry.call("tuf_metadata", {{"role", "timestamp"}}, context);
     ASSERT_TRUE(fetched.ok) << fetched.error.message;
@@ -1235,8 +1331,8 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     const std::string monitored_identity = "taap:1:ed25519:postgres-monitor";
     const std::string attestation = signed_attestation(monitored_identity, 4);
     context.request_id = "postgres-transparency-append";
-    const auto appended =
-        registry.call("append_transparency_entries", {{"attestations", {attestation}}}, context);
+    const auto appended = registry.call(
+        "append_transparency_entries", {{"attestations", {attestation, attestation}}}, context);
     ASSERT_TRUE(appended.ok) << appended.error.message;
     const json second_root = root_document(
         2, keys.roots(), keys.targets(), keys.snapshot, keys.timestamp, keys.root_threshold());
@@ -1255,13 +1351,25 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
         registry.call("publish_transparency_checkpoint", nlohmann::json::object(), context);
     ASSERT_TRUE(checkpoint.ok) << checkpoint.error.message;
     context.request_id = "postgres-transparency-tile";
-    const auto tile = registry.call("transparency_tile", {{"index", 0}, {"width", 1}}, context);
+    const auto tile = registry.call("transparency_tile", {{"index", 0}, {"width", 2}}, context);
     ASSERT_TRUE(tile.ok) << tile.error.message;
+    context.request_id = "postgres-transparency-hash-tile";
+    const auto hash_tile =
+        registry.call("transparency_tile", {{"index", 0}, {"level", 1}, {"width", 1}}, context);
+    ASSERT_TRUE(hash_tile.ok) << hash_tile.error.message;
+    context.request_id = "postgres-transparency-inclusion";
+    const auto inclusion = registry.call(
+        "transparency_inclusion_proof", {{"leaf_index", 0}, {"tree_size", 2}}, context);
+    ASSERT_TRUE(inclusion.ok) << inclusion.error.message;
+    context.request_id = "postgres-transparency-consistency";
+    const auto consistency = registry.call(
+        "transparency_consistency_proof", {{"old_tree_size", 1}, {"new_tree_size", 2}}, context);
+    ASSERT_TRUE(consistency.ok) << consistency.error.message;
     context.request_id = "postgres-transparency-scan";
     const auto scan =
         registry.call("transparency_identity_scan", {{"identity", monitored_identity}}, context);
     ASSERT_TRUE(scan.ok) << scan.error.message;
-    EXPECT_EQ(scan.value.at("matches").size(), 1U);
+    EXPECT_EQ(scan.value.at("matches").size(), 2U);
     const std::string checkpoint_digest = checkpoint.value.at("checkpoint_hash_sha256");
     context.request_id = "postgres-transparency-timestamp";
     const auto timestamped =
@@ -1322,6 +1430,8 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
                                           "transparency_log_configuration",
                                           "publish_transparency_checkpoint",
                                           "transparency_tile",
+                                          "transparency_inclusion_proof",
+                                          "transparency_consistency_proof",
                                           "transparency_identity_scan",
                                           "timestamp_checkpoint",
                                           "renew_timestamp_evidence",

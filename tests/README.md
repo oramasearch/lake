@@ -13,3 +13,8 @@ to each test process.
 The default `lake-tests` target contains the portable suite plus Postgres-backed cases that skip
 when `LAKE_TEST_DB_URI` is absent. `lake-postgres-tests` contains the focused control-store cases.
 Run both through CTest after configuring the repository with CMake.
+
+`fixtures/transparency/fixture.json` is the deterministic transparency-log interoperability
+fixture. Its Python generator and independent C++ verifier cover entry and parent-hash tile bytes,
+checkpoint-bound inclusion proofs for every leaf, consistency between two tree sizes, and changed
+tile or proof bytes. See `fixtures/transparency/README.md` for regeneration commands.

@@ -95,7 +95,9 @@ fidelity report.
 | `publish_transparency_checkpoint` | action | — | signed current checkpoint after mode requirements | [transparency.md](transparency.md) |
 | `transparency_checkpoint` | read | — | current signed checkpoint | [transparency.md](transparency.md) |
 | `append_transparency_entries` | action | canonical TAAP attestations | appended indexes, tree size, and root | [transparency.md](transparency.md) |
-| `transparency_tile` | public read | tile index and exact width | immutable base64url bulk tile | [transparency.md](transparency.md) |
+| `transparency_tile` | public read | level, tile index, and exact width | immutable base64url entry or interior-hash tile | [transparency.md](transparency.md) |
+| `transparency_inclusion_proof` | public read | leaf index and checkpoint tree size | compact audit path bound to a complete signed checkpoint record | [transparency.md](transparency.md) |
+| `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
 | `timestamp_checkpoint` | action | — | RFC 4998 evidence record for the current checkpoint signature | [transparency.md](transparency.md) |
 | `renew_timestamp_evidence` | action | checkpoint digest | evidence record with a new archive timestamp over its predecessor | [transparency.md](transparency.md) |

@@ -318,8 +318,11 @@ it through that capability. The operator maps Lake CR fields under the contract 
 [`../control-plane/log.md`](../control-plane/log.md). **Bulk-tile monitoring status (#37):
 implemented on the lake side.** Each append decodes and verifies canonical TAAP attestations,
 advances the RFC 6962-style Merkle root, and publishes immutable 1,024-entry tile versions. The
-public hosted monitor recomputes the checkpoint root from those tiles before returning identity
-matches and detects a changed tile. Complete client proof verification is tracked in liquid #207.
+hosted monitor recomputes the checkpoint root before returning identity matches. **Hash-tile and
+compact-proof status (#88): implemented on the lake side.** Appends publish immutable interior-hash
+tiles. Public REST, OpenAPI, and MCP capabilities return inclusion and consistency audit paths bound
+to exact signed checkpoints, and the conformance fixture independently verifies every leaf and
+detects changed tile and proof bytes. Complete client proof verification is tracked in liquid #207.
 **Trusted timestamp status (#36): implemented on the lake side.** Lake hashes each checkpoint
 signature value into an RFC 3161 request, verifies the TSA response and trust chain, and stores a
 DER RFC 4998 evidence record at `LAKE_STORE_ROOT/<instance>/log/timestamps/`. The owner loop renews
