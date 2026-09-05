@@ -144,6 +144,7 @@ add_executable(lake src/main.cpp)
 target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
 
 if(LAKE_BUILD_TESTS)
+  find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG        v1.17.0)

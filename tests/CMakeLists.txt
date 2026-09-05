@@ -21,3 +21,7 @@ gtest_discover_tests(lake-tests)
 add_executable(lake-postgres-tests test_postgres.cpp)
 target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres GTest::gtest_main)
 gtest_discover_tests(lake-postgres-tests)
+
+add_test(
+  NAME lake-ui-token-gates
+  COMMAND ${CMAKE_SOURCE_DIR}/tools/ui/test-token-gates.sh)
