@@ -1089,7 +1089,7 @@ public:
     SyncStoreResult<std::vector<std::byte>> push(const std::string& customer_id,
                                                  const std::string& repository_id,
                                                  std::span<const std::byte> request,
-                                                 SyncChangeAuthorizer authorize) override {
+                                                 SyncPushAuthorizer authorize) override {
         std::lock_guard lock(mutex_);
         auto state = open_repository(customer_id, repository_id);
         if (!state) {
@@ -1099,9 +1099,25 @@ public:
         options.authorize =
             [authorize = std::move(authorize)](
                 const liquid::sync_item& item,
-                std::span<const liquid::sync_ref_update>) -> liquid::runtime::task<void> {
-            const std::string change_id = liquid::to_string(item.reference.value);
-            auto result = authorize(change_id);
+                std::span<const liquid::sync_ref_update> updates) -> liquid::runtime::task<void> {
+            std::vector<BranchRefUpdate> reference_updates;
+            reference_updates.reserve(updates.size());
+            for (const liquid::sync_ref_update& update : updates) {
+                reference_updates.push_back(BranchRefUpdate{
+                    .name = update.name,
+                    .old_head = update.old_head
+                                    ? std::optional{liquid::to_string(update.old_head->value)}
+                                    : std::nullopt,
+                    .new_head = liquid::to_string(update.new_head.value),
+                    .fast_forward = update.fast_forward,
+                });
+            }
+            const SyncPushItem input{
+                .kind = item.kind == liquid::sync_item_kind::reference ? SyncPushItemKind::Reference
+                                                                       : SyncPushItemKind::Change,
+                .change_id = liquid::to_string(item.reference.value),
+            };
+            auto result = authorize(input, reference_updates);
             if (!result) {
                 co_return std::unexpected(liquid_error(result.error()));
             }

@@ -35,7 +35,8 @@ Lake links libliquid as a library-only submodule and opens one customer store at
 `LAKE_STORE_ROOT/<customer id>/store`; liquid #160, #165, and #184's client, server, protocol, and
 reference-update authorization contracts are pinned. The source tree serves repository push, pull,
 missing-object negotiation, chunk upload,
-and ranged reads through the registry, with per-change policy and signed audit. These routes are not
+and ranged reads through the registry, with per-change and protected-reference policy and signed
+audit. These routes are not
 part of the production state above until a containing image and operator volume support are
 deployed. The source tree also provides signed portable repository export/import, including the
 liquid history/object transfer, forge state, direct grants, artifact evidence, optional Git

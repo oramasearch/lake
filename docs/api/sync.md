@@ -153,10 +153,18 @@ capabilities. Request buffering is bounded at 64 MiB and accepts fixed-length or
 bodies before passing one byte span to `sync_server`.
 
 Push additionally calls the policy engine with the repository object and `write` action once for
-each change through `sync_server_options::authorize`. Any refusal rejects the metadata batch. Lake
-records each callback outcome and the final route outcome. Successful push refreshes the control
-plane's `repository_refs` rows from the live repository. Pull and chunk reads require `read`; push
-and chunk upload require `write`.
+each change through `sync_server_options::authorize`. On each reference callback, lake evaluates
+the server-derived update against branch protection with the authenticated caller. The callback
+records `forge.branch_protection.allowed` or `forge.branch_protection.refused` for protected refs;
+the audit detail has the repository, ref, caller, rule, and reason but never a credential. The
+registry rejects an anonymous or unauthorized request before callbacks run. Successful push
+refreshes the control plane's `repository_refs` rows from the live repository. Pull and chunk reads
+require `read`; push and chunk upload require `write`.
+
+Liquid #184 rejects the complete metadata batch when a reference callback refuses it. Lake therefore
+returns the precise reference-and-rule reason to the sync client and leaves every ref in that push
+unchanged. Liquid #189 will make reference application independent by default, with `atomic` for a
+client that requires all-or-nothing application.
 
 Lake opens one caller-owned `liquid::store` at
 `LAKE_STORE_ROOT/<customer-id>/store` and passes it through `repository_options.store` when opening

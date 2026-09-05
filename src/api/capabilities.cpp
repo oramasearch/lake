@@ -11,12 +11,13 @@
 
 #include "lake/audit/audit.hpp"
 
+#include "lake/api/forge.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
-#include "lake/control/saml.hpp"
 #include "lake/control/pki.hpp"
+#include "lake/control/saml.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 
@@ -957,6 +958,38 @@ ApiResult from_sync_error(ApiContext& context, SyncStoreError error) {
     return ApiResult::failure(code, message);
 }
 
+SyncStoreResult<void> record_branch_protection_event(ApiContext& context,
+                                                     const std::string& customer_id,
+                                                     const std::string& repository_id,
+                                                     const BranchRefUpdate& update,
+                                                     const std::string& rule,
+                                                     bool allowed,
+                                                     const std::string& reason) {
+    const audit::EventDraft event{
+        .customer_id = customer_id,
+        .kind = allowed ? "forge.branch_protection.allowed" : "forge.branch_protection.refused",
+        .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
+        .object = "repository/" + repository_id + "/ref/" + update.name,
+        .action = "reference_update",
+        .outcome = allowed ? "success" : "denied",
+        .request_id = context.request_id,
+        .method = context.authentication_method,
+        .device = context.device,
+        .details = {{"repository", repository_id},
+                    {"reference", update.name},
+                    {"caller",
+                     context.acting_identity.empty() ? "anonymous" : context.acting_identity},
+                    {"rule", rule},
+                    {"reason", reason}},
+    };
+    const auto recorded = audit::record(*context.store, event, identity_options(context));
+    if (!recorded) {
+        return std::unexpected(
+            SyncStoreError{recorded.error().code, recorded.error().message, update.name, rule});
+    }
+    return {};
+}
+
 bool offline_grant_fields_match(const control::OfflineGrant& grant) {
     const json& credential = grant.credential;
     if (!credential.is_object() || !credential.contains("attestation_identifier") ||
@@ -974,8 +1007,50 @@ bool offline_grant_fields_match(const control::OfflineGrant& grant) {
            attributes.at("device_id").get<std::string>() == grant.device_id;
 }
 
-SyncChangeAuthorizer sync_change_authorizer(ApiContext& context, const std::string& repository_id) {
-    return [&context, repository_id](const std::string& change_id) -> SyncStoreResult<void> {
+SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
+                                          const std::string& customer_id,
+                                          const std::string& repository_id) {
+    return [&context, customer_id, repository_id](
+               const SyncPushItem& item,
+               std::span<const BranchRefUpdate> updates) -> SyncStoreResult<void> {
+        if (item.kind == SyncPushItemKind::Reference) {
+            for (const BranchRefUpdate& update : updates) {
+                const auto evaluated = evaluate_branch_protection(*context.store,
+                                                                  context.acting_identity,
+                                                                  context.authorization_cache,
+                                                                  repository_id,
+                                                                  update);
+                if (!evaluated) {
+                    const auto recorded = record_branch_protection_event(context,
+                                                                         customer_id,
+                                                                         repository_id,
+                                                                         update,
+                                                                         evaluated.error().rule,
+                                                                         false,
+                                                                         evaluated.error().message);
+                    if (!recorded) {
+                        return std::unexpected(recorded.error());
+                    }
+                    return std::unexpected(evaluated.error());
+                }
+                for (const std::string& rule : evaluated->matched_rules) {
+                    const auto recorded =
+                        record_branch_protection_event(context,
+                                                       customer_id,
+                                                       repository_id,
+                                                       update,
+                                                       rule,
+                                                       true,
+                                                       "branch protection allows the update");
+                    if (!recorded) {
+                        return std::unexpected(recorded.error());
+                    }
+                }
+            }
+            return {};
+        }
+
+        const std::string& change_id = item.change_id;
         std::string denial_code;
         std::string denial_reason;
         if (!context.offline_grant_id.empty()) {
@@ -3078,11 +3153,11 @@ void register_repository_capabilities(Registry& registry) {
             if (!repository) {
                 return repository.error();
             }
-            auto response =
-                context.sync_store->push(repository->customer_id,
-                                         repository->id,
-                                         context.sync_request,
-                                         sync_change_authorizer(context, repository->id));
+            auto response = context.sync_store->push(
+                repository->customer_id,
+                repository->id,
+                context.sync_request,
+                sync_change_authorizer(context, repository->customer_id, repository->id));
             if (!response) {
                 return from_sync_error(context, response.error());
             }

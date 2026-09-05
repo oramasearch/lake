@@ -26,7 +26,7 @@ liquid is the tool. lake is where it collects.
 > customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160, #165, and #184's
 > client, public server, protocol, and reference-update authorization contracts are pinned. Lake
 > serves push, pull, missing-object negotiation, chunk upload, and ranged chunk read through the
-> registry, with per-change policy,
+> registry, with per-change and protected-reference policy,
 > offline-grant revocation checks, exact refusal reasons, atomic refusal, and signed outcome audit.
 > The source tree also provides signed portable repository export and import, including liquid
 > history/object transfer, forge state, grants, artifact evidence, an optional Git projection, and

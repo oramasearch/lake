@@ -18,10 +18,27 @@ struct SyncStoreError {
     std::string code;
     std::string message;
     std::string context;
+    std::string rule;
 };
 
 template <class T> using SyncStoreResult = std::expected<T, SyncStoreError>;
-using SyncChangeAuthorizer = std::function<SyncStoreResult<void>(const std::string& change_id)>;
+
+struct BranchRefUpdate {
+    std::string name;
+    std::optional<std::string> old_head;
+    std::string new_head;
+    bool fast_forward = false;
+};
+
+enum class SyncPushItemKind { Change, Reference };
+
+struct SyncPushItem {
+    SyncPushItemKind kind = SyncPushItemKind::Change;
+    std::string change_id;
+};
+
+using SyncPushAuthorizer =
+    std::function<SyncStoreResult<void>(const SyncPushItem&, std::span<const BranchRefUpdate>)>;
 
 struct RepositoryContentRef {
     std::string name;
@@ -218,7 +235,7 @@ public:
     virtual SyncStoreResult<std::vector<std::byte>> push(const std::string& customer_id,
                                                          const std::string& repository_id,
                                                          std::span<const std::byte> request,
-                                                         SyncChangeAuthorizer authorize) = 0;
+                                                         SyncPushAuthorizer authorize) = 0;
     virtual SyncStoreResult<std::vector<std::byte>> pull(const std::string& customer_id,
                                                          const std::string& repository_id,
                                                          std::span<const std::byte> request) = 0;

@@ -73,12 +73,24 @@ repository-child `path` policy object. A non-operator pusher must be permitted t
 object through `authorize`; inherited repository grants therefore remain effective and ref-specific
 grants can narrow access.
 
-`evaluate_branch_protection` accepts a `BranchRefUpdate` containing the ref name, prior and
-proposed heads, and the computed fast-forward result. It is ready for liquid #177's reference
-authorizer and refuses the proposed update on the first failed rule. The liquid revision currently
-vendored by lake supplies only bare change IDs to the push authorizer and does not expose reference
-items or the refs they move. Lake cannot call this evaluator from the existing callback without
-guessing a ref, so ref-specific enforcement is intentionally pending liquid #177.
+Liquid #184 supplies `BranchRefUpdate` values containing the ref name, server-derived prior and
+proposed heads, and computed fast-forward result. Lake evaluates every reference callback with the
+authenticated caller and refuses the first failed rule. A refusal names the reference and rule; for
+example, `branch protection rejects a non-fast-forward update to main`. The registry refuses an
+anonymous or unauthorized push before invoking the reference evaluator.
+
+An approved review is a `review` record whose `change_id` exactly equals the reference's proposed
+head and whose current `state` is `approved`. Approval for an ancestor, a different change, or a
+review in any other state does not satisfy `required_review`.
+
+Lake records one signed audit event for each protected reference decision. Allowed decisions use
+kind `forge.branch_protection.allowed`; refusals use `forge.branch_protection.refused`. Both retain
+the repository, reference, caller, matched rule, and reason, never a credential.
+
+At the Liquid #184 pin, a callback refusal rejects the complete metadata batch before import, so a
+push with any refused reference applies no references. Liquid #189 changes this to per-reference
+application and returns an applied or refused verdict for each reference; clients that require the
+current all-or-nothing behavior will request `atomic`.
 
 ## Verify
 
