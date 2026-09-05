@@ -60,7 +60,8 @@ verification still rejects an expired key.
 Both capabilities go through the registry's customer object resolver and `authorize`. Every
 success, invalid signature, expired key, denial, and storage failure is recorded through
 `audit::record` as `agent_session`. Audit details name identities and the transparency index but
-never contain the private seed.
+never contain the private seed. The audit API can retrieve a session's complete event history with
+the object filter `agent_session/<session UUID>`.
 
 ## Verify and change
 
