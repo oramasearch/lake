@@ -75,7 +75,7 @@ fidelity report.
 | `export_repository`, `import_repository`, `list_exports` | read/action | repository or destination customer, archive, and optional Git projection | signed portable archive, recreated repository, or prior export records | [export.md](export.md) |
 | `import_github_repository` | action | destination customer, local Git directory, and recorded GitHub responses | imported repository and durable fidelity report | [github-import.md](github-import.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
-| `list_memberships`, `create_membership` | read/action | scope, principal, role, TAAP evidence | membership(s) | [organizations.md](organizations.md) |
+| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope, membership id, principal, role, TAAP evidence | membership(s) or removal confirmation | [organizations.md](organizations.md) |
 | `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role, TAAP evidence | grant(s) | [policy.md](policy.md) |
@@ -130,7 +130,7 @@ fidelity report.
 | `upsert_scim_user`, `upsert_scim_group`, `list_sso_provisioning_logs` | action/read | SCIM resource mapping or provider id | SCIM mapping or provisioning outcomes | [sso.md](sso.md) |
 | `scim_list_*`, `scim_get_*`, `scim_upsert_*`, `scim_patch_*`, `scim_delete_*` | action, provider entry | provider bearer plus filter, resource, PATCH operations, or resource id | SCIM user/group resource, list response, or deletion confirmation | [sso.md](sso.md) |
 | `search` | read | `query`, `customer?`, `repository?`, `ref?`, `change?`, `history?`, `limit?` | `{mode, scanned_changes, items: [ranked hit]}` | [search.md](search.md) |
-| `metering_usage` | read | `customer_id`, `from?`, `to?`, `limit?` | hourly unique storage, transfer, build compute, quota, pricing, and charge | [metering.md](metering.md) |
+| `metering_usage`, `set_storage_quota` | read/action | customer, time range, or quota bytes | hourly usage, pricing, and the customer quota | [metering.md](metering.md) |
 | `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, organization, mount fields | mount metadata | [secrets.md](secrets.md) |
 | `put_secret`, `read_secret`, `secret_metadata` | action/read | mount, name, value/version/metadata fields | versioned value or history | [secrets.md](secrets.md) |
 | `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions` | action | mount, name, `versions[]` | updated history | [secrets.md](secrets.md) |

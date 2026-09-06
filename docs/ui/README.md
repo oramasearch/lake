@@ -4,6 +4,7 @@ Drive browsing, preview, history, and documented Linux client states are in
 [drive.md](drive.md). The sharing decision and management screens are in
 [sharing.md](sharing.md).
 The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
+Organization and personal settings are in [`settings.md`](settings.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at `/style.css`, an accessible shared shell,
@@ -14,12 +15,15 @@ exports, SSO, repository content, and drive views.
 | Page | Route | Shows |
 |---|---|---|
 | Home | `GET /` | the node, version, links |
-| User identity | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`, `/sessions`, `/passkeys`, `/tokens` | password, TOTP, OAuth, passkeys, sessions/devices, and scoped tokens; see [identity.md](identity.md) |
+| User identity | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`, `/settings`, `/sessions`, `/passkeys`, `/tokens` | password, TOTP, OAuth, profile, passkeys, sessions/devices, notifications, and scoped tokens; see [identity.md](identity.md) |
 | Applications | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | registration, theme, pool users, organizations, webhooks, and delivery history; see [identity.md](identity.md) |
 | Application identity | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed pool-specific identity on lake's host or a configured custom host |
 | Operator sign in | `GET /login`, `POST /session` (form field `token`), `POST /logout` | the operator-token form; a match sets the session cookie and redirects to Repositories |
 | Customers | `GET /customers` | every tenant: handle (links to its repositories), type, identity id, created |
-| Organizations | `GET /organizations` | every authorized organization, with links to teams, members, and effective access |
+| Organization settings | `GET /organization?id=<uuid>&tab=<tab>` | overview, teams, members, invitations, access, SSO, applications, metering, and audit; see [settings.md](settings.md) |
+| Team settings | `GET /team?id=<uuid>` | team memberships and effective access; see [settings.md](settings.md) |
+| Member settings | `GET /member?id=<uuid>` | role, attestation evidence, effective access, role change, and confirmed removal; see [settings.md](settings.md) |
+| Organizations | `GET /organizations` | every authorized organization, with links to the organization settings surface |
 | Teams | `GET /teams?organization_id=<uuid>` | the organization's authorized teams with member and effective-access links |
 | Enterprise SSO | `GET /sso?organization_id=<uuid>[&provider_id=<uuid>]` | SAML/OIDC provider configuration, federation issuer claims, and one provider's SCIM provisioning log |
 | Members | `GET /members?organization_id=<uuid>[&team_id=<uuid>]` | direct memberships, their role, principal and attestation evidence |
@@ -88,4 +92,4 @@ puts protected input or output into HTML.
 cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (200, the table),
 `curl -b j -X POST /logout` (302), `curl -b j /repositories` (302 to `/login`).
 
-**Next.** Mutation forms for the remaining control-plane actions and a customer detail page.
+**Next.** A customer detail page and mutation forms for the remaining control-plane actions.

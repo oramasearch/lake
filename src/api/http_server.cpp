@@ -4568,6 +4568,188 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_organization_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string organization_id = query_value(route, "id");
+        if (organization_id.empty()) {
+            return redirect(route, "/organizations");
+        }
+        const ApiResult organization_result =
+            registry.call("get_organization", {{"id", organization_id}}, context);
+        if (!organization_result.ok) {
+            return serve_page_error(route, organization_result);
+        }
+        OrganizationSettingsData data;
+        const auto load = [&](const std::string& name,
+                              nlohmann::json input,
+                              auto append) -> std::optional<ApiResult> {
+            const ApiResult result = registry.call(name, std::move(input), context);
+            if (!result.ok) {
+                return result;
+            }
+            for (const nlohmann::json& item :
+                 result.value.value("items", nlohmann::json::array())) {
+                append(item);
+            }
+            return std::nullopt;
+        };
+        if (const auto error = load(
+                "list_teams",
+                {{"organization_id", organization_id}, {"limit", 500}},
+                [&](const nlohmann::json& item) { data.teams.push_back(team_from_json(item)); })) {
+            return serve_page_error(route, *error);
+        }
+        if (const auto error = load("list_memberships",
+                                    {{"organization_id", organization_id}, {"limit", 500}},
+                                    [&](const nlohmann::json& item) {
+                                        data.memberships.push_back(membership_from_json(item));
+                                    })) {
+            return serve_page_error(route, *error);
+        }
+        if (const auto error = load("list_invitations",
+                                    {{"organization_id", organization_id}, {"limit", 500}},
+                                    [&](const nlohmann::json& item) {
+                                        data.invitations.push_back(invitation_from_json(item));
+                                    })) {
+            return serve_page_error(route, *error);
+        }
+        const ApiResult access =
+            registry.call("entity_effective_access",
+                          {{"object_type", "organization"}, {"id", organization_id}},
+                          context);
+        if (access.ok) {
+            for (const nlohmann::json& item :
+                 access.value.value("items", nlohmann::json::array())) {
+                data.access.push_back(access_from_json(item));
+            }
+        }
+        const ApiResult providers = registry.call(
+            "list_sso_providers", {{"organization_id", organization_id}, {"limit", 100}}, context);
+        if (providers.ok) {
+            for (const nlohmann::json& item :
+                 providers.value.value("items", nlohmann::json::array())) {
+                data.providers.push_back(sso_provider_from_json(item));
+            }
+        }
+        const ApiResult customers = registry.call("list_customers", {{"limit", 500}}, context);
+        if (customers.ok) {
+            for (const nlohmann::json& item :
+                 customers.value.value("items", nlohmann::json::array())) {
+                const control::Customer customer = customer_from_json(item);
+                if (customer.organization_id != organization_id) {
+                    continue;
+                }
+                const ApiResult applications = registry.call(
+                    "list_applications", {{"customer_id", customer.id}, {"limit", 100}}, context);
+                if (applications.ok) {
+                    for (const nlohmann::json& application :
+                         applications.value.value("items", nlohmann::json::array())) {
+                        data.applications.push_back(application_from_json(application));
+                    }
+                }
+                const ApiResult metering =
+                    registry.call("metering_usage", {{"customer_id", customer.id}}, context);
+                if (metering.ok) {
+                    data.metering = metering.value;
+                }
+                break;
+            }
+        }
+        const ApiResult audit_result = registry.call(
+            "audit", {{"object", "organization/" + organization_id}, {"limit", 100}}, context);
+        if (audit_result.ok) {
+            for (const nlohmann::json& item :
+                 audit_result.value.value("items", nlohmann::json::array())) {
+                data.audit_events.push_back(audit::event_from_json(item));
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_organization(organization_from_json(organization_result.value),
+                                             data,
+                                             query_value(route, "tab")),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_team_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string team_id = query_value(route, "id");
+        const ApiResult team = registry.call("get_team", {{"id", team_id}}, context);
+        if (!team.ok) {
+            return serve_page_error(route, team);
+        }
+        const control::Team value = team_from_json(team.value);
+        const ApiResult members = registry.call(
+            "list_memberships",
+            {{"organization_id", value.organization_id}, {"team_id", value.id}, {"limit", 500}},
+            context);
+        if (!members.ok) {
+            return serve_page_error(route, members);
+        }
+        std::vector<control::Membership> memberships;
+        for (const nlohmann::json& item : members.value.at("items")) {
+            memberships.push_back(membership_from_json(item));
+        }
+        std::vector<control::EffectiveAccessEntry> access;
+        const ApiResult effective = registry.call(
+            "entity_effective_access", {{"object_type", "team"}, {"id", team_id}}, context);
+        if (effective.ok) {
+            for (const nlohmann::json& item :
+                 effective.value.value("items", nlohmann::json::array())) {
+                access.push_back(access_from_json(item));
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_team(value, memberships, access),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_member_page(boost::http::route_params& route,
+                                              std::string_view error = {},
+                                              bool confirm_removal = false) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/login");
+        }
+        const std::string member_id = query_value(route, "id");
+        const ApiResult member = registry.call("get_membership", {{"id", member_id}}, context);
+        if (!member.ok) {
+            return serve_page_error(route, member);
+        }
+        const control::Membership value = membership_from_json(member.value);
+        const std::string type = value.team_id.empty() ? "organization" : "team";
+        const std::string scope_id = value.team_id.empty() ? value.organization_id : value.team_id;
+        const ApiResult effective = registry.call(
+            "entity_effective_access", {{"object_type", type}, {"id", scope_id}}, context);
+        std::vector<control::EffectiveAccessEntry> access;
+        if (effective.ok) {
+            for (const nlohmann::json& item :
+                 effective.value.value("items", nlohmann::json::array())) {
+                if (item.value("principal_taap_id", "") == value.principal_taap_id) {
+                    access.push_back(access_from_json(item));
+                }
+            }
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_member(value,
+                          access,
+                          error,
+                          confirm_removal || query_value(route, "confirm_removal") == "yes"),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
     boost::http::route_task serve_sso_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized) {
@@ -5306,6 +5488,168 @@ struct ApiServer::Impl {
                          web_ui_tokens(sessions, "", error),
                          "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    boost::http::route_task serve_settings(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized || context.operator_credential) {
+            return redirect(route, "/sign-in");
+        }
+        std::vector<control::Session> sessions;
+        std::vector<control::Device> devices;
+        std::string error;
+        if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
+            sessions = std::move(*rows);
+        } else {
+            error = rows.error().message;
+        }
+        if (auto rows = options.store->list_devices(context.acting_user_id)) {
+            devices = std::move(*rows);
+        } else if (error.empty()) {
+            error = rows.error().message;
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_settings(
+                context.acting_identity, sessions, devices, query_value(route, "tab"), error),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
+    boost::http::route_task serve_organization_invitation(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string organization_id = form_field(body, "organization_id");
+        const ApiResult result = registry.call("create_invitation",
+                                               {{"organization_id", organization_id},
+                                                {"invitee_type", form_field(body, "invitee_type")},
+                                                {"invitee", form_field(body, "invitee")},
+                                                {"role", form_field(body, "role")},
+                                                {"expires_at", form_field(body, "expires_at")}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_error(result.error.code, result.error.message, context.authorized),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        co_return co_await redirect(route,
+                                    "/organization?id=" + organization_id + "&tab=invitations");
+    }
+
+    boost::http::route_task serve_organization_sso(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string organization_id = form_field(body, "organization_id");
+        const ApiResult result = registry.call("register_sso_provider",
+                                               {{"organization_id", organization_id},
+                                                {"name", form_field(body, "name")},
+                                                {"protocol", form_field(body, "protocol")},
+                                                {"issuer", form_field(body, "issuer")},
+                                                {"scim_token", form_field(body, "scim_token")}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_error(result.error.code, result.error.message, context.authorized),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        co_return co_await redirect(route, "/organization?id=" + organization_id + "&tab=sso");
+    }
+
+    boost::http::route_task serve_member_role(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string membership_id = form_field(body, "id");
+        const ApiResult result =
+            registry.call("set_member_role",
+                          {{"id", membership_id}, {"role", form_field(body, "role")}},
+                          context);
+        if (!result.ok) {
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_error(result.error.code, result.error.message, context.authorized),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        co_return co_await redirect(route, "/member?id=" + membership_id);
+    }
+
+    boost::http::route_task serve_member_remove(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string membership_id = form_field(body, "id");
+        if (form_field(body, "confirmed") != "yes") {
+            co_return co_await redirect(route,
+                                        "/member?id=" + membership_id + "&confirm_removal=yes");
+        }
+        const ApiResult result = registry.call("remove_member", {{"id", membership_id}}, context);
+        if (!result.ok) {
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_error(result.error.code, result.error.message, context.authorized),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        co_return co_await redirect(route, "/organizations");
+    }
+
+    boost::http::route_task serve_metering_quota(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        const std::string quota = form_field(body, "quota_bytes");
+        std::uint64_t quota_bytes = 0;
+        const auto [position, error] =
+            std::from_chars(quota.data(), quota.data() + quota.size(), quota_bytes);
+        if (error != std::errc{} || position != quota.data() + quota.size()) {
+            co_return co_await send_text(
+                route,
+                http::status::bad_request,
+                web_ui_error("invalid_input", "quota bytes must be a non-negative integer", true),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result =
+            registry.call("set_storage_quota",
+                          {{"customer_id", customer_id}, {"quota_bytes", quota_bytes}},
+                          context);
+        if (!result.ok) {
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_error(result.error.code, result.error.message, context.authorized),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        co_return co_await redirect(route, "/metering?customer_id=" + customer_id);
     }
 
     boost::http::route_task serve_identity_sign_up(boost::http::route_params& route) {
@@ -8327,6 +8671,41 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/organizations", impl.serve_organizations_page(route));
                });
+    router.add(
+        http::method::get, "/organization", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/organization", impl.serve_organization_page(route));
+        });
+    router.add(http::method::get, "/team", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/team", impl.serve_team_page(route));
+    });
+    router.add(
+        http::method::get, "/member", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/member", impl.serve_member_page(route));
+        });
+    router.add(http::method::post,
+               "/organization/invitations",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/organization/invitations",
+                                               impl.serve_organization_invitation(route));
+               });
+    router.add(http::method::post,
+               "/organization/sso",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/organization/sso", impl.serve_organization_sso(route));
+               });
+    router.add(
+        http::method::post, "/member/role", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/member/role", impl.serve_member_role(route));
+        });
+    router.add(http::method::post,
+               "/member/remove",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/member/remove", impl.serve_member_remove(route));
+               });
     router.add(http::method::get, "/sso", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/sso", impl.serve_sso_page(route));
     });
@@ -8477,6 +8856,10 @@ bool ApiServer::start() {
     router.add(
         http::method::get, "/tokens", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/tokens", impl.serve_tokens(route));
+        });
+    router.add(
+        http::method::get, "/settings", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/settings", impl.serve_settings(route));
         });
     router.add(http::method::post,
                "/identity/sign-up",
@@ -8850,6 +9233,12 @@ bool ApiServer::start() {
         http::method::get, "/metering", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/metering", impl.serve_metering_page(route));
         });
+    router.add(http::method::post,
+               "/metering/quota",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/metering/quota", impl.serve_metering_quota(route));
+               });
     router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/audit", impl.serve_audit_page(route));
     });

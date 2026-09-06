@@ -62,9 +62,14 @@ public:
     Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) override;
     Result<Team> get_team(const std::string& id) override;
     Result<Membership> create_membership(const NewMembership&) override;
+    Result<Membership> get_membership(const std::string& id) override;
     Result<std::vector<Membership>> list_memberships(const std::string& organization_id,
                                                      const std::string& team_id,
                                                      int limit) override;
+    Result<Membership> set_member_role(const std::string& id,
+                                       const std::string& role,
+                                       const std::string& actor) override;
+    Result<void> remove_member(const std::string& id, const std::string& actor) override;
     Result<Membership> accept_invitation(const AcceptInvitation&) override;
     Result<Invitation> create_invitation(const NewInvitation&) override;
     Result<std::vector<Invitation>> list_invitations(const std::string& organization_id,
@@ -149,6 +154,9 @@ public:
                                                            const std::string& from_hour,
                                                            const std::string& to_hour,
                                                            int limit) override;
+    Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) override;
+    Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
+                                            std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                     const std::string& instance_kek) override;
     Result<PkiAuthorityMaterial> get_pki_authority(const std::string& customer_id,
@@ -350,6 +358,7 @@ private:
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
     std::vector<MeteringUsage> metering_usage_;
+    std::map<std::string, std::uint64_t> storage_quotas_;
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;

@@ -335,6 +335,45 @@ TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
     expect_theme_scripts(access);
 }
 
+TEST(WebUi, SettingsPagesExposeTabsMutationsAndConfirmation) {
+    const lake::control::Organization organization{
+        "o1", "taap:1:ed25519:org", "Orama", "created", "updated"};
+    const lake::control::Membership membership{"m1",
+                                               "o1",
+                                               "",
+                                               "user",
+                                               "u1",
+                                               "taap:1:ed25519:user",
+                                               "owner",
+                                               "digest<&>",
+                                               "taap:1:ed25519:owner",
+                                               "created",
+                                               "updated"};
+    lake::api::OrganizationSettingsData data;
+    data.memberships.push_back(membership);
+    const std::string organization_page =
+        lake::api::web_ui_organization(organization, data, "invitations");
+    EXPECT_NE(organization_page.find("Organization settings"), std::string::npos);
+    EXPECT_NE(organization_page.find("action=\"/organization/invitations\""), std::string::npos);
+    expect_theme_scripts(organization_page);
+
+    const std::string sso_page = lake::api::web_ui_organization(organization, data, "sso");
+    EXPECT_NE(sso_page.find("action=\"/organization/sso\""), std::string::npos);
+    expect_theme_scripts(sso_page);
+
+    const std::string member_page = lake::api::web_ui_member(membership, {}, "", true);
+    EXPECT_NE(member_page.find("action=\"/member/role\""), std::string::npos);
+    EXPECT_NE(member_page.find("action=\"/member/remove\""), std::string::npos);
+    EXPECT_NE(member_page.find("derived grants immediately"), std::string::npos);
+    EXPECT_NE(member_page.find("digest&lt;&amp;&gt;"), std::string::npos);
+    expect_theme_scripts(member_page);
+
+    const std::string personal_page = lake::api::web_ui_settings("taap:1:user", {}, {}, "tokens");
+    EXPECT_NE(personal_page.find("Personal settings"), std::string::npos);
+    EXPECT_NE(personal_page.find("href=\"/tokens\""), std::string::npos);
+    expect_theme_scripts(personal_page);
+}
+
 TEST(WebUi, SsoPageEscapesProviderAndProvisioningValues) {
     const lake::control::SsoProvider provider{"p1",
                                               "o1",

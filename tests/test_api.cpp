@@ -332,6 +332,67 @@ TEST(Metering, CapabilityReportsExactStorageAndIdempotentBuildCompute) {
     EXPECT_EQ(second.value.at("items").front().at("compute_seconds"), 2);
 }
 
+TEST(Metering, CustomerQuotaCapabilityOverridesTheProcessDefault) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    surface.ctx.metering.storage_quota_bytes = 100;
+    const ApiResult user =
+        surface.call("create_user", {{"email", "quota@example.com"}, {"display_name", "Quota"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value.at("id")}, {"name", "quota"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const std::string customer_id = customer.value.at("id");
+    const ApiResult configured =
+        surface.call("set_storage_quota", {{"customer_id", customer_id}, {"quota_bytes", 10}});
+    ASSERT_TRUE(configured.ok) << configured.error.message;
+    EXPECT_EQ(configured.value.at("quota_bytes"), 10);
+    const ApiResult usage = surface.call("metering_usage", {{"customer_id", customer_id}});
+    ASSERT_TRUE(usage.ok) << usage.error.message;
+    EXPECT_EQ(usage.value.at("quota_bytes"), 10);
+    EXPECT_TRUE(usage.value.at("over_quota"));
+}
+
+TEST(Organizations, MemberMutationCapabilitiesUseTheRegistry) {
+    Surface surface;
+    const ApiResult first = surface.call("create_user",
+                                         {{"taap_id", "taap:1:ed25519:first-owner"},
+                                          {"email", "first-owner@example.com"},
+                                          {"display_name", "First owner"}});
+    const ApiResult second = surface.call("create_user",
+                                          {{"taap_id", "taap:1:ed25519:second-owner"},
+                                           {"email", "second-owner@example.com"},
+                                           {"display_name", "Second owner"}});
+    const ApiResult organization =
+        surface.call("create_organization", {{"display_name", "Members"}});
+    ASSERT_TRUE(first.ok);
+    ASSERT_TRUE(second.ok);
+    ASSERT_TRUE(organization.ok);
+    const auto create = [&](const ApiResult& user, const std::string& role) {
+        return surface.call("create_membership",
+                            {{"organization_id", organization.value.at("id")},
+                             {"principal_type", "user"},
+                             {"principal_id", user.value.at("id")},
+                             {"principal_taap_id", user.value.at("taap_id")},
+                             {"role", role},
+                             {"attestation_digest", "sha512-256:membership"}});
+    };
+    const ApiResult first_membership = create(first, "owner");
+    const ApiResult second_membership = create(second, "owner");
+    ASSERT_TRUE(first_membership.ok) << first_membership.error.message;
+    ASSERT_TRUE(second_membership.ok) << second_membership.error.message;
+    const ApiResult changed = surface.call(
+        "set_member_role", {{"id", first_membership.value.at("id")}, {"role", "admin"}});
+    ASSERT_TRUE(changed.ok) << changed.error.message;
+    EXPECT_EQ(changed.value.at("role"), "admin");
+    const ApiResult removed =
+        surface.call("remove_member", {{"id", first_membership.value.at("id")}});
+    ASSERT_TRUE(removed.ok) << removed.error.message;
+    EXPECT_TRUE(removed.value.at("removed"));
+}
+
 class TemporaryRepositoryRoot {
 public:
     TemporaryRepositoryRoot() {

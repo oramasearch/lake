@@ -1947,6 +1947,7 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
                 web_ui_escape(organization.display_name.empty() ? organization.id
                                                                 : organization.display_name),
                 web_ui_escape(organization.taap_id.empty() ? "not assigned" : organization.taap_id),
+                row_link("/organization?id=" + organization.id, "settings"),
                 row_link("/teams?" + organization_query, "teams"),
                 row_link("/members?" + organization_query, "members"),
                 row_link("/invitations?" + organization_query, "invitations"),
@@ -1960,6 +1961,238 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
                         std::format("{} organizations", organizations.size()),
                         content,
                         true);
+}
+
+std::string web_ui_organization(const control::Organization& organization,
+                                const OrganizationSettingsData& data,
+                                std::string_view tab,
+                                std::string_view error) {
+    const std::string selected = tab.empty() ? "overview" : std::string(tab);
+    const std::string base = "/organization?id=" + organization.id + "&tab=";
+    std::string content =
+        "<p class=\"eyebrow\">organization settings</p><h1>" +
+        web_ui_escape(organization.display_name) +
+        "</h1><p class=\"sub\">Organization administration, identity, access, and evidence.</p>" +
+        "<nav class=\"tabs\" aria-label=\"Organization settings\">";
+    for (const auto& [name, label] :
+         std::vector<std::pair<std::string, std::string>>{{"overview", "Overview"},
+                                                          {"teams", "Teams"},
+                                                          {"members", "Members"},
+                                                          {"invitations", "Invitations"},
+                                                          {"access", "Access"},
+                                                          {"sso", "SSO"},
+                                                          {"applications", "Applications"},
+                                                          {"metering", "Metering"},
+                                                          {"audit", "Audit"}}) {
+        content += "<a href=\"" + base + name + "\"" +
+                   (selected == name ? " aria-current=\"page\"" : "") + ">" + label + "</a>";
+    }
+    content += "</nav>" + error_markup(error);
+    if (selected == "overview") {
+        content +=
+            std::format("<section class=\"panel\"><dl><dt>Identity</dt><dd><code>{}</code></dd>"
+                        "<dt>Teams</dt><dd>{}</dd><dt>Members</dt><dd>{}</dd>"
+                        "<dt>Pending invitations</dt><dd>{}</dd></dl></section>",
+                        web_ui_escape(organization.taap_id),
+                        data.teams.size(),
+                        data.memberships.size(),
+                        data.invitations.size());
+    } else if (selected == "teams") {
+        content += "<section class=\"panel\"><h2>Teams</h2>";
+        for (const auto& team : data.teams) {
+            content +=
+                "<p>" + row_link("/team?id=" + team.id, web_ui_escape(team.display_name)) + "</p>";
+        }
+        if (data.teams.empty()) {
+            content += "<p class=\"empty\">No teams in this organization.</p>";
+        }
+        content += "</section>";
+    } else if (selected == "members") {
+        content += "<section class=\"panel\"><h2>Members</h2>";
+        for (const auto& member : data.memberships) {
+            content +=
+                "<p>" +
+                row_link("/member?id=" + member.id, web_ui_escape(member.principal_taap_id)) +
+                " <span class=\"badge\">" + web_ui_escape(member.role) + "</span></p>";
+        }
+        if (data.memberships.empty()) {
+            content += "<p class=\"empty\">No memberships in this organization.</p>";
+        }
+        content += "</section>";
+    } else if (selected == "invitations") {
+        content +=
+            "<section class=\"panel\"><h2>Invite a member</h2><form class=\"stack\" "
+            "method=\"post\" action=\"/organization/invitations\">"
+            "<input type=\"hidden\" name=\"organization_id\" value=\"" +
+            web_ui_escape(organization.id) +
+            "\"><label>Email or handle<input name=\"invitee\" required></label><label>Type<select "
+            "name=\"invitee_type\"><option value=\"email\">Email</option><option "
+            "value=\"handle\">Handle</option></select></label><label>Role<select "
+            "name=\"role\"><option>member</option><option>admin</option><option>owner</option></"
+            "select></label><label>Expiry<input name=\"expires_at\" type=\"datetime-local\" "
+            "required></label><button class=\"primary\" type=\"submit\">Send "
+            "invitation</button></form></section>";
+        if (data.invitations.empty()) {
+            content += "<div class=\"panel empty\">No pending invitations.</div>";
+        }
+    } else if (selected == "access") {
+        content += "<section class=\"panel\"><h2>Effective access</h2>";
+        for (const auto& entry : data.access) {
+            content += "<p><code>" + web_ui_escape(entry.principal_taap_id) + "</code> " +
+                       "<span class=\"badge\">" + web_ui_escape(entry.role) + "</span></p>";
+        }
+        if (data.access.empty()) {
+            content += "<p class=\"empty\">No effective access entries.</p>";
+        }
+        content += "</section>";
+    } else if (selected == "sso") {
+        content +=
+            "<section class=\"panel\"><h2>Configure SSO provider</h2><form class=\"stack\" "
+            "method=\"post\" action=\"/organization/sso\">"
+            "<input type=\"hidden\" name=\"organization_id\" value=\"" +
+            web_ui_escape(organization.id) +
+            "\"><label>Name<input name=\"name\" required></label><label>Protocol<select "
+            "name=\"protocol\"><option value=\"oidc\">OpenID Connect</option><option "
+            "value=\"saml\">SAML 2.0</option></select></label><label>Issuer<input name=\"issuer\" "
+            "required></label><label>SCIM token<input name=\"scim_token\" required></label><button "
+            "class=\"primary\" type=\"submit\">Save provider</button></form></section>";
+        for (const auto& provider : data.providers) {
+            content += "<p class=\"panel\"><code>" + web_ui_escape(provider.name) + "</code> " +
+                       web_ui_escape(provider.protocol) + "</p>";
+        }
+    } else if (selected == "applications") {
+        content += "<section class=\"panel\"><h2>Applications</h2>";
+        for (const auto& application : data.applications) {
+            content +=
+                "<p>" +
+                row_link("/application?id=" + application.id, web_ui_escape(application.name)) +
+                "</p>";
+        }
+        if (data.applications.empty()) {
+            content +=
+                "<p class=\"empty\">No applications belong to this organization customer.</p>";
+        }
+        content += "</section>";
+    } else if (selected == "metering") {
+        const std::string customer_id = data.metering.value("customer_id", "");
+        content += "<section class=\"panel\"><h2>Metering</h2>";
+        if (customer_id.empty()) {
+            content += "<p class=\"empty\">No customer is attached to this organization.</p>";
+        } else {
+            content += "<p>Storage quota: " +
+                       std::to_string(data.metering.value("quota_bytes", std::uint64_t{0})) +
+                       " bytes.</p><p>" +
+                       row_link("/metering?customer_id=" + customer_id, "Open metering") + "</p>";
+        }
+        content += "</section>";
+    } else if (selected == "audit") {
+        content += "<section class=\"panel\"><h2>Recent audit outcomes</h2>";
+        for (const auto& event : data.audit_events) {
+            content += "<p><code>" + web_ui_escape(event.draft.action) + "</code> " +
+                       web_ui_escape(event.draft.outcome) + "</p>";
+        }
+        if (data.audit_events.empty()) {
+            content += "<p class=\"empty\">No matching audit events.</p>";
+        }
+        content += "</section>";
+    }
+    return web_ui_shell("lake — organization settings", organization.display_name, content, true);
+}
+
+std::string web_ui_team(const control::Team& team,
+                        const std::vector<control::Membership>& memberships,
+                        const std::vector<control::EffectiveAccessEntry>& access) {
+    std::string content =
+        "<p class=\"eyebrow\">organization settings</p><h1>" +
+        web_ui_escape(team.display_name.empty() ? team.name : team.display_name) +
+        "</h1><nav class=\"tabs\" aria-label=\"Team settings\"><a aria-current=\"page\" "
+        "href=\"/team?id=" +
+        web_ui_escape(team.id) +
+        "\">Overview</a><a href=\"/members?organization_id=" + web_ui_escape(team.organization_id) +
+        "&team_id=" + web_ui_escape(team.id) +
+        "\">Members</a><a href=\"/team/access?id=" + web_ui_escape(team.id) +
+        "\">Access</a></nav><section class=\"panel\"><h2>Members</h2>";
+    for (const auto& member : memberships) {
+        content += "<p>" +
+                   row_link("/member?id=" + member.id, web_ui_escape(member.principal_taap_id)) +
+                   "</p>";
+    }
+    if (memberships.empty()) {
+        content += "<p class=\"empty\">No team members.</p>";
+    }
+    content += "</section><section class=\"panel\"><h2>Effective access</h2><p>" +
+               std::to_string(access.size()) + " access entries.</p></section>";
+    return web_ui_shell("lake — team settings", team.name, content, true);
+}
+
+std::string web_ui_member(const control::Membership& membership,
+                          const std::vector<control::EffectiveAccessEntry>& access,
+                          std::string_view error,
+                          bool confirm_removal) {
+    std::string content =
+        "<p class=\"eyebrow\">organization settings</p><h1>Member</h1>" + error_markup(error) +
+        "<section class=\"panel\"><dl><dt>Principal</dt><dd><code>" +
+        web_ui_escape(membership.principal_taap_id) + "</code></dd><dt>Role</dt><dd>" +
+        web_ui_escape(membership.role) + "</dd><dt>Attestation evidence</dt><dd><code>" +
+        web_ui_escape(membership.attestation_digest) + "</code></dd></dl>" +
+        "<form class=\"inline\" method=\"post\" action=\"/member/role\"><input type=\"hidden\" "
+        "name=\"id\" value=\"" +
+        web_ui_escape(membership.id) +
+        "\"><label>Role<select "
+        "name=\"role\"><option>member</option><option>admin</option><option>owner</option></"
+        "select></label><button type=\"submit\">Change role</button></form>";
+    if (confirm_removal) {
+        content += "<p class=\"notice\">Removing this member revokes their membership and derived "
+                   "grants immediately.</p><form class=\"inline\" method=\"post\" "
+                   "action=\"/member/remove\"><input type=\"hidden\" name=\"id\" value=\"" +
+                   web_ui_escape(membership.id) +
+                   "\"><input type=\"hidden\" name=\"confirmed\" value=\"yes\"><button "
+                   "class=\"destructive\" type=\"submit\">Confirm removal</button></form>";
+    } else {
+        content += "<form class=\"inline\" method=\"post\" action=\"/member/remove\"><input "
+                   "type=\"hidden\" name=\"id\" value=\"" +
+                   web_ui_escape(membership.id) +
+                   "\"><button class=\"destructive\" type=\"submit\">Remove member</button></form>";
+    }
+    content += "</section><section class=\"panel\"><h2>Effective access</h2><p>" +
+               std::to_string(access.size()) + " entries at this scope.</p></section>";
+    return web_ui_shell("lake — member settings", membership.principal_taap_id, content, true);
+}
+
+std::string web_ui_settings(std::string_view identity,
+                            const std::vector<control::Session>& sessions,
+                            const std::vector<control::Device>& devices,
+                            std::string_view tab,
+                            std::string_view error) {
+    const std::string selected = tab.empty() ? "profile" : std::string(tab);
+    std::string content = "<p class=\"eyebrow\">personal settings</p><h1>Settings</h1><nav "
+                          "class=\"tabs\" aria-label=\"Personal settings\">";
+    for (const auto& [name, label] :
+         std::vector<std::pair<std::string, std::string>>{{"profile", "Profile"},
+                                                          {"sessions", "Sessions and devices"},
+                                                          {"passkeys", "Passkeys"},
+                                                          {"tokens", "Tokens"},
+                                                          {"notifications", "Notifications"}}) {
+        content += "<a href=\"/settings?tab=" + name + "\"" +
+                   (selected == name ? " aria-current=\"page\"" : "") + ">" + label + "</a>";
+    }
+    content += "</nav>" + error_markup(error) + "<section class=\"panel\">";
+    if (selected == "profile") {
+        content += "<h2>Profile</h2><p><code>" + web_ui_escape(identity) + "</code></p>";
+    } else if (selected == "sessions") {
+        content += "<h2>Sessions and devices</h2><p>" + std::to_string(sessions.size()) +
+                   " sessions and " + std::to_string(devices.size()) + " devices.</p><p>" +
+                   row_link("/sessions", "Manage sessions and devices") + "</p>";
+    } else if (selected == "passkeys") {
+        content += "<h2>Passkeys</h2><p>" + row_link("/passkeys", "Manage passkeys") + "</p>";
+    } else if (selected == "tokens") {
+        content += "<h2>Tokens</h2><p>" + row_link("/tokens", "Create or revoke tokens") + "</p>";
+    } else {
+        content += "<h2>Notifications</h2><p class=\"empty\">No notification delivery preferences "
+                   "are configured.</p>";
+    }
+    content += "</section>";
+    return web_ui_shell("lake — settings", selected, content, true);
 }
 
 std::string web_ui_sso(std::string_view organization_id,
@@ -2245,6 +2478,14 @@ std::string web_ui_metering(const nlohmann::json& usage) {
                            usage.value("quota_bytes", std::uint64_t{0}),
                            usage.value("cost_micros", std::uint64_t{0}),
                            web_ui_escape(usage.value("currency", "USD")));
+    content += std::format(
+        "<div class=\"panel\"><h2>Storage quota</h2><p class=\"sub\">This value is used by "
+        "storage enforcement.</p><form class=\"stack\" method=\"post\" action=\"/metering/quota\">"
+        "<input type=\"hidden\" name=\"customer_id\" value=\"{}\"><label>Bytes<input "
+        "type=\"number\" name=\"quota_bytes\" min=\"0\" value=\"{}\" required></label>"
+        "<button class=\"primary\" type=\"submit\">Set quota</button></form></div>",
+        web_ui_escape(customer_id),
+        usage.value("quota_bytes", std::uint64_t{0}));
     const auto items = usage.value("items", nlohmann::json::array());
     if (items.empty()) {
         content += "<div class=\"panel empty\">No hourly usage.</div>";

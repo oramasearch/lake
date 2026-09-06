@@ -2313,6 +2313,18 @@ public:
         });
     }
 
+    Result<Membership> get_membership(const std::string& id) override {
+        return with_tx<Membership>([&](pqxx::work& tx) -> Result<Membership> {
+            const pqxx::result rows = tx.exec_params(std::string("SELECT ") + membership_columns +
+                                                         " FROM memberships WHERE id = $1::uuid",
+                                                     id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no membership " + id});
+            }
+            return membership_of(rows[0]);
+        });
+    }
+
     Result<std::vector<Membership>> list_memberships(const std::string& organization_id,
                                                      const std::string& team_id,
                                                      int limit) override {
@@ -2339,6 +2351,126 @@ public:
                 }
                 return out;
             });
+    }
+
+    Result<Membership> set_member_role(const std::string& id,
+                                       const std::string& role,
+                                       const std::string& actor) override {
+        return with_tx<Membership>([&](pqxx::work& tx) -> Result<Membership> {
+            if (role != "owner" && role != "admin" && role != "member") {
+                return std::unexpected(
+                    StoreError{"invalid_input", "role must be owner, admin, or member"});
+            }
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + membership_columns +
+                                   " FROM memberships WHERE id = $1::uuid FOR UPDATE",
+                               id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no membership " + id});
+            }
+            const Membership membership = membership_of(rows[0]);
+            if (membership.role == "owner" && role != "owner") {
+                const pqxx::result owners = tx.exec_params(
+                    "SELECT count(*) FROM memberships WHERE organization_id = $1::uuid "
+                    "AND team_id IS NOT DISTINCT FROM $2::uuid AND role = 'owner'",
+                    membership.organization_id,
+                    nullable(membership.team_id));
+                if (owners[0][0].as<int>() == 1) {
+                    return std::unexpected(StoreError{
+                        "conflict", "cannot demote the last owner in this membership scope"});
+                }
+            }
+            const std::string object_type = membership.team_id.empty() ? "organization" : "team";
+            const std::string external_id =
+                membership.team_id.empty() ? membership.organization_id : membership.team_id;
+            const pqxx::result objects = tx.exec_params(
+                "SELECT id::text FROM objects WHERE object_type = $1 AND external_id = $2",
+                object_type,
+                external_id);
+            if (objects.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "membership policy parent is missing"});
+            }
+            const std::string previous_grant_role = membership.role == "member" ? "read" : "admin";
+            const std::string next_grant_role = role == "member" ? "read" : "admin";
+            const pqxx::result removed = tx.exec_params(
+                "DELETE FROM grants WHERE principal_taap_id = $1 AND object_id = $2::uuid "
+                "AND role = $3 AND attestation_digest = $4 AND granted_by_taap_id = $5",
+                membership.principal_taap_id,
+                objects[0][0].as<std::string>(),
+                previous_grant_role,
+                membership.attestation_digest,
+                membership.granted_by_taap_id);
+            if (removed.affected_rows() != 1) {
+                return std::unexpected(
+                    StoreError{"store_error", "membership derived grant is missing"});
+            }
+            tx.exec_params(
+                "INSERT INTO grants (principal_taap_id, object_id, role, attestation_digest, "
+                "granted_by_taap_id) VALUES ($1, $2::uuid, $3, $4, $5) ON CONFLICT DO NOTHING",
+                membership.principal_taap_id,
+                objects[0][0].as<std::string>(),
+                next_grant_role,
+                membership.attestation_digest,
+                membership.granted_by_taap_id);
+            const pqxx::result updated = tx.exec_params(
+                std::string("UPDATE memberships SET role = $2 WHERE id = $1::uuid RETURNING ") +
+                    membership_columns,
+                id,
+                role);
+            static_cast<void>(actor);
+            return membership_of(updated[0]);
+        });
+    }
+
+    Result<void> remove_member(const std::string& id, const std::string& actor) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + membership_columns +
+                                   " FROM memberships WHERE id = $1::uuid FOR UPDATE",
+                               id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no membership " + id});
+            }
+            const Membership membership = membership_of(rows[0]);
+            if (membership.role == "owner") {
+                const pqxx::result owners = tx.exec_params(
+                    "SELECT count(*) FROM memberships WHERE organization_id = $1::uuid "
+                    "AND team_id IS NOT DISTINCT FROM $2::uuid AND role = 'owner'",
+                    membership.organization_id,
+                    nullable(membership.team_id));
+                if (owners[0][0].as<int>() == 1) {
+                    const std::string message =
+                        membership.principal_taap_id == actor
+                            ? "cannot remove yourself as the last owner in this membership scope"
+                            : "cannot remove the last owner in this membership scope";
+                    return std::unexpected(StoreError{"conflict", message});
+                }
+            }
+            const std::string object_type = membership.team_id.empty() ? "organization" : "team";
+            const std::string external_id =
+                membership.team_id.empty() ? membership.organization_id : membership.team_id;
+            const pqxx::result objects = tx.exec_params(
+                "SELECT id::text FROM objects WHERE object_type = $1 AND external_id = $2",
+                object_type,
+                external_id);
+            if (objects.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "membership policy parent is missing"});
+            }
+            tx.exec_params(
+                "DELETE FROM grants WHERE principal_taap_id = $1 AND object_id = $2::uuid "
+                "AND role = $3 AND attestation_digest = $4 AND granted_by_taap_id = $5",
+                membership.principal_taap_id,
+                objects[0][0].as<std::string>(),
+                membership.role == "member" ? "read" : "admin",
+                membership.attestation_digest,
+                membership.granted_by_taap_id);
+            tx.exec_params("DELETE FROM objects WHERE object_type = 'member' AND external_id = $1",
+                           id);
+            tx.exec_params("DELETE FROM memberships WHERE id = $1::uuid", id);
+            return {};
+        });
     }
 
     Result<Invitation> create_invitation(const NewInvitation& in) override {
@@ -3420,6 +3552,43 @@ public:
                 }
                 return usage;
             });
+    }
+
+    Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) override {
+        return with_tx<std::optional<std::uint64_t>>(
+            [&](pqxx::work& tx) -> Result<std::optional<std::uint64_t>> {
+                const pqxx::result customers =
+                    tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id);
+                if (customers.empty()) {
+                    return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+                }
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT quota_bytes FROM customer_storage_quotas WHERE customer_id = $1::uuid",
+                    customer_id);
+                if (rows.empty()) {
+                    return std::optional<std::uint64_t>{};
+                }
+                return rows[0][0].as<std::uint64_t>();
+            });
+    }
+
+    Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
+                                            std::uint64_t quota_bytes) override {
+        return with_tx<std::uint64_t>([&](pqxx::work& tx) -> Result<std::uint64_t> {
+            const pqxx::result customers =
+                tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO customer_storage_quotas (customer_id, quota_bytes) VALUES ($1::uuid, "
+                "$2) "
+                "ON CONFLICT (customer_id) DO UPDATE SET quota_bytes = EXCLUDED.quota_bytes, "
+                "updated_at = now() RETURNING quota_bytes",
+                customer_id,
+                quota_bytes);
+            return rows[0][0].as<std::uint64_t>();
+        });
     }
 
     Result<IssuedSession> sign_up_password(const NewPasswordUser& in) override {

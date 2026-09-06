@@ -19,7 +19,7 @@ unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
 is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
 credential resolution in place of the single admin token (lake #4), repositories with content
 once liquid Phase 1 lands, incremental migrations (operator #126). The codebase also includes
-organization administration, one policy engine, migration `0004`, and pages for organizations,
+organization administration, one policy engine, migration `0004`, and settings pages for organizations,
 teams, members, invitations, grants and effective access; those are not yet deployed in the
 production state above. It also includes the signed, hash-linked audit stream (one event per
 capability call, sign-in and session event, recorded by `Registry::call` and the session routes),
@@ -70,8 +70,9 @@ and records the signed query outcome through `Registry::call`. REST, OpenAPI, MC
 `/search` page expose the same capability.
 Metering migration `0014_metering` stores hourly unique-byte gauges, sync transfer counters, and
 idempotent build-compute counters. `metering_usage` and `/metering` expose configured integer
-pricing. `LAKE_STORAGE_QUOTA_BYTES` throttles new writes at the customer-store boundary while
-existing content remains complete and readable. The contract is `docs/api/metering.md`.
+pricing, with audited per-customer quota overrides. `LAKE_STORAGE_QUOTA_BYTES` remains the
+default and throttles new writes at the customer-store boundary while existing content remains
+complete and readable. The contract is `docs/api/metering.md`.
 Static secrets and encryption add migration `0009_secrets`: customer-namespaced organization
 mounts; immutable JSON versions with soft delete, restore and destroy; named keys with rotation,
 encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivation; and customer-KEK

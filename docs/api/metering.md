@@ -50,6 +50,12 @@ Prices are integer micro-units in `LAKE_PRICE_CURRENCY` (default `USD`):
 Fractional byte-based charges round up to one micro-unit. Arithmetic saturates at the unsigned
 64-bit maximum rather than wrapping.
 
+`set_storage_quota` stores a customer-specific integer byte quota through the registry. It
+requires `admin` on that customer, is represented in OpenAPI and MCP with the same schema, and
+records `metering.quota.set` in the signed audit stream. Its value overrides
+`LAKE_STORAGE_QUOTA_BYTES` for that customer; an explicit value of `0` disables the customer's
+quota. Customers without an override retain the process configuration.
+
 ## Quota behavior
 
 Chunk upload computes the exact raw bytes for digests absent from the customer store while holding
