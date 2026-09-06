@@ -10,6 +10,10 @@
 
 #include "lake/transparency/tuf.hpp"
 
+namespace lake::audit {
+struct Event;
+}
+
 namespace lake::transparency {
 
 inline constexpr std::size_t transparency_tile_width = 1024;
@@ -87,6 +91,7 @@ public:
     TiledLog(std::filesystem::path store_root, std::string instance_name);
 
     Result<AppendResult> append(const std::vector<std::string>& attestations);
+    Result<AppendResult> append_audit_event(const audit::Event& event);
     Result<Tile> tile(std::uint64_t index, std::size_t width) const;
     Result<HashTile> hash_tile(std::uint32_t level, std::uint64_t index, std::size_t width) const;
     Result<InclusionProof> inclusion_proof(std::uint64_t leaf_index, std::uint64_t tree_size) const;

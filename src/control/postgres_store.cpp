@@ -525,6 +525,68 @@ std::string base64url_encode(std::string_view value) {
     return base64url(reinterpret_cast<const unsigned char*>(value.data()), value.size());
 }
 
+std::expected<VerifiedTaapSignIn, std::string>
+verify_taap_sign_in(std::string_view identity_document,
+                    std::string_view pool_id,
+                    std::string_view nonce,
+                    std::int64_t issued_at,
+                    const nlohmann::json& signature,
+                    std::int64_t now_unix) {
+    if (pool_id.empty() || nonce.size() < 16 || !signature.is_object()) {
+        return std::unexpected("TAAP sign-in fields are incomplete");
+    }
+    if (now_unix == 0) {
+        now_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+    }
+    if (issued_at < now_unix - 300 || issued_at > now_unix + 60) {
+        return std::unexpected("TAAP sign-in assertion is outside its validity window");
+    }
+    const std::vector<unsigned char> document_bytes = from_base64url(identity_document);
+    const std::vector<unsigned char> signature_bytes = from_base64url(signature.value("bytes", ""));
+    if (document_bytes.empty() || signature_bytes.empty()) {
+        return std::unexpected("TAAP sign-in document or signature is not base64url");
+    }
+    std::vector<std::byte> encoded_document(document_bytes.size());
+    std::vector<std::byte> encoded_signature(signature_bytes.size());
+    std::transform(document_bytes.begin(),
+                   document_bytes.end(),
+                   encoded_document.begin(),
+                   [](auto value) { return std::byte{value}; });
+    std::transform(signature_bytes.begin(),
+                   signature_bytes.end(),
+                   encoded_signature.begin(),
+                   [](auto value) { return std::byte{value}; });
+    const auto document = liquid::decode_identity_document(encoded_document);
+    if (!document) {
+        return std::unexpected("TAAP identity document is invalid canonical CBOR");
+    }
+    const auto verified_document = liquid::verify_document(*document);
+    const auto canonical = liquid::encode_identity_document(*document);
+    if (!verified_document || !*verified_document || !canonical || *canonical != encoded_document) {
+        return std::unexpected("TAAP identity document does not verify canonically");
+    }
+    liquid::signature signed_value{signature.value("algorithm", ""),
+                                   signature.value("signing_key_identifier", ""),
+                                   signature.value("signing_key_label", ""),
+                                   signature.value("signature_purpose", ""),
+                                   signature.value("signed_at", ""),
+                                   std::move(encoded_signature)};
+    const std::string body =
+        std::string(pool_id) + "\n" + std::string(nonce) + "\n" + std::to_string(issued_at);
+    const std::span<const std::byte> body_bytes(reinterpret_cast<const std::byte*>(body.data()),
+                                                body.size());
+    const auto verified =
+        liquid::verify(document->subject, "lake_sign_in", body_bytes, signed_value);
+    if (!verified || !*verified) {
+        return std::unexpected("TAAP sign-in signature does not verify");
+    }
+    return VerifiedTaapSignIn{
+        document->subject.taap_id,
+        sha256_hex(std::string(identity_document) + "\n" + body + "\n" + signature.dump())};
+}
+
 std::optional<OidcClaims> verify_oidc_id_token(std::string_view token,
                                                std::string_view jwks,
                                                std::string_view issuer,
@@ -3456,6 +3518,48 @@ public:
             });
     }
 
+    Result<void>
+    create_application_authorization_code(const ApplicationAuthorizationCode& value) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params(
+                "INSERT INTO auth_app_authorization_codes "
+                "(code_hash, application_id, user_id, redirect_uri, code_challenge, nonce) "
+                "VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6)",
+                value.code_hash,
+                value.application_id,
+                value.user_id,
+                value.redirect_uri,
+                value.code_challenge,
+                value.nonce);
+            return {};
+        });
+    }
+
+    Result<ApplicationAuthorizationCode>
+    consume_application_authorization_code(const std::string& application_id,
+                                           const std::string& code_hash) override {
+        return with_tx<ApplicationAuthorizationCode>(
+            [&](pqxx::work& tx) -> Result<ApplicationAuthorizationCode> {
+                const pqxx::result rows = tx.exec_params(
+                    "UPDATE auth_app_authorization_codes SET used_at = now() "
+                    "WHERE application_id = $1::uuid AND code_hash = $2 AND used_at IS NULL "
+                    "AND expires_at > now() RETURNING application_id::text, user_id::text, "
+                    "redirect_uri, code_hash, code_challenge, nonce",
+                    application_id,
+                    code_hash);
+                if (rows.empty()) {
+                    return std::unexpected(StoreError{
+                        "unauthorized", "authorization code is invalid, expired, or already used"});
+                }
+                return ApplicationAuthorizationCode{rows[0][0].as<std::string>(),
+                                                    rows[0][1].as<std::string>(),
+                                                    rows[0][2].as<std::string>(),
+                                                    rows[0][3].as<std::string>(),
+                                                    rows[0][4].as<std::string>(),
+                                                    rows[0][5].as<std::string>()};
+            });
+    }
+
     audit::Result<audit::Identity> current_lake_identity() override {
         return with_audit_tx<audit::Identity>([](pqxx::work& tx) -> audit::Result<audit::Identity> {
             const pqxx::result rows =
@@ -3837,6 +3941,32 @@ public:
                                  {"*"},
                                  "",
                                  60 * 60 * 24 * 30);
+        });
+    }
+
+    Result<IssuedSession> sign_in_taap(const TaapSignIn& input) override {
+        return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
+            const pqxx::result users =
+                tx.exec_params("SELECT id::text FROM users WHERE pool_id = $1 AND taap_id = $2",
+                               input.pool_id,
+                               input.taap_id);
+            if (users.empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "TAAP identity is not registered"});
+            }
+            const std::string user_id = users[0][0].as<std::string>();
+            try {
+                tx.exec_params("INSERT INTO identity_taap_assertions "
+                               "(assertion_id, user_id, pool_id) VALUES ($1, $2::uuid, $3)",
+                               input.assertion_id,
+                               user_id,
+                               input.pool_id);
+            } catch (const pqxx::unique_violation&) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "TAAP assertion was already used"});
+            }
+            return issue_session(
+                tx, user_id, input.pool_id, input.device_name, "taap", "", {"*"}, "", 60 * 60 * 24);
         });
     }
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
@@ -5214,6 +5344,79 @@ public:
             });
     }
 
+    Result<PkiCertificateRecord>
+    create_pki_certificate(const NewPkiCertificateRecord& input) override {
+        return with_tx<PkiCertificateRecord>([&](pqxx::work& tx) -> Result<PkiCertificateRecord> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO pki_certificates "
+                "(authority_id, customer_id, profile, subject, serial, public_value, expires_at, "
+                "renewed_from_id) SELECT id, customer_id, $2, $3, $4, $5, $6::timestamptz, "
+                "NULLIF($7, '')::uuid FROM pki_authorities WHERE customer_id = $1::uuid "
+                "RETURNING id::text, authority_id::text, customer_id::text, profile, subject, "
+                "serial, public_value, "
+                "to_char(expires_at AT TIME ZONE 'UTC', "
+                "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), issued_at::text, "
+                "coalesce(renewed_from_id::text,''), coalesce(revoked_at::text,'')",
+                input.customer_id,
+                input.profile,
+                input.subject,
+                input.serial,
+                input.public_value,
+                input.expires_at,
+                input.renewed_from_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "customer authority does not exist"});
+            }
+            return PkiCertificateRecord{rows[0][0].as<std::string>(),
+                                        rows[0][1].as<std::string>(),
+                                        rows[0][2].as<std::string>(),
+                                        rows[0][3].as<std::string>(),
+                                        rows[0][4].as<std::string>(),
+                                        rows[0][5].as<std::string>(),
+                                        rows[0][6].as<std::string>(),
+                                        rows[0][7].as<std::string>(),
+                                        rows[0][8].as<std::string>(),
+                                        rows[0][9].as<std::string>(),
+                                        rows[0][10].as<std::string>()};
+        });
+    }
+
+    Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) override {
+        return with_tx<PkiCertificateRecord>([&](pqxx::work& tx) -> Result<PkiCertificateRecord> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT id::text, authority_id::text, customer_id::text, profile, subject, serial, "
+                "public_value, to_char(expires_at AT TIME ZONE 'UTC', "
+                "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), issued_at::text, "
+                "coalesce(renewed_from_id::text,''), coalesce(revoked_at::text,'') "
+                "FROM pki_certificates WHERE id = $1::uuid",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "certificate does not exist"});
+            }
+            return PkiCertificateRecord{rows[0][0].as<std::string>(),
+                                        rows[0][1].as<std::string>(),
+                                        rows[0][2].as<std::string>(),
+                                        rows[0][3].as<std::string>(),
+                                        rows[0][4].as<std::string>(),
+                                        rows[0][5].as<std::string>(),
+                                        rows[0][6].as<std::string>(),
+                                        rows[0][7].as<std::string>(),
+                                        rows[0][8].as<std::string>(),
+                                        rows[0][9].as<std::string>(),
+                                        rows[0][10].as<std::string>()};
+        });
+    }
+
+    Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) override {
+        return with_tx<PkiCertificateRecord>([&](pqxx::work& tx) -> Result<PkiCertificateRecord> {
+            tx.exec_params("UPDATE pki_certificates SET revoked_at = coalesce(revoked_at, now()) "
+                           "WHERE id = $1::uuid",
+                           id);
+            return get_pki_certificate_tx(tx, id);
+        });
+    }
+
     Result<AgentSession> create_agent_session(const NewAgentSession& input) override {
         if (input.id.empty() || input.customer_id.empty() || input.durable_agent_taap_id.empty() ||
             input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||
@@ -5675,6 +5878,89 @@ public:
             tx.exec_params("UPDATE secrets_entries SET updated_at = now() WHERE id = $1::uuid",
                            entry_id);
             return secret_metadata_tx(tx, mount_id, name);
+        });
+    }
+
+    Result<IssuedDynamicSecret> lease_dynamic_secret(const NewDynamicSecretLease& input,
+                                                     const std::string& instance_kek) override {
+        if (input.role.empty() || !input.value.is_object() || input.lifetime_seconds < 1 ||
+            input.lifetime_seconds > 3600) {
+            return std::unexpected(StoreError{"invalid_input", "dynamic-secret lease is invalid"});
+        }
+        return with_tx<IssuedDynamicSecret>([&](pqxx::work& tx) -> Result<IssuedDynamicSecret> {
+            const std::string id = new_uuid_v4();
+            auto key = data_key_tx(tx, "mount", input.mount_id, 1, instance_kek);
+            if (!key) {
+                return std::unexpected(key.error());
+            }
+            const std::string associated = "lake dynamic secret/" + input.mount_id + "/" + id;
+            const auto encrypted = secrets_crypto::seal(*key, input.value.dump(), associated);
+            secrets_crypto::cleanse(*key);
+            if (!encrypted) {
+                return std::unexpected(encrypted.error());
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO secrets_dynamic_leases "
+                "(id, mount_id, role, encrypted_value, expires_at) "
+                "VALUES ($1::uuid, $2::uuid, $3, $4, "
+                "now() + make_interval(secs => $5)) RETURNING id::text, mount_id::text, role, "
+                "expires_at::text, coalesce(revoked_at::text,''), renewals, created_at::text",
+                id,
+                input.mount_id,
+                input.role,
+                *encrypted,
+                input.lifetime_seconds);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "secret mount does not exist"});
+            }
+            DynamicSecretLease lease{rows[0][0].as<std::string>(),
+                                     rows[0][1].as<std::string>(),
+                                     rows[0][2].as<std::string>(),
+                                     rows[0][3].as<std::string>(),
+                                     rows[0][4].as<std::string>(),
+                                     rows[0][5].as<int>(),
+                                     rows[0][6].as<std::string>()};
+            return IssuedDynamicSecret{std::move(lease), input.value};
+        });
+    }
+
+    Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) override {
+        return with_tx<DynamicSecretLease>(
+            [&](pqxx::work& tx) { return dynamic_secret_lease_tx(tx, id); });
+    }
+
+    Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
+                                                          int lifetime_seconds) override {
+        if (lifetime_seconds < 1 || lifetime_seconds > 3600) {
+            return std::unexpected(
+                StoreError{"invalid_input", "lease lifetime must be at most one hour"});
+        }
+        return with_tx<DynamicSecretLease>([&](pqxx::work& tx) -> Result<DynamicSecretLease> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE secrets_dynamic_leases SET expires_at = now() + make_interval(secs => $2), "
+                "renewals = renewals + 1 WHERE id = $1::uuid AND revoked_at IS NULL "
+                "AND expires_at > now() RETURNING id::text",
+                id,
+                lifetime_seconds);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "dynamic-secret lease is not active"});
+            }
+            return dynamic_secret_lease_tx(tx, id);
+        });
+    }
+
+    Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) override {
+        return with_tx<DynamicSecretLease>([&](pqxx::work& tx) -> Result<DynamicSecretLease> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE secrets_dynamic_leases SET revoked_at = coalesce(revoked_at, now()) "
+                "WHERE id = $1::uuid RETURNING id::text",
+                id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "dynamic-secret lease does not exist"});
+            }
+            return dynamic_secret_lease_tx(tx, id);
         });
     }
 
@@ -6512,6 +6798,48 @@ public:
     }
 
 private:
+    Result<PkiCertificateRecord> get_pki_certificate_tx(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            "SELECT id::text, authority_id::text, customer_id::text, profile, subject, serial, "
+            "public_value, to_char(expires_at AT TIME ZONE 'UTC', "
+            "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), issued_at::text, "
+            "coalesce(renewed_from_id::text,''), coalesce(revoked_at::text,'') "
+            "FROM pki_certificates WHERE id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "certificate does not exist"});
+        }
+        return PkiCertificateRecord{rows[0][0].as<std::string>(),
+                                    rows[0][1].as<std::string>(),
+                                    rows[0][2].as<std::string>(),
+                                    rows[0][3].as<std::string>(),
+                                    rows[0][4].as<std::string>(),
+                                    rows[0][5].as<std::string>(),
+                                    rows[0][6].as<std::string>(),
+                                    rows[0][7].as<std::string>(),
+                                    rows[0][8].as<std::string>(),
+                                    rows[0][9].as<std::string>(),
+                                    rows[0][10].as<std::string>()};
+    }
+
+    Result<DynamicSecretLease> dynamic_secret_lease_tx(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows =
+            tx.exec_params("SELECT id::text, mount_id::text, role, expires_at::text, "
+                           "coalesce(revoked_at::text,''), renewals, created_at::text "
+                           "FROM secrets_dynamic_leases WHERE id = $1::uuid",
+                           id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
+        }
+        return DynamicSecretLease{rows[0][0].as<std::string>(),
+                                  rows[0][1].as<std::string>(),
+                                  rows[0][2].as<std::string>(),
+                                  rows[0][3].as<std::string>(),
+                                  rows[0][4].as<std::string>(),
+                                  rows[0][5].as<int>(),
+                                  rows[0][6].as<std::string>()};
+    }
+
     Result<Application> application_by(std::string_view predicate, const std::string& value) {
         return with_tx<Application>([&](pqxx::work& tx) -> Result<Application> {
             const pqxx::result rows =

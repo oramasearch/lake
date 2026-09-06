@@ -65,11 +65,14 @@ liquid is the tool. lake is where it collects.
 > static secrets with delete/restore/destroy history, and named encryption keys with rotation,
 > encrypt/decrypt/rewrap, Ed25519 signatures, HMAC, derivation and customer-KEK rotation. The
 > registry records every operation, including mount-grant denials, and the secrets pages expose
-> metadata without rendering protected values or key material.
+> metadata without rendering protected values or key material. Migration `0020_identity_exit`
+> adds encrypted, renewable and revocable dynamic-secret leases whose signed lifecycle audit rows
+> are committed to the transparency log.
 > Customer PKI adds private root and online-intermediate authorities, SPIFFE X.509 and JWT SVIDs,
 > client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555
 > ACME HTTP-01 order flow under migration `0013_pki`. ACME requests use one-use nonces and ES256
-> account JWS, and finalization signs the submitted CSR key.
+> account JWS, and finalization signs the submitted CSR key. Agent TAAP public keys now receive
+> short-lived certificates with explicit rotation links, revocation, and API status enforcement.
 > Caller exchanges persist verified non-secret metadata, while root-recovery ceremonies persist
 > quorum, expiry, completion, and one-way share evidence. OIDC/JWT claim policy comes from the
 > shared federation issuer store. All remain on the signed audit path.
@@ -94,7 +97,8 @@ liquid is the tool. lake is where it collects.
 > instance log. Signed checkpoints commit to their Merkle root. Public tile and compact
 > inclusion/consistency-proof capabilities bind responses to exact signed checkpoints. The hosted
 > `/transparency` identity monitor recomputes the root before returning matches, so a modified tile
-> is refused.
+> is refused. Lake pins liquid #207's client verifier and the identity-exit scenario verifies a
+> dynamic-secret audit leaf against Lake's compact inclusion proof.
 > Active/standby Lake instances also replicate customer repositories through durable liquid
 > cursors and replicate the transparency log only from a matching Merkle prefix. Signed
 > checkpoints are verified and adopted without rollback. The consistency model and operator
@@ -108,7 +112,9 @@ liquid is the tool. lake is where it collects.
 > Application authentication migration `0016_auth_apps` adds isolated user pools, hosted and
 > custom-domain identity pages, per-application JWT signing and JWKS, lifecycle webhooks, and
 > operator pages for application users and organizations. The registry authorizes and audits its
-> application management capabilities.
+> application management capabilities. A fresh libliquid TAAP-key assertion can now issue a lake
+> session, and that session can complete a one-use PKCE application authorization-code flow whose
+> ID token verifies against the application's JWKS.
 > Agent-session migration `0017_agent_sessions` adds short-lived Ed25519 session identities
 > delegated to durable agents through logged `delegation/1` attestations. The private seed is
 > returned once and never stored; signed drips verify as the durable agent until expiry. The

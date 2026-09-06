@@ -208,14 +208,14 @@ void exercise_agent_session(lake::control::Store& store,
     EXPECT_EQ(attestation->profile, "delegation/1");
     EXPECT_EQ(attestation->subject_kind, liquid::attestation_subject_kind::actor);
     EXPECT_TRUE(std::ranges::any_of(attestation->attributes, [&](const auto& attribute) {
-        const auto* principal = std::get_if<std::string>(&attribute.value);
-        return attribute.name == "principal" && principal && *principal == durable_agent;
+        const auto* value = std::get_if<std::string>(&attribute.value);
+        return attribute.name == "dispatcher" && value && *value == dispatcher;
     }));
     const auto state = log.state();
     ASSERT_TRUE(state) << state.error().message;
     EXPECT_EQ(state->tree_size, 1U);
     EXPECT_EQ(state->root_hash, stored->transparency_root);
-    const auto scan = log.scan_identity(durable_agent, state->tree_size, state->root_hash);
+    const auto scan = log.scan_identity(dispatcher, state->tree_size, state->root_hash);
     ASSERT_TRUE(scan) << scan.error().message;
     ASSERT_EQ(scan->matches.size(), 1U);
     EXPECT_EQ(scan->matches.front().attestation, stored->attestation);

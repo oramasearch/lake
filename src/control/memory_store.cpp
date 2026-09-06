@@ -252,6 +252,16 @@ nlohmann::json to_json(const SecretMetadata& metadata) {
             {"updated_at", metadata.updated_at}};
 }
 
+nlohmann::json to_json(const DynamicSecretLease& value) {
+    return {{"id", value.id},
+            {"mount_id", value.mount_id},
+            {"role", value.role},
+            {"expires_at", value.expires_at},
+            {"revoked_at", nullable(value.revoked_at)},
+            {"renewals", value.renewals},
+            {"created_at", value.created_at}};
+}
+
 nlohmann::json to_json(const EncryptionKey& key) {
     return {{"id", key.id},
             {"mount_id", key.mount_id},
@@ -1005,6 +1015,32 @@ Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& inpu
         return issued;
     }
     return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
+}
+
+Result<IssuedSession> InMemoryStore::sign_in_taap(const TaapSignIn& input) {
+    if (input.pool_id.empty() || input.taap_id.empty() || input.assertion_id.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "TAAP sign-in fields are required"});
+    }
+    std::lock_guard lock(mutex_);
+    if (!taap_assertions_.insert(input.assertion_id).second) {
+        return std::unexpected(StoreError{"unauthorized", "TAAP assertion was already used"});
+    }
+    const auto user = std::ranges::find_if(
+        users_, [&](const User& value) { return value.taap_id == input.taap_id; });
+    const auto credential = std::ranges::find_if(passwords_, [&](const PasswordCredential& value) {
+        return user != users_.end() && value.user_id == user->id && value.pool_id == input.pool_id;
+    });
+    if (user == users_.end() || credential == passwords_.end()) {
+        return std::unexpected(StoreError{"unauthorized", "TAAP identity is not registered"});
+    }
+    Device& device = add_device(devices_, user->id, input.device_name);
+    IssuedSession issued =
+        add_session(sessions_, user->id, input.pool_id, device.id, "taap", "", {"*"}, "", 86400);
+    if (issued.secret.empty()) {
+        return std::unexpected(StoreError{"store_error", "could not issue session"});
+    }
+    issued.session.reason.clear();
+    return issued;
 }
 
 Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
@@ -3283,6 +3319,55 @@ Result<std::vector<PkiCallerRecord>> InMemoryStore::list_pki_callers(const std::
     return output;
 }
 
+Result<PkiCertificateRecord>
+InMemoryStore::create_pki_certificate(const NewPkiCertificateRecord& input) {
+    std::lock_guard lock(mutex_);
+    const auto authority = std::ranges::find_if(pki_authorities_, [&](const auto& value) {
+        return value.customer_id == input.customer_id;
+    });
+    if (authority == pki_authorities_.end()) {
+        return std::unexpected(StoreError{"not_found", "customer authority does not exist"});
+    }
+    if (std::ranges::any_of(pki_certificates_, [&](const auto& value) {
+            return value.authority_id == authority->id && value.serial == input.serial;
+        })) {
+        return std::unexpected(StoreError{"conflict", "certificate serial already exists"});
+    }
+    pki_certificates_.push_back(PkiCertificateRecord{new_uuid_v4(),
+                                                     authority->id,
+                                                     input.customer_id,
+                                                     input.profile,
+                                                     input.subject,
+                                                     input.serial,
+                                                     input.public_value,
+                                                     input.expires_at,
+                                                     now_iso8601(),
+                                                     input.renewed_from_id,
+                                                     ""});
+    return pki_certificates_.back();
+}
+
+Result<PkiCertificateRecord> InMemoryStore::get_pki_certificate(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(pki_certificates_, id, &PkiCertificateRecord::id);
+    if (found == pki_certificates_.end()) {
+        return std::unexpected(StoreError{"not_found", "certificate does not exist"});
+    }
+    return *found;
+}
+
+Result<PkiCertificateRecord> InMemoryStore::revoke_pki_certificate(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(pki_certificates_, id, &PkiCertificateRecord::id);
+    if (found == pki_certificates_.end()) {
+        return std::unexpected(StoreError{"not_found", "certificate does not exist"});
+    }
+    if (found->revoked_at.empty()) {
+        found->revoked_at = now_iso8601();
+    }
+    return *found;
+}
+
 Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& input) {
     std::lock_guard lock(mutex_);
     const auto customer = std::ranges::find_if(
@@ -3733,6 +3818,73 @@ InMemoryStore::change_secret_versions(const std::string& mount_id,
     }
     entry->metadata.updated_at = now;
     return entry->metadata;
+}
+
+Result<IssuedDynamicSecret> InMemoryStore::lease_dynamic_secret(const NewDynamicSecretLease& input,
+                                                                const std::string& instance_kek) {
+    static_cast<void>(instance_kek);
+    if (input.role.empty() || !input.value.is_object() || input.lifetime_seconds < 1 ||
+        input.lifetime_seconds > 3600) {
+        return std::unexpected(StoreError{"invalid_input", "dynamic-secret lease is invalid"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            secret_mounts_, [&](const SecretMount& value) { return value.id == input.mount_id; })) {
+        return std::unexpected(StoreError{"not_found", "secret mount does not exist"});
+    }
+    const auto expires =
+        std::chrono::system_clock::now() + std::chrono::seconds{input.lifetime_seconds};
+    DynamicSecretLease lease{
+        new_uuid_v4(),
+        input.mount_id,
+        input.role,
+        std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires)),
+        "",
+        0,
+        now_iso8601()};
+    dynamic_secret_leases_.push_back(lease);
+    return IssuedDynamicSecret{lease, input.value};
+}
+
+Result<DynamicSecretLease> InMemoryStore::get_dynamic_secret_lease(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(dynamic_secret_leases_, id, &DynamicSecretLease::id);
+    if (found == dynamic_secret_leases_.end()) {
+        return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
+    }
+    return *found;
+}
+
+Result<DynamicSecretLease> InMemoryStore::renew_dynamic_secret_lease(const std::string& id,
+                                                                     int lifetime_seconds) {
+    if (lifetime_seconds < 1 || lifetime_seconds > 3600) {
+        return std::unexpected(
+            StoreError{"invalid_input", "lease lifetime must be at most one hour"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(dynamic_secret_leases_, id, &DynamicSecretLease::id);
+    if (found == dynamic_secret_leases_.end()) {
+        return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
+    }
+    if (!found->revoked_at.empty() || found->expires_at <= now_iso8601()) {
+        return std::unexpected(StoreError{"conflict", "dynamic-secret lease is not active"});
+    }
+    const auto expires = std::chrono::system_clock::now() + std::chrono::seconds{lifetime_seconds};
+    found->expires_at = std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires));
+    ++found->renewals;
+    return *found;
+}
+
+Result<DynamicSecretLease> InMemoryStore::revoke_dynamic_secret_lease(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(dynamic_secret_leases_, id, &DynamicSecretLease::id);
+    if (found == dynamic_secret_leases_.end()) {
+        return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
+    }
+    if (found->revoked_at.empty()) {
+        found->revoked_at = now_iso8601();
+    }
+    return *found;
 }
 
 Result<EncryptionKey> InMemoryStore::create_encryption_key(const NewEncryptionKey& input,

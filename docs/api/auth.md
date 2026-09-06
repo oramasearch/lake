@@ -31,5 +31,14 @@ kubectl get secret lake-<name>-admin -n <namespace> -o jsonpath='{.data.token}' 
 
 The operator bearer remains a break-glass credential rather than a user identity. TAAP user
 identities, scoped sessions, and device revocation are the default user path. Agent workloads use
-the short-lived delegated keys in [agents.md](agents.md); general external workload credential
-resolution and lake acting as an OIDC issuer remain later work.
+the short-lived delegated keys in [agents.md](agents.md). Lake also accepts a fresh, one-use
+libliquid TAAP-key assertion through `sign_in_taap` and acts as the issuer in an application OIDC
+authorization-code flow; see [identity.md](identity.md) and [apps.md](apps.md).
+
+## What the exit scenario proves
+
+The Postgres identity-exit scenario starts with a TAAP-key session, completes a one-use code flow
+with exact redirect matching and PKCE S256, and has the relying party validate the returned ID
+token's EdDSA signature, issuer, audience, nonce, and `kid` against Lake's public application JWKS.
+It also proves certificate issue, rotation, revocation enforcement, and dynamic-secret lease
+lifecycle calls all traverse the same authorization and signed audit path.

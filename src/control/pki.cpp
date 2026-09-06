@@ -726,6 +726,46 @@ issue_x509_certificate(const Authority& authority, std::string_view subject, int
                     authority.intermediate_certificate_pem + authority.root_certificate_pem};
 }
 
+Result<X509Svid> issue_agent_certificate(const Authority& authority,
+                                         std::string_view subject,
+                                         std::string_view public_key,
+                                         int lifetime_seconds) {
+    if (subject.empty() || lifetime_seconds <= 0 || lifetime_seconds > 3600) {
+        return std::unexpected(Error{
+            "invalid_input", "certificate subject and a lifetime up to one hour are required"});
+    }
+    auto public_key_bytes = base64url_decode(std::string(public_key));
+    if (!public_key_bytes || public_key_bytes->size() != 32) {
+        return std::unexpected(
+            Error{"invalid_input", "agent TAAP public key must be 32-byte base64url Ed25519"});
+    }
+    Pkey leaf_key(EVP_PKEY_new_raw_public_key(
+        EVP_PKEY_ED25519, nullptr, public_key_bytes->data(), public_key_bytes->size()));
+    auto intermediate_key = private_key_from_pem(authority.intermediate_private_key_pem);
+    auto intermediate_certificate = certificate_from_pem(authority.intermediate_certificate_pem);
+    if (!leaf_key || !intermediate_key || !intermediate_certificate) {
+        return std::unexpected(
+            Error{"invalid_input", "authority or agent key material is invalid"});
+    }
+    auto leaf_certificate = make_certificate(leaf_key.get(),
+                                             intermediate_key->get(),
+                                             intermediate_certificate->get(),
+                                             "lake agent",
+                                             lifetime_seconds,
+                                             false,
+                                             subject);
+    if (!leaf_certificate) {
+        return std::unexpected(leaf_certificate.error());
+    }
+    auto certificate_pem = pem_of_certificate(leaf_certificate->get());
+    if (!certificate_pem) {
+        return std::unexpected(certificate_pem.error());
+    }
+    return X509Svid{*certificate_pem,
+                    {},
+                    authority.intermediate_certificate_pem + authority.root_certificate_pem};
+}
+
 Result<void> verify_x509_svid(const Authority& authority, const X509Svid& svid) {
     auto root = certificate_from_pem(authority.root_certificate_pem);
     auto intermediate = certificate_from_pem(authority.intermediate_certificate_pem);
@@ -1146,6 +1186,19 @@ Result<X509Svid> Service::issue_x509_certificate(::lake::control::Store& store,
         return std::unexpected(authority.error());
     }
     return pki::issue_x509_certificate(*authority, subject, lifetime_seconds);
+}
+
+Result<X509Svid> Service::issue_agent_certificate(::lake::control::Store& store,
+                                                  std::string_view customer_id,
+                                                  std::string_view subject,
+                                                  std::string_view public_key,
+                                                  std::string_view instance_kek,
+                                                  int lifetime_seconds) {
+    auto authority = load_authority(store, customer_id, instance_kek);
+    if (!authority) {
+        return std::unexpected(authority.error());
+    }
+    return pki::issue_agent_certificate(*authority, subject, public_key, lifetime_seconds);
 }
 
 Result<JwtSvid> Service::issue_jwt_svid(std::string_view customer_id,

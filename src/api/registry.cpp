@@ -6,6 +6,7 @@
 
 #include "lake/audit/audit.hpp"
 #include "lake/control/store.hpp"
+#include "lake/transparency/log.hpp"
 
 namespace lake::api {
 
@@ -146,6 +147,14 @@ ApiResult finish_call(const std::string& name, ApiResult result, ApiContext& con
     if (!recorded) {
         return ApiResult::failure("store_error",
                                   "could not record audit event: " + recorded.error().message);
+    }
+    if (kind == "dynamic_secret" && context.transparency_log) {
+        auto appended = context.transparency_log->append_audit_event(*recorded);
+        if (!appended) {
+            return ApiResult::failure("store_error",
+                                      "could not append audit event to transparency log: " +
+                                          appended.error().message);
+        }
     }
     return result;
 }

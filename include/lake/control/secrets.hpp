@@ -63,6 +63,28 @@ struct PutSecret {
     std::uint64_t check_and_set = 0;
 };
 
+struct DynamicSecretLease {
+    std::string id;
+    std::string mount_id;
+    std::string role;
+    std::string expires_at;
+    std::string revoked_at;
+    int renewals = 0;
+    std::string created_at;
+};
+
+struct NewDynamicSecretLease {
+    std::string mount_id;
+    std::string role;
+    nlohmann::json value;
+    int lifetime_seconds = 0;
+};
+
+struct IssuedDynamicSecret {
+    DynamicSecretLease lease;
+    nlohmann::json value;
+};
+
 enum class SecretVersionAction {
     Delete,
     Undelete,
@@ -110,6 +132,7 @@ struct CustomerKekRotation {
 nlohmann::json to_json(const SecretMount& value);
 nlohmann::json to_json(const SecretVersion& value);
 nlohmann::json to_json(const SecretMetadata& value);
+nlohmann::json to_json(const DynamicSecretLease& value);
 nlohmann::json to_json(const EncryptionKey& value);
 nlohmann::json to_json(const TransitValue& value);
 nlohmann::json to_json(const TransitVerification& value);

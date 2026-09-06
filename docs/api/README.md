@@ -114,9 +114,10 @@ and Loki-compatible log reads.
 | `export_transparency_replication_batch` | action | source tree-size cursor | verified log suffix with base/head commitments and current checkpoint | [replication.md](replication.md) |
 | `replicate_transparency_log` | action | source Lake URL | applied tree size, root, checkpoint sequence, and catch-up state | [replication.md](replication.md) |
 | `replicate_repository` | action | repository, source instance, source Lake URL | durable liquid cursor, transfer totals, and ref count | [replication.md](replication.md) |
-| `sign_up_password`, `sign_in_password`, `verify_mfa` | action, public entry | password credentials; verify also takes a TOTP or recovery code | browser session + secret | [identity.md](identity.md) |
+| `sign_up_password`, `sign_in_password`, `sign_in_taap`, `verify_mfa` | action, public entry | password, one-use TAAP assertion, or MFA proof | browser session + secret | [identity.md](identity.md) |
 | `register_application`, `list_applications`, `get_application`, `update_application_theme`, `rotate_application_signing_key` | action/read | customer, application registration, theme, or application id | isolated pool registration and key metadata | [apps.md](apps.md) |
 | `application_jwks`, `issue_application_jwt` | public read / protected action | application and active user ids | Ed25519 JWKS or short-lived audience-bound JWT | [apps.md](apps.md) |
+| `begin_application_authorization`, `exchange_application_authorization_code` | protected/public action | application, exact redirect, state, nonce, PKCE challenge; then code and verifier | one-use authorization result, then access and ID tokens | [apps.md](apps.md) |
 | `list_application_users`, `suspend_application_user`, `delete_application_user`, `export_application_user` | read/action | application and user ids | pool profiles, suspension, deletion, or export | [apps.md](apps.md) |
 | `list_application_organizations`, `create_application_organization`, `update_application_organization`, `delete_application_organization` | read/action | application, organization, TAAP identity, name, metadata | application organization lifecycle | [apps.md](apps.md) |
 | `create_application_webhook`, `list_application_webhooks`, `list_application_webhook_events`, `retry_application_webhook` | action/read | application, endpoint, subscriptions, event and webhook ids | signed lifecycle delivery log | [apps.md](apps.md) |
@@ -141,6 +142,7 @@ and Loki-compatible log reads.
 | `create_secret_mount`, `list_secret_mounts`, `get_secret_mount` | action/read | customer, organization, mount fields | mount metadata | [secrets.md](secrets.md) |
 | `put_secret`, `read_secret`, `secret_metadata` | action/read | mount, name, value/version/metadata fields | versioned value or history | [secrets.md](secrets.md) |
 | `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions` | action | mount, name, `versions[]` | updated history | [secrets.md](secrets.md) |
+| `lease_dynamic_secret`, `renew_dynamic_secret`, `revoke_dynamic_secret` | action | mount, role and bounded lifetime; then lease id | response-only generated credential or updated lease metadata | [secrets.md](secrets.md) |
 | `create_encryption_key`, `list_encryption_keys`, `get_encryption_key`, `rotate_encryption_key` | action/read | mount and key name | named-key metadata only | [encryption.md](encryption.md) |
 | `encrypt`, `decrypt`, `rewrap`, `sign`, `verify`, `hmac`, `derive_encryption_key` | action | mount, key and base64url payload fields | protected result and key version | [encryption.md](encryption.md) |
 | `rotate_customer_kek` | action | `customer_id` | KEK version and rewrapped-key count | [encryption.md](encryption.md) |
@@ -148,6 +150,7 @@ and Loki-compatible log reads.
 | `issue_x509_svid` | action | customer, SPIFFE ID, optional lifetime | short-lived X.509 SVID, private key, and chain | [pki.md](pki.md) |
 | `issue_jwt_svid` | action | customer, SPIFFE ID, audience, optional lifetime | short-lived ES256 JWT SVID | [pki.md](pki.md) |
 | `issue_client_certificate`, `issue_device_certificate` | action | customer, subject, optional lifetime | short-lived client or device X.509 certificate, private key, and chain | [pki.md](pki.md) |
+| `issue_agent_certificate`, `rotate_agent_certificate`, `revoke_agent_certificate`, `check_agent_certificate` | action/read | customer and TAAP key; then certificate id and optional replacement key | short-lived public-key certificate or enforced status | [pki.md](pki.md) |
 | `issue_ssh_user_certificate`, `issue_ssh_host_certificate` | action | customer, Ed25519 public key, key ID, principals, optional lifetime | short-lived OpenSSH certificate and CA public key | [pki.md](pki.md) |
 | `acme_new_account`, `acme_new_order`, `acme_order`, `acme_authorization`, `acme_http01_challenge`, `acme_finalize_order`, `acme_certificate`, `acme_http01_response` | ACME transport | RFC 8555 JWS, account, order, authorization, challenge and CSR fields | customer-scoped ACME state and certificate chain | [pki.md](pki.md) |
 | `begin_root_recovery`, `complete_root_recovery` | action | customer, configured quorum; then ceremony and shares | recovery shares, then rehearsal confirmation | [break-glass.md](break-glass.md) |

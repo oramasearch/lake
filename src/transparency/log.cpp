@@ -26,6 +26,8 @@
 
 #include <liquid/attestation.hpp>
 
+#include "lake/audit/audit.hpp"
+
 namespace lake::transparency {
 namespace {
 
@@ -35,6 +37,7 @@ using nlohmann::json;
 
 constexpr std::string_view tile_header = "LAKE-TILE-1\n";
 constexpr std::string_view hash_tile_header = "LAKE-HASH-TILE-1\n";
+constexpr std::string_view audit_entry_header = "LAKE-AUDIT-EVENT-1\n";
 
 class AppendLock {
 public:
@@ -126,6 +129,21 @@ Result<Hash> sha256(std::span<const std::byte> value) {
                    nullptr) != 1 ||
         size != output.size()) {
         return std::unexpected(Error{"store_error", "could not calculate transparency SHA-256"});
+    }
+    return output;
+}
+
+Result<Hash> sha512_256(std::span<const std::byte> value) {
+    Hash output{};
+    unsigned int size = 0;
+    if (EVP_Digest(value.data(),
+                   value.size(),
+                   reinterpret_cast<unsigned char*>(output.data()),
+                   &size,
+                   EVP_sha512_256(),
+                   nullptr) != 1 ||
+        size != output.size()) {
+        return std::unexpected(Error{"store_error", "could not calculate audit SHA-512/256"});
     }
     return output;
 }
@@ -526,6 +544,39 @@ void add_identity(std::vector<std::string>& identities, const std::string& value
 }
 
 Result<VerifiedAttestation> verify_attestation(std::span<const std::byte> encoded) {
+    const bool audit_entry =
+        encoded.size() > audit_entry_header.size() &&
+        std::ranges::equal(encoded.first(audit_entry_header.size()),
+                           audit_entry_header,
+                           [](std::byte left, char right) {
+                               return left == std::byte{static_cast<unsigned char>(right)};
+                           });
+    if (audit_entry) {
+        const auto body = encoded.subspan(audit_entry_header.size());
+        const json event = json::from_cbor(body, true, false);
+        if (!event.is_object() || event.value("version", "") != "audit_event/1" ||
+            !event.contains("digest") || !event.at("digest").is_string() ||
+            !event.contains("signer") || !event.at("signer").is_string() ||
+            !event.contains("principal") || !event.at("principal").is_string() ||
+            !event.contains("object") || !event.at("object").is_string()) {
+            return std::unexpected(Error{"invalid_input", "audit event entry is malformed"});
+        }
+        json stored_event = event;
+        const std::string expected_digest = stored_event.at("digest");
+        stored_event.erase("digest");
+        const std::vector<std::uint8_t> stored_bytes = json::to_cbor(stored_event);
+        const auto digest = sha512_256(std::as_bytes(std::span(stored_bytes)));
+        if (!digest || hex(*digest) != expected_digest) {
+            return std::unexpected(
+                Error{"invalid_input", "audit event entry digest does not verify"});
+        }
+        VerifiedAttestation output{.profile = "audit_event/1",
+                                   .issuer = event.at("signer"),
+                                   .subject = event.at("object")};
+        add_identity(output.identities, output.issuer);
+        add_identity(output.identities, event.at("principal"));
+        return output;
+    }
     const auto statement = liquid::decode_attestation(encoded);
     if (!statement) {
         return std::unexpected(
@@ -1138,6 +1189,23 @@ Result<AppendResult> TiledLog::append(const std::vector<std::string>& attestatio
             Error{"invalid_input", "lake instance name is not a safe path component"});
     }
     return impl_->append_entries(attestations, std::nullopt, std::nullopt);
+}
+
+Result<AppendResult> TiledLog::append_audit_event(const audit::Event& event) {
+    const std::vector<std::uint8_t> body = json::to_cbor(audit::to_json(event));
+    Bytes entry;
+    entry.reserve(audit_entry_header.size() + body.size());
+    for (const char value : audit_entry_header) {
+        entry.push_back(std::byte{static_cast<unsigned char>(value)});
+    }
+    entry.insert(entry.end(),
+                 reinterpret_cast<const std::byte*>(body.data()),
+                 reinterpret_cast<const std::byte*>(body.data() + body.size()));
+    const auto encoded = base64url_encode(entry);
+    if (!encoded) {
+        return std::unexpected(encoded.error());
+    }
+    return append({*encoded});
 }
 
 Result<Tile> TiledLog::tile(std::uint64_t index, std::size_t width) const {
