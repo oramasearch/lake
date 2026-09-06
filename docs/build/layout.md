@@ -20,7 +20,7 @@ respectively.
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks, the design-token gates and the contrast check |
 | `assets/fonts/`, `cmake/embed_fonts.cmake` | OFL-licensed IBM Plex WOFF2 sources and their binary embed step |
-| `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx`: vendored dependencies; Zetta remains an external source path selected by `LAKE_ZETTA_SOURCE_DIR` |
+| `modules/` | vendored dependencies and private patch carriers listed in [`dependencies.md`](dependencies.md); Zetta remains an external source path selected by `LAKE_ZETTA_SOURCE_DIR` |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image ([`container-image.md`](container-image.md)); the context excludes `build/` and `.git/` |
 | `db/schema.sql` | **the control-plane schema, source of truth.** Identity and application user pools, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema` ([`../control-plane/schema.md`](../control-plane/schema.md)) |
 | `docs/` | one folder per topic ([`../README.md`](../README.md)) |

@@ -18,7 +18,8 @@
 - Submodules. Clone with `--recurse-submodules` or run `git submodule update --init --recursive`
   before configuring: libliquid (library-only, pinned to liquid `main`), Boost.HTTP, Beast2 and
   libpqxx are vendored under `modules/`. Boost and GoogleTest arrive through FetchContent on the
-  first configure.
+  first configure. [`dependencies.md`](dependencies.md) records every direct pin and the private
+  patch-carrier update procedure.
 
 ## Build
 
