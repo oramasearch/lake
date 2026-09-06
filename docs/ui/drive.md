@@ -62,7 +62,8 @@ Liquid client contracts:
   folder through the API and read its rendered history.
 - `DriveScenario.ConcurrentOfflineEditsKeepBothNamedVersionsInHistory` proves that clients editing
   the same file while disconnected retain both edits under distinct names, publish both paths, and
-  expose both immutable values through the history API and page.
+  expose both immutable values through the history API and page. It requires the bootstrap actor
+  identity fix from [liquid #262](https://github.com/oramasearch/liquid/pull/262).
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` proves that a drive folder is the
   same Liquid repository: the public repository client pulls and materializes it, after which CMake
   builds and runs the contained project.
