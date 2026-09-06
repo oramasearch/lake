@@ -16,8 +16,7 @@ and repositories behind the admin sign-in; liveness, readiness,
 Prometheus metrics and JSON request logs. Capabilities and metrics use the admin bearer except
 `server_info` and documented public identity and transparency-monitoring reads; probes are
 unauthenticated. State and runbook: `docs/deployment/aks.md`; the specification
-is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), TAAP
-credential resolution in place of the single admin token (lake #4), repositories with content
+is `oramasearch/liquid/docs/features/`. Next: the Zetta data plane (operator #125), repositories with content
 once liquid Phase 1 lands, incremental migrations (operator #126). The codebase also includes
 organization administration, one policy engine, migration `0004`, and settings pages for organizations,
 teams, members, invitations, grants and effective access; those are not yet deployed in the
@@ -57,6 +56,9 @@ adds migrations `0007_identity_core` and `0008_mfa_recovery`, verified TAAP docu
 plus TOTP with one-use recovery codes, persisted WebAuthn, OAuth, row-resolved sessions, scoped
 tokens, device revocation, lake-signed passkey-to-TAAP bindings, and the hosted identity pages.
 Identity documents are verified through libliquid's public canonical-CBOR codec.
+Migration `0020_identity_exit` adds fresh, replay-resistant libliquid TAAP-key sign-in and a
+one-use application authorization-code flow with exact redirects, PKCE S256, nonce-bound ID
+tokens, and the existing Ed25519 application JWKS.
 SSO federation adds `0010_sso_federation`, organization SAML/OIDC provider configuration,
 federation issuer-claim policy, SCIM user/group mappings, deactivation session revocation,
 provisioning logs, the `/sso` page, and provider-bearer SCIM 2.0 `/scim/v2/Users` and `/Groups`
@@ -84,12 +86,15 @@ mounts; immutable JSON versions with soft delete, restore and destroy; named key
 encrypt/decrypt/rewrap, Ed25519 signing, HMAC-SHA-256 and stored child derivation; and customer-KEK
 rotation that rewraps data keys without rewriting secret ciphertext. The mount, secret and key
 pages render metadata only. Every operation uses policy authorization and the signed registry
-audit path, including denials.
+audit path, including denials. Renewable and revocable dynamic-secret leases encrypt the generated
+credential and mirror their signed lifecycle audit rows into the transparency log.
 Customer PKI adds persisted private roots and online intermediates, SPIFFE X.509 and JWT SVIDs,
 client, device, OpenSSH user and OpenSSH host certificates, and a customer-scoped RFC 8555 ACME
 HTTP-01 flow. Migration `0013_pki` holds the durable state. ACME consumes one-use nonces, verifies
 ES256 account JWS and the final CSR, and runs every resource operation through its registry
-transport for signed audit.
+transport for signed audit. Agent TAAP Ed25519 public keys receive short-lived X.509 certificates;
+rotation links the replacement, revocation is explicit, and API checks reject revoked or expired
+rows.
 Caller exchanges persist verified non-secret identity metadata before returning a bearer
 credential, and OIDC/JWT claims resolve through `federation_issuers`. Root-recovery ceremonies
 persist quorum, expiry, completion, and one-way share evidence while keeping shares and
@@ -118,6 +123,7 @@ Canonical TAAP attestations append to immutable 1,024-entry and interior-hash ti
 bind their Merkle root and tree size. Public tile and compact inclusion/consistency-proof
 capabilities bind responses to exact signed checkpoints. The hosted `/transparency` identity
 monitor verifies the complete checkpoint root before returning matches and refuses modified tiles.
+The pinned liquid #207 verifier checks the identity-exit dynamic-secret inclusion proof end to end.
 Customer repositories and the transparency log replicate asynchronously from one active Lake to
 standbys. Repository pulls persist per-source liquid cursors after successful import. Log pulls
 require the destination's exact Merkle prefix, verify the proposed head and signed checkpoint, and

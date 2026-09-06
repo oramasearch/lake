@@ -485,6 +485,18 @@ public:
         return call("list_application_webhook_deliveries",
                     [&] { return store_->list_application_webhook_deliveries(event_id); });
     }
+    control::Result<void> create_application_authorization_code(
+        const control::ApplicationAuthorizationCode& value) override {
+        return call("create_application_authorization_code",
+                    [&] { return store_->create_application_authorization_code(value); });
+    }
+    control::Result<control::ApplicationAuthorizationCode>
+    consume_application_authorization_code(const std::string& application_id,
+                                           const std::string& code_hash) override {
+        return call("consume_application_authorization_code", [&] {
+            return store_->consume_application_authorization_code(application_id, code_hash);
+        });
+    }
     control::Result<control::DriveShareLink>
     create_drive_share_link(const control::NewDriveShareLink& value) override {
         return call("create_drive_share_link",
@@ -583,6 +595,19 @@ public:
         return call("list_pki_callers",
                     [&] { return store_->list_pki_callers(customer_id, limit); });
     }
+    control::Result<control::PkiCertificateRecord>
+    create_pki_certificate(const control::NewPkiCertificateRecord& value) override {
+        return call("create_pki_certificate",
+                    [&] { return store_->create_pki_certificate(value); });
+    }
+    control::Result<control::PkiCertificateRecord>
+    get_pki_certificate(const std::string& id) override {
+        return call("get_pki_certificate", [&] { return store_->get_pki_certificate(id); });
+    }
+    control::Result<control::PkiCertificateRecord>
+    revoke_pki_certificate(const std::string& id) override {
+        return call("revoke_pki_certificate", [&] { return store_->revoke_pki_certificate(id); });
+    }
     control::Result<control::AgentSession>
     create_agent_session(const control::NewAgentSession& value) override {
         return call("create_agent_session", [&] { return store_->create_agent_session(value); });
@@ -649,6 +674,27 @@ public:
         return call("change_secret_versions", [&] {
             return store_->change_secret_versions(mount_id, name, versions, action);
         });
+    }
+    control::Result<control::IssuedDynamicSecret>
+    lease_dynamic_secret(const control::NewDynamicSecretLease& value,
+                         const std::string& instance_kek) override {
+        return call("lease_dynamic_secret",
+                    [&] { return store_->lease_dynamic_secret(value, instance_kek); });
+    }
+    control::Result<control::DynamicSecretLease>
+    get_dynamic_secret_lease(const std::string& id) override {
+        return call("get_dynamic_secret_lease",
+                    [&] { return store_->get_dynamic_secret_lease(id); });
+    }
+    control::Result<control::DynamicSecretLease>
+    renew_dynamic_secret_lease(const std::string& id, int lifetime_seconds) override {
+        return call("renew_dynamic_secret_lease",
+                    [&] { return store_->renew_dynamic_secret_lease(id, lifetime_seconds); });
+    }
+    control::Result<control::DynamicSecretLease>
+    revoke_dynamic_secret_lease(const std::string& id) override {
+        return call("revoke_dynamic_secret_lease",
+                    [&] { return store_->revoke_dynamic_secret_lease(id); });
     }
     control::Result<control::EncryptionKey>
     create_encryption_key(const control::NewEncryptionKey& value,
@@ -744,6 +790,10 @@ public:
     control::Result<control::IssuedSession>
     sign_in_password(const control::PasswordSignIn& value) override {
         return call("sign_in_password", [&] { return store_->sign_in_password(value); });
+    }
+    control::Result<control::IssuedSession>
+    sign_in_taap(const control::TaapSignIn& value) override {
+        return call("sign_in_taap", [&] { return store_->sign_in_taap(value); });
     }
     control::Result<control::MfaEnrollment> enroll_mfa(const std::string& user_id,
                                                        const std::string& pool_id) override {

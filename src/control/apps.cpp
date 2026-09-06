@@ -21,9 +21,8 @@ std::string nullable_text(const std::string& value) {
 
 std::string base64url(const unsigned char* bytes, std::size_t size) {
     std::string result(((size + 2) / 3) * 4, '\0');
-    const int encoded = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(result.data()),
-                                        bytes,
-                                        static_cast<int>(size));
+    const int encoded = EVP_EncodeBlock(
+        reinterpret_cast<unsigned char*>(result.data()), bytes, static_cast<int>(size));
     if (encoded < 0) {
         return {};
     }
@@ -114,12 +113,12 @@ CryptoResult generate_signing_key(std::string_view application_id, int version) 
                                  {}};
 }
 
-std::expected<std::string, std::string>
-issue_jwt(const Application& application,
-          const ApplicationSigningKey& key,
-          const ApplicationUser& user,
-          std::string_view issuer,
-          int lifetime_seconds) {
+std::expected<std::string, std::string> issue_jwt(const Application& application,
+                                                  const ApplicationSigningKey& key,
+                                                  const ApplicationUser& user,
+                                                  std::string_view issuer,
+                                                  int lifetime_seconds,
+                                                  std::string_view nonce) {
     if (key.seed.empty() || !key.current || lifetime_seconds < 1 || lifetime_seconds > 3600) {
         return std::unexpected("a current signing key and a lifetime up to one hour are required");
     }
@@ -128,33 +127,33 @@ issue_jwt(const Application& application,
         return std::unexpected("application signing key is malformed");
     }
     std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> signing_key(
-        EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519,
-                                     nullptr,
-                                     decoded_seed.data(),
-                                     decoded_seed.size()),
+        EVP_PKEY_new_raw_private_key(
+            EVP_PKEY_ED25519, nullptr, decoded_seed.data(), decoded_seed.size()),
         EVP_PKEY_free);
     if (!signing_key) {
         return std::unexpected("could not load application signing key");
     }
     const long issued_at = unix_now();
-    const nlohmann::json header = {
-        {"alg", "EdDSA"}, {"kid", key.kid}, {"typ", "JWT"}};
-    const nlohmann::json claims = {{"iss", issuer},
-                                   {"sub", user.taap_id.empty() ? user.user_id : user.taap_id},
-                                   {"aud", application.id},
-                                   {"application_id", application.id},
-                                   {"pool_id", application.pool_id},
-                                   {"user_id", user.user_id},
-                                   {"iat", issued_at},
-                                   {"exp", issued_at + lifetime_seconds},
-                                   {"jti", identity_crypto::random_secret()}};
+    const nlohmann::json header = {{"alg", "EdDSA"}, {"kid", key.kid}, {"typ", "JWT"}};
+    nlohmann::json claims = {{"iss", issuer},
+                             {"sub", user.taap_id.empty() ? user.user_id : user.taap_id},
+                             {"aud", application.id},
+                             {"application_id", application.id},
+                             {"pool_id", application.pool_id},
+                             {"user_id", user.user_id},
+                             {"iat", issued_at},
+                             {"exp", issued_at + lifetime_seconds},
+                             {"jti", identity_crypto::random_secret()}};
+    if (!nonce.empty()) {
+        claims["nonce"] = nonce;
+    }
     const std::string signing_input = base64url(header.dump()) + "." + base64url(claims.dump());
     std::array<unsigned char, 64> signature{};
     std::size_t signature_size = signature.size();
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(),
-                                                                   EVP_MD_CTX_free);
-    if (!context || EVP_DigestSignInit(context.get(), nullptr, nullptr, nullptr, signing_key.get()) !=
-                        1 ||
+                                                                    EVP_MD_CTX_free);
+    if (!context ||
+        EVP_DigestSignInit(context.get(), nullptr, nullptr, nullptr, signing_key.get()) != 1 ||
         EVP_DigestSign(context.get(),
                        signature.data(),
                        &signature_size,
@@ -165,9 +164,8 @@ issue_jwt(const Application& application,
     return signing_input + "." + base64url(signature.data(), signature_size);
 }
 
-std::string webhook_signature(std::string_view secret,
-                              std::string_view event_id,
-                              std::string_view payload) {
+std::string
+webhook_signature(std::string_view secret, std::string_view event_id, std::string_view payload) {
     const std::string signed_payload = std::string(event_id) + "." + std::string(payload);
     unsigned int size = EVP_MAX_MD_SIZE;
     std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};

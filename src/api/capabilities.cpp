@@ -1640,6 +1640,55 @@ void register_identity_capabilities(Registry& registry) {
                                                             input.value("device_name", "browser")}),
                            context);
                    }});
+    registry.add(Capability{
+        .name = "sign_in_taap",
+        .title = "Sign in with TAAP key",
+        .description = "Verify a fresh liquid identity assertion and issue a lake session.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"identity_document", {{"type", "string"}}},
+                           {"nonce", {{"type", "string"}}},
+                           {"issued_at", {{"type", "integer"}}},
+                           {"signature", {{"type", "object"}}},
+                           {"device_name", {{"type", "string"}}}}},
+                         {"required",
+                          json::array({"identity_document", "nonce", "issued_at", "signature"})},
+                         {"additionalProperties", false}},
+        .output_schema = session_issue_schema,
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            const std::string pool_id = input.value("pool_id", "lake");
+            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                !origin.ok) {
+                return origin;
+            }
+            auto verified = control::identity_crypto::verify_taap_sign_in(
+                input.at("identity_document").get<std::string>(),
+                pool_id,
+                input.at("nonce").get<std::string>(),
+                input.at("issued_at").get<std::int64_t>(),
+                input.at("signature"));
+            if (!verified) {
+                return ApiResult::failure("unauthorized", verified.error());
+            }
+            context.authentication_method = "taap";
+            context.audit_details = {{"taap_id", verified->taap_id},
+                                     {"assertion_id", verified->assertion_id}};
+            return issued_result(
+                context.store->sign_in_taap({pool_id,
+                                             verified->taap_id,
+                                             verified->assertion_id,
+                                             input.value("device_name", "taap-key")}),
+                context);
+        }});
     registry.add(
         Capability{.name = "verify_mfa",
                    .title = "Verify TOTP",

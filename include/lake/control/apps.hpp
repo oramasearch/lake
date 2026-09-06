@@ -119,20 +119,28 @@ struct NewApplicationWebhookDelivery {
     std::string error;
 };
 
+struct ApplicationAuthorizationCode {
+    std::string application_id;
+    std::string user_id;
+    std::string redirect_uri;
+    std::string code_hash;
+    std::string code_challenge;
+    std::string nonce;
+};
+
 namespace apps {
 
 using CryptoResult = std::expected<ApplicationSigningKey, std::string>;
 
 CryptoResult generate_signing_key(std::string_view application_id, int version);
-std::expected<std::string, std::string>
-issue_jwt(const Application& application,
-          const ApplicationSigningKey& key,
-          const ApplicationUser& user,
-          std::string_view issuer,
-          int lifetime_seconds = 900);
-std::string webhook_signature(std::string_view secret,
-                              std::string_view event_id,
-                              std::string_view payload);
+std::expected<std::string, std::string> issue_jwt(const Application& application,
+                                                  const ApplicationSigningKey& key,
+                                                  const ApplicationUser& user,
+                                                  std::string_view issuer,
+                                                  int lifetime_seconds = 900,
+                                                  std::string_view nonce = {});
+std::string
+webhook_signature(std::string_view secret, std::string_view event_id, std::string_view payload);
 
 } // namespace apps
 

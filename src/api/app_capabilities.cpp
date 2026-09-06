@@ -433,6 +433,138 @@ void register_application_capabilities(Registry& registry) {
             }
             return ApiResult::success({{"items", std::move(items)}});
         }});
+    registry.add(Capability{
+        .name = "begin_application_authorization",
+        .title = "Authorize application",
+        .description = "Issue a one-use OIDC authorization code with PKCE for the signed-in user.",
+        .input_schema = input_schema({{"application_id", {{"type", "string"}}},
+                                      {"redirect_uri", {{"type", "string"}}},
+                                      {"code_challenge", {{"type", "string"}}},
+                                      {"code_challenge_method", {{"type", "string"}}},
+                                      {"state", {{"type", "string"}}},
+                                      {"nonce", {{"type", "string"}}}},
+                                     json::array({"application_id",
+                                                  "redirect_uri",
+                                                  "code_challenge",
+                                                  "code_challenge_method",
+                                                  "state",
+                                                  "nonce"})),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "application",
+        .action = "write",
+        .resolve_object = application_object,
+        .handler = [](const json& input, ApiContext& context) {
+            auto application = context.store->get_application(input.at("application_id"));
+            if (!application) {
+                return from_store_error(application.error());
+            }
+            const std::string redirect_uri = input.at("redirect_uri");
+            if (std::ranges::find(application->redirect_uris, redirect_uri) ==
+                application->redirect_uris.end()) {
+                return ApiResult::failure(
+                    "unauthorized", "redirect URI is not registered", "/redirect_uri");
+            }
+            if (input.at("code_challenge_method") != "S256") {
+                return ApiResult::failure("invalid_input",
+                                          "code_challenge_method must be S256",
+                                          "/code_challenge_method");
+            }
+            if (context.acting_user_id.empty()) {
+                return ApiResult::failure("unauthorized", "authorization requires a lake user");
+            }
+            auto application_user =
+                context.store->get_application_user(application->id, context.acting_user_id);
+            if (!application_user && application_user.error().code == "not_found") {
+                application_user = context.store->register_application_user(application->id,
+                                                                            context.acting_user_id);
+            }
+            if (!application_user) {
+                return from_store_error(application_user.error());
+            }
+            if (application_user->status != "active") {
+                return ApiResult::failure("unauthorized", "application user is suspended");
+            }
+            const std::string code = control::identity_crypto::random_secret();
+            auto stored = context.store->create_application_authorization_code(
+                {application->id,
+                 context.acting_user_id,
+                 redirect_uri,
+                 control::identity_crypto::sha256_hex(code),
+                 input.at("code_challenge"),
+                 input.at("nonce")});
+            if (!stored) {
+                return from_store_error(stored.error());
+            }
+            context.audit_customer_id = application->customer_id;
+            context.audit_kind = "authentication";
+            context.audit_object = "application/" + application->id + "/authorization";
+            context.audit_details = {{"application_id", application->id},
+                                     {"user_id", context.acting_user_id}};
+            return ApiResult::success(
+                {{"code", code}, {"state", input.at("state")}, {"redirect_uri", redirect_uri}});
+        }});
+    registry.add(Capability{
+        .name = "exchange_application_authorization_code",
+        .title = "Exchange application authorization code",
+        .description = "Exchange a one-use OIDC authorization code and PKCE verifier for tokens.",
+        .input_schema =
+            input_schema({{"application_id", {{"type", "string"}}},
+                          {"code", {{"type", "string"}}},
+                          {"redirect_uri", {{"type", "string"}}},
+                          {"code_verifier", {{"type", "string"}}}},
+                         json::array({"application_id", "code", "redirect_uri", "code_verifier"})),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = application_object,
+        .handler = [](const json& input, ApiContext& context) {
+            auto code = context.store->consume_application_authorization_code(
+                input.at("application_id"),
+                control::identity_crypto::sha256_hex(input.at("code").get<std::string>()));
+            if (!code) {
+                return from_store_error(code.error());
+            }
+            if (code->redirect_uri != input.at("redirect_uri").get<std::string>() ||
+                code->code_challenge != control::identity_crypto::sha256_base64url(
+                                            input.at("code_verifier").get<std::string>())) {
+                return ApiResult::failure(
+                    "unauthorized", "authorization code redirect or PKCE verifier is invalid");
+            }
+            auto application = context.store->get_application(code->application_id);
+            auto user = context.store->get_application_user(code->application_id, code->user_id);
+            auto key = context.store->current_application_signing_key(code->application_id);
+            if (!application) {
+                return from_store_error(application.error());
+            }
+            if (!user) {
+                return from_store_error(user.error());
+            }
+            if (!key) {
+                return from_store_error(key.error());
+            }
+            const std::string host = application->custom_sign_in_domain.empty()
+                                         ? context.public_host
+                                         : application->custom_sign_in_domain;
+            const std::string issuer = "https://" + host + "/v1/apps/" + application->id;
+            auto access_token = control::apps::issue_jwt(*application, *key, *user, issuer);
+            auto id_token =
+                control::apps::issue_jwt(*application, *key, *user, issuer, 900, code->nonce);
+            if (!access_token || !id_token) {
+                return ApiResult::failure("store_error", "could not issue application tokens");
+            }
+            context.audit_customer_id = application->customer_id;
+            context.audit_kind = "authentication";
+            context.audit_object = "application/" + application->id + "/token";
+            context.audit_details = {{"application_id", application->id},
+                                     {"user_id", user->user_id}};
+            return ApiResult::success({{"access_token", *access_token},
+                                       {"id_token", *id_token},
+                                       {"token_type", "Bearer"},
+                                       {"expires_in", 900}});
+        }});
     registry.add(Capability{.name = "get_application",
                             .title = "Get application",
                             .description = "Read one application registration.",

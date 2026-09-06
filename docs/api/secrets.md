@@ -45,6 +45,25 @@ Every call passes through `Registry::call` and `audit::record`. Secret audit eve
 customer, caller, mount, name and version or version set; values and ciphertext are never audit
 details. A policy refusal records outcome `denied` against `secret_mount/<mount-id>`.
 
+## Dynamic leases
+
+`lease_dynamic_secret` generates a response-only username and password for a named role and stores
+their encrypted JSON under the mount data-key hierarchy. The response includes lease metadata and
+the value once. `renew_dynamic_secret` extends an active, unexpired lease and increments its
+renewal count. `revoke_dynamic_secret` records immediate revocation and is idempotent. Initial and
+renewed lifetimes are positive and capped at one hour.
+
+Each lifecycle call records a signed `dynamic_secret` audit event whose object is the lease ID and
+whose details name only the mount, lease, operation, and outcome. When a transparency log is
+configured, that signed audit record is also appended as a digest-checked `audit_event/1` entry.
+No generated username, password, ciphertext, or KEK is present in the audit event or log entry.
+
+## What the exit scenario proves
+
+The identity-exit Postgres scenario leases a generated credential, renews it, revokes it, reads the
+three signed audit rows by lease object, observes three transparency leaves, and verifies the
+revocation leaf's compact inclusion proof with libliquid's verifier.
+
 ## Page and verification
 
 `GET /secret-mounts` lists readable mounts. `GET /secrets?mount_id=<uuid>&name=<name>` shows custom

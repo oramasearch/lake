@@ -29,10 +29,9 @@ complete signed metadata, verifies it, and appends it only after the role thresh
 bindings pass.
 
 The implementation follows the [TUF specification](https://theupdateframework.github.io/specification/latest/).
-The liquid client verifier is tracked in
-[`oramasearch/liquid#186`](https://github.com/oramasearch/liquid/issues/186). Complete checkpoint,
-tile, inclusion, and consistency-proof verification is tracked in
-[`oramasearch/liquid#207`](https://github.com/oramasearch/liquid/issues/207).
+The liquid client verifier from
+[`oramasearch/liquid#207`](https://github.com/oramasearch/liquid/issues/207) is pinned by Lake and
+verifies entry tiles, compact inclusion proofs, and compact consistency proofs.
 RFC 3161 and RFC 4998 evidence verification is tracked in
 [`oramasearch/liquid#210`](https://github.com/oramasearch/liquid/issues/210).
 
@@ -208,6 +207,11 @@ repeated width times:
 EOF: no padding, count field, or trailer
 ```
 
+Alongside canonical liquid attestations, Lake may append an internal `LAKE-AUDIT-EVENT-1\n`
+record followed by canonical CBOR `audit_event/1`. Admission recomputes the event digest before
+the leaf is accepted. The event already carries Lake's signed audit-chain fields; secret values are
+never included. These entries replicate and scan through the same immutable tile and Merkle path.
+
 A hash tile is byte-for-byte:
 
 ```text
@@ -278,9 +282,8 @@ causes `unrecoverable`; the monitor returns no partial results. Earlier partial 
 available, so a monitor can verify an older checkpoint even after later appends fill that tile.
 
 Lake's monitor verifies inclusion in the selected checkpoint by recomputing the complete root.
-Lake serves the compact proofs and hash tiles described above. Witness, Lake-signature, tile, and
-proof verification in the client library remains liquid #207; Lake does not claim client proof
-enforcement before that issue lands.
+Lake serves the compact proofs and hash tiles described above. The identity-exit scenario invokes
+the pinned libliquid inclusion verifier directly over a dynamic-secret audit leaf and Lake's proof.
 
 The deterministic conformance vector is
 [`../../tests/fixtures/transparency/fixture.json`](../../tests/fixtures/transparency/fixture.json).

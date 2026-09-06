@@ -19,6 +19,8 @@
 #include <liquid/hash.hpp>
 #include <liquid/identity.hpp>
 
+#include "objects/records.hpp"
+
 namespace lake::control::agents {
 namespace {
 
@@ -41,15 +43,6 @@ Error liquid_error(const liquid::error& error) {
     const std::string code =
         error.code == liquid::errc::unauthorized ? "unauthorized" : "invalid_input";
     return {code, error.message};
-}
-
-std::vector<std::uint8_t> unsigned_bytes(std::span<const std::byte> input) {
-    std::vector<std::uint8_t> output;
-    output.reserve(input.size());
-    for (const std::byte value : input) {
-        output.push_back(std::to_integer<std::uint8_t>(value));
-    }
-    return output;
 }
 
 Bytes byte_values(std::span<const std::uint8_t> input) {
@@ -126,10 +119,6 @@ Result<Bytes> canonical_cbor(const OrderedJson& value) {
     } catch (const nlohmann::json::exception& error) {
         return std::unexpected(Error{"crypto_error", error.what()});
     }
-}
-
-OrderedJson binary(std::span<const std::byte> input) {
-    return OrderedJson::binary(unsigned_bytes(input));
 }
 
 Result<Bytes> canonical_public_key(std::span<const std::byte> public_key,
@@ -210,48 +199,6 @@ Result<liquid::actor> lake_actor(const audit::Identity& identity) {
         identity.taap_id, "ed25519", fingerprint, std::move(*public_key), fingerprint};
 }
 
-OrderedJson actor_value(const liquid::actor& actor) {
-    OrderedJson output = OrderedJson::object();
-    output["taap_id"] = actor.taap_id;
-    output["algorithm"] = actor.algorithm;
-    output["public_key"] = binary(actor.public_key);
-    output["fingerprint"] = actor.fingerprint;
-    output["key_fingerprint"] = actor.key_fingerprint;
-    return output;
-}
-
-OrderedJson digest_value(const liquid::digest& value) {
-    OrderedJson output = OrderedJson::object();
-    output["alg"] = static_cast<std::uint64_t>(value.alg);
-    output["bytes"] = binary(value.bytes);
-    return output;
-}
-
-Result<Bytes> attestation_body(const liquid::attestation& statement,
-                               std::uint64_t not_after,
-                               const std::string& principal,
-                               const std::vector<std::string>& scopes) {
-    OrderedJson attributes = OrderedJson::object();
-    attributes["scopes"] = scopes;
-    attributes["not_after"] = not_after;
-    attributes["principal"] = principal;
-
-    OrderedJson body = OrderedJson::object();
-    body["v"] = std::uint64_t{1};
-    body["at"] = statement.at.time_since_epoch().count();
-    body["kind"] = "attestation";
-    body["issuer"] = actor_value(statement.issuer);
-    body["profile"] = statement.profile;
-    body["subject"] = digest_value(statement.subject);
-    body["findings"] = std::uint64_t{0};
-    body["detectors"] = OrderedJson::array();
-    body["allowances"] = OrderedJson::array();
-    body["attributes"] = std::move(attributes);
-    body["subject_kind"] = "actor";
-    body["attribute_disclosure_commitments"] = OrderedJson::object();
-    return canonical_cbor(body);
-}
-
 Result<Pkey> generate_key(std::array<std::uint8_t, 32>& seed) {
     if (RAND_bytes(seed.data(), static_cast<int>(seed.size())) != 1) {
         return std::unexpected(Error{"crypto_error", "could not generate an agent session key"});
@@ -276,10 +223,9 @@ Result<Bytes> public_key(EVP_PKEY* key) {
 
 Result<std::string> encode_delegation(Store& store,
                                       const liquid::actor& session,
-                                      const std::string& durable_agent_taap_id,
+                                      const std::string& dispatcher_taap_id,
                                       const std::vector<std::string>& scopes,
                                       std::chrono::sys_seconds issued,
-                                      std::chrono::sys_seconds expires,
                                       const audit::IdentityOptions& identity_options) {
     const auto lake_identity = audit::identity(store, identity_options);
     if (!lake_identity) {
@@ -303,17 +249,15 @@ Result<std::string> encode_delegation(Store& store,
         .at = issued,
         .issuer = std::move(*issuer),
         .subject_kind = liquid::attestation_subject_kind::actor,
-        .attributes = {{"principal", durable_agent_taap_id},
-                       {"scopes", scopes},
-                       {"not_after",
-                        static_cast<std::uint64_t>(expires.time_since_epoch().count())}},
+        .attributes = {{"scopes", scopes},
+                       {"may_publish", false},
+                       {"may_lease", false},
+                       {"depth_remaining", std::uint64_t{0}},
+                       {"dispatcher", dispatcher_taap_id}},
     };
-    auto body = attestation_body(statement,
-                                 static_cast<std::uint64_t>(expires.time_since_epoch().count()),
-                                 durable_agent_taap_id,
-                                 scopes);
+    auto body = liquid::objects::encode_attestation_body(statement);
     if (!body) {
-        return std::unexpected(body.error());
+        return std::unexpected(liquid_error(body.error()));
     }
     auto raw_signature =
         audit::sign_taap(store, lake_identity->taap_id, "attestation", *body, identity_options);
@@ -406,13 +350,8 @@ Result<MintedSession> Service::mint(Store& store,
         OPENSSL_cleanse(seed.data(), seed.size());
         return std::unexpected(actor.error());
     }
-    auto attestation = encode_delegation(store,
-                                         *actor,
-                                         request.durable_agent_taap_id,
-                                         request.scopes,
-                                         issued,
-                                         expires,
-                                         identity_options);
+    auto attestation = encode_delegation(
+        store, *actor, request.dispatcher_taap_id, request.scopes, issued, identity_options);
     if (!attestation) {
         OPENSSL_cleanse(seed.data(), seed.size());
         return std::unexpected(attestation.error());

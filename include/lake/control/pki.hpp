@@ -102,6 +102,10 @@ Result<X509Svid> issue_x509_svid(const Authority& authority,
 Result<X509Svid> issue_x509_certificate(const Authority& authority,
                                         std::string_view subject,
                                         int lifetime_seconds = 3600);
+Result<X509Svid> issue_agent_certificate(const Authority& authority,
+                                         std::string_view subject,
+                                         std::string_view public_key,
+                                         int lifetime_seconds = 3600);
 Result<void> verify_x509_svid(const Authority& authority, const X509Svid& svid);
 Result<JwtSvid> issue_jwt_svid(const Authority& authority,
                                std::string_view spiffe_id,
@@ -138,6 +142,12 @@ public:
                                             std::string_view subject,
                                             std::string_view instance_kek,
                                             int lifetime_seconds = 3600);
+    Result<X509Svid> issue_agent_certificate(Store& store,
+                                             std::string_view customer_id,
+                                             std::string_view subject,
+                                             std::string_view public_key,
+                                             std::string_view instance_kek,
+                                             int lifetime_seconds = 3600);
     Result<JwtSvid> issue_jwt_svid(std::string_view customer_id,
                                    std::string_view spiffe_id,
                                    std::string_view audience,

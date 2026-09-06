@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::api {
@@ -93,6 +94,18 @@ CapabilityObjectResolver mount_object(std::string audit_kind) {
         }
         return object->id;
     };
+}
+
+std::expected<std::string, ApiError> dynamic_lease_object(const json& input, ApiContext& context) {
+    auto lease = context.store->get_dynamic_secret_lease(input.at("lease_id"));
+    if (!lease) {
+        return std::unexpected(ApiError{lease.error().code, lease.error().message, "/lease_id"});
+    }
+    json normalized = {{"mount_id", lease->mount_id}};
+    auto object = mount_object("dynamic_secret")(normalized, context);
+    context.audit_object = "dynamic_secret/" + lease->id;
+    context.audit_details["lease_id"] = lease->id;
+    return object;
 }
 
 std::expected<std::string, ApiError> customer_object(const json& input, ApiContext& context) {
@@ -392,6 +405,76 @@ void register_static_secret_capabilities(Registry& registry) {
                        "Destroy secret versions",
                        "Permanently erase selected version ciphertext while retaining metadata.",
                        control::SecretVersionAction::Destroy);
+}
+
+void register_dynamic_secret_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "lease_dynamic_secret",
+        .title = "Lease dynamic secret",
+        .description = "Generate and lease a short-lived credential from a secret mount.",
+        .input_schema = input_schema({{"mount_id", {{"type", "string"}}},
+                                      {"role", {{"type", "string"}}},
+                                      {"lifetime_seconds", {{"type", "integer"}}}},
+                                     json::array({"mount_id", "role"})),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "secret_mount",
+        .action = "write",
+        .resolve_object = mount_object("dynamic_secret"),
+        .resolves_operator_audit_target = true,
+        .handler = [](const json& input, ApiContext& context) {
+            const std::string suffix = control::identity_crypto::random_secret();
+            json credential = {{"username", "lake-" + suffix.substr(0, 12)},
+                               {"password", control::identity_crypto::random_secret()}};
+            auto issued =
+                context.store->lease_dynamic_secret({input.at("mount_id"),
+                                                     input.at("role"),
+                                                     credential,
+                                                     input.value("lifetime_seconds", 300)},
+                                                    context.instance_kek);
+            if (!issued) {
+                return from_store_error(issued.error());
+            }
+            context.audit_object = "dynamic_secret/" + issued->lease.id;
+            context.audit_details["lease_id"] = issued->lease.id;
+            context.audit_details["operation"] = "lease";
+            return ApiResult::success(
+                {{"lease", control::to_json(issued->lease)}, {"value", issued->value}});
+        }});
+    registry.add(
+        Capability{.name = "renew_dynamic_secret",
+                   .title = "Renew dynamic secret",
+                   .description = "Extend an active dynamic-secret lease.",
+                   .input_schema = input_schema({{"lease_id", {{"type", "string"}}},
+                                                 {"lifetime_seconds", {{"type", "integer"}}}},
+                                                json::array({"lease_id"})),
+                   .output_schema = object_schema(),
+                   .kind = CapabilityKind::Action,
+                   .object = "secret_mount",
+                   .action = "write",
+                   .resolve_object = dynamic_lease_object,
+                   .resolves_operator_audit_target = true,
+                   .handler = [](const json& input, ApiContext& context) {
+                       context.audit_details["operation"] = "renew";
+                       return one_result(context.store->renew_dynamic_secret_lease(
+                           input.at("lease_id"), input.value("lifetime_seconds", 300)));
+                   }});
+    registry.add(Capability{
+        .name = "revoke_dynamic_secret",
+        .title = "Revoke dynamic secret",
+        .description = "Revoke a dynamic-secret lease immediately.",
+        .input_schema =
+            input_schema({{"lease_id", {{"type", "string"}}}}, json::array({"lease_id"})),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "secret_mount",
+        .action = "write",
+        .resolve_object = dynamic_lease_object,
+        .resolves_operator_audit_target = true,
+        .handler = [](const json& input, ApiContext& context) {
+            context.audit_details["operation"] = "revoke";
+            return one_result(context.store->revoke_dynamic_secret_lease(input.at("lease_id")));
+        }});
 }
 
 void register_encryption_key_capabilities(Registry& registry) {
@@ -728,6 +811,7 @@ void register_customer_kek_capability(Registry& registry) {
 void register_secret_capabilities(Registry& registry) {
     register_mount_capabilities(registry);
     register_static_secret_capabilities(registry);
+    register_dynamic_secret_capabilities(registry);
     register_encryption_key_capabilities(registry);
     register_encryption_value_capabilities(registry);
     register_encryption_integrity_capabilities(registry);

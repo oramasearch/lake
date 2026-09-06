@@ -8,7 +8,8 @@ keys. Offline device grants are specified separately in [`offline.md`](offline.m
 
 Identity capabilities live in the single registry and are therefore available as REST, OpenAPI,
 and MCP tools. `sign_up_password`, `sign_in_password`, `verify_mfa`,
-`begin_passkey_sign_in`, `sign_in_passkey`, and `start_oauth` are unauthenticated entry points.
+`begin_passkey_sign_in`, `sign_in_passkey`, `start_oauth`, and `sign_in_taap` are unauthenticated
+entry points.
 `enroll_mfa`, `disable_mfa`, `begin_passkey_registration`, `register_passkey`,
 `create_token`, `list_sessions`, `revoke_session`, `list_devices`, and `revoke_device` require
 the same row-resolved session or operator credential as every other protected capability.
@@ -81,6 +82,20 @@ Password sign-up requires the client-held TAAP/1 document as a base64url-encoded
 complete canonical record with SHA-512/256, writes `identity_documents`, and binds the resulting
 `taap_id` to the new user. lake never receives a person's private key.
 
+`sign_in_taap` lets that registered user return without a password. The client signs
+`pool_id + "\n" + nonce + "\n" + issued_at` with the key in its liquid identity document. Lake
+verifies the canonical document and `lake_sign_in` signature through libliquid, accepts a five
+minute freshness window, and records the assertion digest before issuing a one-day session.
+Assertion digests are one-use, so replay fails while the timestamp remains fresh.
+
+## What the exit scenario proves
+
+`IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` creates a real identity with the pinned
+libliquid, registers its public document, signs a fresh challenge with the private TAAP key, signs
+in to the lake pool, resolves the resulting session, and rejects reuse of the same assertion. The
+same resolved user then authorizes a relying party, proving that TAAP sign-in feeds the ordinary
+authorization and application-identity paths without giving Lake the private key.
+
 ## Why
 
 The random bearer secret is not the authority. Every request resolves its session and device row;
@@ -110,6 +125,8 @@ proves origin binding, first-attempt challenge consumption, lake-signed TAAP bin
 before and after identity rotation, session issue and sign-count replay rejection. The Postgres
 identity test repeats a successful registration, binding verification and assertion against the
 persisted challenge and credential rows.
+The identity-exit Postgres scenario covers fresh liquid-key sign-in, persisted replay protection,
+and use of that session in the relying-party authorization-code flow.
 
 ## How to change
 
