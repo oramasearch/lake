@@ -22,6 +22,7 @@
 
 #include <liquid/attestation.hpp>
 #include <liquid/runtime.hpp>
+#include <liquid/transparency.hpp>
 
 #include "objects/records.hpp"
 
@@ -493,6 +494,191 @@ std::string signed_attestation(std::string identity, unsigned char marker) {
     EXPECT_TRUE(encoded) << encoded.error().message;
     return base64url(*encoded);
 }
+
+std::vector<std::byte> decode_base64url(std::string value) {
+    for (char& character : value) {
+        if (character == '-') {
+            character = '+';
+        } else if (character == '_') {
+            character = '/';
+        }
+    }
+    constexpr std::string_view alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<std::byte> output;
+    std::uint32_t accumulator = 0;
+    unsigned int bits = 0;
+    for (const char character : value) {
+        const std::size_t position = alphabet.find(character);
+        if (position == std::string_view::npos) {
+            break;
+        }
+        accumulator = (accumulator << 6U) | static_cast<std::uint32_t>(position);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            output.push_back(std::byte{static_cast<unsigned char>((accumulator >> bits) & 0xffU)});
+        }
+    }
+    return output;
+}
+
+std::vector<std::byte> decode_hex(std::string_view value) {
+    const auto nibble = [](char character) {
+        if (character >= '0' && character <= '9') {
+            return static_cast<unsigned char>(character - '0');
+        }
+        return static_cast<unsigned char>(character - 'a' + 10);
+    };
+    std::vector<std::byte> output;
+    output.reserve(value.size() / 2);
+    for (std::size_t index = 0; index + 1 < value.size(); index += 2) {
+        output.push_back(std::byte{
+            static_cast<unsigned char>((nibble(value[index]) << 4U) | nibble(value[index + 1]))});
+    }
+    return output;
+}
+
+liquid::transparency::hash decode_hash(std::string_view value) {
+    const std::vector<std::byte> decoded = decode_hex(value);
+    liquid::transparency::hash output{};
+    std::ranges::copy(decoded, output.begin());
+    return output;
+}
+
+struct OfflineProofBundle {
+    liquid::actor identity;
+    liquid::transparency::log_configuration configuration;
+    liquid::transparency::checkpoint checkpoint;
+    std::vector<liquid::transparency::tile> tiles;
+    liquid::transparency::inclusion_proof inclusion;
+};
+
+OfflineProofBundle decode_proof_bundle(const json& bundle) {
+    const json& record = bundle.at("checkpoint");
+    const json& body = record.at("checkpoint");
+    liquid::transparency::checkpoint checkpoint;
+    checkpoint.sequence = record.at("sequence").get<std::uint64_t>();
+    checkpoint.tree_size = body.at("tree_size").get<std::uint64_t>();
+    checkpoint.entry_tile_width = body.at("tile_width").get<std::uint64_t>();
+    checkpoint.hash_tile_width = body.at("hash_tile_width").get<std::uint64_t>();
+    checkpoint.root_hash = decode_hash(body.at("root_hash").get<std::string>());
+    checkpoint.checkpoint_hash =
+        decode_hash(record.at("checkpoint_hash_sha256").get<std::string>());
+    checkpoint.signature.signer = record.at("signature").at("signer").get<std::string>();
+    checkpoint.signature.bytes =
+        decode_base64url(record.at("signature").at("signature").get<std::string>());
+    const std::string canonical_body = body.dump();
+    checkpoint.canonical_body.assign(
+        reinterpret_cast<const std::byte*>(canonical_body.data()),
+        reinterpret_cast<const std::byte*>(canonical_body.data() + canonical_body.size()));
+
+    liquid::transparency::log_configuration configuration;
+    configuration.witness_threshold =
+        bundle.at("configuration").at("witness_threshold").get<std::uint64_t>();
+    for (const json& witness : bundle.at("configuration").at("witnesses")) {
+        const auto public_key = decode_hash(witness.at("public_key").get<std::string>());
+        configuration.witnesses.push_back({witness.at("endpoint").get<std::string>(), public_key});
+    }
+    for (const json& signature : record.at("witness_signatures")) {
+        checkpoint.witness_signatures.push_back(
+            {signature.at("endpoint").get<std::string>(),
+             decode_hash(signature.at("public_key").get<std::string>()),
+             decode_hex(signature.at("signature").get<std::string>())});
+    }
+
+    const json& identity_json = bundle.at("identity");
+    liquid::actor identity{identity_json.at("taap_id").get<std::string>(),
+                           "ed25519",
+                           {},
+                           decode_base64url(identity_json.at("public_key").get<std::string>()),
+                           {}};
+    std::vector<liquid::transparency::tile> tiles;
+    for (const json& item : bundle.at("tiles")) {
+        liquid::transparency::tile tile;
+        tile.level = item.at("level").get<std::uint32_t>();
+        tile.index = item.at("index").get<std::uint64_t>();
+        tile.width = item.contains("entries") ? item.at("entries").get<std::uint64_t>()
+                                              : item.at("hashes").get<std::uint64_t>();
+        tile.sha256 = decode_hash(item.at("sha256").get<std::string>());
+        tile.bytes = decode_base64url(item.at("tile").get<std::string>());
+        tiles.push_back(std::move(tile));
+    }
+    const json& inclusion_json = bundle.at("inclusion");
+    liquid::transparency::inclusion_proof inclusion;
+    inclusion.leaf_index = inclusion_json.at("leaf_index").get<std::uint64_t>();
+    inclusion.tree_size = inclusion_json.at("tree_size").get<std::uint64_t>();
+    inclusion.root_hash = decode_hash(inclusion_json.at("root_hash").get<std::string>());
+    inclusion.bound_checkpoint = checkpoint;
+    for (const json& item : inclusion_json.at("audit_path")) {
+        inclusion.audit_path.push_back(decode_hash(item.get<std::string>()));
+    }
+    return {std::move(identity),
+            std::move(configuration),
+            std::move(checkpoint),
+            std::move(tiles),
+            std::move(inclusion)};
+}
+
+class OfflineProofSource final : public liquid::transparency::log_source {
+public:
+    explicit OfflineProofSource(OfflineProofBundle bundle) : bundle_(std::move(bundle)) {}
+
+    [[nodiscard]] std::string name() const override {
+        return "exported lake proof bundle";
+    }
+
+    [[nodiscard]] liquid::runtime::task<liquid::actor> identity() override {
+        ++bundle_reads;
+        co_return bundle_.identity;
+    }
+
+    [[nodiscard]] liquid::runtime::task<liquid::transparency::log_configuration>
+    configuration() override {
+        ++bundle_reads;
+        co_return bundle_.configuration;
+    }
+
+    [[nodiscard]] liquid::runtime::task<liquid::transparency::checkpoint>
+    current_checkpoint() override {
+        ++bundle_reads;
+        co_return bundle_.checkpoint;
+    }
+
+    [[nodiscard]] liquid::runtime::task<liquid::transparency::tile>
+    get_tile(std::uint32_t level, std::uint64_t index, std::uint64_t width) override {
+        ++bundle_reads;
+        const auto found = std::ranges::find_if(bundle_.tiles, [=](const auto& tile) {
+            return tile.level == level && tile.index == index && tile.width == width;
+        });
+        if (found == bundle_.tiles.end()) {
+            co_return std::unexpected(liquid::error{
+                liquid::errc::not_found, "tile is absent from offline bundle", name()});
+        }
+        co_return *found;
+    }
+
+    [[nodiscard]] liquid::runtime::task<liquid::transparency::inclusion_proof>
+    get_inclusion_proof(std::uint64_t leaf_index, std::uint64_t tree_size) override {
+        ++bundle_reads;
+        if (bundle_.inclusion.leaf_index != leaf_index ||
+            bundle_.inclusion.tree_size != tree_size) {
+            co_return std::unexpected(liquid::error{
+                liquid::errc::not_found, "proof is absent from offline bundle", name()});
+        }
+        co_return bundle_.inclusion;
+    }
+
+    [[nodiscard]] liquid::runtime::task<liquid::transparency::consistency_proof>
+    get_consistency_proof(std::uint64_t, std::uint64_t) override {
+        ++bundle_reads;
+        co_return std::unexpected(liquid::error{
+            liquid::errc::not_found, "consistency proof is absent from offline bundle", name()});
+    }
+
+    OfflineProofBundle bundle_;
+    std::size_t bundle_reads = 0;
+};
 
 } // namespace
 
@@ -1279,6 +1465,102 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
                event.draft.object == "transparency/log";
     }));
     EXPECT_TRUE(lake::audit::verify(store, *events));
+}
+
+TEST(TransparencyScenario, ExportedBundleVerifiesOfflineAndSplitViewIsDetected) {
+    TemporaryRoot temporary;
+    Keys keys;
+    lake::transparency::Service service(temporary.path(), "offline-instance");
+    lake::transparency::CheckpointService checkpoints(
+        temporary.path(), "offline-instance", air_gapped_configuration());
+    lake::transparency::TiledLog log(temporary.path(), "offline-instance");
+    lake::control::InMemoryStore store;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.transparency = &service;
+    context.checkpoints = &checkpoints;
+    context.transparency_log = &log;
+    context.authorized = true;
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    context.instance_kek = "offline-proof-instance-kek";
+    const json root = root_document(
+        1, keys.roots(), keys.targets(), keys.snapshot, keys.timestamp, keys.root_threshold());
+    const auto initialized = registry.call("initialize_tuf", {{"root", root}}, context);
+    ASSERT_TRUE(initialized.ok) << initialized.error.message;
+    const Bundle metadata = bundle(1, keys.targets(), keys.snapshot, keys.timestamp);
+    context.request_id.clear();
+    const auto metadata_published = registry.call("publish_tuf_metadata",
+                                                  {{"targets", metadata.targets},
+                                                   {"snapshot", metadata.snapshot},
+                                                   {"timestamp", metadata.timestamp}},
+                                                  context);
+    ASSERT_TRUE(metadata_published.ok) << metadata_published.error.message;
+    context.request_id.clear();
+    const std::string attestation = signed_attestation("taap:1:ed25519:offline-proof-subject", 7);
+    const auto appended = registry.call(
+        "append_transparency_entries", {{"attestations", {attestation, attestation}}}, context);
+    ASSERT_TRUE(appended.ok) << appended.error.message;
+    context.request_id.clear();
+    const auto published =
+        registry.call("publish_transparency_checkpoint", json::object(), context);
+    ASSERT_TRUE(published.ok) << published.error.message;
+    context.request_id.clear();
+    const auto exported = registry.call("transparency_proof_bundle", {{"leaf_index", 0}}, context);
+    ASSERT_TRUE(exported.ok) << exported.error.message;
+    EXPECT_EQ(exported.value.at("version"), "lake_transparency_proof_bundle/1");
+
+    OfflineProofSource offline(decode_proof_bundle(exported.value));
+    liquid::transparency::log_client verifier(offline);
+    auto verifier_repository = liquid::runtime::block_on(
+        liquid::repository::create(temporary.path() / "offline-verifier"));
+    ASSERT_TRUE(verifier_repository) << verifier_repository.error().message;
+    const auto verified = liquid::runtime::block_on(
+        verifier.verify_inclusion(*verifier_repository,
+                                  decode_base64url(attestation),
+                                  liquid::transparency::bootstrap_policy::pinned));
+    ASSERT_TRUE(verified) << verified.error().message;
+    EXPECT_FALSE(verified->bootstrap_warning);
+    EXPECT_GT(offline.bundle_reads, 0U);
+
+    auto gossip_repository =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "gossip"));
+    ASSERT_TRUE(gossip_repository) << gossip_repository.error().message;
+    const liquid::transparency::checkpoint first_witness_view = offline.bundle_.checkpoint;
+    json second_record = exported.value.at("checkpoint");
+    json second_body = second_record.at("checkpoint");
+    std::string second_root = second_body.at("root_hash").get<std::string>();
+    second_root.front() = second_root.front() == '0' ? '1' : '0';
+    second_body["root_hash"] = second_root;
+    const auto second_signature = lake::audit::sign_transparency_checkpoint(
+        store, second_body, {.instance_kek = context.instance_kek});
+    ASSERT_TRUE(second_signature) << second_signature.error().message;
+    second_record["checkpoint"] = second_body;
+    second_record["checkpoint_hash_sha256"] = sha256(second_body.dump());
+    second_record["signature"] = *second_signature;
+    json second_export = exported.value;
+    second_export["checkpoint"] = std::move(second_record);
+    const liquid::transparency::checkpoint second_witness_view =
+        decode_proof_bundle(second_export).checkpoint;
+    const liquid::transparency::log_trust trust{offline.bundle_.identity,
+                                                offline.bundle_.configuration};
+    ASSERT_TRUE(first_witness_view.verify(trust));
+    ASSERT_TRUE(second_witness_view.verify(trust));
+    const auto trusted_first = liquid::runtime::block_on(
+        liquid::transparency::trust_checkpoint(*gossip_repository,
+                                               "two-witness checkpoint gossip",
+                                               first_witness_view,
+                                               liquid::transparency::bootstrap_policy::pinned));
+    ASSERT_TRUE(trusted_first) << trusted_first.error().message;
+    const auto detected_split = liquid::runtime::block_on(
+        liquid::transparency::trust_checkpoint(*gossip_repository,
+                                               "two-witness checkpoint gossip",
+                                               second_witness_view,
+                                               liquid::transparency::bootstrap_policy::pinned));
+    ASSERT_FALSE(detected_split);
+    EXPECT_EQ(detected_split.error().code, liquid::errc::conflict);
 }
 
 TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {

@@ -34,12 +34,16 @@ fidelity report.
 [`platform.md`](platform.md) defines the operator-control mirror, environment/domain mutations,
 and Loki-compatible log reads.
 
+[`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
+routes and their exact-byte integration coverage.
+
 ## Operational routes
 
 | Route | Contract |
 |---|---|
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Liveness and readiness are unauthenticated; metrics uses the same bearer or session cookie as capabilities. These are HTTP operational routes, not capabilities, so they are not rendered into OpenAPI or MCP. See [`../serving/telemetry.md`](../serving/telemetry.md). |
 | `/scim/v2/Users`, `/scim/v2/Users/:id`, `/scim/v2/Groups`, `/scim/v2/Groups/:id` | SCIM 2.0 list/get/create/PATCH/delete resources. The adapter renders SCIM media types and calls the registry capabilities authenticated by the provider bearer. See [`sso.md`](sso.md). |
+| `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*`, `/buildid/*` | Native artifact registry and debug-information protocols. Publication uses the administrator bearer; published artifacts are public reads. See [`registry.md`](registry.md). |
 
 ## Capabilities
 
@@ -104,6 +108,7 @@ and Loki-compatible log reads.
 | `append_transparency_entries` | action | canonical TAAP attestations | appended indexes, tree size, and root | [transparency.md](transparency.md) |
 | `transparency_tile` | public read | level, tile index, and exact width | immutable base64url entry or interior-hash tile | [transparency.md](transparency.md) |
 | `transparency_inclusion_proof` | public read | leaf index and checkpoint tree size | compact audit path bound to a complete signed checkpoint record | [transparency.md](transparency.md) |
+| `transparency_proof_bundle` | public read | leaf index | identity, trust configuration, current checkpoint, all committed tiles, and one inclusion proof for offline verification | [transparency.md](transparency.md) |
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
