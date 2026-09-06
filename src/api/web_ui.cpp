@@ -1744,12 +1744,28 @@ std::string web_ui_change(const control::Repository& repository,
     } else {
         content += "<div class=\"stack\">";
         for (const RepositoryArtifact& check : review.checks.items) {
-            content += std::format("<article class=\"panel check-row\"><strong>{}</strong>{}"
-                                   "<span>{} attestations</span><span>{}</span></article>",
-                                   web_ui_escape(check.action),
-                                   badge_markup(check.exit_code == 0 ? "passed" : "failed"),
-                                   check.attestations.size(),
-                                   identifier_markup(check.id));
+            std::vector<std::string> output_paths;
+            output_paths.reserve(check.outputs.size());
+            for (const RepositoryArtifactOutput& output : check.outputs) {
+                output_paths.push_back(output.path);
+            }
+            std::vector<std::string> attestation_profiles;
+            for (const RepositoryArtifactAttestation& attestation : check.attestations) {
+                if (attestation.verified) {
+                    attestation_profiles.push_back(attestation.profile);
+                }
+            }
+            content += std::format(
+                "<article class=\"panel check-row\"><strong>{}</strong>{}"
+                "<span>{} attestations</span><span>outputs: <code>{}</code>"
+                "</span><span>attested: <code>{}</code></span><span>{}</span>"
+                "</article>",
+                web_ui_escape(check.action),
+                badge_markup(check.exit_code == 0 ? "passed" : "failed"),
+                check.attestations.size(),
+                web_ui_escape(output_paths.empty() ? "none" : joined(output_paths)),
+                web_ui_escape(attestation_profiles.empty() ? "none" : joined(attestation_profiles)),
+                identifier_markup(check.id));
         }
         content += "</div>";
     }

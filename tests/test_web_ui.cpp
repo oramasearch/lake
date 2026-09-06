@@ -679,7 +679,8 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
         .id = "result-long-identifier-0123456789",
         .action = "test",
         .exit_code = 0,
-        .attestations = {{"attestation-1", "profile", "subject", "issuer", true, ""}},
+        .outputs = {{"build/app", 0755, "blob-3"}},
+        .attestations = {{"attestation-1", "slsa_provenance/1", "subject", "issuer", true, ""}},
     };
     const lake::api::ChangeReviewData review_data{
         .reviews = {review_record},
@@ -703,6 +704,8 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
               std::string::npos);
     EXPECT_NE(change_page.find("href=\"#readme-md-new-2\">line 2</a>"), std::string::npos);
     EXPECT_NE(change_page.find("1 attestations"), std::string::npos);
+    EXPECT_NE(change_page.find("outputs: <code>build/app</code>"), std::string::npos);
+    EXPECT_NE(change_page.find("attested: <code>slsa_provenance/1</code>"), std::string::npos);
     EXPECT_EQ(change_page.find("<script>x</script>"), std::string::npos);
     EXPECT_NE(change_page.find("id=\"change-review-script\""), std::string::npos);
     expect_theme_scripts(change_page, 1);

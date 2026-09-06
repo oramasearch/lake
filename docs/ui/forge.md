@@ -57,8 +57,10 @@ source layout with fully escaped plain text.
 renders the remaining Markdown on the server with the same raw-HTML prohibition as README files.
 It shows compact change, author, parent, and blob identities; review state and reviewers; per-file
 and aggregate addition/removal counts; structural conflict values; line-addressable text hunks and
-their anchored comments; and repository checks with attestation counts. Reviews and comments are
-selected by change and review identity after their capability reads.
+their anchored comments; and repository checks with output paths and verified attestation profiles.
+Reviews and comments are selected by change and review identity after their capability reads.
+Change lookup includes changes retained by named review references as well as the current head, so
+an open review remains available before it lands.
 
 The unified diff is the no-script view. One page-local vanilla script switches to the side-by-side
 representation and copies the complete change identity. If the script is unavailable, every file,
@@ -67,6 +69,22 @@ identities are also available on hover through `title`. Comment threads follow b
 representations and link back to their numbered new-line anchor, so switching layouts never hides
 discussion. Reviewer, assignee, and allowed-pusher identities use the same compact rule and wrap
 as groups rather than overflowing their panels.
+
+## What the scenario proves
+
+The Postgres-backed forge scenario starts with a Liquid drip stream and publishes a candidate on a
+named review reference while `main` remains at its prior head. A reviewer opens the review through
+`liquid::forge_client`, reads the same change through the server-rendered page, and comments on a
+source line. The author rebases the candidate as a rewritten change with an inserted line, the
+client advances every anchor through Liquid's diff, and the test asserts that the original comment
+moves from line 2 to line 3 with its moved disposition preserved. Only the rewritten, approved
+change is then published to `main`.
+
+Before landing, the scenario records the graph-selected action and its signed provenance in Lake's
+Liquid repository. It asserts that the repository contains no `.yml` or `.yaml` file. The landed
+change page must contain the graph action's result identity, `build/forge-proof.txt`, and the
+verified `slsa_provenance/1` profile. This proves that the visible check describes the recorded
+graph result rather than repository automation configuration.
 
 ## Issues
 
@@ -129,7 +147,9 @@ place their primary recovery action after the state message.
 
 ## Verify
 
-Run `lake-tests --gtest_filter='WebUi.Markdown*:WebUi.Repositories*:WebUi.RepositoryContent*'`.
+Run `lake-tests --gtest_filter='WebUi.Markdown*:WebUi.Repositories*:WebUi.RepositoryContent*'` for
+the portable renderer checks. With a schema-loaded `LAKE_TEST_DB_URI`, run
+`lake-tests --gtest_filter='PostgresForgeScenario.*'` for the complete review lifecycle.
 The string tests prove raw HTML is escaped, heading anchors are stable, repository sections are
 present, tree rows carry last-change context, known source is highlighted, line anchors and blame
 are rendered, review Markdown is sanitized, review state and comments are anchored, checks and

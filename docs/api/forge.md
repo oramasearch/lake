@@ -5,10 +5,10 @@
 JSON object as its value. The API capabilities that create and read these facts are added with the
 forge surface.
 
-**Why.** A review anchor is an evolving value: it initially holds `{change, path, line, column}`
-and the temporary mapper adds its disposition when a later change is selected. Liquid #174 will
-replace that mapper with `repository::map_anchor` without a database migration or a reinterpretation
-of existing review comments.
+**Why.** A review anchor is an evolving value: it initially holds `{change, path, line, column}`.
+When an author rebases a reviewed change as a rewritten candidate, Liquid maps that cursor through
+the repository diff and Lake stores the mapped position and disposition without reinterpreting the
+original comment.
 
 ## Stored kinds
 
@@ -38,10 +38,26 @@ that review to `approved` or `closed`. `create_review_comment` verifies that its
 in the same repository and accepts an anchor value with required `change`, `path`, `line`, and
 `column` members.
 
-`map_review_anchors` is the provisional adapter for liquid #174. It receives a source change,
-target change, path, and the text hunks between them. It updates only matching comment anchors and
-reports `same`, `shifted`, `approximate`, or `deleted`. Once liquid provides
-`repository::map_anchor`, the adapter will call it without changing persisted comments.
+`map_review_anchors` receives a source change, target change, path, and the text hunks between them.
+It updates only matching comment anchors and reports `same`, `shifted`, `approximate`, or
+`deleted`. `liquid::forge_client::advance_anchors` loads the review comments, derives those hunks
+from Liquid's repository diff, persists each mapped cursor through this capability, and retargets
+the review to the rewritten change.
+
+Named review references are synchronized with the repository document. Lake's repository history
+adapter walks the current head and every named reference, deduplicating change identities, so
+`get_change`, `change_diff`, and the change page can resolve an unlanded reviewed change.
+
+## Graph-backed change checks
+
+The change page reads build results through `list_artifacts`. Each listed result carries the same
+output, verified attestation, and retained trace evidence as `get_artifact`; the adapter does not
+invent a page-only check state. The renderer names every output path and every verified
+attestation profile beside the action and result identity.
+
+The end-to-end scenario records a graph-selected action and signed `slsa_provenance/1` statement
+without adding automation YAML to the repository. Its final HTML assertions require the output
+path, profile, and result identity that Liquid persisted.
 
 ## Releases
 
@@ -102,7 +118,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 The forge capability and Postgres tests create records through both store implementations, verify
-the repository foreign key, and read their versioned values back unchanged.
+the repository foreign key, and read their versioned values back unchanged. The
+`PostgresForgeScenario` case additionally exercises the Liquid forge client, cursor movement,
+approval, publication, and graph evidence through a real Lake server.
 
 ## Change
 
