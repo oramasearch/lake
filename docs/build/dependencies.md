@@ -20,7 +20,8 @@ select their revisions independently.
 ## Beast2 carrier
 
 `oramasearch/beast2` is a private copy, not a GitHub fork. Its `main` branch mirrors public
-upstream. Branch `orama-main` carries one reviewed commit on top: `85e2f31`, which treats
+upstream. Branch `orama-main` carries one reviewed commit on Lake's current Beast2 base
+`fb0a9c8`: `fe1af5a`, which treats
 `boost::http::error::end_of_stream` from an idle keep-alive close as a normal connection end and
 does not print it to stderr. Lake records that commit in `modules/beast2` and declares
 `branch = orama-main` in `.gitmodules` for update tooling.
