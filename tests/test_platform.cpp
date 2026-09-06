@@ -1,0 +1,506 @@
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include <liquid/runtime.hpp>
+#include <nlohmann/json.hpp>
+
+#include <boost/beast2/http_server.hpp>
+#include <boost/corosio/endpoint.hpp>
+#include <boost/corosio/io_context.hpp>
+#include <boost/corosio/ipv4_address.hpp>
+#include <boost/http.hpp>
+
+#include "lake/api/capabilities.hpp"
+#include "lake/api/mcp.hpp"
+#include "lake/api/rest.hpp"
+#include "lake/api/web_ui.hpp"
+#include "lake/control/memory_store.hpp"
+#include "lake/control/platform.hpp"
+#include "lake/control/zetta_control.hpp"
+
+namespace {
+
+using lake::api::ApiContext;
+using lake::api::ApiResult;
+using lake::api::Registry;
+using lake::control::PlatformResult;
+using lake::control::ZettaControlResult;
+using nlohmann::json;
+
+class FakeZettaControl final : public lake::control::ZettaControl {
+public:
+    bool unavailable = false;
+    std::vector<json> deployments;
+    std::vector<json> environment_env;
+    std::vector<json> domains;
+
+    liquid::runtime::task<ZettaControlResult<lake::control::ZettaRows>>
+    sql(std::string statement, std::string database) override {
+        if (unavailable) {
+            co_return ZettaControlResult<lake::control::ZettaRows>(std::unexpected(
+                lake::control::ZettaControlError{"store_unavailable", "fake unavailable"}));
+        }
+        if (database != lake::control::operator_control_database) {
+            co_return ZettaControlResult<lake::control::ZettaRows>(std::unexpected(
+                lake::control::ZettaControlError{"invalid_input", "wrong database"}));
+        }
+        if (statement.find("environment_env") != std::string::npos) {
+            co_return ZettaControlResult<lake::control::ZettaRows>(environment_env);
+        }
+        if (statement.find("deployments") != std::string::npos) {
+            co_return ZettaControlResult<lake::control::ZettaRows>(deployments);
+        }
+        if (statement.find("domains") != std::string::npos) {
+            co_return ZettaControlResult<lake::control::ZettaRows>(domains);
+        }
+        co_return ZettaControlResult<lake::control::ZettaRows>(
+            std::unexpected(lake::control::ZettaControlError{"invalid_input", "unknown table"}));
+    }
+
+    liquid::runtime::task<ZettaControlResult<void>> append(std::string table, json row) override {
+        if (unavailable) {
+            co_return ZettaControlResult<void>(std::unexpected(
+                lake::control::ZettaControlError{"store_unavailable", "fake unavailable"}));
+        }
+        table_rows(table).push_back(std::move(row));
+        co_return ZettaControlResult<void>{};
+    }
+
+private:
+    std::vector<json>& table_rows(const std::string& table) {
+        if (table == lake::control::environment_env_table) {
+            return environment_env;
+        }
+        if (table == lake::control::domains_table) {
+            return domains;
+        }
+        return deployments;
+    }
+};
+
+class FakeLoki final : public lake::control::LokiSource {
+public:
+    std::string requested_namespace;
+    std::string requested_since;
+    int requested_limit = 0;
+    std::string requested_direction;
+
+    liquid::runtime::task<PlatformResult<json>> query(std::string namespace_name,
+                                                      std::string since,
+                                                      int limit,
+                                                      std::string direction) override {
+        requested_namespace = std::move(namespace_name);
+        requested_since = std::move(since);
+        requested_limit = limit;
+        requested_direction = std::move(direction);
+        co_return PlatformResult<json>(json{
+            {"items",
+             json::array(
+                 {{{"ts", "200"}, {"pod", "web-1"}, {"container", "app"}, {"line", "ready"}}})},
+            {"next_since", "200"},
+        });
+    }
+};
+
+class LokiDouble {
+public:
+    LokiDouble() {
+        namespace http = boost::http;
+        http::router<http::route_params> router;
+        router.add(
+            http::method::get,
+            "/loki/api/v1/query_range",
+            [this](http::route_params& route) -> http::route_task {
+                {
+                    std::lock_guard lock(mutex_);
+                    target_ = std::string(route.url.buffer());
+                    authorization_ = route.req.count(http::field::authorization) == 0
+                                         ? std::string()
+                                         : std::string(route.req.at(http::field::authorization));
+                }
+                const std::string body =
+                    json{{"status", "success"},
+                         {"data",
+                          {{"result",
+                            json::array(
+                                {{{"stream", {{"pod", "web-1"}, {"container", "app"}}},
+                                  {"values", json::array({json::array({"300", "served"})})}}})}}}}
+                        .dump();
+                route.status(http::status::ok);
+                route.res.set(http::field::content_type, "application/json");
+                auto [error] = co_await route.send(body);
+                if (error) {
+                    co_return http::route_error(error);
+                }
+                co_return http::route_done;
+            });
+        server_ = std::make_unique<boost::beast2::http_server>(
+            io_context_,
+            1,
+            std::move(router),
+            http::make_parser_config(http::parser_config{true}),
+            http::make_serializer_config(http::serializer_config()));
+        const std::error_code error =
+            server_->bind(boost::corosio::endpoint(boost::corosio::ipv4_address("127.0.0.1"), 0));
+        if (error) {
+            return;
+        }
+        port_ = server_->local_endpoint().port();
+        server_->start();
+        thread_ = std::thread([this] { io_context_.run(); });
+    }
+
+    ~LokiDouble() {
+        if (server_) {
+            server_->stop();
+        }
+        io_context_.stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    [[nodiscard]] std::string endpoint() const {
+        return "http://127.0.0.1:" + std::to_string(port_);
+    }
+
+    [[nodiscard]] std::string target() const {
+        std::lock_guard lock(mutex_);
+        return target_;
+    }
+
+    [[nodiscard]] std::string authorization() const {
+        std::lock_guard lock(mutex_);
+        return authorization_;
+    }
+
+private:
+    boost::corosio::io_context io_context_;
+    std::unique_ptr<boost::beast2::http_server> server_;
+    std::thread thread_;
+    unsigned short port_ = 0;
+    mutable std::mutex mutex_;
+    std::string target_;
+    std::string authorization_;
+};
+
+json deployment_row(const std::string& repository, std::string phase, std::string updated_at) {
+    return {{"operator", "operator-a"},
+            {"lake", "lake.example"},
+            {"repository", repository},
+            {"environment", "production"},
+            {"kind", "application"},
+            {"change", "change-0123456789"},
+            {"image", "registry.example/app@sha256:0123456789abcdef"},
+            {"deployment_id", "deployment-1"},
+            {"requested_by", "admin"},
+            {"requested_at", "2026-09-06T00:00:00Z"},
+            {"phase", std::move(phase)},
+            {"namespace", "lake-production"},
+            {"url", "https://app.example"},
+            {"message", ""},
+            {"updated_at", std::move(updated_at)}};
+}
+
+class PlatformFixture : public testing::Test {
+protected:
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
+    std::shared_ptr<FakeZettaControl> control = std::make_shared<FakeZettaControl>();
+    std::shared_ptr<FakeLoki> loki = std::make_shared<FakeLoki>();
+    std::unique_ptr<lake::control::PlatformService> platform;
+    lake::control::Repository repository;
+    Registry registry;
+    ApiContext context;
+
+    void SetUp() override {
+        const auto user = store->create_user({"admin", "admin@example.test", "Admin"});
+        ASSERT_TRUE(user);
+        const auto customer = store->create_customer({"individual", user->id, "", "admin"});
+        ASSERT_TRUE(customer);
+        const auto created = store->create_repository({customer->id, "platform", "", "private"});
+        ASSERT_TRUE(created);
+        repository = *created;
+        control->deployments.push_back(
+            deployment_row(repository.id, "deploying", "2026-09-06T00:01:00Z"));
+        platform = std::make_unique<lake::control::PlatformService>(
+            store,
+            control,
+            loki,
+            lake::control::PlatformConfig{
+                .lake = "lake.example",
+                .identity_seed = "",
+                .instance_kek = "platform-test-kek",
+            });
+        lake::api::register_core_capabilities(registry, "test");
+        context.store = store.get();
+        context.platform = platform.get();
+        context.authorized = true;
+        context.acting_identity = "admin";
+        context.operator_credential = true;
+        context.instance_kek = "platform-test-kek";
+    }
+
+    PlatformResult<void> sync() {
+        auto completed = liquid::runtime::block_on(platform->sync());
+        EXPECT_TRUE(completed) << (completed ? "" : completed.error().message);
+        if (!completed) {
+            return std::unexpected(
+                lake::control::PlatformError{"store_error", completed.error().message});
+        }
+        return std::move(*completed);
+    }
+
+    ApiResult call_async(const std::string& name, json input) {
+        context.request_id.clear();
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed) << (completed ? "" : completed.error().message);
+        if (!completed) {
+            return ApiResult::failure("store_error", completed.error().message);
+        }
+        return std::move(*completed);
+    }
+};
+
+TEST(ZettaControlLiteral, QuotesApostrophesAndRejectsControlCharacters) {
+    const auto quoted = lake::control::quote_zetta_literal("Lake's production");
+    ASSERT_TRUE(quoted);
+    EXPECT_EQ(*quoted, "'Lake''s production'");
+    const auto rejected = lake::control::quote_zetta_literal(std::string("line\nvalue"));
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error().code, "invalid_input");
+}
+
+TEST(LokiHttpSource, UsesQueryRangeAndReturnsAStableCursor) {
+    LokiDouble server;
+    ASSERT_NE(server.endpoint(), "http://127.0.0.1:0");
+    lake::control::install_zetta_control_transport();
+    {
+        lake::control::LokiHttpSource source(server.endpoint(), "logs-token");
+        auto completed =
+            liquid::runtime::block_on(source.query("lake-production", "250", 25, "forward"));
+        ASSERT_TRUE(completed) << completed.error().message;
+        ASSERT_TRUE(*completed) << completed->error().message;
+        EXPECT_EQ(completed->value().at("items").at(0).at("line"), "served");
+        EXPECT_EQ(completed->value().at("next_since"), "300");
+    }
+    lake::control::shutdown_zetta_control_transport();
+    EXPECT_NE(server.target().find("/loki/api/v1/query_range?"), std::string::npos);
+    EXPECT_NE(server.target().find("start=250"), std::string::npos);
+    EXPECT_NE(server.target().find("limit=25"), std::string::npos);
+    EXPECT_EQ(server.authorization(), "Bearer logs-token");
+}
+
+TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
+    ASSERT_TRUE(sync());
+    auto environments = platform->list_environments(repository.id);
+    ASSERT_TRUE(environments);
+    ASSERT_EQ(environments->at("items").size(), 1U);
+    EXPECT_EQ(environments->at("items").at(0).at("phase"), "deploying");
+    const std::string object_id = environments->at("items").at(0).at("object_id");
+    const auto object = store->get_policy_object(object_id);
+    ASSERT_TRUE(object);
+    EXPECT_EQ(object->object_type, "environment");
+    auto events = store->list_audit_events({});
+    ASSERT_TRUE(events);
+    EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
+        return event.draft.kind == "platform.deployment.phase";
+    }));
+
+    control->deployments.push_back(deployment_row(repository.id, "ready", "2026-09-06T00:02:00Z"));
+    control->deployments.push_back(
+        deployment_row(repository.id, "healthy", "2026-09-06T00:03:00Z"));
+    ASSERT_TRUE(sync());
+    const auto environment = platform->get_environment(repository.id, "production");
+    ASSERT_TRUE(environment);
+    EXPECT_EQ(environment->at("deployment").at("phase"), "healthy");
+    events = store->list_audit_events({});
+    ASSERT_TRUE(events);
+    EXPECT_EQ(std::ranges::count_if(*events,
+                                    [](const lake::audit::Event& event) {
+                                        return event.draft.kind == "platform.deployment.phase";
+                                    }),
+              3);
+}
+
+TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRows) {
+    control->environment_env.push_back({{"lake", "lake.example"},
+                                        {"repository", repository.id},
+                                        {"environment", "production"},
+                                        {"key", "COLOR"},
+                                        {"value", "blue"},
+                                        {"deleted", false},
+                                        {"set_by", "admin"},
+                                        {"updated_at", "2026-09-06T00:01:00Z"}});
+    control->environment_env.push_back({{"lake", "lake.example"},
+                                        {"repository", repository.id},
+                                        {"environment", "production"},
+                                        {"key", "COLOR"},
+                                        {"value", ""},
+                                        {"deleted", true},
+                                        {"set_by", "admin"},
+                                        {"updated_at", "2026-09-06T00:02:00Z"}});
+    ASSERT_TRUE(sync());
+    auto environment = platform->get_environment(repository.id, "production");
+    ASSERT_TRUE(environment);
+    EXPECT_TRUE(environment->at("env").empty());
+
+    ApiResult set = call_async("set_environment_env",
+                               {{"repository_id", repository.id},
+                                {"environment", "production"},
+                                {"key", "COLOR"},
+                                {"value", "green"}});
+    ASSERT_TRUE(set.ok) << set.error.message;
+    ASSERT_EQ(control->environment_env.back().at("value"), "green");
+    const std::string credential = std::string("AKIA") + "0123456789ABCDEF";
+    ApiResult secret = call_async("set_environment_env",
+                                  {{"repository_id", repository.id},
+                                   {"environment", "production"},
+                                   {"key", "AWS_ACCESS_KEY_ID"},
+                                   {"value", credential}});
+    EXPECT_FALSE(secret.ok);
+    EXPECT_EQ(secret.error.message, "use a sealed secret");
+
+    ApiResult domain = call_async("create_domain",
+                                  {{"repository_id", repository.id},
+                                   {"environment", "production"},
+                                   {"host", "www.example.test"},
+                                   {"tls", "acme"}});
+    ASSERT_TRUE(domain.ok) << domain.error.message;
+    environment = platform->get_environment(repository.id, "production");
+    ASSERT_TRUE(environment);
+    ASSERT_EQ(environment->at("domains").size(), 1U);
+    EXPECT_EQ(environment->at("domains").at(0).at("status"), "pending");
+    const std::string pending_page =
+        lake::api::web_ui_environment(repository, *environment, json{{"items", json::array()}});
+    EXPECT_NE(pending_page.find("pending"), std::string::npos);
+
+    json ready_domain = control->domains.back();
+    ready_domain["status"] = "ready";
+    ready_domain["updated_at"] = "2099-09-06T00:03:00Z";
+    control->domains.push_back(std::move(ready_domain));
+    ASSERT_TRUE(sync());
+    environment = platform->get_environment(repository.id, "production");
+    ASSERT_TRUE(environment);
+    EXPECT_EQ(environment->at("domains").at(0).at("status"), "ready");
+}
+
+TEST_F(PlatformFixture, LogsReturnLinesAndCursor) {
+    ASSERT_TRUE(sync());
+    ApiResult result = call_async("environment_logs",
+                                  {{"repository_id", repository.id},
+                                   {"environment", "production"},
+                                   {"since", "100"},
+                                   {"limit", 25},
+                                   {"direction", "forward"}});
+    ASSERT_TRUE(result.ok) << result.error.message;
+    EXPECT_EQ(result.value.at("items").at(0).at("line"), "ready");
+    EXPECT_EQ(result.value.at("next_since"), "200");
+    EXPECT_EQ(loki->requested_namespace, "lake-production");
+    EXPECT_EQ(loki->requested_since, "100");
+    EXPECT_EQ(loki->requested_limit, 25);
+}
+
+TEST_F(PlatformFixture, UnreachableControlServesStaleMirrorAndRefusesWrites) {
+    ASSERT_TRUE(sync());
+    control->unavailable = true;
+    const auto failed = sync();
+    ASSERT_FALSE(failed);
+    EXPECT_TRUE(platform->degraded());
+    const auto environment = platform->get_environment(repository.id, "production");
+    ASSERT_TRUE(environment);
+    EXPECT_TRUE(environment->contains("stale_since"));
+    ApiResult write = call_async("set_environment_env",
+                                 {{"repository_id", repository.id},
+                                  {"environment", "production"},
+                                  {"key", "COLOR"},
+                                  {"value", "green"}});
+    EXPECT_FALSE(write.ok);
+    EXPECT_EQ(write.error.code, "store_unavailable");
+}
+
+TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
+    ASSERT_TRUE(sync());
+    const auto environment = platform->get_environment(repository.id, "production");
+    ASSERT_TRUE(environment);
+    ASSERT_TRUE(store->create_grant(
+        {"reader", environment->at("object_id"), "read", "attestation", "admin", "read-grant"}));
+    context.acting_identity = "reader";
+    context.operator_credential = false;
+    ApiResult read =
+        registry.call("get_environment",
+                      {{"repository_id", repository.id}, {"environment", "production"}},
+                      context);
+    EXPECT_TRUE(read.ok) << read.error.message;
+    ApiResult set = call_async("set_environment_env",
+                               {{"repository_id", repository.id},
+                                {"environment", "production"},
+                                {"key", "COLOR"},
+                                {"value", "green"}});
+    EXPECT_FALSE(set.ok);
+    EXPECT_EQ(set.error.code, "unauthorized");
+    ApiResult domain = call_async("create_domain",
+                                  {{"repository_id", repository.id},
+                                   {"environment", "production"},
+                                   {"host", "www.example.test"},
+                                   {"tls", "acme"}});
+    EXPECT_FALSE(domain.ok);
+    EXPECT_EQ(domain.error.code, "unauthorized");
+    ASSERT_TRUE(store->create_grant({"deployer",
+                                     environment->at("object_id"),
+                                     "deploy",
+                                     "attestation",
+                                     "admin",
+                                     "deploy-grant"}));
+    context.acting_identity = "deployer";
+    domain = call_async("create_domain",
+                        {{"repository_id", repository.id},
+                         {"environment", "production"},
+                         {"host", "www.example.test"},
+                         {"tls", "acme"}});
+    EXPECT_TRUE(domain.ok) << domain.error.message;
+}
+
+TEST_F(PlatformFixture, RenderersAndDiscoveryExposePlatformSurface) {
+    ASSERT_TRUE(sync());
+    json environments = *platform->list_environments(repository.id);
+    environments["stale_since"] = "2026-09-06T00:04:00Z";
+    const std::string list_page = lake::api::web_ui_environments(repository, environments);
+    EXPECT_NE(list_page.find("Platform data is stale"), std::string::npos);
+    EXPECT_NE(list_page.find("production"), std::string::npos);
+    EXPECT_NE(list_page.find("sha256:0123456789ab"), std::string::npos);
+
+    json environment = *platform->get_environment(repository.id, "production");
+    const std::string detail_page = lake::api::web_ui_environment(
+        repository, environment, *platform->list_deployments(repository.id, "production", 100));
+    EXPECT_NE(detail_page.find("Environment variables"), std::string::npos);
+    EXPECT_NE(detail_page.find("Deployment history"), std::string::npos);
+    EXPECT_NE(detail_page.find("platform/domain/create"), std::string::npos);
+
+    const json logs{
+        {"items",
+         json::array({{{"ts", "200"}, {"pod", "web-1"}, {"container", "app"}, {"line", "ready"}}})},
+        {"next_since", "200"}};
+    const std::string logs_page = lake::api::web_ui_logs(repository, "production", logs, "stale");
+    EXPECT_NE(logs_page.find("environment_logs"), std::string::npos);
+    EXPECT_NE(logs_page.find("Refresh"), std::string::npos);
+
+    const json openapi = lake::api::openapi_document(registry, "test");
+    EXPECT_TRUE(openapi.at("paths").contains("/v1/get_environment"));
+    EXPECT_TRUE(openapi.at("paths").contains("/v1/create_domain"));
+    ApiContext mcp_context = context;
+    const auto response = lake::api::mcp_dispatch(
+        registry, {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}}, mcp_context, "test");
+    ASSERT_TRUE(response);
+    EXPECT_NE(response->find("environment_logs"), std::string::npos);
+    EXPECT_NE(response->find("set_environment_env"), std::string::npos);
+}
+
+} // namespace

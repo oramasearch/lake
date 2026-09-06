@@ -27,3 +27,11 @@ tile or proof bytes. See `fixtures/transparency/README.md` for regeneration comm
 Agent-session coverage uses an injected clock and a real Ed25519 TAAP signature. The portable and
 Postgres cases mint a response-only key, verify its logged `delegation/1` attestation, attribute a
 signed drip to the durable agent, reject a modified body, and reject the key after expiry.
+
+Platform coverage uses an append-only fake Zetta control source and fake Loki source against
+`InMemoryStore`. It proves latest-wins sync, environment policy-object creation, signed phase audit,
+tombstones, mutation rows, secret detection, role checks, stale reads, degraded health state, log
+cursors, renderer strings, OpenAPI, and MCP discovery. A Beast2 Loki double verifies the real
+coroutine HTTP client, selector request, secret bearer, line conversion, and cursor. The focused
+Postgres suite round-trips the same environment binding and JSON mirror through the production
+store.
