@@ -6,13 +6,13 @@ Live captures give each page 30 seconds to reach DOM-ready and network-idle, sav
 on a timeout, and report all timed-out pages after finishing the manifest.
 
 Its live mode reads a tab-separated page manifest, fetches each page from a running lake with the
-manifest's session cookie, and records light and dark PNGs. `lake-ui-fixture` runs the production
-HTTP server over an in-memory control plane and an on-disk libliquid repository populated with
-retained versions, a two-value conflict, representative preview formats, and a build result. It
-covers public pages, operator pages, identity pages, repository content, hosted application
-identity, secrets, sharing decisions, an individual link detail, a recipient's shared-with-me
-page, metering, audit data, and the public transparency monitor without adding a fixture route
-to `lake`.
+manifest's session cookie, rewrites the content-hashed stylesheet URL to the fixture server's
+origin, and records light and dark PNGs. `lake-ui-fixture` runs the production HTTP server over an
+in-memory control plane and an on-disk libliquid repository populated with retained versions, a
+two-value conflict, representative preview formats, and a build result. It covers public pages,
+operator pages, identity pages, repository content, hosted application identity, secrets, sharing
+decisions, an individual link detail, a recipient's shared-with-me page, metering, audit data, and
+the public transparency monitor without adding a fixture route to `lake`.
 
 ```sh
 cmake --build build --target lake-ui-fixture
@@ -25,7 +25,8 @@ The optional port defaults to `4902`; select another when parallel fixture runs 
 pass the same port in `--base-url`.
 
 `sync-design-system.mjs` refreshes or verifies the stamped DTCG snapshot. `build-tokens.mjs`
-compiles the committed token layer used by `/style.css`. `test-token-gates.sh` proves both gates
-reject local changes. `check-contrast.mjs` resolves the generated theme roles, calculates the WCAG
-contrast ratio for every governed text, status, focus, and boundary pair, and fails below the
-documented threshold. See [`docs/ui/design-system.md`](../../docs/ui/design-system.md).
+compiles the committed token layer used by the content-hashed stylesheet and its `/style.css`
+compatibility alias. `test-token-gates.sh` proves both gates reject local changes.
+`check-contrast.mjs` resolves the generated theme roles, calculates the WCAG contrast ratio for
+every governed text, status, focus, and boundary pair, and fails below the documented threshold.
+See [`docs/ui/design-system.md`](../../docs/ui/design-system.md).

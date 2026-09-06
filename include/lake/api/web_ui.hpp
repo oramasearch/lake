@@ -1,6 +1,7 @@
 #pragma once
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,7 +15,7 @@
 #include "lake/search/index.hpp"
 
 // Pure renderers: data in, HTML out. No HTTP type, no I/O. Pages are
-// server-rendered, self-contained (one stylesheet at /style.css and only the
+// server-rendered, self-contained (one content-hashed stylesheet and only the
 // documented progressive-enhancement scripts) and unit-tested here.
 namespace lake::api {
 
@@ -22,7 +23,12 @@ std::string web_ui_escape(std::string_view text);
 std::string web_ui_markdown(std::string_view markdown);
 std::string web_ui_error(std::string_view code, std::string_view message, bool signed_in = false);
 std::string web_ui_loading(std::string_view subject, bool signed_in = false);
-std::string web_ui_stylesheet();
+std::string web_ui_hashed_asset_url(std::string_view path, std::string_view contents);
+std::string_view web_ui_stylesheet();
+std::string_view web_ui_stylesheet_url();
+std::span<const std::string_view> web_ui_font_names();
+std::string_view web_ui_font_url(std::string_view name);
+std::string_view web_ui_asset_cache_control(std::string_view path);
 std::string web_ui_icon(std::string_view name);
 
 // A self-hosted IBM Plex WOFF2 face embedded in the binary. Unknown names return an empty view.

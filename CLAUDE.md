@@ -171,7 +171,9 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   passkey pages each add one script required to call `navigator.credentials`. Data pages call
   capabilities through `Registry::call` and can never do what the API cannot.
 - IBM Plex Sans and Mono are self-hosted WOFF2 assets embedded into the binary and served below
-  `/fonts/` with immutable cache headers; the browser never needs a third-party font origin.
+  content-hashed `/fonts/` URLs with immutable cache headers. Pages use the content-hashed
+  stylesheet URL; unhashed stylesheet and font aliases use `no-cache`. The browser never needs a
+  third-party font origin.
 - Static visual-direction references live under `docs/design/ui/mocks/`. The served design system
   and its complete before/after screenshots are documented in `docs/ui/design-system.md`;
   `tools/ui/screenshot.sh` reproduces the 1440×900 review images.

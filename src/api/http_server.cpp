@@ -3689,6 +3689,15 @@ struct ApiServer::Impl {
         std::chrono::steady_clock::now();
 
     explicit Impl(ServerOptions opts) : options(std::move(opts)), sync_store(options.store_root) {
+        if (web_ui_stylesheet_url().empty()) {
+            failure_reason = "could not calculate the stylesheet asset hash";
+        }
+        for (const std::string_view font : web_ui_font_names()) {
+            if (web_ui_font_url(font).empty()) {
+                failure_reason = "could not calculate the font asset hash for " + std::string(font);
+                break;
+            }
+        }
         if (!options.store_root.empty()) {
             const auto valid = transparency::validate_log_configuration(options.log_configuration);
             if (!valid) {
@@ -3979,6 +3988,14 @@ struct ApiServer::Impl {
             "/mcp",
         };
         const std::string path(route.url.path());
+        if (path == web_ui_stylesheet_url()) {
+            return path;
+        }
+        for (const std::string_view font : web_ui_font_names()) {
+            if (path == web_ui_font_url(font)) {
+                return path;
+            }
+        }
         for (const std::string_view pattern : fixed_routes) {
             if (path == pattern)
                 return std::string(pattern);
@@ -8190,20 +8207,21 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_style(boost::http::route_params& route) {
-        static const std::string css = web_ui_stylesheet();
+        const std::string path(route.url.path());
         return send_text(route,
                          boost::http::status::ok,
-                         css,
+                         std::string(web_ui_stylesheet()),
                          "text/css; charset=utf-8",
-                         "public, max-age=86400");
+                         web_ui_asset_cache_control(path));
     }
 
     boost::http::route_task serve_font(boost::http::route_params& route, std::string_view name) {
+        const std::string path(route.url.path());
         return send_text(route,
                          boost::http::status::ok,
                          std::string(web_ui_font(name)),
                          "font/woff2",
-                         "public, max-age=31536000, immutable");
+                         web_ui_asset_cache_control(path));
     }
 
     boost::http::route_task serve_openapi(boost::http::route_params& route) {
@@ -8564,16 +8582,25 @@ bool ApiServer::start() {
         http::method::get, "/style.css", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/style.css", impl.serve_style(route));
         });
-    for (const std::string_view font : {"ibm-plex-sans-400.woff2",
-                                        "ibm-plex-sans-500.woff2",
-                                        "ibm-plex-sans-600.woff2",
-                                        "ibm-plex-mono-400.woff2",
-                                        "ibm-plex-mono-500.woff2"}) {
+    const std::string stylesheet_path(web_ui_stylesheet_url());
+    router.add(http::method::get,
+               stylesheet_path,
+               [&impl, stylesheet_path](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route, stylesheet_path, impl.serve_style(route));
+               });
+    for (const std::string_view font : web_ui_font_names()) {
         const std::string route_path = "/fonts/" + std::string(font);
         router.add(http::method::get,
                    route_path,
                    [&impl, font, route_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(route, route_path, impl.serve_font(route, font));
+                   });
+        const std::string hashed_route_path(web_ui_font_url(font));
+        router.add(http::method::get,
+                   hashed_route_path,
+                   [&impl, font, hashed_route_path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, hashed_route_path, impl.serve_font(route, font));
                    });
     }
     router.add(

@@ -8,6 +8,8 @@
 #include <set>
 #include <sstream>
 
+#include <liquid/hash.hpp>
+
 #include "modules/frontends/common/syntax.hpp"
 
 namespace lake::api {
@@ -184,14 +186,93 @@ std::string web_ui_markdown(std::string_view markdown) {
     return output;
 }
 
-std::string web_ui_stylesheet() {
+std::string web_ui_hashed_asset_url(std::string_view path, std::string_view contents) {
+    const std::span<const std::byte> bytes(reinterpret_cast<const std::byte*>(contents.data()),
+                                           contents.size());
+    const liquid::result<liquid::digest> digest = liquid::hash(liquid::algorithm::sha256, bytes);
+    if (!digest) {
+        return {};
+    }
+    constexpr std::string_view hex = "0123456789abcdef";
+    std::string hash;
+    hash.reserve(16);
+    for (std::size_t index = 0; index < 8; ++index) {
+        const unsigned char value = std::to_integer<unsigned char>(digest->bytes[index]);
+        hash += hex[value >> 4];
+        hash += hex[value & 0x0f];
+    }
+    const std::size_t slash = path.rfind('/');
+    const std::size_t extension = path.rfind('.');
+    if (extension == std::string_view::npos ||
+        (slash != std::string_view::npos && extension < slash)) {
+        return std::string(path) + '-' + hash;
+    }
+    return std::string(path.substr(0, extension)) + '-' + hash +
+           std::string(path.substr(extension));
+}
+
+std::span<const std::string_view> web_ui_font_names() {
+    static constexpr std::array names{
+        std::string_view{"ibm-plex-sans-400.woff2"},
+        std::string_view{"ibm-plex-sans-500.woff2"},
+        std::string_view{"ibm-plex-sans-600.woff2"},
+        std::string_view{"ibm-plex-mono-400.woff2"},
+        std::string_view{"ibm-plex-mono-500.woff2"},
+    };
+    return names;
+}
+
+std::string_view web_ui_font_url(std::string_view name) {
+    static const std::map<std::string, std::string, std::less<>> urls = [] {
+        std::map<std::string, std::string, std::less<>> result;
+        for (const std::string_view font_name : web_ui_font_names()) {
+            const std::string path = "/fonts/" + std::string(font_name);
+            result.emplace(font_name, web_ui_hashed_asset_url(path, web_ui_font(font_name)));
+        }
+        return result;
+    }();
+    const auto found = urls.find(name);
+    return found == urls.end() ? std::string_view{} : std::string_view(found->second);
+}
+
+std::string_view web_ui_stylesheet() {
     static constexpr std::string_view tokens =
 #include "web_ui_tokens.inc"
         ;
     static constexpr std::string_view styles =
 #include "web_ui_styles.inc"
         ;
-    return std::string(tokens) + std::string(styles);
+    static const std::string stylesheet = [] {
+        std::string result = std::string(tokens) + std::string(styles);
+        for (const std::string_view name : web_ui_font_names()) {
+            const std::string plain_url = "/fonts/" + std::string(name);
+            const std::string_view hashed_url = web_ui_font_url(name);
+            std::size_t offset = 0;
+            while ((offset = result.find(plain_url, offset)) != std::string::npos) {
+                result.replace(offset, plain_url.size(), hashed_url);
+                offset += hashed_url.size();
+            }
+        }
+        return result;
+    }();
+    return stylesheet;
+}
+
+std::string_view web_ui_stylesheet_url() {
+    static const std::string url = web_ui_hashed_asset_url("/style.css", web_ui_stylesheet());
+    return url;
+}
+
+std::string_view web_ui_asset_cache_control(std::string_view path) {
+    if (path == web_ui_stylesheet_url()) {
+        return "public, max-age=31536000, immutable";
+    }
+    for (const std::string_view name : web_ui_font_names()) {
+        if (path == web_ui_font_url(name)) {
+            return "public, max-age=31536000, immutable";
+        }
+    }
+    return "no-cache";
 }
 
 std::string web_ui_icon(std::string_view name) {
@@ -243,6 +324,10 @@ constexpr std::string_view theme_preference_script =
     R"(<script id="theme-preference">(()=>{try{const t=localStorage.getItem('lake-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t;}catch{}})();</script>)";
 constexpr std::string_view theme_toggle_script =
     R"(<script id="theme-toggle-script">(()=>{const b=document.querySelector('[data-theme-toggle]');if(!b)return;const current=()=>document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');const label=()=>{const t=current();b.setAttribute('aria-label',`Use ${t==='dark'?'light':'dark'} theme`);b.setAttribute('aria-pressed',String(t==='dark'));};b.addEventListener('click',()=>{const t=current()==='dark'?'light':'dark';document.documentElement.dataset.theme=t;try{localStorage.setItem('lake-theme',t);}catch{}label();});label();})();</script>)";
+
+std::string stylesheet_link() {
+    return std::format("<link rel=\"stylesheet\" href=\"{}\">", web_ui_stylesheet_url());
+}
 
 bool navigation_is_current(std::string_view title, std::string_view key) {
     if (key == "home") {
@@ -796,27 +881,27 @@ std::string application_shell(const control::Application& application,
                               std::string_view content) {
     const std::string accent = theme_color(application, "accent_color", "#0b6e99");
     const std::string background = theme_color(application, "background_color", "#fafaf8");
-    std::string html =
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"light dark\">"
-        "<title>" +
-        web_ui_escape(title) + "</title>" + std::string(theme_preference_script) +
-        "<link rel=\"stylesheet\" href=\"/style.css\"><style>:root{--accent:" + accent +
-        ";--paper:" + background + ";--app-accent:" + accent + ";--app-background:" + background +
-        "}</style></head><body class=\"hosted-shell\">"
-        "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
-        "<header class=\"hosted-header\"><span class=\"hosted-brand\"><span "
-        "class=\"hosted-brand-mark\" aria-hidden=\"true\"></span>" +
-        web_ui_escape(application.name) +
-        "</span><button class=\"theme-toggle\" type=\"button\" data-theme-toggle "
-        "aria-label=\"Toggle theme\">" +
-        web_ui_icon("theme") +
-        "<span class=\"sr-only\">Toggle theme</span></button></header>"
-        "<main class=\"hosted-main\" id=\"main-content\" tabindex=\"-1\"><div "
-        "class=\"hosted-card\">" +
-        std::string(content) + "</div></main>" + std::string(theme_toggle_script) +
-        "</body></html>";
+    std::string html = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+                       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                       "<meta name=\"color-scheme\" content=\"light dark\">"
+                       "<title>" +
+                       web_ui_escape(title) + "</title>" + std::string(theme_preference_script) +
+                       stylesheet_link() + "<style>:root{--accent:" + accent +
+                       ";--paper:" + background + ";--app-accent:" + accent +
+                       ";--app-background:" + background +
+                       "}</style></head><body class=\"hosted-shell\">"
+                       "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
+                       "<header class=\"hosted-header\"><span class=\"hosted-brand\"><span "
+                       "class=\"hosted-brand-mark\" aria-hidden=\"true\"></span>" +
+                       web_ui_escape(application.name) +
+                       "</span><button class=\"theme-toggle\" type=\"button\" data-theme-toggle "
+                       "aria-label=\"Toggle theme\">" +
+                       web_ui_icon("theme") +
+                       "<span class=\"sr-only\">Toggle theme</span></button></header>"
+                       "<main class=\"hosted-main\" id=\"main-content\" tabindex=\"-1\"><div "
+                       "class=\"hosted-card\">" +
+                       std::string(content) + "</div></main>" + std::string(theme_toggle_script) +
+                       "</body></html>";
     return html;
 }
 
@@ -829,8 +914,7 @@ std::string web_ui_shell(std::string_view title,
     return std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>{}"
-        "<link rel=\"stylesheet\" href=\"/style.css\"></head><body>"
+        "<meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>{}{}</head><body>"
         "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
         "<div class=\"app-shell\"><aside class=\"sidebar\"><a class=\"brand\" href=\"/\">"
         "<span class=\"brand-mark\">{}</span><span>lake</span></a>{}"
@@ -843,6 +927,7 @@ std::string web_ui_shell(std::string_view title,
         "<div class=\"page-container\">{}</div></main></div></div>{}</body></html>",
         web_ui_escape(title),
         theme_preference_script,
+        stylesheet_link(),
         web_ui_icon("lake"),
         nav(signed_in, title),
         web_ui_escape(meta),

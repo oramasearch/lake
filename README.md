@@ -126,8 +126,8 @@ ctest --test-dir build
 | Route | Serves |
 |---|---|
 | `GET /` | the hello page in the server-rendered Orama application shell |
-| `GET /style.css` | the token-driven light and dark stylesheet (`public, max-age=86400`) |
-| `GET /fonts/<IBM Plex face>.woff2` | embedded Sans and Mono faces (`public, max-age=31536000, immutable`) |
+| `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by every page |
+| `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |

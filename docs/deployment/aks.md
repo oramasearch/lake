@@ -65,7 +65,9 @@ git push origin <tag>
 Wait for the GitHub Actions `image` workflow to publish `oramasearch/lake:<tag>`, then change
 `spec.image` on the Lake and apply; the Deployment rolls. Never deploy `latest` or an image pushed
 from a workstation. The workflow credentials and the manual retry path are documented in
-[`../build/ci.md`](../build/ci.md).
+[`../build/ci.md`](../build/ci.md). Pages link the content-hashed stylesheet and font URLs, so a
+Cloudflare cache purge is not part of a Lake rollout. The unhashed compatibility routes require
+revalidation and cannot retain a prior deployment's bytes without checking Lake.
 
 **Roll the operator.** From the operator repo on the branch to deploy:
 

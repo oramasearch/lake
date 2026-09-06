@@ -41,16 +41,45 @@ TEST(WebUi, MarkdownEscapesRawHtmlAndAddsStableHeadingAnchors) {
 }
 
 TEST(WebUi, EmbedsEveryDesignSystemFont) {
-    for (const std::string_view name : {"ibm-plex-sans-400.woff2",
-                                        "ibm-plex-sans-500.woff2",
-                                        "ibm-plex-sans-600.woff2",
-                                        "ibm-plex-mono-400.woff2",
-                                        "ibm-plex-mono-500.woff2"}) {
+    for (const std::string_view name : lake::api::web_ui_font_names()) {
         const std::string_view font = lake::api::web_ui_font(name);
         ASSERT_GE(font.size(), 4);
         EXPECT_EQ(font.substr(0, 4), "wOF2");
     }
     EXPECT_TRUE(lake::api::web_ui_font("unknown.woff2").empty());
+}
+
+TEST(WebUi, ContentHashedAssetUrlsUseTheFirstSha256HexDigits) {
+    EXPECT_EQ(lake::api::web_ui_hashed_asset_url("/style.css", "abc"),
+              "/style-ba7816bf8f01cfea.css");
+    EXPECT_EQ(lake::api::web_ui_hashed_asset_url("/fonts/example.woff2", "abc"),
+              "/fonts/example-ba7816bf8f01cfea.woff2");
+    EXPECT_NE(lake::api::web_ui_hashed_asset_url("/style.css", "first stylesheet"),
+              lake::api::web_ui_hashed_asset_url("/style.css", "second stylesheet"));
+}
+
+TEST(WebUi, StylesheetUsesContentHashedFontUrls) {
+    const std::string_view css = lake::api::web_ui_stylesheet();
+    for (const std::string_view name : lake::api::web_ui_font_names()) {
+        const std::string_view url = lake::api::web_ui_font_url(name);
+        EXPECT_FALSE(url.empty()) << name;
+        EXPECT_NE(css.find(url), std::string_view::npos) << name;
+        EXPECT_EQ(css.find("url('/fonts/" + std::string(name) + "')"), std::string_view::npos)
+            << name;
+    }
+}
+
+TEST(WebUi, CompatibilityAssetRoutesUseNoCache) {
+    EXPECT_EQ(lake::api::web_ui_asset_cache_control("/style.css"), "no-cache");
+    EXPECT_EQ(lake::api::web_ui_asset_cache_control(lake::api::web_ui_stylesheet_url()),
+              "public, max-age=31536000, immutable");
+    for (const std::string_view name : lake::api::web_ui_font_names()) {
+        const std::string plain_url = "/fonts/" + std::string(name);
+        EXPECT_EQ(lake::api::web_ui_asset_cache_control(plain_url), "no-cache") << name;
+        EXPECT_EQ(lake::api::web_ui_asset_cache_control(lake::api::web_ui_font_url(name)),
+                  "public, max-age=31536000, immutable")
+            << name;
+    }
 }
 
 TEST(WebUi, ApprovedIconsAreDecorativeInlineSvg) {
@@ -75,7 +104,7 @@ TEST(WebUi, ApprovedIconsAreDecorativeInlineSvg) {
 }
 
 TEST(WebUi, StylesheetDefinesTheGovernedComponentSet) {
-    const std::string css = lake::api::web_ui_stylesheet();
+    const std::string_view css = lake::api::web_ui_stylesheet();
     for (const std::string_view selector : {".app-shell",
                                             ".sidebar",
                                             ".topbar",
@@ -263,13 +292,33 @@ TEST(WebUi, HelloIsASelfContainedDocument) {
     EXPECT_TRUE(html.starts_with("<!doctype html>"));
     EXPECT_NE(html.find("hello from lake"), std::string::npos);
     EXPECT_NE(html.find("node-1"), std::string::npos);
-    EXPECT_NE(html.find("/style.css"), std::string::npos);
+    EXPECT_NE(html.find(lake::api::web_ui_stylesheet_url()), std::string::npos);
+    EXPECT_EQ(html.find("href=\"/style.css\""), std::string::npos);
     EXPECT_NE(html.find("class=\"skip-link\""), std::string::npos);
     EXPECT_NE(html.find("<aside class=\"sidebar\""), std::string::npos);
     EXPECT_NE(html.find("<nav class=\"primary-nav\" aria-label=\"Primary\""), std::string::npos);
     EXPECT_NE(html.find("<header class=\"topbar\""), std::string::npos);
     EXPECT_NE(html.find("<main id=\"main-content\""), std::string::npos);
     expect_theme_scripts(html);
+}
+
+TEST(WebUi, EveryPageHeadUsesTheSharedStylesheetLink) {
+    const lake::control::Application application{"app-1",
+                                                 "customer-1",
+                                                 "pool-1",
+                                                 "Example",
+                                                 {},
+                                                 {},
+                                                 "",
+                                                 nlohmann::json::object(),
+                                                 "created",
+                                                 "updated"};
+    const std::string shell = lake::api::web_ui_hello("node", "version");
+    const std::string hosted = lake::api::web_ui_application_sign_in(application, "");
+    const std::string link = "<link rel=\"stylesheet\" href=\"" +
+                             std::string(lake::api::web_ui_stylesheet_url()) + "\">";
+    EXPECT_EQ(occurrences(shell, link), 1u);
+    EXPECT_EQ(occurrences(hosted, link), 1u);
 }
 
 TEST(WebUi, HelloEscapesNodeName) {

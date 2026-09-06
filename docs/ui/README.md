@@ -7,10 +7,12 @@ The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
 Organization and personal settings are in [`settings.md`](settings.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
-`src/api/web_ui.cpp`): one token-driven stylesheet at `/style.css`, an accessible shared shell,
-and a persisted light/dark theme control, unit-tested as strings. The grouped navigation covers
-workspace, administration, applications, identity, and developer pages; contextual links lead to
-exports, SSO, repository content, and drive views.
+`src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed
+self-hosted font URLs, an accessible shared shell, and a persisted light/dark theme control,
+unit-tested as strings. The grouped navigation covers workspace, administration, applications,
+identity, and developer pages; contextual links lead to exports, SSO, repository content, and
+drive views. The unhashed stylesheet and font routes remain compatibility aliases with
+`Cache-Control: no-cache`.
 
 | Page | Route | Shows |
 |---|---|---|
