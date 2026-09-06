@@ -19,6 +19,13 @@ page heads, SHA-256 URL changes for different stylesheet bytes, content-hashed f
 and the immutable versus `no-cache` route policy. These checks use embedded or in-memory bytes and
 perform no filesystem or network I/O.
 
+`test_forge_scenario.cpp` is the Postgres-backed forge lifecycle proof. It drives repository sync
+and review operations through a real Lake server with Liquid's sync and forge clients, opens the
+candidate and landed HTML pages, maps a line comment after an inserted line, and lands the approved
+target. The same case records a graph action with signed provenance in Lake's repository, rejects
+automation YAML in the source tree, and asserts the result identity, output path, and verified
+profile in the rendered change page.
+
 `fixtures/transparency/fixture.json` is the deterministic transparency-log interoperability
 fixture. Its Python generator and independent C++ verifier cover entry and parent-hash tile bytes,
 checkpoint-bound inclusion proofs for every leaf, consistency between two tree sizes, and changed

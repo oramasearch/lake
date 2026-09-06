@@ -50,9 +50,12 @@ liquid is the tool. lake is where it collects.
 > atomic manifest replacement, filters candidates with the batched policy engine, and records the
 > signed query outcome through the registry. Change pages render libliquid's per-path structural
 > review with safe Markdown, text hunks, line comments, modes, blob identities, file statistics,
-> conflict values, checks, and attestations. Issue, release, webhook, and branch-protection pages
-> expose their existing forge and signed-audit records. Artifact pages provide filtered cursor pages of results
-> plus result outputs, timing, cache state, verified attestations, and retained trace summaries.
+> conflict values, checks, output paths, and verified attestation profiles. A Postgres-backed
+> scenario proves an unlanded Liquid review, cursor movement after rewrite, approval, publication,
+> and graph-derived evidence without repository automation YAML. Issue, release, webhook, and
+> branch-protection pages expose their existing forge and signed-audit records. Artifact pages
+> provide filtered cursor pages of results plus result outputs, timing, cache state, verified
+> attestations, and retained trace summaries.
 > Metering migration `0014_metering` aggregates hourly unique stored bytes, sync transfer, and
 > build compute. The `metering_usage` capability and `/metering` page apply configured integer
 > pricing. Per-customer quotas override the configured default and throttle new writes without
