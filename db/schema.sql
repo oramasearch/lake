@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `auth_app_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `platform_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -1130,3 +1130,37 @@ CREATE TABLE IF NOT EXISTS settings_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0018_settings_surface') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Platform mirror (migration 0019): repository environments and the last operator-control rows
+-- Lake observed. Zetta remains the append-only deployment authority; this mirror keeps pages
+-- available during an operator-control outage.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS platform_environments (
+    id            uuid        PRIMARY KEY,
+    repository_id uuid        NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    name          text        NOT NULL,
+    object_id     uuid        NOT NULL UNIQUE REFERENCES objects(id) ON DELETE CASCADE,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT platform_environments_repository_name_unique UNIQUE (repository_id, name),
+    CONSTRAINT platform_environments_name_check CHECK (length(name) BETWEEN 1 AND 256)
+);
+CREATE INDEX IF NOT EXISTS platform_environments_repository_idx
+    ON platform_environments (repository_id, name);
+
+CREATE TABLE IF NOT EXISTS platform_mirror (
+    kind    text        NOT NULL,
+    key     text        NOT NULL,
+    value   jsonb       NOT NULL,
+    seen_at timestamptz NOT NULL,
+    PRIMARY KEY (kind, key),
+    CONSTRAINT platform_mirror_kind_check
+        CHECK (kind IN ('deployment', 'environment_env', 'domain')),
+    CONSTRAINT platform_mirror_value_check CHECK (jsonb_typeof(value) = 'object')
+);
+
+CREATE TABLE IF NOT EXISTS platform_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0019_platform') ON CONFLICT DO NOTHING;

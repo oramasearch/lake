@@ -33,6 +33,7 @@
 
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/platform_store.hpp"
 #include "secrets_crypto.hpp"
 
 #include <pqxx/pqxx>
@@ -1666,7 +1667,7 @@ EncryptionKey encryption_key_of(const pqxx::row& row) {
                          row[6].as<std::string>()};
 }
 
-class PostgresStore final : public Store {
+class PostgresStore final : public Store, public PlatformStore {
 public:
     PostgresStore(std::string uri, std::string instance_kek)
         : uri_(std::move(uri)), instance_kek_(std::move(instance_kek)) {}
@@ -1683,6 +1684,149 @@ public:
         if (!result)
             return std::unexpected(StoreError{"store_unavailable", result.error().message});
         return {};
+    }
+
+    Result<PlatformEnvironment> ensure_platform_environment(const std::string& repository_id,
+                                                            const std::string& name) override {
+        if (repository_id.empty() || name.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "repository_id and environment name are required"});
+        }
+        return with_tx<PlatformEnvironment>([&](pqxx::work& tx) -> Result<PlatformEnvironment> {
+            const pqxx::result existing = tx.exec_params(
+                "SELECT id::text, repository_id::text, name, object_id::text, created_at::text "
+                "FROM platform_environments WHERE repository_id = $1::uuid AND name = $2",
+                repository_id,
+                name);
+            if (!existing.empty()) {
+                return PlatformEnvironment{existing[0][0].as<std::string>(),
+                                           existing[0][1].as<std::string>(),
+                                           existing[0][2].as<std::string>(),
+                                           existing[0][3].as<std::string>(),
+                                           existing[0][4].as<std::string>()};
+            }
+            const pqxx::result parents =
+                tx.exec_params("SELECT id::text FROM objects WHERE object_type = 'repository' AND "
+                               "external_id = $1",
+                               repository_id);
+            if (parents.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "repository policy object is missing"});
+            }
+            const std::string environment_id = new_uuid_v4();
+            const pqxx::result objects =
+                tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
+                               "VALUES ('environment', $1, $2::uuid) RETURNING id::text",
+                               environment_id,
+                               parents[0][0].as<std::string>());
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO platform_environments (id, repository_id, name, object_id) "
+                "VALUES ($1::uuid, $2::uuid, $3, $4::uuid) "
+                "RETURNING id::text, repository_id::text, name, object_id::text, created_at::text",
+                environment_id,
+                repository_id,
+                name,
+                objects[0][0].as<std::string>());
+            return PlatformEnvironment{rows[0][0].as<std::string>(),
+                                       rows[0][1].as<std::string>(),
+                                       rows[0][2].as<std::string>(),
+                                       rows[0][3].as<std::string>(),
+                                       rows[0][4].as<std::string>()};
+        });
+    }
+
+    Result<PlatformEnvironment> get_platform_environment(const std::string& repository_id,
+                                                         const std::string& name) override {
+        return with_tx<PlatformEnvironment>([&](pqxx::work& tx) -> Result<PlatformEnvironment> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT id::text, repository_id::text, name, object_id::text, created_at::text "
+                "FROM platform_environments WHERE repository_id = $1::uuid AND name = $2",
+                repository_id,
+                name);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no environment " + name});
+            }
+            return PlatformEnvironment{rows[0][0].as<std::string>(),
+                                       rows[0][1].as<std::string>(),
+                                       rows[0][2].as<std::string>(),
+                                       rows[0][3].as<std::string>(),
+                                       rows[0][4].as<std::string>()};
+        });
+    }
+
+    Result<std::vector<PlatformEnvironment>>
+    list_platform_environments(const std::string& repository_id) override {
+        return with_tx<std::vector<PlatformEnvironment>>(
+            [&](pqxx::work& tx) -> Result<std::vector<PlatformEnvironment>> {
+                pqxx::result rows;
+                if (repository_id.empty()) {
+                    rows = tx.exec("SELECT id::text, repository_id::text, name, object_id::text, "
+                                   "created_at::text FROM platform_environments ORDER BY name");
+                } else {
+                    rows = tx.exec_params(
+                        "SELECT id::text, repository_id::text, name, object_id::text, "
+                        "created_at::text FROM platform_environments "
+                        "WHERE repository_id = $1::uuid ORDER BY name",
+                        repository_id);
+                }
+                std::vector<PlatformEnvironment> output;
+                for (const pqxx::row& row : rows) {
+                    output.push_back(PlatformEnvironment{row[0].as<std::string>(),
+                                                         row[1].as<std::string>(),
+                                                         row[2].as<std::string>(),
+                                                         row[3].as<std::string>(),
+                                                         row[4].as<std::string>()});
+                }
+                return output;
+            });
+    }
+
+    Result<void> upsert_platform_mirror(const PlatformMirrorRow& row) override {
+        if (row.kind.empty() || row.key.empty() || !row.value.is_object()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "platform mirror row is incomplete"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("INSERT INTO platform_mirror (kind, key, value, seen_at) "
+                           "VALUES ($1, $2, $3::jsonb, $4::timestamptz) "
+                           "ON CONFLICT (kind, key) DO UPDATE SET value = EXCLUDED.value, "
+                           "seen_at = EXCLUDED.seen_at",
+                           row.kind,
+                           row.key,
+                           row.value.dump(),
+                           row.seen_at);
+            return {};
+        });
+    }
+
+    Result<std::vector<PlatformMirrorRow>> list_platform_mirror(const std::string& kind) override {
+        return with_tx<std::vector<PlatformMirrorRow>>(
+            [&](pqxx::work& tx) -> Result<std::vector<PlatformMirrorRow>> {
+                pqxx::result rows;
+                if (kind.empty()) {
+                    rows = tx.exec("SELECT kind, key, value::text, seen_at::text "
+                                   "FROM platform_mirror ORDER BY kind, key");
+                } else {
+                    rows = tx.exec_params(
+                        "SELECT kind, key, value::text, seen_at::text FROM platform_mirror "
+                        "WHERE kind = $1 ORDER BY key",
+                        kind);
+                }
+                std::vector<PlatformMirrorRow> output;
+                for (const pqxx::row& row : rows) {
+                    const nlohmann::json value =
+                        nlohmann::json::parse(row[2].as<std::string>(), nullptr, false);
+                    if (value.is_discarded() || !value.is_object()) {
+                        return std::unexpected(
+                            StoreError{"store_error", "platform mirror contains invalid JSON"});
+                    }
+                    output.push_back(PlatformMirrorRow{row[0].as<std::string>(),
+                                                       row[1].as<std::string>(),
+                                                       value,
+                                                       row[3].as<std::string>()});
+                }
+                return output;
+            });
     }
 
     Result<User> create_user(const NewUser& in) override {

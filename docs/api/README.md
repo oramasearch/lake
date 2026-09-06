@@ -5,7 +5,8 @@ OpenAPI 3.1 document at `GET /v1/openapi.json`, and MCP at `POST /mcp`. One capa
 (`include/lake/api/registry.hpp`) is the single source all three read: a capability is a name,
 a kind (`read` → `GET /v1/<name>`, input in the query string; `action` → `POST /v1/<name>`,
 input as the JSON body), an input schema, an output schema, an authorization object and action,
-an object resolver, and a handler. REST and MCP go through the same `Registry::call`, so they
+an object resolver, and a handler. REST and MCP go through the same `Registry::call` or coroutine
+`Registry::call_async`, so they
 authorize, validate and fail identically.
 
 Binary liquid-sync capabilities use the same registry for validation, policy, execution, and
@@ -30,6 +31,9 @@ import validation.
 [`github-import.md`](github-import.md) defines recorded GitHub migration input and its explicit
 fidelity report.
 
+[`platform.md`](platform.md) defines the operator-control mirror, environment/domain mutations,
+and Loki-compatible log reads.
+
 ## Operational routes
 
 | Route | Contract |
@@ -53,6 +57,9 @@ fidelity report.
 | `create_customer` | action | `customer_type`, `user_id?`, `organization_id?`, `name?` | customer | [customers.md](customers.md) |
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
+| `list_environments`, `get_environment`, `list_deployments`, `environment_logs` | read | repository id, optional environment, paging and log cursor fields | mirrored platform state or Loki-compatible log page | [platform.md](platform.md) |
+| `set_environment_env`, `unset_environment_env` | action (`write`) | repository, environment, key and plain value where setting | appended control-plane row | [platform.md](platform.md) |
+| `create_domain`, `delete_domain` | action (`deploy`) | repository, environment, host and TLS mode where creating | pending operator request | [platform.md](platform.md) |
 | `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
 | `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata, per-path diffs with text hunks, or conflict values | [repositories.md](repositories.md) |
 | `list_artifacts`, `get_artifact` | read | repository id; optional action/output/content filters, cursor and limit; or result id | a result page, or one result with outputs, timing, cache state, verified attestations and trace | [repositories.md](repositories.md) |

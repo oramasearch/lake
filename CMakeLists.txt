@@ -77,12 +77,42 @@ FetchContent_MakeAvailable(boost_core_libs)
 set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
 set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
+if(BUILD_SHARED_LIBS AND LAKE_BUILD_TESTS)
+  # Existing Lake tests exercise libliquid's internal conformance helpers. A nested dependency
+  # selects hidden C++ visibility globally, so expose those helpers only in shared test builds.
+  set_target_properties(libliquid PROPERTIES
+    CXX_VISIBILITY_PRESET default
+    VISIBILITY_INLINES_HIDDEN OFF)
+endif()
 # Search uses oramacore-cpp's in-memory BM25F engine. Lake owns persistence
 # and the positional trigram postings in src/search/index.cpp. Liquid supplies
 # the shared oramacore-cpp target at its pinned revision.
 set(BOOST_BEAST2_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(BOOST_BEAST2_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(modules/beast2 EXCLUDE_FROM_ALL)
+# Beast2's HTTPS implementation uses Corosio's TLS stream. Declare the dependency here because
+# the vendored target omits it and shared builds cannot rely on static archive resolution.
+target_link_libraries(boost_beast2 PUBLIC Boost::corosio_openssl)
+
+# Zetta's client-only API transport is compiled from the one authorized bridge checkout and
+# linked against lake's existing Boost.HTTP, Beast2, Capy, and Corosio targets. This avoids a
+# second copy of the networking stack while keeping Zetta source out of this repository.
+set(LAKE_ZETTA_SOURCE_DIR "" CACHE PATH "Path to the zetta source tree used for zetta-api")
+if(NOT LAKE_ZETTA_SOURCE_DIR)
+  message(FATAL_ERROR
+    "LAKE_ZETTA_SOURCE_DIR is required; point it at the zetta-bridge modules/zetta checkout")
+endif()
+if(NOT EXISTS "${LAKE_ZETTA_SOURCE_DIR}/include/zetta/connect/http_transport.hpp")
+  message(FATAL_ERROR
+    "LAKE_ZETTA_SOURCE_DIR does not contain the required zetta-api client headers")
+endif()
+add_library(zetta-api STATIC
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/connect/http_transport.cpp"
+  "${LAKE_ZETTA_SOURCE_DIR}/src/core/api/native_http_transport.cpp")
+target_compile_features(zetta-api PUBLIC cxx_std_26)
+target_include_directories(zetta-api PUBLIC "${LAKE_ZETTA_SOURCE_DIR}/include")
+target_link_libraries(zetta-api PRIVATE
+  Boost::http Boost::beast2 Boost::corosio Boost::corosio_openssl OpenSSL::SSL)
 
 # -----------------------------------------------------------------------------
 # nlohmann/json — the document type of the API layer (registry, REST envelope,
@@ -110,6 +140,9 @@ add_library(lake-core STATIC
   src/control/callers.cpp
   src/control/agents.cpp
   src/control/pki.cpp
+  src/control/platform.cpp
+  src/control/zetta_control.cpp
+  modules/liquid/src/scan/detectors.cpp
   src/version.cpp
   src/api/web_ui.cpp
   src/api/oauth.cpp
@@ -130,6 +163,7 @@ add_library(lake-core STATIC
   src/api/replication_capabilities.cpp
   src/api/app_capabilities.cpp
   src/api/agent_capabilities.cpp
+  src/api/platform_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp
@@ -142,11 +176,12 @@ add_library(lake-core STATIC
   src/transparency/timestamps.cpp
   src/telemetry/metrics.cpp
 )
-target_include_directories(lake-core PUBLIC include PRIVATE modules/liquid)
+target_include_directories(lake-core PUBLIC include PRIVATE modules/liquid modules/liquid/src)
 target_compile_features(lake-core PUBLIC cxx_std_26)
 target_link_libraries(lake-core
   PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto
   PRIVATE liquid_frontend_syntax)
+target_link_libraries(lake-core PRIVATE zetta-api)
 
 # lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
 add_library(lake-control-postgres STATIC

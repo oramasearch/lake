@@ -36,6 +36,10 @@ liquid is the tool. lake is where it collects.
 > history/object transfer, forge state, grants, artifact evidence, an optional Git projection, and
 > a server-rendered export download page. Recorded GitHub imports map Git history, issues,
 > reviews, and workflow documents with an explicit fidelity report.
+> Platform environments now mirror append-only deployment, plain environment-variable, and domain
+> rows from the operator's Zetta control plane. Policy-checked capabilities and server-rendered
+> environment/detail/log pages remain readable from the auditable Postgres mirror during an
+> operator-control outage; mutations are refused until sync recovers.
 > Migration `0011_offline_recovery` adds bounded cached-read grants, recovery codes, 24-hour email
 > recovery, two-administrator organization recovery, device notices, and designated custody of
 > client-wrapped repository keys. Account recovery does not recreate a lost repository key.
@@ -117,7 +121,8 @@ toolchain on every push and pull request; see [`docs/build/ci.md`](docs/build/ci
 ```sh
 git clone --recurse-submodules git@github.com:oramasearch/lake.git
 cd lake
-cmake -S . -B build -G Ninja
+cmake -S . -B build -G Ninja \
+  -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta-bridge/modules/zetta
 cmake --build build
 ctest --test-dir build
 ./build/lake --listen 127.0.0.1:4900 --node hello
@@ -139,6 +144,7 @@ ctest --test-dir build
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/organization?id=`, `/team?id=`, `/member?id=`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /transparency?identity=<taap-id>` | public hosted identity monitor over checkpoint-verified bulk tiles |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/issues`, `/issue`, `/releases`, `/webhooks`, `/protection`, `/conflicts`, `/artifacts`, `/artifact` | forge pages over authorized repository, review, issue, release, webhook, policy, signed-audit, and libliquid records; file pages include highlighted line anchors and blame, and change pages include review discussion, diff views, checks, and attestations. |
+| `GET /environments?repository_id=`, `/environment?repository_id=&name=`, `/logs?repository_id=&environment=` | platform summaries, deployment history, capability-backed environment/domain forms, and cursor-polling Loki-compatible logs; stale mirror reads show a warning |
 | `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, retained version comparison and conflict values, effective access, and scoped links; create, upload, rename, move, delete, restore, and sharing mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
@@ -158,6 +164,10 @@ Postgres control plane, `--memory-store` an in-memory one for demos; `--admin-to
 (default `$LAKE_ADMIN_TOKEN`) is the bearer every capability except `server_info` requires.
 `LAKE_REPLICATION_TOKEN` is the bearer presented to peer Lake instances and defaults to the admin
 token when omitted.
+Platform sync uses `LAKE_OPERATOR_ZETTA_URL`, secret bearer `LAKE_OPERATOR_ZETTA_TOKEN`,
+`LAKE_PUBLIC_HOST`, and optional `LAKE_PLATFORM_SYNC_SECONDS` (default 15). Logs use
+`LAKE_LOGS_URL` and optional secret bearer `LAKE_LOGS_TOKEN`; see
+[`docs/api/platform.md`](docs/api/platform.md).
 Metering and quota configuration uses the `LAKE_PRICE_*` and `LAKE_STORAGE_QUOTA_BYTES`
 environment variables documented in [`docs/api/metering.md`](docs/api/metering.md).
 Trusted timestamping uses `LAKE_TSA_URL`, optional PEM `LAKE_TSA_TRUST_CERT`, and the
@@ -194,7 +204,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `include/lake/api/server.hpp` | `ApiServer` / `ServerOptions` in Zetta's shape — no HTTP type appears here |
 | `src/api/http_server.cpp` | the **one** translation unit that knows Beast2, `boost::http` and Boost.JSON; serves the registry as REST, OpenAPI and MCP |
 | `include/lake/api/registry.hpp`, `sync_store.hpp`, `rest.hpp`, `mcp.hpp`, `capabilities.hpp` | the HTTP-free capability registry, liquid-sync boundary, and surface renderers |
-| `include/lake/control/`, `src/control/` | the control-plane store, policy engine, application authentication, static-secret lifecycle and encryption service: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
+| `include/lake/control/`, `src/control/` | the control-plane store, policy engine, operator-Zetta platform client/mirror, application authentication, static-secret lifecycle and encryption service: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
 | `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
 | `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
 | `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
@@ -204,7 +214,7 @@ by default, no args needed. Details, including the manual dispatch path, are in
 | `tests/` | GoogleTest; `ctest --test-dir build` |
 | `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |
 | `assets/fonts/`, `cmake/embed_fonts.cmake` | OFL-licensed IBM Plex WOFF2 sources and their binary embed step |
-| `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies |
+| `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies; Zetta remains an external source path selected by `LAKE_ZETTA_SOURCE_DIR` |
 | `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
 | `db/schema.sql` | **the control-plane schema, source of truth.** Identity and application user pools, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
 

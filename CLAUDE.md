@@ -28,6 +28,12 @@ floor, migration `0005`, and the `/audit` page; `LAKE_INSTANCE_KEK` is required 
 Postgres store runs. Repository lifecycle adds migration `0006_repository_lifecycle`, repository
 rename, transfer, visibility and tombstone capabilities, and lifecycle state on the repository
 page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
+Platform support links a client-only `zetta-api` from the required `LAKE_ZETTA_SOURCE_DIR`, sharing
+Lake's existing Boost.HTTP/Beast2 stack. It mirrors operator-control deployment, environment, and
+domain rows into migration `0019_platform`, creates environment policy objects, exposes the eight
+policy-checked platform capabilities, Loki-compatible logs, and the server-rendered environment
+pages. Operator-control outages degrade platform health, preserve stale mirror reads, and refuse
+platform writes without changing readiness.
 The codebase now renders forge-designed repository homes, trees, highlighted files with line
 anchors and blame, change review with safe Markdown, comments, diff layouts and checks, issues,
 releases, webhook history and retry, branch protection with signed refusal audit, conflict values,
@@ -253,10 +259,9 @@ that licence boundary.
 
 - **Blocking store calls run inline on the io thread** (one statement each). Offload to a
   pool, as Zetta does, when latency shows; not before.
-- **Copy the pattern vs link `zetta-api`.** Today lake copies Zetta's serving shape and has
-  no source dependency on Zetta. Linking Zetta as a library (control plane, state, auth,
-  Clerk issuer) means adding Zetta as a module of lake — decide how lake obtains Zetta before a
-  capability requires that source dependency.
+- **Broader Zetta linkage.** The operator-control and Loki HTTP clients link the client-only
+  transport from the authorized bridge source path. Any further Zetta target remains a separate
+  decision and must preserve one copy of the networking stack.
 
 ## Never
 

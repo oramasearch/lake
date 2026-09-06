@@ -34,6 +34,9 @@ drive views. The unhashed stylesheet and font routes remain compatibility aliase
 | Effective access | `GET /access?object_id=<uuid>` | direct and inherited principals, roles and allowed actions; object pages link to entity-specific views |
 | Repositories | `GET /repositories[?customer_id=<uuid>]` | public repositories for anonymous readers, or authorized repositories for a signed-in caller |
 | Repository | `GET /repository?id=<uuid>` | forge home with tree, recent changes, rendered README, refs and releases, clone/push commands, language/size summary, lifecycle state, and effective access |
+| Environments | `GET /environments?repository_id=<uuid>` | current mirrored phase, change, short image digest, URL, domains, update time, and stale warning |
+| Environment | `GET /environment?repository_id=<uuid>&name=<name>` | deployment history, URL and namespace, environment-variable and domain capability forms, and logs link |
+| Environment logs | `GET /logs?repository_id=<uuid>&environment=<name>[&since=<cursor>]` | server-rendered last page and refresh link, enhanced by a small polling island using `environment_logs` |
 | Model | `GET /models/<namespace>/<name>` or `/models/<uuid>` | card, revisions, file sizes and deduplication savings, storage totals, and the verified dataset-to-model provenance chain |
 | Exports | `GET /exports?repository_id=<uuid>` | signed archive requests and prior export manifests; its download form calls the export capability |
 | Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree with breadcrumbs, sizes, modes, and per-path last changes |

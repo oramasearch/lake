@@ -20,5 +20,6 @@ void register_timestamp_capabilities(Registry& registry);
 void register_replication_capabilities(Registry& registry);
 void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
+void register_platform_capabilities(Registry& registry);
 
 } // namespace lake::api

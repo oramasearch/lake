@@ -110,6 +110,18 @@ std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const std::vector<RepositoryContentRef>& refs = {},
                               bool signed_in = true);
+std::string web_ui_environments(const control::Repository& repository,
+                                const nlohmann::json& environments,
+                                bool signed_in = true);
+std::string web_ui_environment(const control::Repository& repository,
+                               const nlohmann::json& environment,
+                               const nlohmann::json& deployments,
+                               bool signed_in = true);
+std::string web_ui_logs(const control::Repository& repository,
+                        std::string_view environment,
+                        const nlohmann::json& logs,
+                        std::string_view stale_since,
+                        bool signed_in = true);
 std::string web_ui_repository_tree(const control::Repository& repository,
                                    std::string_view ref,
                                    const std::vector<RepositoryTreeEntry>& entries,

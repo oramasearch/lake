@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 
+#include "lake/control/platform_store.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::control {
@@ -12,12 +13,20 @@ namespace lake::control {
 // In-memory store enforcing the same constraints as db/schema.sql: one customer
 // per identity, individual xor organization, one global handle namespace, the
 // handle format.
-class InMemoryStore final : public Store {
+class InMemoryStore final : public Store, public PlatformStore {
 public:
     std::string kind() const override {
         return "memory";
     }
     Result<void> ping() override;
+    Result<PlatformEnvironment> ensure_platform_environment(const std::string& repository_id,
+                                                            const std::string& name) override;
+    Result<PlatformEnvironment> get_platform_environment(const std::string& repository_id,
+                                                         const std::string& name) override;
+    Result<std::vector<PlatformEnvironment>>
+    list_platform_environments(const std::string& repository_id) override;
+    Result<void> upsert_platform_mirror(const PlatformMirrorRow& row) override;
+    Result<std::vector<PlatformMirrorRow>> list_platform_mirror(const std::string& kind) override;
     Result<User> create_user(const NewUser&) override;
     Result<std::vector<User>> list_users(int limit) override;
     Result<User> get_user(const std::string& id) override;
@@ -432,6 +441,8 @@ private:
     std::vector<RecoveryDelivery> recovery_deliveries_;
     std::vector<RecoveryNotification> recovery_notifications_;
     std::vector<RecoveryContact> recovery_contacts_;
+    std::vector<PlatformEnvironment> platform_environments_;
+    std::vector<PlatformMirrorRow> platform_mirror_;
     std::vector<SsoProvider> sso_providers_;
     std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
     std::vector<std::pair<std::string, std::string>> sso_oidc_secrets_;

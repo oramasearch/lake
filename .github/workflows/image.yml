@@ -24,6 +24,15 @@ jobs:
           submodules: recursive
           token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
 
+      - name: Check out the Zetta client source
+        uses: actions/checkout@v4
+        with:
+          repository: oramasearch/zetta-bridge
+          ref: 5aba1ef333d969c1bfd45225936c596e537f4317
+          path: _external/zetta-bridge
+          submodules: recursive
+          token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
+
       - name: Resolve image tags
         id: image_tags
         env:
@@ -58,6 +67,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          build-contexts: zetta_source=${{ github.workspace }}/_external/zetta-bridge/modules/zetta
           push: true
           platforms: linux/amd64
           tags: |

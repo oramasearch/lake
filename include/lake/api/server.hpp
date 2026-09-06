@@ -12,7 +12,8 @@ class Service;
 
 namespace lake::control {
 class Store;
-}
+class PlatformService;
+} // namespace lake::control
 namespace lake::control::callers {
 class TokenReviewer;
 class JwtVerifier;
@@ -43,6 +44,7 @@ struct ServerOptions {
     // Search index service backed by LAKE_STORE_ROOT. Null keeps search
     // unavailable, which is useful for a control-plane-only node.
     std::shared_ptr<search::Service> search;
+    std::shared_ptr<control::PlatformService> platform;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;

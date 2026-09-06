@@ -13,6 +13,7 @@
 
 #include "lake/api/server.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/platform.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/search/index.hpp"
 #include "lake/version.hpp"
@@ -68,6 +69,9 @@ int usage() {
     std::println("  $LAKE_TSA_TRUST_CERT contains optional PEM trust roots for timestamp tokens");
     std::println(
         "  $LAKE_TSA_RENEWAL_SECONDS and $LAKE_TSA_RENEW_BEFORE_SECONDS set renewal policy");
+    std::println("  LAKE_OPERATOR_ZETTA_URL and LAKE_OPERATOR_ZETTA_TOKEN enable platform sync");
+    std::println("  LAKE_LOGS_URL and optional LAKE_LOGS_TOKEN enable environment logs");
+    std::println("  LAKE_PLATFORM_SYNC_SECONDS sets the platform poll interval (default 15)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -83,6 +87,11 @@ int main(int argc, char** argv) {
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
+    const std::string operator_zetta_url = env_or("LAKE_OPERATOR_ZETTA_URL", "");
+    const std::string operator_zetta_token = env_or("LAKE_OPERATOR_ZETTA_TOKEN", "");
+    const std::string logs_url = env_or("LAKE_LOGS_URL", "");
+    const std::string logs_token = env_or("LAKE_LOGS_TOKEN", "");
+    const std::uint64_t platform_sync_seconds = env_u64("LAKE_PLATFORM_SYNC_SECONDS", 15);
     opts.tsa_endpoint = env_or("LAKE_TSA_URL", "");
     opts.tsa_trust_pem = env_or("LAKE_TSA_TRUST_CERT", "");
     opts.timestamp_policy.renewal_interval =
@@ -176,6 +185,21 @@ int main(int argc, char** argv) {
     if (opts.replication_token.empty()) {
         opts.replication_token = opts.admin_token;
     }
+    if (operator_zetta_url.empty() != operator_zetta_token.empty()) {
+        std::println(stderr,
+                     "lake: LAKE_OPERATOR_ZETTA_URL and LAKE_OPERATOR_ZETTA_TOKEN must be set "
+                     "together");
+        return 2;
+    }
+    if (!operator_zetta_url.empty() && opts.public_host.empty()) {
+        std::println(
+            stderr, "lake: LAKE_PUBLIC_HOST is required when the operator Zetta client is enabled");
+        return 2;
+    }
+    if (platform_sync_seconds == 0) {
+        std::println(stderr, "lake: LAKE_PLATFORM_SYNC_SECONDS must be greater than zero");
+        return 2;
+    }
 
     std::string store_kind = "none";
     if (memory_store) {
@@ -188,6 +212,26 @@ int main(int argc, char** argv) {
     if (!opts.store_root.empty()) {
         opts.search = std::make_shared<lake::search::Service>(opts.store_root);
     }
+    const bool platform_transport_required = !operator_zetta_url.empty() || !logs_url.empty();
+    if (platform_transport_required) {
+        lake::control::install_zetta_control_transport();
+    }
+    if (!operator_zetta_url.empty()) {
+        auto control = std::make_shared<lake::control::ZettaControlClient>(operator_zetta_url,
+                                                                           operator_zetta_token);
+        std::shared_ptr<lake::control::LokiSource> logs;
+        if (!logs_url.empty()) {
+            logs = std::make_shared<lake::control::LokiHttpSource>(logs_url, logs_token);
+        }
+        opts.platform = std::make_shared<lake::control::PlatformService>(
+            opts.store,
+            std::move(control),
+            std::move(logs),
+            lake::control::PlatformConfig{opts.public_host,
+                                          std::chrono::seconds{platform_sync_seconds},
+                                          opts.identity_seed,
+                                          opts.instance_kek});
+    }
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -195,6 +239,9 @@ int main(int argc, char** argv) {
     lake::api::ApiServer server(opts);
     if (!server.start()) {
         std::println(stderr, "lake: cannot start: {}", server.reason());
+        if (platform_transport_required) {
+            lake::control::shutdown_zetta_control_transport();
+        }
         return 1;
     }
     std::println(
@@ -210,6 +257,8 @@ int main(int argc, char** argv) {
             {"tsa_configured", opts.tsa_endpoint.empty() ? "no" : "yes"},
             {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
             {"replication_token_set", opts.replication_token.empty() ? "no" : "yes"},
+            {"operator_zetta_configured", operator_zetta_url.empty() ? "no" : "yes"},
+            {"logs_configured", logs_url.empty() ? "no" : "yes"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}
             .dump());
@@ -218,5 +267,8 @@ int main(int argc, char** argv) {
         server.drain();
     }
     server.stop();
+    if (platform_transport_required) {
+        lake::control::shutdown_zetta_control_transport();
+    }
     return 0;
 }

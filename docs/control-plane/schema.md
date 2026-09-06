@@ -251,13 +251,26 @@ remain as public attribution evidence, while live verification rejects them at o
 `expires_at`. Customer deletion cascades the records. The migration follows application
 authentication migration `0016`.
 
+## Platform mirror (migration `0019_platform`)
+
+| Table | Purpose |
+|---|---|
+| `platform_environments` | Repository/name binding to the local environment policy object created when the mirror first sees an environment. |
+| `platform_mirror` | Last operator-control JSON row Lake saw per `(kind, key)`, plus local `seen_at`; deployment, environment-value, and domain rows share this auditable cache. |
+| `platform_guard` | Guard table for the platform migration. |
+
+The issue brief reserved `0017_platform`, but `0017_agent_sessions` and `0018_settings_surface`
+were already present on main. The platform tables therefore use the next collision-free migration,
+`0019_platform`. Operator Zetta remains the source of truth; these tables provide stale reads and
+local policy binding only.
+
 ## How it is applied
 
 With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-controldb-migrations`
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`agent_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`platform_guard` today), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -279,7 +292,8 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    `forge_guard`; the metering wave adds `0014_metering` and `metering_guard`; drive adds
    `0015_drive` and `drive_guard`; application authentication adds `0016_auth_apps` and
    `auth_app_guard`; agent sessions add `0017_agent_sessions` and `agent_guard`; settings adds
-   `0018_settings_surface` and `settings_guard`. The operator copy remains deferred to the single
+   `0018_settings_surface` and `settings_guard`; platform adds `0019_platform` and
+   `platform_guard`. The operator copy remains deferred to the single
    wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
@@ -293,6 +307,6 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions')" \
-  -c "SELECT to_regclass('agent_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform')" \
+  -c "SELECT to_regclass('platform_guard')"
 ```

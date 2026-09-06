@@ -8,8 +8,10 @@ installer.
 ## Build and test workflow
 
 [`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It checks out all
-submodules recursively, starts a Postgres 16 service, configures Release with
-`LAKE_BUILD_TESTS=ON`, builds with clang-19, applies `db/schema.sql`, then runs:
+submodules recursively, checks out the pinned `oramasearch/zetta-bridge` source, starts a Postgres
+16 service, configures Release with `LAKE_BUILD_TESTS=ON` and
+`LAKE_ZETTA_SOURCE_DIR=<checkout>/modules/zetta`, builds with clang-19, applies `db/schema.sql`, then
+runs:
 
 ```sh
 ctest --test-dir build --output-on-failure
@@ -47,6 +49,18 @@ the dependencies again.
 `modules/liquid` is a library-only source submodule pinned to liquid `origin/main`. Initialise it
 with the rest of the module tree (`git submodule update --init --recursive`) before configuring a
 consumer build. Its `LIQUID_BUILD_CLI` and `LIQUID_BUILD_TESTS` options stay off for lake.
+
+Zetta remains an external source dependency. `LAKE_ZETTA_SOURCE_DIR` must name the one authorized
+`zetta-bridge/modules/zetta` checkout. Lake builds a client-only `zetta-api` from that directory and
+links it to Lake's existing Boost.HTTP, Beast2, Capy, and Corosio targets, so the binary contains
+one networking stack. CI pins the bridge commit and the image workflow supplies the same directory
+as the `zetta_source` named build context.
+
+Lake's plain environment-value check compiles libliquid's existing private detector source into
+`lake-core`. The detector has no exported shared-library API, so this keeps static and shared builds
+on the exact inline scanner implementation without adding a different scanner implementation.
+Shared test builds expose libliquid's internal conformance helpers because existing Lake tests call
+them directly; production builds retain libliquid's hidden C++ visibility.
 
 Postgres-backed identity coverage uses `LAKE_TEST_DB_URI`. To run it locally, start the documented
 test database and apply the schema before the test command:

@@ -142,6 +142,14 @@ Identity-core credential resolution supplies user TAAP principals; self-manageme
 `principal/<taap_id>`, and scoped API tokens are narrowed before policy evaluation. Workload TAAP
 principals remain part of the workload-identity follow-up.
 
+**Platform (decision 22, lake #83).** Deployments live in the operator's `orama_control` Zetta
+database. Lake is not a deployment control plane: it mirrors the latest deployment, environment,
+and domain rows for server-rendered pages and signed phase audit, and appends only authorized plain
+environment values and domain requests. The local `environment` policy object is created under its
+repository on first sight. Zetta failure leaves mirror reads available with `stale_since`, degrades
+platform health without changing readiness, and refuses mutations. Logs are cursor pages from a
+Loki-compatible endpoint through the `environment_logs` capability and a small polling island.
+
 **Offline rule (#22).** A signed `offline_grant/1` attestation permits only cached repository reads,
 only for its explicit scopes, device, and duration (at most seven days). Revocation cannot erase
 disconnected cached bytes, so those reads remain valid until embedded expiry. Publication never

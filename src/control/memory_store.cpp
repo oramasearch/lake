@@ -288,6 +288,93 @@ Result<void> InMemoryStore::ping() {
     return {};
 }
 
+Result<PlatformEnvironment>
+InMemoryStore::ensure_platform_environment(const std::string& repository_id,
+                                           const std::string& name) {
+    if (repository_id.empty() || name.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "repository_id and environment name are required"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto existing =
+        std::ranges::find_if(platform_environments_, [&](const PlatformEnvironment& environment) {
+            return environment.repository_id == repository_id && environment.name == name;
+        });
+    if (existing != platform_environments_.end()) {
+        return *existing;
+    }
+    const auto repository = std::ranges::find(repositories_, repository_id, &Repository::id);
+    if (repository == repositories_.end()) {
+        return std::unexpected(StoreError{"not_found", "no repository " + repository_id});
+    }
+    const auto parent = std::ranges::find_if(policy_objects_, [&](const PolicyObject& object) {
+        return object.object_type == "repository" && object.external_id == repository_id;
+    });
+    if (parent == policy_objects_.end()) {
+        return std::unexpected(StoreError{"store_error", "repository policy object is missing"});
+    }
+    const std::string now = now_iso8601();
+    PlatformEnvironment environment{new_uuid_v4(), repository_id, name, new_uuid_v4(), now};
+    policy_objects_.push_back(PolicyObject{
+        environment.object_id, "environment", environment.id, parent->id, now, now, true});
+    platform_environments_.push_back(environment);
+    return environment;
+}
+
+Result<PlatformEnvironment>
+InMemoryStore::get_platform_environment(const std::string& repository_id, const std::string& name) {
+    std::lock_guard lock(mutex_);
+    const auto environment =
+        std::ranges::find_if(platform_environments_, [&](const PlatformEnvironment& candidate) {
+            return candidate.repository_id == repository_id && candidate.name == name;
+        });
+    if (environment == platform_environments_.end()) {
+        return std::unexpected(StoreError{"not_found", "no environment " + name});
+    }
+    return *environment;
+}
+
+Result<std::vector<PlatformEnvironment>>
+InMemoryStore::list_platform_environments(const std::string& repository_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<PlatformEnvironment> output;
+    for (const PlatformEnvironment& environment : platform_environments_) {
+        if (repository_id.empty() || environment.repository_id == repository_id) {
+            output.push_back(environment);
+        }
+    }
+    return output;
+}
+
+Result<void> InMemoryStore::upsert_platform_mirror(const PlatformMirrorRow& row) {
+    if (row.kind.empty() || row.key.empty() || !row.value.is_object()) {
+        return std::unexpected(StoreError{"invalid_input", "platform mirror row is incomplete"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto existing =
+        std::ranges::find_if(platform_mirror_, [&](const PlatformMirrorRow& candidate) {
+            return candidate.kind == row.kind && candidate.key == row.key;
+        });
+    if (existing == platform_mirror_.end()) {
+        platform_mirror_.push_back(row);
+    } else {
+        *existing = row;
+    }
+    return {};
+}
+
+Result<std::vector<PlatformMirrorRow>>
+InMemoryStore::list_platform_mirror(const std::string& kind) {
+    std::lock_guard lock(mutex_);
+    std::vector<PlatformMirrorRow> output;
+    for (const PlatformMirrorRow& row : platform_mirror_) {
+        if (kind.empty() || row.kind == kind) {
+            output.push_back(row);
+        }
+    }
+    return output;
+}
+
 Result<User> InMemoryStore::create_user(const NewUser& in) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_) {
