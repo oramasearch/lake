@@ -2,6 +2,7 @@ add_executable(lake-tests test_web_ui.cpp
   scenarios/drive_test.cpp
   test_apps.cpp
   test_api.cpp
+  test_http_server.cpp
   test_forge_scenario.cpp
   test_handles.cpp
   test_policy.cpp

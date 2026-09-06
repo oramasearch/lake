@@ -215,8 +215,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   and `src/control/postgres_store.cpp` (libpqxx). nlohmann::json is the API document type.
 - Operational telemetry: `GET /healthz`, `GET /readyz`, authenticated `GET /metrics`, and one JSON
   request log on stdout. Contract and metric names: `docs/serving/telemetry.md`.
-- Expected stderr noise: beast2 logs `read_header error: end of stream` once per
-  keep-alive connection a client closes. Not a bug.
+- Idle keep-alive closes are normal and produce no stderr output. Lake pins the
+  `oramasearch/beast2` `orama-main` carrier branch that suppresses its former end-of-stream line.
 
 ## What lake is built on
 

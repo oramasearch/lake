@@ -152,7 +152,8 @@ and contract page.
 Requirements on macOS: CMake 3.28 or newer, Ninja, Homebrew LLVM (Clang 17 or newer), OpenSSL 3
 and libpq (`brew install llvm cmake ninja openssl@3 libpq`), Node for the UI checks in the test
 suite, and a checkout of `zetta-bridge` for `LAKE_ZETTA_SOURCE_DIR`. Clone with submodules; the
-HTTP stack and libliquid are vendored under `modules/`.
+HTTP stack and libliquid are vendored under `modules/`; the pins and private patch-carrier update
+rules are in [`docs/build/dependencies.md`](docs/build/dependencies.md).
 
 ```sh
 git clone --recurse-submodules git@github.com:oramasearch/lake.git
