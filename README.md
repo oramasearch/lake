@@ -67,7 +67,8 @@ liquid is the tool. lake is where it collects.
 > quorum, expiry, completion, and one-way share evidence. OIDC/JWT claim policy comes from the
 > shared federation issuer store. All remain on the signed audit path.
 > Drive presents the same repositories as folders with stable-node ACLs, server-rendered previews,
-> effective-access sharing, expiring links, path history, and restore-as-a-new-change. Models and
+> effective-access sharing before creation, expiring links with stated revocation consequences, a
+> shared-with-me view, path history, and restore-as-a-new-change. Models and
 > datasets use native resumable liquid sync with chunk-level deduplication and unique-byte
 > metering. The Hugging Face-compatible adapter supports repository creation, file/folder upload,
 > basic LFS, listings, model metadata, snapshots, and named or digest downloads. Model reads and

@@ -10,8 +10,9 @@ manifest's session cookie, and records light and dark PNGs. `lake-ui-fixture` ru
 HTTP server over an in-memory control plane and an on-disk libliquid repository populated with
 retained versions, a two-value conflict, representative preview formats, and a build result. It
 covers public pages, operator pages, identity pages, repository content, hosted application
-identity, secrets, sharing, metering, audit data, and the public
-transparency monitor without adding a fixture route to `lake`.
+identity, secrets, sharing decisions, an individual link detail, a recipient's shared-with-me
+page, metering, audit data, and the public transparency monitor without adding a fixture route
+to `lake`.
 
 ```sh
 cmake --build build --target lake-ui-fixture

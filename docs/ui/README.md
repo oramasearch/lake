@@ -1,7 +1,8 @@
 # The web UI
 
-Drive browsing, preview, history, sharing, and documented Linux client states are in
-[`drive.md`](drive.md).
+Drive browsing, preview, history, and documented Linux client states are in
+[drive.md](drive.md). The sharing decision and management screens are in
+[sharing.md](sharing.md).
 The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
 Organization and personal settings are in [`settings.md`](settings.md).
 
@@ -53,7 +54,8 @@ exports, SSO, repository content, and drive views.
 | Drive folder | `GET /drive?repository_id=<uuid>&ref=<ref>&path=<path>[&view=list|grid&sort=name|size|modified&direction=asc|desc]` | breadcrumbs, folder and file cards or rows, size, modified time, and capability-backed create, upload, rename, move, and delete controls |
 | Drive preview | `GET /drive/preview`, `/drive/download` | server-rendered or browser-native preview for registered formats, with exact-byte download, size, and digest fallback |
 | Drive history | `GET /drive/history`, `/drive/history/diff`, `/drive/conflict` | retained path versions, restore-as-new-change controls, two-version text differences, and preserved conflict values |
-| Drive sharing | `GET /drive/share`, `/share/<token>` | effective access, scoped links, and the public shared-folder view; see [drive.md](drive.md) and [sharing.md](sharing.md) |
+| Drive sharing | GET /drive/share, /drive/share/link, /share/<token> | effective access before sharing, People/Organization/Link choices, link state and revocation consequence, individual link detail, and the public shared-folder view; see [sharing.md](sharing.md) |
+| Shared with me | GET /shared-with-me | live folders granted directly to the signed-in identity, their grantor, allowed actions, and current availability; see [sharing.md](sharing.md) |
 
 **Session.** `POST /session` compares the form token with the operator token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the

@@ -246,6 +246,13 @@ std::string web_ui_drive_share(const control::Repository& repository,
                                const std::vector<nlohmann::json>& links,
                                std::string_view created_link,
                                std::string_view error);
+std::string web_ui_drive_share_link(const control::Repository& repository,
+                                    std::string_view ref,
+                                    std::string_view path,
+                                    const nlohmann::json& link,
+                                    std::string_view error);
+std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
+                                  std::string_view error);
 std::string web_ui_drive_link(std::string_view path,
                               const std::vector<RepositoryTreeEntry>& entries,
                               std::string_view error);

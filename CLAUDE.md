@@ -91,7 +91,8 @@ reconstructed root material out of storage. Both use the signed registry audit p
 Drive and models add migration `0015_drive`, stable-node folder ACLs, live recipient grants,
 expiring and revocable links, list/grid browse and repository mutations, browser-native and
 server-rendered format-registry previews, version comparison, conflict presentation, per-path
-history and restore, and the server-rendered browse/share/history pages. Models and datasets use
+history and restore, effective access before sharing, link management, and shared-with-me pages.
+Models and datasets use
 the liquid sync protocol for resumable deduplicated transfer and unique-byte metering. The
 compatible Hub routes support create,
 file/folder upload, basic LFS, list, info, snapshot, and named or digest downloads. Model metadata
