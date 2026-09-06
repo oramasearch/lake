@@ -149,6 +149,9 @@ struct NewPasswordUser {
 struct PasswordSignIn {
     std::string pool_id, email, password, totp_code, device_name;
 };
+struct TaapSignIn {
+    std::string pool_id, taap_id, assertion_id, device_name;
+};
 struct MfaEnrollment {
     std::string secret;
     std::vector<std::string> recovery_codes;
@@ -318,6 +321,30 @@ struct PkiCallerRecord {
     nlohmann::json attributes = nlohmann::json::object();
     std::string expires_at;
     std::string issued_at;
+};
+
+struct PkiCertificateRecord {
+    std::string id;
+    std::string authority_id;
+    std::string customer_id;
+    std::string profile;
+    std::string subject;
+    std::string serial;
+    std::string public_value;
+    std::string expires_at;
+    std::string issued_at;
+    std::string renewed_from_id;
+    std::string revoked_at;
+};
+
+struct NewPkiCertificateRecord {
+    std::string customer_id;
+    std::string profile;
+    std::string subject;
+    std::string serial;
+    std::string public_value;
+    std::string expires_at;
+    std::string renewed_from_id;
 };
 
 struct NewPkiCallerRecord {
@@ -566,6 +593,11 @@ public:
     create_application_webhook_delivery(const NewApplicationWebhookDelivery& value) = 0;
     virtual Result<std::vector<ApplicationWebhookDelivery>>
     list_application_webhook_deliveries(const std::string& event_id) = 0;
+    virtual Result<void>
+    create_application_authorization_code(const ApplicationAuthorizationCode& value) = 0;
+    virtual Result<ApplicationAuthorizationCode>
+    consume_application_authorization_code(const std::string& application_id,
+                                           const std::string& code_hash) = 0;
 
     virtual audit::Result<audit::Identity> current_lake_identity() = 0;
     virtual audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) = 0;
@@ -595,6 +627,10 @@ public:
     virtual Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& value) = 0;
     virtual Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
                                                                   int limit) = 0;
+    virtual Result<PkiCertificateRecord>
+    create_pki_certificate(const NewPkiCertificateRecord& value) = 0;
+    virtual Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) = 0;
+    virtual Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) = 0;
     virtual Result<AgentSession> create_agent_session(const NewAgentSession& value) = 0;
     virtual Result<AgentSession> get_agent_session(const std::string& customer_id,
                                                    const std::string& id) = 0;
@@ -626,6 +662,12 @@ public:
                            const std::string& name,
                            const std::vector<std::uint64_t>& versions,
                            SecretVersionAction action) = 0;
+    virtual Result<IssuedDynamicSecret> lease_dynamic_secret(const NewDynamicSecretLease& value,
+                                                             const std::string& instance_kek) = 0;
+    virtual Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) = 0;
+    virtual Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
+                                                                  int lifetime_seconds) = 0;
+    virtual Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) = 0;
 
     virtual Result<EncryptionKey> create_encryption_key(const NewEncryptionKey& value,
                                                         const std::string& instance_kek) = 0;
@@ -676,6 +718,7 @@ public:
     // request so a revoked session or device is rejected immediately.
     virtual Result<IssuedSession> sign_up_password(const NewPasswordUser&) = 0;
     virtual Result<IssuedSession> sign_in_password(const PasswordSignIn&) = 0;
+    virtual Result<IssuedSession> sign_in_taap(const TaapSignIn&) = 0;
     virtual Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
                                              const std::string& pool_id) = 0;
     virtual Result<void> disable_mfa(const std::string& user_id,

@@ -14,6 +14,21 @@ contains a newly generated workload private key; Lake does not persist that leaf
 `issue_client_certificate` and `issue_device_certificate` issue the same short-lived chain for a
 named client or device subject.
 
+`issue_agent_certificate` accepts the 32-byte base64url Ed25519 public key from an agent's TAAP
+identity and issues a certificate with that TAAP identifier as its URI subject alternative name.
+The private key never enters Lake. `rotate_agent_certificate` issues a new certificate row linked
+by `renewed_from_id`; it does not silently change the old row. `revoke_agent_certificate` records
+immediate revocation, and `check_agent_certificate` rejects a revoked or expired certificate at
+the API boundary. Lifetimes are positive and capped at one hour.
+
+## What the exit scenario proves
+
+The identity-exit Postgres scenario uses the same libliquid actor that signed in, gives Lake only
+its public TAAP key, checks the first short-lived certificate, rotates it, revokes the first
+certificate, observes its API check fail with `unauthorized`, and confirms the replacement remains
+valid. Issue, check, rotation, revocation, denied old-certificate check, and replacement check are
+retained as signed `certificate` audit events.
+
 `issue_ssh_user_certificate` and `issue_ssh_host_certificate` accept an Ed25519 OpenSSH public
 key, a key ID, one or more principals, and an optional lifetime. Lake returns a native OpenSSH
 certificate plus the customer CA public key. The online P-256 intermediate signs both profiles;

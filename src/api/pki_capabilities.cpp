@@ -1,11 +1,13 @@
 #include "lake/api/capabilities.hpp"
 
 #include "lake/control/callers.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/pki.hpp"
 #include "lake/control/store.hpp"
 
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <format>
 #include <tuple>
 
@@ -34,6 +36,24 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
             ApiError{object.error().code, object.error().message, "/customer_id"});
     }
     return object->id;
+}
+
+std::expected<std::string, ApiError> certificate_object(const json& input, ApiContext& context) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    auto certificate = context.store->get_pki_certificate(input.at("certificate_id"));
+    if (!certificate) {
+        return std::unexpected(
+            ApiError{certificate.error().code, certificate.error().message, "/certificate_id"});
+    }
+    json normalized = {{"customer_id", certificate->customer_id}};
+    context.audit_customer_id = certificate->customer_id;
+    context.audit_kind = "certificate";
+    context.audit_object = "certificate/" + certificate->id;
+    context.audit_details = {{"certificate_id", certificate->id}};
+    return customer_object(normalized, context);
 }
 
 std::expected<std::string, ApiError> acme_challenge_object(const json& input, ApiContext&) {
@@ -83,6 +103,25 @@ json svid_schema() {
              {{"certificate_pem", {{"type", "string"}}},
               {"private_key_pem", {{"type", "string"}}},
               {"chain_pem", {{"type", "string"}}}}}};
+}
+
+json certificate_record_json(const control::PkiCertificateRecord& value) {
+    return {{"id", value.id},
+            {"customer_id", value.customer_id},
+            {"profile", value.profile},
+            {"subject", value.subject},
+            {"serial", value.serial},
+            {"certificate_pem", value.public_value},
+            {"expires_at", value.expires_at},
+            {"issued_at", value.issued_at},
+            {"renewed_from_id", value.renewed_from_id},
+            {"revoked_at", value.revoked_at}};
+}
+
+std::string expiry_after(int lifetime_seconds) {
+    const auto expiry = std::chrono::floor<std::chrono::seconds>(
+        std::chrono::system_clock::now() + std::chrono::seconds(lifetime_seconds));
+    return std::format("{:%FT%TZ}", expiry);
 }
 
 std::string hex_of(const std::vector<std::byte>& bytes) {
@@ -196,6 +235,160 @@ void register_pki_capabilities(Registry& registry) {
             return ApiResult::success({{"certificate_pem", svid->certificate_pem},
                                        {"private_key_pem", svid->private_key_pem},
                                        {"chain_pem", svid->chain_pem}});
+        }});
+    registry.add(Capability{
+        .name = "issue_agent_certificate",
+        .title = "Issue agent certificate",
+        .description = "Issue a short-lived X.509 certificate to an agent TAAP Ed25519 key.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"taap_id", {{"type", "string"}}},
+                           {"public_key", {{"type", "string"}}},
+                           {"lifetime_seconds", {{"type", "integer"}}}}},
+                         {"required", json::array({"customer_id", "taap_id", "public_key"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.pki || !context.store) {
+                return no_pki();
+            }
+            const int lifetime_seconds = input.value("lifetime_seconds", 300);
+            auto certificate =
+                context.pki->issue_agent_certificate(*context.store,
+                                                     input.at("customer_id").get<std::string>(),
+                                                     input.at("taap_id").get<std::string>(),
+                                                     input.at("public_key").get<std::string>(),
+                                                     context.instance_kek,
+                                                     lifetime_seconds);
+            if (!certificate) {
+                return from_pki_error(certificate.error());
+            }
+            auto stored = context.store->create_pki_certificate(
+                {input.at("customer_id").get<std::string>(),
+                 "agent",
+                 input.at("taap_id").get<std::string>(),
+                 control::identity_crypto::sha256_hex(certificate->certificate_pem),
+                 certificate->certificate_pem,
+                 expiry_after(lifetime_seconds),
+                 {}});
+            if (!stored) {
+                return ApiResult::failure(stored.error().code, stored.error().message);
+            }
+            context.audit_customer_id = stored->customer_id;
+            context.audit_kind = "certificate";
+            context.audit_object = "certificate/" + stored->id;
+            context.audit_details = {{"certificate_id", stored->id}, {"operation", "issue"}};
+            json output = certificate_record_json(*stored);
+            output["chain_pem"] = certificate->chain_pem;
+            return ApiResult::success(std::move(output));
+        }});
+    registry.add(Capability{
+        .name = "rotate_agent_certificate",
+        .title = "Rotate agent certificate",
+        .description = "Issue a replacement certificate for an agent TAAP key.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"certificate_id", {{"type", "string"}}},
+                           {"public_key", {{"type", "string"}}},
+                           {"lifetime_seconds", {{"type", "integer"}}}}},
+                         {"required", json::array({"certificate_id", "public_key"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = certificate_object,
+        .handler = [](const json& input, ApiContext& context) {
+            auto previous = context.store->get_pki_certificate(input.at("certificate_id"));
+            if (!previous) {
+                return ApiResult::failure(previous.error().code, previous.error().message);
+            }
+            if (previous->profile != "agent") {
+                return ApiResult::failure("invalid_input",
+                                          "certificate is not an agent certificate");
+            }
+            const int lifetime_seconds = input.value("lifetime_seconds", 300);
+            auto certificate =
+                context.pki->issue_agent_certificate(*context.store,
+                                                     previous->customer_id,
+                                                     previous->subject,
+                                                     input.at("public_key").get<std::string>(),
+                                                     context.instance_kek,
+                                                     lifetime_seconds);
+            if (!certificate) {
+                return from_pki_error(certificate.error());
+            }
+            auto stored = context.store->create_pki_certificate(
+                {previous->customer_id,
+                 "agent",
+                 previous->subject,
+                 control::identity_crypto::sha256_hex(certificate->certificate_pem),
+                 certificate->certificate_pem,
+                 expiry_after(lifetime_seconds),
+                 previous->id});
+            if (!stored) {
+                return ApiResult::failure(stored.error().code, stored.error().message);
+            }
+            context.audit_object = "certificate/" + stored->id;
+            context.audit_details = {{"certificate_id", stored->id},
+                                     {"operation", "rotate"},
+                                     {"renewed_from_id", previous->id}};
+            json output = certificate_record_json(*stored);
+            output["chain_pem"] = certificate->chain_pem;
+            return ApiResult::success(std::move(output));
+        }});
+    registry.add(Capability{
+        .name = "revoke_agent_certificate",
+        .title = "Revoke agent certificate",
+        .description = "Revoke an issued agent certificate immediately.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"certificate_id", {{"type", "string"}}}}},
+                         {"required", json::array({"certificate_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = certificate_object,
+        .handler = [](const json& input, ApiContext& context) {
+            auto revoked = context.store->revoke_pki_certificate(input.at("certificate_id"));
+            if (!revoked) {
+                return ApiResult::failure(revoked.error().code, revoked.error().message);
+            }
+            context.audit_details["operation"] = "revoke";
+            return ApiResult::success(certificate_record_json(*revoked));
+        }});
+    registry.add(Capability{
+        .name = "check_agent_certificate",
+        .title = "Check agent certificate",
+        .description = "Reject revoked or expired agent certificates at the API boundary.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"certificate_id", {{"type", "string"}}}}},
+                         {"required", json::array({"certificate_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = certificate_object,
+        .handler = [](const json& input, ApiContext& context) {
+            auto certificate = context.store->get_pki_certificate(input.at("certificate_id"));
+            if (!certificate) {
+                return ApiResult::failure(certificate.error().code, certificate.error().message);
+            }
+            context.audit_details["operation"] = "check";
+            if (!certificate->revoked_at.empty()) {
+                return ApiResult::failure("unauthorized", "certificate is revoked");
+            }
+            if (certificate->expires_at <= expiry_after(0)) {
+                return ApiResult::failure("unauthorized", "certificate is expired");
+            }
+            return ApiResult::success({{"valid", true}, {"certificate_id", certificate->id}});
         }});
     registry.add(Capability{
         .name = "issue_jwt_svid",

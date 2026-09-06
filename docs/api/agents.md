@@ -3,7 +3,7 @@
 Lake mints one Ed25519 key for one agent session and delegates that key to a durable TAAP agent
 identity. The private seed is returned once by `mint_agent_session_key`; Lake stores only the
 public key, delegation, expiry, scopes, and transparency-log commitment. A drip verified through
-`verify_agent_session_drip` is attributed to the durable identity carried by the delegation.
+`verify_agent_session_drip` is attributed to the durable identity retained with the session.
 
 This is the custody boundary for liquid's agent sessions. A durable identity describes the agent
 across sessions. A session identity limits the useful life of secret key material held by one
@@ -35,9 +35,11 @@ subject is that session key and whose attributes are:
 
 | Attribute | Value |
 |---|---|
-| `principal` | Durable agent TAAP identity |
 | `scopes` | Requested session scopes |
-| `not_after` | Session expiry as Unix seconds |
+| `may_publish` | `false`; Lake authorizes each operation from the retained scopes |
+| `may_lease` | `false`; Lake authorizes each operation from the retained scopes |
+| `depth_remaining` | `0`; the session cannot delegate again |
+| `dispatcher` | Dispatcher TAAP identity |
 
 Lake verifies the completed attestation with libliquid before returning it. The capability then
 appends it to the instance tiled transparency log and persists its entry index and resulting
@@ -45,10 +47,10 @@ Merkle root. Persistence happens after append; if persistence fails, the capabil
 private seed. This can leave a harmless public delegation entry that no caller received a secret
 for, but it cannot create an unlogged usable session.
 
-The public `transparency_identity_scan` capability finds the delegation by durable identity.
-Clients can therefore bind a session signature to the durable agent and independently verify the
-tile and checkpoint chain. Full client-side inclusion and consistency verification is tracked in
-[liquid #207](https://github.com/oramasearch/liquid/issues/207).
+The public `transparency_identity_scan` capability finds the delegation by dispatcher identity.
+Clients combine that public statement with the durable-to-session binding retained in the session
+record and signed audit trail. The pinned liquid verifier checks tiles and compact inclusion and
+consistency proofs.
 
 ## Storage and audit
 

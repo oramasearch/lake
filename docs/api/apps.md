@@ -28,6 +28,8 @@ denial, and failure.
 | `rotate_application_signing_key` | application `admin` | new key ID and version |
 | `application_jwks` | public | all retained public verification keys |
 | `issue_application_jwt` | application `write` | short-lived user access token |
+| `begin_application_authorization` | application `write` | one-use code, state, and exact registered redirect for the signed-in lake user |
+| `exchange_application_authorization_code` | public client | EdDSA access and ID tokens after exact redirect and PKCE S256 verification |
 | `list_application_users`, `export_application_user` | application `read` | pool user profiles and status |
 | `suspend_application_user`, `delete_application_user` | application `admin` | suspended profile or deletion confirmation |
 | `list_application_organizations` | application `read` | application-owned organizations |
@@ -72,6 +74,13 @@ user TAAP identity as `sub` (or the user UUID if no TAAP identity exists), the a
 `aud`, `application_id`, `pool_id`, `user_id`, `iat`, `exp`, and `jti`. The default lifetime is 15
 minutes and cannot exceed one hour. A rotation makes a new key current but retains retired public
 keys so already-issued tokens continue to verify.
+
+The OIDC code path uses `begin_application_authorization` after lake session resolution. It
+registers the lake user in the application, requires an exact configured redirect, accepts only
+PKCE S256, and persists only the code hash with a five-minute expiry. Exchange consumes the code
+before checking its redirect and verifier, so every completion attempt is one-use. The ID token
+adds the request nonce and uses `https://<application host>/v1/apps/<id>` as issuer, the application
+UUID as audience, and the same keys published by `application_jwks` and the raw JWKS route.
 
 Always require EdDSA, fetch keys from the exact application JWKS URL, and compare `aud` to the
 application UUID. Common runtime libraries perform the key selection from `kid`:
@@ -137,6 +146,9 @@ pool isolation. Its policy case proves application lists filter inaccessible reg
 reject access to another application's user list. `ApplicationHttp` submits the hosted forms,
 renders every custom-domain entry page, and reads the raw JWKS route.
 `PostgresApplications` exercises the registry capabilities against migration `0016_auth_apps`.
+`IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` starts from a liquid TAAP-key lake
+session, completes the PKCE code exchange as a test relying party, and validates the ID token
+signature and claims against the application's JWKS.
 
 ## How to change
 

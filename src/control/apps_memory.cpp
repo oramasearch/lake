@@ -469,4 +469,38 @@ InMemoryStore::list_application_webhook_deliveries(const std::string& event_id) 
     return output;
 }
 
+Result<void>
+InMemoryStore::create_application_authorization_code(const ApplicationAuthorizationCode& value) {
+    if (value.application_id.empty() || value.user_id.empty() || value.redirect_uri.empty() ||
+        value.code_hash.empty() || value.code_challenge.empty() || value.nonce.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "authorization-code fields are required"});
+    }
+    std::lock_guard lock(mutex_);
+    if (std::ranges::any_of(application_authorization_codes_, [&](const auto& candidate) {
+            return candidate.code.code_hash == value.code_hash;
+        })) {
+        return std::unexpected(StoreError{"conflict", "authorization code already exists"});
+    }
+    application_authorization_codes_.push_back(
+        {value, std::chrono::steady_clock::now() + std::chrono::minutes(5), false});
+    return {};
+}
+
+Result<ApplicationAuthorizationCode>
+InMemoryStore::consume_application_authorization_code(const std::string& application_id,
+                                                      const std::string& code_hash) {
+    std::lock_guard lock(mutex_);
+    for (auto& candidate : application_authorization_codes_) {
+        if (candidate.code.application_id == application_id &&
+            candidate.code.code_hash == code_hash && !candidate.used &&
+            candidate.expires_at > std::chrono::steady_clock::now()) {
+            candidate.used = true;
+            return candidate.code;
+        }
+    }
+    return std::unexpected(
+        StoreError{"unauthorized", "authorization code is invalid, expired, or already used"});
+}
+
 } // namespace lake::control

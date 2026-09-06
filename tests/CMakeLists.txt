@@ -2,6 +2,7 @@ add_executable(lake-tests test_web_ui.cpp
   scenarios/drive_test.cpp
   test_apps.cpp
   test_api.cpp
+  test_forge_scenario.cpp
   test_handles.cpp
   test_policy.cpp
   test_oauth.cpp
@@ -16,6 +17,7 @@ add_executable(lake-tests test_web_ui.cpp
   test_transparency.cpp
   test_transparency_fixture.cpp
   test_platform.cpp
+  test_identity_exit.cpp
   test_postgres_identity.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest_main)

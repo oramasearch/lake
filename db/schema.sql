@@ -382,7 +382,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     revoked_at   timestamptz,
     created_at   timestamptz NOT NULL DEFAULT now(),
     last_used_at timestamptz,
-    CONSTRAINT sessions_kind_check CHECK (kind IN ('browser', 'api_token', 'static', 'admin')),
+    CONSTRAINT sessions_kind_check
+        CHECK (kind IN ('browser', 'api_token', 'static', 'admin', 'taap')),
     CONSTRAINT static_session_reason_check CHECK (kind <> 'static' OR length(reason) > 0)
 );
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id, created_at DESC);
@@ -822,8 +823,9 @@ CREATE TABLE IF NOT EXISTS pki_certificates (
     expires_at      timestamptz NOT NULL,
     issued_at       timestamptz NOT NULL DEFAULT now(),
     renewed_from_id uuid        REFERENCES pki_certificates(id) ON DELETE SET NULL,
+    revoked_at      timestamptz,
     CONSTRAINT pki_certificates_profile_check
-        CHECK (profile IN ('x509_svid', 'jwt_svid', 'acme', 'ssh', 'client', 'device')),
+        CHECK (profile IN ('x509_svid', 'jwt_svid', 'acme', 'ssh', 'client', 'device', 'agent')),
     CONSTRAINT pki_certificates_authority_serial_unique UNIQUE (authority_id, serial)
 );
 CREATE INDEX IF NOT EXISTS pki_certificates_customer_id_idx
@@ -1164,3 +1166,57 @@ CREATE TABLE IF NOT EXISTS platform_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0019_platform') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Identity, PKI, and dynamic-secret exit scenario (migration 0020): replay-resistant TAAP
+-- sign-in assertions, one-use OIDC authorization codes, certificate status, and renewable leases.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS identity_taap_assertions (
+    assertion_id text        PRIMARY KEY,
+    user_id      uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pool_id      text        NOT NULL,
+    used_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS auth_app_authorization_codes (
+    code_hash      text        PRIMARY KEY,
+    application_id uuid        NOT NULL REFERENCES auth_applications(id) ON DELETE CASCADE,
+    user_id        uuid        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    redirect_uri   text        NOT NULL,
+    code_challenge text        NOT NULL,
+    nonce          text        NOT NULL,
+    expires_at     timestamptz NOT NULL DEFAULT now() + interval '5 minutes',
+    used_at        timestamptz
+);
+CREATE INDEX IF NOT EXISTS auth_app_authorization_codes_live_idx
+    ON auth_app_authorization_codes (application_id, expires_at) WHERE used_at IS NULL;
+
+ALTER TABLE pki_certificates ADD COLUMN IF NOT EXISTS revoked_at timestamptz;
+ALTER TABLE pki_certificates DROP CONSTRAINT IF EXISTS pki_certificates_profile_check;
+ALTER TABLE pki_certificates ADD CONSTRAINT pki_certificates_profile_check
+    CHECK (profile IN ('x509_svid', 'jwt_svid', 'acme', 'ssh', 'client', 'device', 'agent'));
+ALTER TABLE sessions DROP CONSTRAINT IF EXISTS sessions_kind_check;
+ALTER TABLE sessions ADD CONSTRAINT sessions_kind_check
+    CHECK (kind IN ('browser', 'api_token', 'static', 'admin', 'taap'));
+
+CREATE TABLE IF NOT EXISTS secrets_dynamic_leases (
+    id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    mount_id        uuid        NOT NULL REFERENCES secrets_mounts(id) ON DELETE CASCADE,
+    role            text        NOT NULL,
+    encrypted_value text        NOT NULL,
+    expires_at      timestamptz NOT NULL,
+    revoked_at      timestamptz,
+    renewals        integer     NOT NULL DEFAULT 0,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT secrets_dynamic_leases_role_check CHECK (length(role) BETWEEN 1 AND 256),
+    CONSTRAINT secrets_dynamic_leases_expiry_check CHECK (expires_at > created_at),
+    CONSTRAINT secrets_dynamic_leases_renewals_check CHECK (renewals >= 0)
+);
+CREATE INDEX IF NOT EXISTS secrets_dynamic_leases_mount_idx
+    ON secrets_dynamic_leases (mount_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS identity_exit_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0020_identity_exit') ON CONFLICT DO NOTHING;

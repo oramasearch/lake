@@ -1668,9 +1668,9 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        const auto changes = liquid::runtime::block_on((*repository)->subject->log());
+        const auto changes = repository_changes(*(*repository)->subject);
         if (!changes) {
-            return std::unexpected(error_of(changes.error()));
+            return std::unexpected(changes.error());
         }
         std::vector<RepositoryChange> output;
         output.reserve(changes->size());
@@ -1698,9 +1698,9 @@ public:
         if (!repository) {
             return std::unexpected(repository.error());
         }
-        const auto changes = liquid::runtime::block_on((*repository)->subject->log());
+        const auto changes = repository_changes(*(*repository)->subject);
         if (!changes) {
-            return std::unexpected(error_of(changes.error()));
+            return std::unexpected(changes.error());
         }
         const auto found = std::ranges::find_if(*changes, [&](const liquid::change& change) {
             return liquid::to_string(change.id.value) == change_id;
@@ -1810,7 +1810,11 @@ public:
         auto output = RepositoryArtifactPage{.done = page->done};
         output.items.reserve(page->records.size());
         for (const liquid::repository_result& record : page->records) {
-            output.items.push_back(artifact_record(record));
+            auto artifact = artifact_record_with_evidence(*(*repository)->subject, record);
+            if (!artifact) {
+                return std::unexpected(artifact.error());
+            }
+            output.items.push_back(std::move(*artifact));
         }
         if (page->next) {
             output.next_cursor = page->next->token;
@@ -1839,98 +1843,7 @@ public:
         if (results->records.empty()) {
             return std::unexpected(SyncStoreError{"not_found", "no result " + result_id});
         }
-        RepositoryArtifact output = artifact_record(results->records.front());
-
-        if (results->records.front().value.provenance) {
-            const auto provenance = liquid::runtime::block_on(
-                liquid::build::verify_provenance(*(*repository)->subject, id));
-            if (!provenance) {
-                return std::unexpected(error_of(provenance.error()));
-            }
-            append_attestation(output,
-                               provenance->attestation,
-                               provenance->statement,
-                               provenance->verified,
-                               provenance->reason);
-        }
-
-        if (results->records.front().verification) {
-            const auto verification = liquid::runtime::block_on(
-                (*repository)
-                    ->subject->attestations(
-                        {.id = results->records.front().verification, .page = {.limit = 1}}));
-            if (!verification) {
-                return std::unexpected(error_of(verification.error()));
-            }
-            for (const liquid::repository_attestation& attestation : verification->records) {
-                append_verified_attestation(output, attestation.id, attestation.value);
-            }
-        }
-
-        auto attestation_page = liquid::record_page_options{.limit = 1'000};
-        for (;;) {
-            const auto attestations = liquid::runtime::block_on(
-                (*repository)
-                    ->subject->attestations({.subject = id.value, .page = attestation_page}));
-            if (!attestations) {
-                return std::unexpected(error_of(attestations.error()));
-            }
-            for (const liquid::repository_attestation& attestation : attestations->records) {
-                append_verified_attestation(output, attestation.id, attestation.value);
-            }
-            if (attestations->done || !attestations->next) {
-                break;
-            }
-            attestation_page.cursor = attestations->next;
-        }
-
-        auto sbom_page = liquid::record_page_options{.limit = 1'000};
-        for (;;) {
-            const auto sboms =
-                liquid::runtime::block_on((*repository)->subject->sboms(id, sbom_page));
-            if (!sboms) {
-                return std::unexpected(error_of(sboms.error()));
-            }
-            for (const liquid::sbom_report& sbom : sboms->records) {
-                append_attestation(
-                    output, sbom.attestation, sbom.statement, sbom.verified, sbom.reason);
-            }
-            if (sboms->done || !sboms->next) {
-                break;
-            }
-            sbom_page.cursor = sboms->next;
-        }
-
-        auto trace_page = liquid::record_page_options{.limit = 1'000};
-        for (;;) {
-            const auto traces =
-                liquid::runtime::block_on((*repository)->subject->traces(trace_page));
-            if (!traces) {
-                return std::unexpected(error_of(traces.error()));
-            }
-            for (const liquid::build_trace& trace : traces->records) {
-                const auto action = std::ranges::find_if(
-                    trace.actions, [&](const liquid::build_trace_action& value) {
-                        return liquid::to_string(value.result.value) == result_id;
-                    });
-                if (action != trace.actions.end()) {
-                    output.trace = RepositoryArtifactTrace{
-                        .id = liquid::to_string(trace.id),
-                        .wall_ms = milliseconds(trace.wall_time),
-                        .actions = static_cast<std::uint64_t>(trace.actions.size()),
-                        .dependencies = static_cast<std::uint64_t>(trace.edges.size()),
-                        .cache_hits = trace.cache.hits,
-                        .cache_misses = trace.cache.misses,
-                    };
-                    break;
-                }
-            }
-            if (output.trace || traces->done || !traces->next) {
-                break;
-            }
-            trace_page.cursor = traces->next;
-        }
-        return output;
+        return artifact_record_with_evidence(*(*repository)->subject, results->records.front());
     }
 
     SyncStoreResult<std::vector<RepositoryConflict>>
@@ -2837,6 +2750,111 @@ private:
         append_attestation(artifact, id, statement, verification->verified, verification->reason);
     }
 
+    static SyncStoreResult<void> append_result_attestations(liquid::repository& repository,
+                                                            const liquid::repository_result& record,
+                                                            RepositoryArtifact& artifact) {
+        if (record.value.provenance) {
+            const auto provenance =
+                liquid::runtime::block_on(liquid::build::verify_provenance(repository, record.id));
+            if (!provenance) {
+                return std::unexpected(error_of(provenance.error()));
+            }
+            append_attestation(artifact,
+                               provenance->attestation,
+                               provenance->statement,
+                               provenance->verified,
+                               provenance->reason);
+        }
+        if (record.verification) {
+            const auto verification = liquid::runtime::block_on(
+                repository.attestations({.id = record.verification, .page = {.limit = 1}}));
+            if (!verification) {
+                return std::unexpected(error_of(verification.error()));
+            }
+            for (const liquid::repository_attestation& attestation : verification->records) {
+                append_verified_attestation(artifact, attestation.id, attestation.value);
+            }
+        }
+        auto attestation_page = liquid::record_page_options{.limit = 1'000};
+        for (;;) {
+            const auto attestations = liquid::runtime::block_on(
+                repository.attestations({.subject = record.id.value, .page = attestation_page}));
+            if (!attestations) {
+                return std::unexpected(error_of(attestations.error()));
+            }
+            for (const liquid::repository_attestation& attestation : attestations->records) {
+                append_verified_attestation(artifact, attestation.id, attestation.value);
+            }
+            if (attestations->done || !attestations->next) {
+                break;
+            }
+            attestation_page.cursor = attestations->next;
+        }
+        auto sbom_page = liquid::record_page_options{.limit = 1'000};
+        for (;;) {
+            const auto sboms = liquid::runtime::block_on(repository.sboms(record.id, sbom_page));
+            if (!sboms) {
+                return std::unexpected(error_of(sboms.error()));
+            }
+            for (const liquid::sbom_report& sbom : sboms->records) {
+                append_attestation(
+                    artifact, sbom.attestation, sbom.statement, sbom.verified, sbom.reason);
+            }
+            if (sboms->done || !sboms->next) {
+                break;
+            }
+            sbom_page.cursor = sboms->next;
+        }
+        return {};
+    }
+
+    static SyncStoreResult<std::optional<RepositoryArtifactTrace>>
+    result_trace(liquid::repository& repository, const std::string& result_id) {
+        auto trace_page = liquid::record_page_options{.limit = 1'000};
+        for (;;) {
+            const auto traces = liquid::runtime::block_on(repository.traces(trace_page));
+            if (!traces) {
+                return std::unexpected(error_of(traces.error()));
+            }
+            for (const liquid::build_trace& trace : traces->records) {
+                const auto action = std::ranges::find_if(
+                    trace.actions, [&](const liquid::build_trace_action& value) {
+                        return liquid::to_string(value.result.value) == result_id;
+                    });
+                if (action != trace.actions.end()) {
+                    return RepositoryArtifactTrace{
+                        .id = liquid::to_string(trace.id),
+                        .wall_ms = milliseconds(trace.wall_time),
+                        .actions = static_cast<std::uint64_t>(trace.actions.size()),
+                        .dependencies = static_cast<std::uint64_t>(trace.edges.size()),
+                        .cache_hits = trace.cache.hits,
+                        .cache_misses = trace.cache.misses,
+                    };
+                }
+            }
+            if (traces->done || !traces->next) {
+                return std::optional<RepositoryArtifactTrace>{};
+            }
+            trace_page.cursor = traces->next;
+        }
+    }
+
+    static SyncStoreResult<RepositoryArtifact>
+    artifact_record_with_evidence(liquid::repository& repository,
+                                  const liquid::repository_result& record) {
+        RepositoryArtifact output = artifact_record(record);
+        const auto attestations = append_result_attestations(repository, record, output);
+        if (!attestations) {
+            return std::unexpected(attestations.error());
+        }
+        const auto trace = result_trace(repository, output.id);
+        if (!trace) {
+            return std::unexpected(trace.error());
+        }
+        output.trace = *trace;
+        return output;
+    }
+
     SyncStoreResult<liquid::store*> open_customer(const std::string& customer_id) {
         if (root_.empty()) {
             return std::unexpected(
@@ -3272,6 +3290,34 @@ private:
             }
         }
         return output;
+    }
+
+    static SyncStoreResult<std::vector<liquid::change>>
+    repository_changes(liquid::repository& repository) {
+        auto changes = liquid::runtime::block_on(repository.log());
+        if (!changes) {
+            return std::unexpected(error_of(changes.error()));
+        }
+        auto identifiers = std::set<std::string>{};
+        for (const liquid::change& change : *changes) {
+            identifiers.insert(liquid::to_string(change.id.value));
+        }
+        const auto refs = liquid::runtime::block_on(repository.refs());
+        if (!refs) {
+            return std::unexpected(error_of(refs.error()));
+        }
+        for (const liquid::ref& ref : *refs) {
+            const auto referenced = liquid::runtime::block_on(repository.log({.from = ref.id}));
+            if (!referenced) {
+                return std::unexpected(error_of(referenced.error()));
+            }
+            for (const liquid::change& change : *referenced) {
+                if (identifiers.insert(liquid::to_string(change.id.value)).second) {
+                    changes->push_back(change);
+                }
+            }
+        }
+        return *changes;
     }
 
     SyncStoreResult<RepositoryState*> open_repository(const std::string& customer_id,

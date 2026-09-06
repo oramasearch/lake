@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+#include <nlohmann/json_fwd.hpp>
+
 namespace lake::control::identity_crypto {
 
 std::string random_secret();
@@ -16,6 +18,19 @@ bool verify_totp(std::string_view secret, std::string_view code);
 std::string sha256_hex(std::string_view value);
 std::string sha256_base64url(std::string_view value);
 std::string base64url_encode(std::string_view value);
+
+struct VerifiedTaapSignIn {
+    std::string taap_id;
+    std::string assertion_id;
+};
+
+std::expected<VerifiedTaapSignIn, std::string>
+verify_taap_sign_in(std::string_view identity_document,
+                    std::string_view pool_id,
+                    std::string_view nonce,
+                    std::int64_t issued_at,
+                    const nlohmann::json& signature,
+                    std::int64_t now_unix = 0);
 
 struct OidcClaims {
     std::string subject;

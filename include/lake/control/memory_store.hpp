@@ -148,6 +148,11 @@ public:
     create_application_webhook_delivery(const NewApplicationWebhookDelivery& value) override;
     Result<std::vector<ApplicationWebhookDelivery>>
     list_application_webhook_deliveries(const std::string& event_id) override;
+    Result<void>
+    create_application_authorization_code(const ApplicationAuthorizationCode& value) override;
+    Result<ApplicationAuthorizationCode>
+    consume_application_authorization_code(const std::string& application_id,
+                                           const std::string& code_hash) override;
     audit::Result<audit::Identity> current_lake_identity() override;
     audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) override;
     audit::Result<void> create_lake_identity(const audit::Identity& identity) override;
@@ -173,6 +178,10 @@ public:
     Result<PkiCallerRecord> create_pki_caller(const NewPkiCallerRecord& value) override;
     Result<std::vector<PkiCallerRecord>> list_pki_callers(const std::string& customer_id,
                                                           int limit) override;
+    Result<PkiCertificateRecord>
+    create_pki_certificate(const NewPkiCertificateRecord& value) override;
+    Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) override;
+    Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) override;
     Result<AgentSession> create_agent_session(const NewAgentSession& value) override;
     Result<AgentSession> get_agent_session(const std::string& customer_id,
                                            const std::string& id) override;
@@ -203,6 +212,12 @@ public:
                                                   const std::string& name,
                                                   const std::vector<std::uint64_t>& versions,
                                                   SecretVersionAction action) override;
+    Result<IssuedDynamicSecret> lease_dynamic_secret(const NewDynamicSecretLease& value,
+                                                     const std::string& instance_kek) override;
+    Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) override;
+    Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
+                                                          int lifetime_seconds) override;
+    Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) override;
     Result<EncryptionKey> create_encryption_key(const NewEncryptionKey& value,
                                                 const std::string& instance_kek) override;
     Result<std::vector<EncryptionKey>> list_encryption_keys(const std::string& mount_id,
@@ -249,6 +264,7 @@ public:
                                                     const std::string& instance_kek) override;
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
+    Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,
                                      const std::string& pool_id) override;
     Result<void> disable_mfa(const std::string& user_id,
@@ -363,6 +379,12 @@ private:
     std::vector<ApplicationWebhook> application_webhooks_;
     std::vector<ApplicationWebhookEvent> application_webhook_events_;
     std::vector<ApplicationWebhookDelivery> application_webhook_deliveries_;
+    struct ApplicationAuthorizationCodeRecord {
+        ApplicationAuthorizationCode code;
+        std::chrono::steady_clock::time_point expires_at;
+        bool used = false;
+    };
+    std::vector<ApplicationAuthorizationCodeRecord> application_authorization_codes_;
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
@@ -371,6 +393,7 @@ private:
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;
+    std::vector<PkiCertificateRecord> pki_certificates_;
     std::vector<AgentSession> agent_sessions_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
@@ -397,6 +420,7 @@ private:
     std::vector<DataKeyRecord> data_keys_;
     std::vector<SecretMount> secret_mounts_;
     std::vector<SecretEntryRecord> secret_entries_;
+    std::vector<DynamicSecretLease> dynamic_secret_leases_;
     std::vector<EncryptionKey> encryption_keys_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
@@ -416,6 +440,7 @@ private:
         bool used = false;
     };
     std::vector<PasswordCredential> passwords_;
+    std::set<std::string> taap_assertions_;
     std::vector<PasskeyCredential> passkeys_;
     std::vector<OAuthCredential> oauth_credentials_;
     std::vector<WebAuthnChallengeRecord> webauthn_challenges_;
