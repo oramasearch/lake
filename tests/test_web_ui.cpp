@@ -221,12 +221,18 @@ TEST(WebUi, DrivePagesExposeBrowseMutationHistoryAndConflictControls) {
     EXPECT_NE(preview.find("download>Download"), std::string::npos);
 
     const std::vector<nlohmann::json> history{
-        {{"id", "new"}, {"new_blob", "new-blob"}, {"changes", {"modified"}}},
+        {{"id", "new"},
+         {"new_blob", "new-blob"},
+         {"changes", {"modified", "conflicted"}},
+         {"new_conflicts", {"left-value", "right-value"}}},
         {{"id", "old"}, {"new_blob", "old-blob"}, {"changes", {"added"}}}};
     const std::string versions =
         lake::api::web_ui_drive_history(repository, "main", "README.md", history, true);
     EXPECT_NE(versions.find("action=\"/drive/history/diff\""), std::string::npos);
     EXPECT_NE(versions.find("action=\"/drive/history/restore\""), std::string::npos);
+    EXPECT_NE(versions.find("Conflict versions:"), std::string::npos);
+    EXPECT_NE(versions.find("left-value"), std::string::npos);
+    EXPECT_NE(versions.find("right-value"), std::string::npos);
 
     const lake::api::DriveVersionDiff difference = lake::api::drive_text_diff(
         {"README.md", "old-blob", "old\n", 4}, {"README.md", "new-blob", "new\n", 4});

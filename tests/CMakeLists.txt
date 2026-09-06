@@ -1,4 +1,5 @@
 add_executable(lake-tests test_web_ui.cpp
+  scenarios/drive_test.cpp
   test_apps.cpp
   test_api.cpp
   test_handles.cpp
@@ -20,6 +21,7 @@ target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx Ope
   Boost::beast2 Boost::http Boost::corosio GTest::gtest_main)
 target_include_directories(lake-tests PRIVATE ${PROJECT_SOURCE_DIR}/modules/liquid/src)
 target_compile_definitions(lake-tests PRIVATE
+  LAKE_TEST_CMAKE_COMMAND="${CMAKE_COMMAND}"
   LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>"
   LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 add_dependencies(lake-tests lake)

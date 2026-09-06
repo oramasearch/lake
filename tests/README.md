@@ -10,6 +10,12 @@ Postgres-backed tests use `LAKE_TEST_DB_URI` and do not create or drop its datab
 starts concurrent suites must provide a freshly created, schema-loaded database with a unique name
 to each test process.
 
+The `scenarios/` cases combine those production Postgres stores with an in-process Lake, public
+HTTP routes, and public client libraries. The drive scenario signs users up, synchronizes and
+shares a folder, checks API and rendered history, preserves both named results of concurrent
+offline edits, pulls the same repository through Liquid, and builds the project it contains. See
+`scenarios/README.md` for the named coverage.
+
 The default `lake-tests` target contains the portable suite plus Postgres-backed cases that skip
 when `LAKE_TEST_DB_URI` is absent. `lake-postgres-tests` contains the focused control-store cases.
 Run both through CTest after configuring the repository with CMake.
