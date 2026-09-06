@@ -52,6 +52,11 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 > `LAKE_STORE_ROOT/<customer>/index/`, reports `hot`, `snapshot`, or `scan` mode, publishes through
 > atomic manifest replacement, filters candidates with the batched policy engine, and records the
 > signed query outcome through the registry. Change pages render libliquid's per-path structural
+> Published artifact outputs are decomposed through libliquid's format registry after sync
+> publication and by the audited `reindex_artifacts` action for existing results. Scoped
+> `in:artifact:<name>[@<version>]` search returns text and source members with their artifact,
+> member path, digest, and line; binary and deeper-nested members remain listed only. Change pages
+> render libliquid's per-path structural
 > review with safe Markdown, text hunks, line comments, modes, blob identities, file statistics,
 > conflict values, checks, output paths, and verified attestation profiles. A Postgres-backed
 > scenario proves an unlanded Liquid review, cursor movement after rewrite, approval, publication,

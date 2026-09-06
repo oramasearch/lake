@@ -1,8 +1,10 @@
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -112,6 +114,103 @@ std::string update_change(const std::filesystem::path& path,
 lake::search::Publish
 publication(const std::string& customer, const std::string& repository, const std::string& change) {
     return {customer, repository, "main", change};
+}
+
+TEST(Search, ArtifactMembersUseRegistryForDebianAndOciLayers) {
+    TemporaryStore store;
+    const auto fixture_directory = store.path() / "fixtures";
+    std::filesystem::create_directories(fixture_directory);
+    const auto script = fixture_directory / "build.py";
+    std::ofstream output(script);
+    output << R"PY(import gzip, io, pathlib, tarfile, sys
+p = pathlib.Path(sys.argv[1])
+def tar(name, text):
+    data = text.encode()
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode='w') as archive:
+        entry = tarfile.TarInfo(name)
+        entry.size = len(data)
+        archive.addfile(entry, io.BytesIO(data))
+    return stream.getvalue()
+def ar(entries):
+    data = bytearray(b'!<arch>\n')
+    for name, body in entries:
+        header = (name + '/').ljust(16) + '0'.ljust(12) + '0'.ljust(6) + '0'.ljust(6) + '100644'.ljust(8) + str(len(body)).ljust(10) + '`\n'
+        data.extend(header.encode())
+        data.extend(body)
+        if len(body) % 2: data.extend(b'\n')
+    return data
+gzip_bytes = lambda value: gzip.compress(value, mtime=0)
+(p / 'package.deb').write_bytes(ar([('debian-binary', b'2.0\n'), ('control.tar.gz', gzip_bytes(tar('control', 'Package: fixture\n'))), ('data.tar.gz', gzip_bytes(tar('usr/src/debian.cpp', 'void deb_artifact_symbol() {}\n')))]))
+(p / 'layer.tar.gz').write_bytes(gzip_bytes(tar('app/layer.cpp', 'void oci_layer_symbol() {}\n')))
+)PY";
+    output.close();
+    ASSERT_EQ(
+        std::system(
+            ("python3 \"" + script.string() + "\" \"" + fixture_directory.string() + "\"").c_str()),
+        0);
+    const auto repository_path = store.path() / "customer" / "repositories" / "artifacts";
+    auto customer_store =
+        liquid::runtime::block_on(liquid::store::open(store.path() / "customer" / "store"));
+    ASSERT_TRUE(customer_store) << customer_store.error().message;
+    liquid::repository_options options;
+    options.store = &*customer_store;
+    auto opened = liquid::runtime::block_on(liquid::repository::create(repository_path, options));
+    ASSERT_TRUE(opened) << opened.error().message;
+    auto repository = std::move(*opened);
+    std::map<std::string, liquid::digest> output_blobs;
+    for (const std::string& name : {"package.deb", "layer.tar.gz"}) {
+        std::ifstream input(fixture_directory / name, std::ios::binary);
+        const std::string contents{std::istreambuf_iterator<char>{input}, {}};
+        ASSERT_TRUE(liquid::runtime::block_on(repository.write(name, bytes(contents))));
+        const auto content = liquid::hash(liquid::algorithm::blake3, bytes(contents));
+        ASSERT_TRUE(content) << content.error().message;
+        const auto blob = liquid::runtime::block_on(repository.store_remote_blob(
+            {.chunks = {*content},
+             .size = contents.size(),
+             .chunk_sizes = {contents.size()},
+             .content = *content,
+             .remote = liquid::remote_blob_location{"fixture", "artifact"}}));
+        ASSERT_TRUE(blob) << blob.error().message;
+        output_blobs.emplace(name, *blob);
+    }
+    const auto root = liquid::runtime::block_on(repository.root_digest());
+    const auto tree = liquid::runtime::block_on(repository.root());
+    ASSERT_TRUE(root) << root.error().message;
+    ASSERT_TRUE(tree) << tree.error().message;
+    liquid::action_result result;
+    for (const std::string& name : {"package.deb", "layer.tar.gz"}) {
+        result.outputs.push_back({name, 0100644, output_blobs.at(name)});
+    }
+    result.stdout_output = result.outputs.front().blob;
+    result.stderr_output = result.outputs.front().blob;
+    const auto recorded = liquid::runtime::block_on(
+        liquid::build::record_remote_result(repository,
+                                            {.command = {"fixture"},
+                                             .outputs = {"package.deb", "layer.tar.gz"},
+                                             .inputs = *root,
+                                             .toolchain = *root,
+                                             .platform = {"macos", "arm64"}},
+                                            result));
+    ASSERT_TRUE(recorded) << recorded.error().message;
+    const std::string version = liquid::to_string(recorded->value);
+    lake::search::Service service(store.path());
+    ASSERT_TRUE(service.reindex_artifacts("customer", "artifacts"));
+    lake::control::InMemoryStore control;
+    const auto deb = service.query(
+        {"deb_artifact_symbol in:artifact:package.deb@" + version, "customer", "artifacts", "", 20},
+        "admin",
+        control);
+    ASSERT_TRUE(deb) << deb.error().message;
+    ASSERT_FALSE(deb->items.empty());
+    EXPECT_EQ(deb->items.front().line, 1U);
+    const auto oci = service.query(
+        {"oci_layer_symbol in:artifact:layer.tar.gz@" + version, "customer", "artifacts", "", 20},
+        "admin",
+        control);
+    ASSERT_TRUE(oci) << oci.error().message;
+    ASSERT_EQ(oci->items.size(), 1U);
+    EXPECT_NE(oci->items.front().path.find("app/layer.cpp"), std::string::npos);
 }
 
 } // namespace

@@ -104,6 +104,11 @@ discussion, and supporting details follow document order and work unchanged with
 the tag, change identity, artifacts, output counts, and verified attestation counts together. It
 shows an explicit release-level artifact empty state when older records have none.
 
+`GET /artifact?repository_id=<id>&id=<result>` includes a Search inside form and a member listing.
+Each output path is searchable as `in:artifact:<output>@<result>`; text and source members link to
+their scoped results, while binary members retain their digest without a search link. A nested
+container is opened one level below the output and deeper nesting is listed but not indexed.
+
 `GET /webhooks?repository_id=<id>` groups each sanitized webhook configuration with its durable
 delivery attempts: event, attempt number, status, error, and delivery outcome. Secrets are removed
 by `list_webhooks` and are never renderer input. Failed attempts expose an ordinary POST retry form

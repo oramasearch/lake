@@ -23,7 +23,7 @@ template <class T> using Result = std::expected<T, Error>;
 
 enum class PublicationKind { BranchTip, TagSnapshot };
 
-enum class QueryMode { Hot, Snapshot, Scan };
+enum class QueryMode { Hot, Snapshot, Scan, Artifact };
 
 [[nodiscard]] std::string_view to_string(QueryMode mode);
 
@@ -52,6 +52,27 @@ struct Hit {
     std::string change;
     std::string snippet;
     double score = 0.0;
+    std::string artifact;
+    std::string artifact_version;
+    std::string digest;
+    std::size_t line = 0;
+};
+
+struct ArtifactMember {
+    std::string artifact;
+    std::string version;
+    std::string path;
+    std::string digest;
+    bool indexed = false;
+    std::string reason;
+};
+
+struct ReindexResult {
+    std::size_t artifacts = 0;
+    std::size_t members = 0;
+    std::size_t indexed = 0;
+    std::size_t binary = 0;
+    std::size_t truncated = 0;
 };
 
 struct QueryResult {
@@ -65,6 +86,12 @@ public:
     explicit Service(std::filesystem::path store_root);
 
     [[nodiscard]] Result<void> publish(const Publish& change);
+    [[nodiscard]] Result<ReindexResult> reindex_artifacts(const std::string& customer,
+                                                          const std::string& repository);
+    [[nodiscard]] Result<std::vector<ArtifactMember>>
+    artifact_members(const std::string& customer,
+                     const std::string& repository,
+                     const std::string& version) const;
     [[nodiscard]] Result<QueryResult>
     query(const Query& query, const std::string& principal, control::Store& store) const;
 

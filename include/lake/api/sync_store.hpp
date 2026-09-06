@@ -158,6 +158,15 @@ struct RepositoryArtifactTrace {
     std::uint64_t cache_misses = 0;
 };
 
+struct RepositoryArtifactMember {
+    std::string artifact;
+    std::string version;
+    std::string path;
+    std::string digest;
+    bool indexed = false;
+    std::string reason;
+};
+
 struct RepositoryArtifact {
     std::string id;
     std::string action;
@@ -173,6 +182,7 @@ struct RepositoryArtifact {
     std::string finished_at;
     std::vector<RepositoryArtifactAttestation> attestations;
     std::optional<RepositoryArtifactTrace> trace;
+    std::vector<RepositoryArtifactMember> members;
 };
 
 struct RepositoryArtifactPage {
