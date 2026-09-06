@@ -200,6 +200,16 @@ The migration follows forge/export/import migration `0012`.
 Both data tables use the metering area prefix. Customer deletion cascades its usage and ledger.
 The migration follows PKI migration `0013`.
 
+## Settings quota (migration `0018_settings_surface`)
+
+| Table | Purpose |
+|---|---|
+| `customer_storage_quotas` | Explicit per-customer storage quota override used by metering and repository-write enforcement. A zero value disables that customer's quota. |
+| `settings_guard` | Guard table for the settings-surface migration. |
+
+Customers without a row continue to use `LAKE_STORAGE_QUOTA_BYTES`. The operator schema copy is
+deferred to the wave-level operator migration pull request.
+
 ## Drive sharing (migration `0015_drive`)
 
 | Table | Purpose |
@@ -268,8 +278,9 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    and newest guard ready for that update. The forge wave adds `0012_forge_export_import` and
    `forge_guard`; the metering wave adds `0014_metering` and `metering_guard`; drive adds
    `0015_drive` and `drive_guard`; application authentication adds `0016_auth_apps` and
-   `auth_app_guard`; agent sessions add `0017_agent_sessions` and `agent_guard`. The operator copy
-   remains deferred to the single wave-level migration pull request.
+   `auth_app_guard`; agent sessions add `0017_agent_sessions` and `agent_guard`; settings adds
+   `0018_settings_surface` and `settings_guard`. The operator copy remains deferred to the single
+   wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
    lake-<name>-controldb-schema -n <ns>`); it is owned, so the operator recreates it within a

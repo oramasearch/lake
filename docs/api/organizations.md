@@ -12,8 +12,10 @@ through `accept_invitation`.
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization |
 | `list_teams` / `get_team` | read | `organization_id` / `id` | teams |
 | `create_team` | action | `organization_id`, `name`, `display_name?` | team |
-| `list_memberships` | read | `organization_id`, `team_id?`, `limit?` | memberships |
+| `list_memberships` / `get_membership` | read | scope and `id` | memberships |
 | `create_membership` | action | organization, optional team, principal, role, attestation digest | membership |
+| `set_member_role` | action | membership `id`, role | membership |
+| `remove_member` | action | membership `id` | `{removed: true}` |
 | `list_invitations` | read | `organization_id`, `team_id?`, `limit?` | invitations |
 | `create_invitation` | action | organization, optional team, email or handle, role, expiry | invitation |
 | `accept_invitation` | action | invitation, principal, attestation digest | membership |
@@ -47,6 +49,12 @@ needed by that verifier.
 Invitation acceptance is transactional: it locks the pending invitation, rejects expired or
 already-used invitations, creates the membership, member object, and corresponding grant, then
 marks the invitation accepted.
+
+`set_member_role` replaces the membership's derived organization or team grant with the role's
+new policy grant. It refuses to demote the final `owner` in a scope. `remove_member` removes the
+membership, its member policy object, and the matching derived grant. It refuses to remove a final
+owner, including when that owner is the acting principal. Both actions require `admin` on the
+membership's organization or team and are recorded by the registry audit path.
 
 ## Verify and change
 

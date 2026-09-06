@@ -1,8 +1,9 @@
 # UI design tools
 
-`screenshot.sh` renders the static visual-direction mocks at 1440×900. It uses an installed
-Chromium or Google Chrome binary when available and otherwise runs the pinned Puppeteer Chromium
-image documented in [`docs/design/ui/mocks/README.md`](../../docs/design/ui/mocks/README.md).
+`screenshot.sh` renders the static visual-direction mocks at 1440×900 with the pinned Puppeteer
+Chromium image documented in [`docs/design/ui/mocks/README.md`](../../docs/design/ui/mocks/README.md).
+Live captures give each page 30 seconds to reach DOM-ready and network-idle, save a partial image
+on a timeout, and report all timed-out pages after finishing the manifest.
 
 Its live mode reads a tab-separated page manifest, fetches each page from a running lake with the
 manifest's session cookie, and records light and dark PNGs. `lake-ui-fixture` runs the production

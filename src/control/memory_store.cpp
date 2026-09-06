@@ -502,6 +502,30 @@ InMemoryStore::list_metering_usage(const std::string& customer_id,
     return result;
 }
 
+Result<std::optional<std::uint64_t>> InMemoryStore::storage_quota(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    const auto quota = storage_quotas_.find(customer_id);
+    if (quota == storage_quotas_.end()) {
+        return std::optional<std::uint64_t>{};
+    }
+    return quota->second;
+}
+
+Result<std::uint64_t> InMemoryStore::set_storage_quota(const std::string& customer_id,
+                                                       std::uint64_t quota_bytes) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    storage_quotas_[customer_id] = quota_bytes;
+    return quota_bytes;
+}
+
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)
@@ -2629,6 +2653,114 @@ Result<std::vector<Membership>> InMemoryStore::list_memberships(const std::strin
         out.resize(static_cast<std::size_t>(limit));
     }
     return out;
+}
+
+Result<Membership> InMemoryStore::get_membership(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto membership = std::ranges::find(memberships_, id, &Membership::id);
+    if (membership == memberships_.end()) {
+        return std::unexpected(StoreError{"not_found", "no membership " + id});
+    }
+    return *membership;
+}
+
+Result<Membership> InMemoryStore::set_member_role(const std::string& id,
+                                                  const std::string& role,
+                                                  const std::string& actor) {
+    if (!valid_membership_role(role)) {
+        return std::unexpected(StoreError{"invalid_input", "role must be owner, admin, or member"});
+    }
+    std::lock_guard lock(mutex_);
+    const auto membership = std::ranges::find(memberships_, id, &Membership::id);
+    if (membership == memberships_.end()) {
+        return std::unexpected(StoreError{"not_found", "no membership " + id});
+    }
+    if (membership->role == "owner" && role != "owner") {
+        const auto owner_count = std::ranges::count_if(memberships_, [&](const Membership& item) {
+            return item.organization_id == membership->organization_id &&
+                   item.team_id == membership->team_id && item.role == "owner";
+        });
+        if (owner_count == 1) {
+            return std::unexpected(
+                StoreError{"conflict", "cannot demote the last owner in this membership scope"});
+        }
+    }
+    const std::string previous_role = membership->role;
+    membership->role = role;
+    membership->updated_at = now_iso8601();
+    const std::string object_type = membership->team_id.empty() ? "organization" : "team";
+    const std::string external_id =
+        membership->team_id.empty() ? membership->organization_id : membership->team_id;
+    const auto object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& item) {
+        return item.object_type == object_type && item.external_id == external_id;
+    });
+    if (object == policy_objects_.end()) {
+        return std::unexpected(StoreError{"store_error", "membership policy parent is missing"});
+    }
+    const auto grant = std::ranges::find_if(grants_, [&](const Grant& item) {
+        return item.principal_taap_id == membership->principal_taap_id &&
+               item.object_id == object->id &&
+               item.role == policy_role_for_membership(previous_role) &&
+               item.attestation_digest == membership->attestation_digest &&
+               item.granted_by_taap_id == membership->granted_by_taap_id;
+    });
+    if (grant == grants_.end()) {
+        return std::unexpected(StoreError{"store_error", "membership derived grant is missing"});
+    }
+    grant->role = policy_role_for_membership(role);
+    grant->updated_at = membership->updated_at;
+    static_cast<void>(actor);
+    return *membership;
+}
+
+Result<void> InMemoryStore::remove_member(const std::string& id, const std::string& actor) {
+    std::lock_guard lock(mutex_);
+    const auto membership = std::ranges::find(memberships_, id, &Membership::id);
+    if (membership == memberships_.end()) {
+        return std::unexpected(StoreError{"not_found", "no membership " + id});
+    }
+    if (membership->role == "owner") {
+        const auto owner_count = std::ranges::count_if(memberships_, [&](const Membership& item) {
+            return item.organization_id == membership->organization_id &&
+                   item.team_id == membership->team_id && item.role == "owner";
+        });
+        if (owner_count == 1) {
+            const std::string message =
+                membership->principal_taap_id == actor
+                    ? "cannot remove yourself as the last owner in this membership scope"
+                    : "cannot remove the last owner in this membership scope";
+            return std::unexpected(StoreError{"conflict", message});
+        }
+    }
+    const std::string object_type = membership->team_id.empty() ? "organization" : "team";
+    const std::string external_id =
+        membership->team_id.empty() ? membership->organization_id : membership->team_id;
+    const auto object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& item) {
+        return item.object_type == object_type && item.external_id == external_id;
+    });
+    if (object == policy_objects_.end()) {
+        return std::unexpected(StoreError{"store_error", "membership policy parent is missing"});
+    }
+    grants_.erase(
+        std::remove_if(grants_.begin(),
+                       grants_.end(),
+                       [&](const Grant& item) {
+                           return item.principal_taap_id == membership->principal_taap_id &&
+                                  item.object_id == object->id &&
+                                  item.role == policy_role_for_membership(membership->role) &&
+                                  item.attestation_digest == membership->attestation_digest &&
+                                  item.granted_by_taap_id == membership->granted_by_taap_id;
+                       }),
+        grants_.end());
+    policy_objects_.erase(std::remove_if(policy_objects_.begin(),
+                                         policy_objects_.end(),
+                                         [&](const PolicyObject& item) {
+                                             return item.object_type == "member" &&
+                                                    item.external_id == membership->id;
+                                         }),
+                          policy_objects_.end());
+    memberships_.erase(membership);
+    return {};
 }
 
 Result<Invitation> InMemoryStore::create_invitation(const NewInvitation& in) {
