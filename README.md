@@ -9,9 +9,9 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 
 ## Status
 
-The control surface serves in production. `Lake/prod` on AKS at https://lake.oramadev.net runs
+The control surface serves in production: `Lake/prod` on AKS at https://lake.oramadev.net runs
 the capability registry as REST `/v1`, OpenAPI and MCP, the Postgres control plane, and the
-server-rendered pages behind the operator sign-in; the state and runbook are in
+server-rendered pages behind the operator sign-in, with the state and runbook in
 [`docs/deployment/aks.md`](docs/deployment/aks.md). The source tree goes further than the deployed
 image: identity, SSO, forge pages, repository sync, search, secrets and PKI, drive and models,
 metering, the transparency log, replication and platform mirroring are implemented and tested
