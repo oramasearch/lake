@@ -125,8 +125,8 @@ prepare_live() {
     asset_base=${asset_base/127.0.0.1/host.docker.internal}
     asset_base=${asset_base/localhost/host.docker.internal}
     curl "${curl_args[@]}" "$base_url$route"
-    sed \
-        -e "s|href=\"/style.css\"|href=\"$asset_base/style.css\"|" \
+    sed -E \
+        -e "s|href=\"(/style(-[0-9a-f]{16})?\.css)\"|href=\"$asset_base\1\"|" \
         -e "s|<html|<html data-theme=\"$theme\"|" \
         "$response_file" >"$render_file"
     temporary_files+=("$response_file" "$render_file")

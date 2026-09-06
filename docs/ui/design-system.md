@@ -10,8 +10,8 @@ commit plus a SHA-256 digest for every file.
 `design-tokens.map.json` is the reviewed boundary between Lake names and upstream DTCG paths.
 `design-tokens.inventory.json` is the stable list of Lake custom properties; the compiler refuses
 an unreviewed addition or removal. `tools/ui/build-tokens.mjs` is dependency-free Node and writes
-`src/api/web_ui_tokens.inc`, the generated token layer linked into `/style.css`. Do not edit the
-generated file or vendored JSON by hand.
+`src/api/web_ui_tokens.inc`, the generated token layer included in the served stylesheet. Do not
+edit the generated file or vendored JSON by hand.
 
 To update the snapshot and generated layer:
 
@@ -37,9 +37,24 @@ duration tokens.
 IBM Plex Sans 400, 500, and 600 and IBM Plex Mono 400 and 500 are self-hosted Latin WOFF2
 subsets under `assets/fonts/`. They are sourced from the Fontsource versions pinned by the design
 system, and the Sans and Mono OFL-1.1 notices ship beside them. CMake embeds the files into the
-binary; Lake serves `/fonts/<face>.woff2` as `font/woff2` with
-`public, max-age=31536000, immutable`. The stylesheet declares every face with `font-display:
-swap`. No browser request reaches a third-party origin.
+binary. At startup Lake computes the first 16 lowercase hexadecimal characters of each file's
+SHA-256 and serves `/fonts/<face>-<hash>.woff2` as `font/woff2` with `Cache-Control: public,
+max-age=31536000, immutable`. The stylesheet declares every face with `font-display: swap` and
+uses those content-hashed URLs. No browser request reaches a third-party origin.
+
+## Asset URLs and caching
+
+Lake builds the final stylesheet bytes from the committed token and component layers after
+substituting the content-hashed font URLs. At server startup it computes the stylesheet SHA-256
+from those final bytes and registers `/style-<hash>.css`. The shared page-head helper links that
+URL in the standard shell and hosted application identity shell, so no renderer assembles an
+asset URL itself.
+
+The content-hashed stylesheet and font routes use `Cache-Control: public, max-age=31536000,
+immutable`. `/style.css` and `/fonts/<face>.woff2` remain aliases for direct use and older pages;
+both use `Cache-Control: no-cache`, so a cache must revalidate them before reuse. A stylesheet or
+font byte change produces a different URL and leaves old immutable URLs valid for pages that still
+reference them.
 
 ## Components and pages
 
@@ -105,7 +120,8 @@ get effectively immediate transitions and no smooth scrolling.
 - Native controls and shared buttons use at least the design system's small control height.
 
 Lake keeps pure C++ renderers; the generated token layer is committed, so neither deployment nor
-request handling invokes Node.
+request handling invokes Node. Renderer tests use in-memory byte strings to prove SHA-256 URL
+changes and cache-policy selection without filesystem or network access.
 
 ### Contrast proof
 
