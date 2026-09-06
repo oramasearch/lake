@@ -16,9 +16,10 @@ a result that the capability would reject.
 | `change` | Optional exact change digest. Requires `customer` and `repository`, cannot be combined with `ref` or `history`, and uses scan mode. |
 | `history` | Optional boolean. Walk every change in one `customer` and `repository`; cannot be combined with `ref` or `change`. |
 | `limit` | Optional result count, default 20 and maximum 1000. |
+| artifact scope | Append `in:artifact:<name>[@<version>]` to `query`. The name is a build output path and the version is its immutable result digest. This scope cannot be combined with `ref`, `change`, or `history`. |
 
 The value is
-`{mode,scanned_changes,items:[{customer,repository,path,change,snippet,score}]}`. `mode` explains
+`{mode,scanned_changes,items:[{customer,repository,path,change,snippet,score,artifact,artifact_version,digest,line}]}`. `mode` explains
 which corpus answered the request:
 
 | Mode | Corpus |
@@ -26,6 +27,7 @@ which corpus answered the request:
 | `hot` | Current branch-tip segments. This is the default when neither `ref`, `change`, nor `history` selects another corpus. |
 | `snapshot` | The immutable segment built once for the requested release or tag. |
 | `scan` | An exact change or the repository's complete change log. `scanned_changes` reports how many snapshots were examined. |
+| `artifact` | Members of the selected published output. Hits name the artifact, result version, logical member digest, and matching one-based line. |
 
 Hits are score-descending and then repository/path ordered for stable ties. A quoted query and
 regex query return score `1`; ranked text returns the combined content and path BM25F score.
@@ -102,6 +104,20 @@ one signed `audit_events` record for the query outcome. The audit details record
 `repository_options.store` over
 `LAKE_STORE_ROOT/<customer-id>/store`. Push records its route and per-change authorization outcomes;
 index publication remains a separate search lifecycle hook.
+
+## Published artifacts
+
+After a repository sync publication, Lake walks retained build outputs through
+`liquid::format_registry::global()`. The same audited `reindex_artifacts` action rebuilds records
+for artifacts that predate the hook. Recognised Debian packages, wheels, JARs, and OCI tar layers
+contribute text and source members to the existing deduplicated index; binary members retain only
+their name and logical digest in `index/artifacts.json`.
+
+The registry depth limit is two: a container inside an artifact is opened, while any deeper
+container remains a digest-bearing member record without indexed contents. Each output has a 256
+MiB decoded-byte budget and 100,000-entry limit. `reindex_artifacts` requires repository `write`
+access and returns `{artifacts,members,indexed,binary,truncated}`; OpenAPI and MCP expose that
+registry capability automatically.
 
 The `/search` page exposes query, customer, repository, branch or tag, exact change, and complete
 history fields. It labels every result set with its query mode and reports the number of examined

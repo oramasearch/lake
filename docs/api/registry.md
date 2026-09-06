@@ -79,3 +79,17 @@ Keep protocol parsing in `src/api/http_server.cpp`, the only HTTP adapter transl
 write must authenticate before reading or publishing its payload, validate every path component,
 and publish content atomically. Preserve native client response headers and exact binary bytes.
 Document and test each added client operation here.
+
+# Published artifact indexing
+# Published artifact indexing
+
+Lake treats each retained build output as a published artifact. Its output path is the artifact
+name and its immutable libliquid result digest is the version.
+
+After repository sync publication, Lake invokes the libliquid format registry for every output and
+records its members. `POST /v1/reindex_artifacts` accepts `{"id":"<repository-id>"}` to rebuild
+those records for existing artifacts; it requires repository `write` access and returns counts for
+visited artifacts, members, text members, binary members, and bounded decompositions.
+
+Search uses `in:artifact:<output>[@<result>]`. See [search.md](search.md) for the query grammar,
+limits, and member-result fields.

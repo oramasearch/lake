@@ -78,6 +78,10 @@ snapshots, exact changes, and complete history; reports `hot`, `snapshot`, or `s
 atomically publishes through its manifest; filters candidates with batched policy authorization;
 and records the signed query outcome through `Registry::call`. REST, OpenAPI, MCP, and the
 `/search` page expose the same capability.
+Published artifact outputs are decomposed through libliquid's format registry after sync
+publication or through the audited `reindex_artifacts` action. Scoped artifact search reports
+indexed text and source members with artifact identity, member path, digest, and line; binary
+members and containers nested beyond one inner level remain listed by digest only.
 Metering migration `0014_metering` stores hourly unique-byte gauges, sync transfer counters, and
 idempotent build-compute counters. `metering_usage` and `/metering` expose configured integer
 pricing, with audited per-customer quota overrides. `LAKE_STORAGE_QUOTA_BYTES` remains the

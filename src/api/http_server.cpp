@@ -1614,6 +1614,14 @@ RepositoryArtifact repository_artifact_from_json(const nlohmann::json& value) {
                                                  trace.value("cache_hits", std::uint64_t{0}),
                                                  trace.value("cache_misses", std::uint64_t{0})};
     }
+    for (const nlohmann::json& member : value.value("members", nlohmann::json::array())) {
+        artifact.members.push_back({json_string(member, "artifact"),
+                                    json_string(member, "version"),
+                                    json_string(member, "path"),
+                                    json_string(member, "digest"),
+                                    member.value("indexed", false),
+                                    json_string(member, "reason")});
+    }
     return artifact;
 }
 
@@ -8954,6 +8962,7 @@ struct ApiServer::Impl {
             const std::string mode = result.value.value("mode", "hot");
             search_result.mode = mode == "scan"       ? search::QueryMode::Scan
                                  : mode == "snapshot" ? search::QueryMode::Snapshot
+                                 : mode == "artifact" ? search::QueryMode::Artifact
                                                       : search::QueryMode::Hot;
             search_result.scanned_changes = result.value.value("scanned_changes", std::size_t{0});
             for (const nlohmann::json& item : result.value.at("items")) {
@@ -8964,6 +8973,10 @@ struct ApiServer::Impl {
                     .change = item.at("change").get<std::string>(),
                     .snippet = item.at("snippet").get<std::string>(),
                     .score = item.at("score").get<double>(),
+                    .artifact = item.value("artifact", ""),
+                    .artifact_version = item.value("artifact_version", ""),
+                    .digest = item.value("digest", ""),
+                    .line = item.value("line", std::size_t{0}),
                 });
             }
         }

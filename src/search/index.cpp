@@ -16,6 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <liquid/format.hpp>
 #include <liquid/liquid.hpp>
 #include <oramacore/index.hpp>
 
@@ -33,6 +34,11 @@ struct Occurrence {
     std::string path;
     std::string blob;
     PublicationKind kind = PublicationKind::BranchTip;
+    std::string artifact;
+    std::string artifact_version;
+    std::string digest;
+    bool indexed = true;
+    std::string reason;
 };
 
 struct Segment {
@@ -46,6 +52,18 @@ struct Segment {
 
 struct BlobRecord {
     std::string content;
+};
+
+struct ArtifactSegment {
+    std::string repository;
+    std::string artifact;
+    std::string version;
+    std::vector<Occurrence> members;
+};
+
+struct ArtifactScope {
+    std::string name;
+    std::string version;
 };
 
 struct TrigramPosting {
@@ -104,6 +122,82 @@ std::string snippet_for(const std::string& content, const std::string& needle) {
     std::string snippet = content.substr(begin, length);
     std::replace(snippet.begin(), snippet.end(), '\n', ' ');
     return snippet;
+}
+
+std::size_t line_for(const std::string& content,
+                     const std::string& needle,
+                     const std::optional<std::regex>& expression) {
+    std::size_t position = content.find(needle);
+    if (expression) {
+        std::smatch match;
+        if (std::regex_search(content, match, *expression)) {
+            position = static_cast<std::size_t>(match.position());
+        }
+    }
+    if (position == std::string::npos) {
+        return 1;
+    }
+    return static_cast<std::size_t>(std::count(
+               content.begin(), content.begin() + static_cast<std::ptrdiff_t>(position), '\n')) +
+           1;
+}
+
+bool is_text(std::span<const std::byte> bytes) {
+    for (const std::byte value : bytes) {
+        const unsigned char character = std::to_integer<unsigned char>(value);
+        if (character == 0) {
+            return false;
+        }
+        if (character < 0x09 || (character > 0x0d && character < 0x20)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Result<std::pair<std::string, std::optional<ArtifactScope>>>
+split_artifact_scope(const std::string& input) {
+    constexpr std::string_view prefix = "in:artifact:";
+    std::istringstream stream(input);
+    std::vector<std::string> terms;
+    std::optional<ArtifactScope> scope;
+    for (std::string term; stream >> term;) {
+        if (!term.starts_with(prefix)) {
+            terms.push_back(std::move(term));
+            continue;
+        }
+        if (scope) {
+            return std::unexpected(Error{"invalid_input", "artifact scope is repeated"});
+        }
+        std::string value = term.substr(prefix.size());
+        if (value.empty()) {
+            return std::unexpected(Error{"invalid_input", "artifact scope requires a name"});
+        }
+        ArtifactScope parsed;
+        const std::size_t at = value.rfind('@');
+        if (at == std::string::npos) {
+            parsed.name = std::move(value);
+        } else {
+            parsed.name = value.substr(0, at);
+            parsed.version = value.substr(at + 1);
+            if (parsed.name.empty() || parsed.version.empty()) {
+                return std::unexpected(
+                    Error{"invalid_input", "artifact scope has an empty name or version"});
+            }
+        }
+        scope = std::move(parsed);
+    }
+    std::string text;
+    for (const std::string& term : terms) {
+        if (!text.empty()) {
+            text.push_back(' ');
+        }
+        text += term;
+    }
+    if (text.empty()) {
+        return std::unexpected(Error{"invalid_input", "query is required"});
+    }
+    return std::pair{std::move(text), std::move(scope)};
 }
 
 const TrigramPosting* posting_for(const std::vector<TrigramPosting>& postings,
@@ -237,6 +331,8 @@ std::string_view to_string(QueryMode mode) {
         return "snapshot";
     case QueryMode::Scan:
         return "scan";
+    case QueryMode::Artifact:
+        return "artifact";
     }
     return "hot";
 }
@@ -245,6 +341,7 @@ struct Service::Impl {
     struct CustomerState {
         std::map<std::string, BlobRecord> blobs;
         std::map<std::string, Segment> active;
+        std::map<std::string, ArtifactSegment> artifacts;
         std::unordered_map<std::string, std::vector<TrigramPosting>> trigram_index;
         std::vector<std::string> blob_documents;
         oramacore::index::MemoryIndex blob_index{{{"content", {1.0, 0.75}}}};
@@ -258,6 +355,77 @@ struct Service::Impl {
 
     [[nodiscard]] std::filesystem::path index_path(const std::string& customer) const {
         return root / customer / "index";
+    }
+
+    [[nodiscard]] static std::string artifact_key(const ArtifactSegment& segment) {
+        return segment.repository + "\n" + segment.version + "\n" + segment.artifact;
+    }
+
+    [[nodiscard]] Result<void> append_artifact_members(const liquid::format_tree& tree,
+                                                       const std::string& prefix,
+                                                       const std::string& repository,
+                                                       const std::string& artifact,
+                                                       const std::string& version,
+                                                       ArtifactSegment& segment,
+                                                       CustomerState& state,
+                                                       ReindexResult& result) {
+        for (const liquid::format_entry& entry : tree.entries) {
+            const std::string path = prefix + "!/" + entry.path;
+            if (entry.kind != liquid::format_entry_kind::directory) {
+                const std::string digest = liquid::to_string(entry.content);
+                const bool indexed = !entry.bytes.empty() && is_text(entry.bytes);
+                std::string reason = entry.opaque_reason;
+                if (!indexed && reason.empty()) {
+                    reason = entry.bytes.empty() ? "member bytes are unavailable" : "binary member";
+                }
+                if (indexed) {
+                    state.blobs.emplace(
+                        digest,
+                        BlobRecord{std::string(reinterpret_cast<const char*>(entry.bytes.data()),
+                                               entry.bytes.size())});
+                    ++result.indexed;
+                } else {
+                    ++result.binary;
+                }
+                segment.members.push_back(Occurrence{.repository = repository,
+                                                     .path = path,
+                                                     .blob = digest,
+                                                     .kind = PublicationKind::BranchTip,
+                                                     .artifact = artifact,
+                                                     .artifact_version = version,
+                                                     .digest = digest,
+                                                     .indexed = indexed,
+                                                     .reason = std::move(reason)});
+                ++result.members;
+            }
+            if (entry.nested) {
+                const auto nested = append_artifact_members(
+                    *entry.nested, path, repository, artifact, version, segment, state, result);
+                if (!nested) {
+                    return nested;
+                }
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] Result<void> save_artifacts(const std::string& customer,
+                                              const CustomerState& state) const {
+        json value{{"version", 1}, {"artifacts", json::array()}};
+        for (const auto& [key, segment] : state.artifacts) {
+            json item{{"repository", segment.repository},
+                      {"artifact", segment.artifact},
+                      {"version", segment.version},
+                      {"members", json::array()}};
+            for (const Occurrence& member : segment.members) {
+                item["members"].push_back({{"path", member.path},
+                                           {"digest", member.digest},
+                                           {"indexed", member.indexed},
+                                           {"reason", member.reason}});
+            }
+            value["artifacts"].push_back(std::move(item));
+        }
+        return write_json_atomically(index_path(customer) / "artifacts.json", value);
     }
 
     void rebuild(CustomerState& state) {
@@ -460,6 +628,28 @@ struct Service::Impl {
                                      std::move(segment));
             }
         }
+        const auto artifacts = read_json(directory / "artifacts.json");
+        if (artifacts) {
+            for (const json& value : artifacts->value("artifacts", json::array())) {
+                ArtifactSegment segment{.repository = value.at("repository").get<std::string>(),
+                                        .artifact = value.at("artifact").get<std::string>(),
+                                        .version = value.at("version").get<std::string>()};
+                for (const json& member : value.value("members", json::array())) {
+                    const std::string digest = member.at("digest").get<std::string>();
+                    segment.members.push_back(
+                        Occurrence{.repository = segment.repository,
+                                   .path = member.at("path").get<std::string>(),
+                                   .blob = digest,
+                                   .kind = PublicationKind::BranchTip,
+                                   .artifact = segment.artifact,
+                                   .artifact_version = segment.version,
+                                   .digest = digest,
+                                   .indexed = member.value("indexed", false),
+                                   .reason = member.value("reason", "")});
+                }
+                state.artifacts.emplace(artifact_key(segment), std::move(segment));
+            }
+        }
         rebuild(state);
         customers.emplace(customer, std::move(state));
         return {};
@@ -588,12 +778,139 @@ Result<void> Service::publish(const Publish& publication) {
     }
 }
 
+Result<ReindexResult> Service::reindex_artifacts(const std::string& customer,
+                                                 const std::string& repository) {
+    try {
+        if (customer.empty() || repository.empty()) {
+            return std::unexpected(Error{"invalid_input", "customer and repository are required"});
+        }
+        std::unique_lock lock(impl_->mutex);
+        const auto loaded = impl_->load_customer(customer);
+        if (!loaded) {
+            return std::unexpected(loaded.error());
+        }
+        auto& state = impl_->customers.at(customer);
+        std::erase_if(state.artifacts,
+                      [&](const auto& item) { return item.second.repository == repository; });
+        auto customer_store =
+            liquid::runtime::block_on(liquid::store::open(impl_->root / customer / "store"));
+        if (!customer_store) {
+            return std::unexpected(Error{"store_error", customer_store.error().message});
+        }
+        liquid::repository_options options;
+        options.store = &*customer_store;
+        auto opened = liquid::runtime::block_on(liquid::repository::open(
+            impl_->root / customer / "repositories" / repository, options));
+        if (!opened) {
+            return std::unexpected(Error{"store_error", opened.error().message});
+        }
+        ReindexResult result;
+        liquid::record_page_options page{.limit = 1'000};
+        do {
+            const auto records = liquid::runtime::block_on(opened->results({.page = page}));
+            if (!records) {
+                return std::unexpected(Error{"store_error", records.error().message});
+            }
+            for (const liquid::repository_result& record : records->records) {
+                const std::string version = liquid::to_string(record.id.value);
+                for (const liquid::action_output& output : record.value.outputs) {
+                    ArtifactSegment segment{
+                        .repository = repository, .artifact = output.path, .version = version};
+                    ++result.artifacts;
+                    const auto contents = liquid::runtime::block_on(opened->blob(output.blob));
+                    if (!contents) {
+                        return std::unexpected(Error{"store_error", contents.error().message});
+                    }
+                    const auto tree = liquid::format_registry::global().unpack(
+                        *contents,
+                        output.path,
+                        {.maximum_depth = 2,
+                         .byte_budget = 256ULL * 1024ULL * 1024ULL,
+                         .maximum_entries = 100'000});
+                    if (!tree) {
+                        if (tree.error().code != liquid::errc::not_found) {
+                            return std::unexpected(Error{"store_error", tree.error().message});
+                        }
+                    } else {
+                        if (tree->truncated) {
+                            ++result.truncated;
+                        }
+                        const auto appended = impl_->append_artifact_members(*tree,
+                                                                             output.path,
+                                                                             repository,
+                                                                             output.path,
+                                                                             version,
+                                                                             segment,
+                                                                             state,
+                                                                             result);
+                        if (!appended) {
+                            return std::unexpected(appended.error());
+                        }
+                    }
+                    state.artifacts.insert_or_assign(impl_->artifact_key(segment),
+                                                     std::move(segment));
+                }
+            }
+            page.cursor = records->next;
+            if (records->done) {
+                break;
+            }
+        } while (page.cursor);
+        const auto saved_blobs = impl_->save_blobs(customer, state);
+        if (!saved_blobs) {
+            return std::unexpected(saved_blobs.error());
+        }
+        const auto saved_artifacts = impl_->save_artifacts(customer, state);
+        if (!saved_artifacts) {
+            return std::unexpected(saved_artifacts.error());
+        }
+        impl_->rebuild(state);
+        return result;
+    } catch (const std::exception& error) {
+        return std::unexpected(Error{"store_error", error.what()});
+    }
+}
+
+Result<std::vector<ArtifactMember>> Service::artifact_members(const std::string& customer,
+                                                              const std::string& repository,
+                                                              const std::string& version) const {
+    try {
+        std::unique_lock lock(impl_->mutex);
+        const auto loaded = impl_->load_customer(customer);
+        if (!loaded) {
+            return std::unexpected(loaded.error());
+        }
+        std::vector<ArtifactMember> output;
+        const auto& state = impl_->customers.at(customer);
+        for (const auto& [key, segment] : state.artifacts) {
+            if (segment.repository != repository || segment.version != version) {
+                continue;
+            }
+            for (const Occurrence& member : segment.members) {
+                output.push_back(ArtifactMember{segment.artifact,
+                                                segment.version,
+                                                member.path,
+                                                member.digest,
+                                                member.indexed,
+                                                member.reason});
+            }
+        }
+        std::ranges::sort(output, {}, &ArtifactMember::path);
+        return output;
+    } catch (const std::exception& error) {
+        return std::unexpected(Error{"store_error", error.what()});
+    }
+}
+
 Result<QueryResult>
 Service::query(const Query& query, const std::string& principal, control::Store& store) const {
     try {
-        if (query.text.empty()) {
-            return std::unexpected(Error{"invalid_input", "query is required"});
+        const auto scoped = split_artifact_scope(query.text);
+        if (!scoped) {
+            return std::unexpected(scoped.error());
         }
+        const std::string& text = scoped->first;
+        const std::optional<ArtifactScope>& artifact_scope = scoped->second;
         if (query.history && !query.change.empty()) {
             return std::unexpected(
                 Error{"invalid_input", "history and change are mutually exclusive"});
@@ -604,19 +921,21 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             return std::unexpected(Error{
                 "invalid_input", "scan queries require customer and repository, without ref"});
         }
+        if (artifact_scope && (scans_history || !query.ref.empty())) {
+            return std::unexpected(Error{
+                "invalid_input", "artifact scope cannot be combined with ref, change, or history"});
+        }
         std::unique_lock lock(impl_->mutex);
         const auto loaded = query.customer.empty() ? impl_->load_all_customers()
                                                    : impl_->load_customer(query.customer);
         if (!loaded) {
             return std::unexpected(loaded.error());
         }
-        const bool is_regex =
-            query.text.size() > 2 && query.text.front() == '/' && query.text.back() == '/';
-        const bool is_substring =
-            query.text.size() > 1 && query.text.front() == '"' && query.text.back() == '"';
-        const std::string needle = is_regex       ? query.text.substr(1, query.text.size() - 2)
-                                   : is_substring ? query.text.substr(1, query.text.size() - 2)
-                                                  : query.text;
+        const bool is_regex = text.size() > 2 && text.front() == '/' && text.back() == '/';
+        const bool is_substring = text.size() > 1 && text.front() == '"' && text.back() == '"';
+        const std::string needle = is_regex       ? text.substr(1, text.size() - 2)
+                                   : is_substring ? text.substr(1, text.size() - 2)
+                                                  : text;
         std::optional<std::regex> expression;
         if (is_regex) {
             try {
@@ -627,13 +946,26 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             }
         }
         QueryResult output;
-        output.mode = scans_history ? QueryMode::Scan : QueryMode::Hot;
+        output.mode = artifact_scope  ? QueryMode::Artifact
+                      : scans_history ? QueryMode::Scan
+                                      : QueryMode::Hot;
         for (auto& [customer, state] : impl_->customers) {
             if (!query.customer.empty() && query.customer != customer) {
                 continue;
             }
             std::vector<Occurrence> selected;
-            if (scans_history) {
+            if (artifact_scope) {
+                for (const auto& [key, artifact] : state.artifacts) {
+                    if ((!query.repository.empty() && query.repository != artifact.repository) ||
+                        artifact_scope->name != artifact.artifact ||
+                        (!artifact_scope->version.empty() &&
+                         artifact_scope->version != artifact.version)) {
+                        continue;
+                    }
+                    selected.insert(
+                        selected.end(), artifact.members.begin(), artifact.members.end());
+                }
+            } else if (scans_history) {
                 const auto scanned = impl_->scan(query, state);
                 if (!scanned) {
                     return std::unexpected(scanned.error());
@@ -783,7 +1115,11 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                                            occurrence.path,
                                            occurrence.change,
                                            snippet_for(blob->second.content, needle),
-                                           scores.at(occurrence.blob)});
+                                           scores.at(occurrence.blob),
+                                           occurrence.artifact,
+                                           occurrence.artifact_version,
+                                           occurrence.digest,
+                                           line_for(blob->second.content, needle, expression)});
             }
         }
         std::sort(output.items.begin(), output.items.end(), [](const Hit& left, const Hit& right) {
