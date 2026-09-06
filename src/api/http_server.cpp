@@ -77,6 +77,7 @@
 #include "lake/control/callers.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/pki.hpp"
+#include "lake/control/platform.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
@@ -3931,6 +3932,13 @@ struct ApiServer::Impl {
             "/repositories",
             "/repository",
             "/repository/tree",
+            "/environments",
+            "/environment",
+            "/logs",
+            "/platform/env/set",
+            "/platform/env/unset",
+            "/platform/domain/create",
+            "/platform/domain/delete",
             "/file",
             "/changes",
             "/change",
@@ -4023,6 +4031,7 @@ struct ApiServer::Impl {
         ctx.search = options.search.get();
         ctx.pki = &pki;
         ctx.agents = &agents;
+        ctx.platform = options.platform.get();
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
@@ -6167,6 +6176,140 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    boost::http::route_task serve_environments_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        if (repository_id.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository =
+            registry.call("get_repository", {{"id", repository_id}}, context);
+        if (!repository.ok) {
+            return serve_repository_page_error(route, context, repository);
+        }
+        const ApiResult environments =
+            registry.call("list_environments", {{"repository_id", repository_id}}, context);
+        if (!environments.ok) {
+            return serve_repository_page_error(route, context, environments);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_environments(repository_from_json(repository.value),
+                                             environments.value,
+                                             context.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_environment_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string name = query_value(route, "name");
+        if (repository_id.empty() || name.empty()) {
+            return redirect(route, "/repositories");
+        }
+        const ApiResult repository =
+            registry.call("get_repository", {{"id", repository_id}}, context);
+        if (!repository.ok) {
+            return serve_repository_page_error(route, context, repository);
+        }
+        const ApiResult environment = registry.call(
+            "get_environment", {{"repository_id", repository_id}, {"environment", name}}, context);
+        if (!environment.ok) {
+            return serve_repository_page_error(route, context, environment);
+        }
+        const ApiResult deployments =
+            registry.call("list_deployments",
+                          {{"repository_id", repository_id}, {"environment", name}, {"limit", 100}},
+                          context);
+        if (!deployments.ok) {
+            return serve_repository_page_error(route, context, deployments);
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_environment(repository_from_json(repository.value),
+                                            environment.value,
+                                            deployments.value,
+                                            context.authorized),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_logs_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string repository_id = query_value(route, "repository_id");
+        const std::string environment_name = query_value(route, "environment");
+        if (repository_id.empty() || environment_name.empty()) {
+            co_return co_await redirect(route, "/repositories");
+        }
+        const ApiResult repository =
+            registry.call("get_repository", {{"id", repository_id}}, context);
+        if (!repository.ok) {
+            co_return co_await serve_repository_page_error(route, context, repository);
+        }
+        auto completed = co_await registry.call_async("environment_logs",
+                                                      {{"repository_id", repository_id},
+                                                       {"environment", environment_name},
+                                                       {"since", query_value(route, "since")},
+                                                       {"limit", 200},
+                                                       {"direction", "forward"}},
+                                                      context);
+        const ApiResult logs = completed
+                                   ? std::move(*completed)
+                                   : ApiResult::failure("store_error", completed.error().message);
+        if (!logs.ok) {
+            co_return co_await serve_repository_page_error(route, context, logs);
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_logs(repository_from_json(repository.value),
+                                                 environment_name,
+                                                 logs.value,
+                                                 logs.value.value("stale_since", ""),
+                                                 context.authorized),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_platform_form(boost::http::route_params& route,
+                                                std::string capability) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return co_await send_text(route,
+                                         boost::http::status::bad_request,
+                                         web_ui_error("invalid_input", "could not read form", true),
+                                         "text/html; charset=utf-8",
+                                         "no-store");
+        }
+        nlohmann::json input{{"repository_id", form_field(body, "repository_id")},
+                             {"environment", form_field(body, "environment")}};
+        if (capability == "set_environment_env" || capability == "unset_environment_env") {
+            input["key"] = form_field(body, "key");
+        }
+        if (capability == "set_environment_env") {
+            input["value"] = form_field(body, "value");
+        }
+        if (capability == "create_domain" || capability == "delete_domain") {
+            input["host"] = form_field(body, "host");
+        }
+        if (capability == "create_domain") {
+            input["tls"] = form_field(body, "tls");
+        }
+        ApiContext context = context_for(route);
+        auto completed = co_await registry.call_async(capability, input, context);
+        const ApiResult result = completed
+                                     ? std::move(*completed)
+                                     : ApiResult::failure("store_error", completed.error().message);
+        if (!result.ok) {
+            co_return co_await serve_page_error(route, result);
+        }
+        const std::string destination =
+            "/environment?repository_id=" +
+            oauth_url_encode(input.at("repository_id").get<std::string>()) +
+            "&name=" + oauth_url_encode(input.at("environment").get<std::string>());
+        co_return co_await redirect(route, destination);
+    }
+
     boost::http::route_task serve_exports_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         const std::string repository_id = query_value(route, "repository_id");
@@ -8233,9 +8376,13 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_healthz(boost::http::route_params& route) {
+        nlohmann::json body{{"ok", true}};
+        if (options.platform) {
+            body["platform"] = options.platform->degraded() ? "degraded" : "ready";
+        }
         return send_text(route,
                          boost::http::status::ok,
-                         R"({"ok":true})",
+                         body.dump(),
                          "application/json; charset=utf-8",
                          "no-store");
     }
@@ -8465,7 +8612,10 @@ struct ApiServer::Impl {
         }
         if (body.empty()) {
             ApiContext ctx = context_for(route);
-            const ApiResult result = registry.call(capability->name, input, ctx);
+            auto completed = co_await registry.call_async(capability->name, input, ctx);
+            const ApiResult result =
+                completed ? std::move(*completed)
+                          : ApiResult::failure("store_error", completed.error().message);
             status = http::int_to_status(static_cast<unsigned>(rest_status(result)));
             body = rest_envelope(result).dump();
             const bool browser_sign_in =
@@ -8508,11 +8658,18 @@ struct ApiServer::Impl {
                        .dump();
         } else {
             ApiContext ctx = context_for(route);
-            const auto response = mcp_dispatch(registry, request, ctx, version_string());
-            if (!response) {
+            auto completed = co_await mcp_dispatch_async(registry, request, ctx, version_string());
+            if (!completed) {
+                status = http::status::internal_server_error;
+                body = nlohmann::json{{"jsonrpc", "2.0"},
+                                      {"id", request.value("id", nlohmann::json())},
+                                      {"error",
+                                       {{"code", -32603}, {"message", completed.error().message}}}}
+                           .dump();
+            } else if (!*completed) {
                 status = http::status::accepted;
             } else {
-                body = *response;
+                body = **completed;
             }
         }
         route.status(status);
@@ -8948,6 +9105,47 @@ bool ApiServer::start() {
             return impl.observe_request(
                 route, "/repositories", impl.serve_repositories_page(route));
         });
+    router.add(
+        http::method::get, "/environments", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/environments", impl.serve_environments_page(route));
+        });
+    router.add(
+        http::method::get, "/environment", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/environment", impl.serve_environment_page(route));
+        });
+    router.add(http::method::get, "/logs", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/logs", impl.serve_logs_page(route));
+    });
+    router.add(
+        http::method::post,
+        "/platform/env/set",
+        [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/platform/env/set", impl.serve_platform_form(route, "set_environment_env"));
+        });
+    router.add(http::method::post,
+               "/platform/env/unset",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route,
+                       "/platform/env/unset",
+                       impl.serve_platform_form(route, "unset_environment_env"));
+               });
+    router.add(http::method::post,
+               "/platform/domain/create",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/platform/domain/create",
+                                               impl.serve_platform_form(route, "create_domain"));
+               });
+    router.add(http::method::post,
+               "/platform/domain/delete",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/platform/domain/delete",
+                                               impl.serve_platform_form(route, "delete_domain"));
+               });
     router.add(
         http::method::get, "/exports", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/exports", impl.serve_exports_page(route));
@@ -9480,6 +9678,9 @@ const std::string& ApiServer::reason() const {
 
 void ApiServer::drain() {
     impl_->renew_due_timestamps();
+    if (impl_->options.platform && impl_->options.platform->sync_due()) {
+        static_cast<void>(liquid::runtime::block_on(impl_->options.platform->sync()));
+    }
 }
 
 void ApiServer::wait_for_work(std::chrono::milliseconds max_idle) {

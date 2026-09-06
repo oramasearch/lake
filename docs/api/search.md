@@ -110,7 +110,8 @@ changes for a scan.
 ## Verify
 
 ```sh
-cmake -S . -B build -G Ninja -DLAKE_BUILD_TESTS=ON
+cmake -S . -B build -G Ninja -DLAKE_BUILD_TESTS=ON \
+  -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta-bridge/modules/zetta
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```

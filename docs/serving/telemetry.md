@@ -6,7 +6,7 @@ The HTTP server exposes three operational routes:
 
 | Route | Authentication | Response |
 |---|---|---|
-| `GET /healthz` | none | `200 {"ok":true}` while the HTTP process is serving |
+| `GET /healthz` | none | `200 {"ok":true,"platform":"ready|degraded"}` while the HTTP process is serving; `platform` is omitted when operator sync is not configured |
 | `GET /readyz` | none | `200 {"ok":true,"store":"<kind>"}` after a successful store ping; otherwise `503` with the JSON error envelope |
 | `GET /metrics` | the existing bearer or `lake_session` cookie | Prometheus text exposition; unauthorized requests receive the normal `403` JSON error |
 
@@ -29,6 +29,10 @@ path. Store `result` is `ok` on success and the store error code on failure.
 The control-store interface exposes `ping()`. The in-memory store always succeeds. The Postgres
 store runs `SELECT 1` with a one-second transaction-local statement timeout and maps any failure
 to `store_unavailable`.
+
+When operator Zetta sync fails, `platform` changes to `degraded` while `/readyz` remains ready as
+long as the local control store responds. Environment reads continue from the mirror with a
+`stale_since` marker, and platform mutations fail with `store_unavailable`.
 
 Every completed request writes one JSON object to stdout with RFC 3339 UTC `ts`, `method`,
 query-free `path`, `route`, `status`, `duration_ms` and `node`. Startup is also one JSON object and

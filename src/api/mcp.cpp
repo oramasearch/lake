@@ -21,23 +21,29 @@ std::string jsonrpc_result(const nlohmann::json& id, nlohmann::json result) {
     return response.dump();
 }
 
-}  // namespace
+} // namespace
 
-std::optional<std::string> mcp_dispatch(const Registry& registry, const nlohmann::json& request,
-                                        ApiContext& context, std::string_view version) {
+std::optional<std::string> mcp_dispatch(const Registry& registry,
+                                        const nlohmann::json& request,
+                                        ApiContext& context,
+                                        std::string_view version) {
     if (!request.is_object() || request.value("jsonrpc", "") != "2.0") {
         return jsonrpc_error(nullptr, -32600, "invalid JSON-RPC 2.0 request");
     }
     const nlohmann::json id = request.value("id", nlohmann::json());
     const std::string method = request.value("method", "");
 
-    if (method == "notifications/initialized") return std::nullopt;
+    if (method == "notifications/initialized")
+        return std::nullopt;
     if (method == "initialize") {
-        return jsonrpc_result(id, {{"protocolVersion", std::string(mcp_protocol_version)},
-                                   {"capabilities", {{"tools", nlohmann::json::object()}}},
-                                   {"serverInfo", {{"name", "lake"}, {"version", std::string(version)}}}});
+        return jsonrpc_result(
+            id,
+            {{"protocolVersion", std::string(mcp_protocol_version)},
+             {"capabilities", {{"tools", nlohmann::json::object()}}},
+             {"serverInfo", {{"name", "lake"}, {"version", std::string(version)}}}});
     }
-    if (method == "ping") return jsonrpc_result(id, nlohmann::json::object());
+    if (method == "ping")
+        return jsonrpc_result(id, nlohmann::json::object());
     if (method == "tools/list") {
         nlohmann::json tools = nlohmann::json::array();
         for (const auto& capability : registry.list()) {
@@ -59,7 +65,8 @@ std::optional<std::string> mcp_dispatch(const Registry& registry, const nlohmann
         const nlohmann::json params = request.value("params", nlohmann::json::object());
         const std::string tool_name = params.value("name", "");
         const nlohmann::json arguments = params.value("arguments", nlohmann::json::object());
-        if (tool_name.empty()) return jsonrpc_error(id, -32602, "params.name is required");
+        if (tool_name.empty())
+            return jsonrpc_error(id, -32602, "params.name is required");
         const ApiResult call_result = registry.call(tool_name, arguments, context);
         nlohmann::json payload = rest_envelope(call_result);
         nlohmann::json result;
@@ -71,4 +78,31 @@ std::optional<std::string> mcp_dispatch(const Registry& registry, const nlohmann
     return jsonrpc_error(id, -32601, "method not found: " + method);
 }
 
-}  // namespace lake::api
+liquid::runtime::task<std::optional<std::string>> mcp_dispatch_async(const Registry& registry,
+                                                                     const nlohmann::json& request,
+                                                                     ApiContext& context,
+                                                                     std::string_view version) {
+    if (!request.is_object() || request.value("jsonrpc", "") != "2.0" ||
+        request.value("method", "") != "tools/call") {
+        co_return mcp_dispatch(registry, request, context, version);
+    }
+    const nlohmann::json id = request.value("id", nlohmann::json());
+    const nlohmann::json params = request.value("params", nlohmann::json::object());
+    const std::string tool_name = params.value("name", "");
+    const nlohmann::json arguments = params.value("arguments", nlohmann::json::object());
+    if (tool_name.empty()) {
+        co_return jsonrpc_error(id, -32602, "params.name is required");
+    }
+    auto completed = co_await registry.call_async(tool_name, arguments, context);
+    const ApiResult call_result =
+        completed ? std::move(*completed)
+                  : ApiResult::failure("store_error", completed.error().message);
+    nlohmann::json payload = rest_envelope(call_result);
+    nlohmann::json result;
+    result["content"] = nlohmann::json::array({{{"type", "text"}, {"text", payload.dump()}}});
+    result["structuredContent"] = std::move(payload);
+    result["isError"] = !call_result.ok;
+    co_return jsonrpc_result(id, std::move(result));
+}
+
+} // namespace lake::api

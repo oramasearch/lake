@@ -4,6 +4,9 @@
 `libstdc++-14-dev`, checksum-verified OpenSSL 3.6.3, libpq development packages, `pkg-config` and
 `libfuse3-dev` for libliquid discovery, Ninja, and CMake 3.31.5. The runtime image contains the
 matching FUSE, OpenSSL, C++ and libpq runtime libraries and runs as numeric UID/GID `10001`.
+The build also requires a named `zetta_source` context pointing at the authorized
+`zetta-bridge/modules/zetta` checkout. The Dockerfile copies that context to `/opt/zetta` and passes
+the same path as `LAKE_ZETTA_SOURCE_DIR`; Lake compiles only the client transport sources.
 
 ## Publish a deployment image
 
@@ -16,7 +19,8 @@ git tag <tag>
 git push origin <tag>
 ```
 
-The [`image` workflow](../../.github/workflows/image.yml) builds `linux/amd64` and publishes
+The [`image` workflow](../../.github/workflows/image.yml) checks out the pinned bridge source,
+supplies its Zetta module as the named build context, builds `linux/amd64`, and publishes
 `oramasearch/lake:<tag>` plus `oramasearch/lake:sha-<short-sha>`. It rejects `latest`.
 
 Wait for the workflow to succeed before updating `Lake.spec.image`; the deployment runbook is in
@@ -27,13 +31,16 @@ Wait for the workflow to succeed before updating `Lake.spec.image`; the deployme
 Identity and API changes must first prove that the production Linux image compiles:
 
 ```sh
-docker build --platform linux/amd64 .
+docker build --platform linux/amd64 \
+  --build-context zetta_source=<zetta-bridge>/modules/zetta .
 ```
 
 For local image inspection, build and load a named image:
 
 ```sh
-docker buildx build --platform linux/amd64 -t oramasearch/lake:<local-tag> --load .
+docker buildx build --platform linux/amd64 \
+  --build-context zetta_source=<zetta-bridge>/modules/zetta \
+  -t oramasearch/lake:<local-tag> --load .
 docker run --rm -p 4900:4900 oramasearch/lake:<local-tag> version
 ```
 

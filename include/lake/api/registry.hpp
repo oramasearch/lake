@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
 
 #include "lake/api/sync_store.hpp"
@@ -30,6 +31,9 @@ class Service;
 }
 namespace lake::control::agents {
 class Service;
+}
+namespace lake::control {
+class PlatformService;
 }
 namespace lake::transparency {
 class Service;
@@ -105,6 +109,7 @@ struct ApiContext {
     control::pki::Service* pki = nullptr;
     control::callers::Service* callers = nullptr;
     control::agents::Service* agents = nullptr;
+    control::PlatformService* platform = nullptr;
     transparency::Service* transparency = nullptr;
     transparency::CheckpointService* checkpoints = nullptr;
     transparency::TiledLog* transparency_log = nullptr;
@@ -133,6 +138,8 @@ struct ApiContext {
 
 using CapabilityHandler =
     std::function<ApiResult(const nlohmann::json& input, ApiContext& context)>;
+using AsyncCapabilityHandler = std::function<liquid::runtime::task<ApiResult>(
+    const nlohmann::json& input, ApiContext& context)>;
 using CapabilityObjectResolver = std::function<std::expected<std::string, ApiError>(
     const nlohmann::json& input, ApiContext& context)>;
 
@@ -158,6 +165,7 @@ struct Capability {
     // audit target before invoking the handler.
     bool resolves_operator_audit_target = false;
     CapabilityHandler handler;
+    AsyncCapabilityHandler async_handler;
 };
 
 // Boundary validation against the schema subset lake declares: required keys,
@@ -173,6 +181,8 @@ public:
     // Authorize (requires_auth vs context.authorized), validate, run, time and
     // audit once.
     ApiResult call(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
+    liquid::runtime::task<ApiResult>
+    call_async(const std::string& name, const nlohmann::json& input, ApiContext& context) const;
 
 private:
     std::vector<std::shared_ptr<const Capability>> entries_;

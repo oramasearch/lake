@@ -437,6 +437,7 @@ std::string forge_tabs(const control::Repository& repository, std::string_view c
         {"Issues", "/issues?repository_id=" + id, "issues"},
         {"Releases", "/releases?repository_id=" + id, "releases"},
         {"Artifacts", "/artifacts?repository_id=" + id, "artifacts"},
+        {"Platform", "/environments?repository_id=" + id, "platform"},
         {"Webhooks", "/webhooks?repository_id=" + id, "webhooks"},
         {"Protection", "/protection?repository_id=" + id, "protection"},
     };
@@ -948,12 +949,12 @@ std::string web_ui_error(std::string_view code, std::string_view message, bool s
 }
 
 std::string web_ui_loading(std::string_view subject, bool signed_in) {
-    const std::string content = std::format(
-        "<div class=\"state-page loading-state\" role=\"status\" aria-live=\"polite\" "
-        "aria-busy=\"true\"><p class=\"eyebrow\">loading</p><h1>{}</h1>"
-        "<p class=\"sub\">Loading.</p><div class=\"loading-bars\" "
-        "aria-hidden=\"true\"><span></span><span></span><span></span></div></div>",
-        web_ui_escape(subject));
+    const std::string content =
+        std::format("<div class=\"state-page loading-state\" role=\"status\" aria-live=\"polite\" "
+                    "aria-busy=\"true\"><p class=\"eyebrow\">loading</p><h1>{}</h1>"
+                    "<p class=\"sub\">Loading.</p><div class=\"loading-bars\" "
+                    "aria-hidden=\"true\"><span></span><span></span><span></span></div></div>",
+                    web_ui_escape(subject));
     return web_ui_shell("lake — loading", subject, content, signed_in);
 }
 
@@ -1224,6 +1225,208 @@ std::string web_ui_repository(const control::Repository& repository,
     RepositoryHomeData data;
     data.refs = refs;
     return web_ui_repository(repository, owner, data, signed_in);
+}
+
+namespace {
+
+std::string platform_text(const nlohmann::json& value, std::string_view key) {
+    const auto found = value.find(key);
+    if (found == value.end() || found->is_null()) {
+        return {};
+    }
+    return found->is_string() ? found->get<std::string>() : found->dump();
+}
+
+std::string platform_stale_banner(std::string_view stale_since) {
+    if (stale_since.empty()) {
+        return {};
+    }
+    return std::format(
+        "<div class=\"notice status-warning\" role=\"status\"><strong>Platform data is "
+        "stale.</strong> The operator control plane has been unreachable since {}. Writes are "
+        "disabled.</div>",
+        web_ui_escape(stale_since));
+}
+
+std::string short_image(std::string_view image) {
+    const std::size_t digest = image.find("sha256:");
+    if (digest == std::string_view::npos) {
+        return abbreviated_identifier(image);
+    }
+    const std::size_t end = std::min(image.size(), digest + 19);
+    return std::string(image.substr(digest, end - digest));
+}
+
+std::string platform_url(std::string_view url) {
+    if (!url.starts_with("https://") && !url.starts_with("http://")) {
+        return web_ui_escape(url);
+    }
+    return row_link(url, url);
+}
+
+std::string platform_heading(const control::Repository& repository,
+                             std::string_view eyebrow,
+                             std::string_view title,
+                             std::string_view current) {
+    return std::format("<p class=\"eyebrow\">{}</p><h1>{}</h1>{}",
+                       web_ui_escape(eyebrow),
+                       web_ui_escape(title),
+                       forge_tabs(repository, current));
+}
+
+} // namespace
+
+std::string web_ui_environments(const control::Repository& repository,
+                                const nlohmann::json& environments,
+                                bool signed_in) {
+    const std::string stale_since = platform_text(environments, "stale_since");
+    const nlohmann::json items = environments.value("items", nlohmann::json::array());
+    std::string content = platform_heading(repository, "platform", "Environments", "platform");
+    content += platform_stale_banner(stale_since);
+    content += "<p class=\"sub\">Deployments mirrored from the operator control plane.</p>";
+    if (items.empty()) {
+        content += "<div class=\"panel empty\">No environments have been deployed for this "
+                   "repository.</div>";
+    } else {
+        content += "<table><thead><tr><th>Name</th><th>Phase</th><th>Change</th><th>Image</th>"
+                   "<th>URL</th><th>Domains</th><th>Updated</th></tr></thead><tbody>";
+        for (const nlohmann::json& item : items) {
+            const std::string name = platform_text(item, "name");
+            const std::string url = platform_text(item, "url");
+            const nlohmann::json domains = item.value("domains", nlohmann::json::array());
+            content += std::format(
+                "<tr><td>{}</td><td><span class=\"badge\">{}</span></td><td><code>{}</code>"
+                "</td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                row_link("/environment?repository_id=" + url_component(repository.id) +
+                             "&name=" + url_component(name),
+                         name),
+                web_ui_escape(platform_text(item, "phase")),
+                web_ui_escape(abbreviated_identifier(platform_text(item, "change"))),
+                web_ui_escape(short_image(platform_text(item, "image"))),
+                url.empty() ? "<span class=\"muted\">—</span>" : platform_url(url),
+                domains.size(),
+                web_ui_escape(platform_text(item, "updated_at")));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell(
+        "lake — environments", std::format("{} environments", items.size()), content, signed_in);
+}
+
+std::string web_ui_environment(const control::Repository& repository,
+                               const nlohmann::json& environment,
+                               const nlohmann::json& deployments,
+                               bool signed_in) {
+    const std::string name = platform_text(environment, "name");
+    const std::string stale_since = platform_text(environment, "stale_since");
+    const nlohmann::json deployment = environment.value("deployment", nlohmann::json::object());
+    const nlohmann::json env = environment.value("env", nlohmann::json::array());
+    const nlohmann::json domains = environment.value("domains", nlohmann::json::array());
+    const nlohmann::json history = deployments.value("items", nlohmann::json::array());
+    std::string content = platform_heading(repository, "environment", name, "platform");
+    content += platform_stale_banner(stale_since);
+    const std::string url = platform_text(deployment, "url");
+    content += std::format(
+        "<section class=\"panel\"><h2>Current deployment</h2><dl><dt>Phase</dt><dd>{}</dd>"
+        "<dt>Change</dt><dd><code>{}</code></dd><dt>Image</dt><dd><code>{}</code></dd>"
+        "<dt>Namespace</dt><dd><code>{}</code></dd><dt>URL</dt><dd>{}</dd></dl><p>{}</p></section>",
+        web_ui_escape(platform_text(deployment, "phase")),
+        web_ui_escape(platform_text(deployment, "change")),
+        web_ui_escape(platform_text(deployment, "image")),
+        web_ui_escape(platform_text(deployment, "namespace")),
+        url.empty() ? "<span class=\"muted\">Pending</span>" : platform_url(url),
+        row_link("/logs?repository_id=" + url_component(repository.id) +
+                     "&environment=" + url_component(name),
+                 "View logs"));
+    content += "<section class=\"panel\"><h2>Environment variables</h2><table><thead><tr>"
+               "<th>Key</th><th>Value</th><th>Updated</th><th></th></tr></thead><tbody>";
+    for (const nlohmann::json& row : env) {
+        content += std::format(
+            "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td><form "
+            "method=\"post\" action=\"/platform/env/unset\"><input type=\"hidden\" "
+            "name=\"repository_id\" value=\"{}\"><input type=\"hidden\" name=\"environment\" "
+            "value=\"{}\"><input type=\"hidden\" name=\"key\" value=\"{}\"><button "
+            "type=\"submit\">Unset</button></form></td></tr>",
+            web_ui_escape(platform_text(row, "key")),
+            web_ui_escape(platform_text(row, "value")),
+            web_ui_escape(platform_text(row, "updated_at")),
+            web_ui_escape(repository.id),
+            web_ui_escape(name),
+            web_ui_escape(platform_text(row, "key")));
+    }
+    content +=
+        "</tbody></table><form method=\"post\" action=\"/platform/env/set\"><input "
+        "type=\"hidden\" name=\"repository_id\" value=\"" +
+        web_ui_escape(repository.id) + "\"><input type=\"hidden\" name=\"environment\" value=\"" +
+        web_ui_escape(name) +
+        "\"><label>Key <input name=\"key\" required></label><label>Value <input "
+        "name=\"value\" required></label><button type=\"submit\">Set variable</button></form>"
+        "</section>";
+    content += "<section class=\"panel\"><h2>Domains</h2><table><thead><tr><th>Host</th><th>TLS"
+               "</th><th>Status</th><th>Message</th><th></th></tr></thead><tbody>";
+    for (const nlohmann::json& row : domains) {
+        content += std::format(
+            "<tr><td>{}</td><td>{}</td><td><span class=\"badge\">{}</span></td><td>{}</td>"
+            "<td><form method=\"post\" action=\"/platform/domain/delete\"><input type=\"hidden\" "
+            "name=\"repository_id\" value=\"{}\"><input type=\"hidden\" name=\"environment\" "
+            "value=\"{}\"><input type=\"hidden\" name=\"host\" value=\"{}\"><button "
+            "type=\"submit\">Delete</button></form></td></tr>",
+            web_ui_escape(platform_text(row, "host")),
+            web_ui_escape(platform_text(row, "tls")),
+            web_ui_escape(platform_text(row, "status")),
+            web_ui_escape(platform_text(row, "message")),
+            web_ui_escape(repository.id),
+            web_ui_escape(name),
+            web_ui_escape(platform_text(row, "host")));
+    }
+    content += "</tbody></table><form method=\"post\" action=\"/platform/domain/create\"><input "
+               "type=\"hidden\" name=\"repository_id\" value=\"" +
+               web_ui_escape(repository.id) +
+               "\"><input type=\"hidden\" name=\"environment\" value=\"" + web_ui_escape(name) +
+               "\"><label>Host <input name=\"host\" required></label><label>TLS <select "
+               "name=\"tls\"><option value=\"acme\">ACME</option><option value=\"provided\">"
+               "Provided</option></select></label><button type=\"submit\">Create domain</button>"
+               "</form></section>";
+    content +=
+        "<section class=\"panel\"><h2>Deployment history</h2><table><thead><tr><th>Phase"
+        "</th><th>Change</th><th>Image</th><th>Updated</th><th>Message</th></tr></thead><tbody>";
+    for (const nlohmann::json& row : history) {
+        content += std::format("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td>"
+                               "<td>{}</td><td>{}</td></tr>",
+                               web_ui_escape(platform_text(row, "phase")),
+                               web_ui_escape(platform_text(row, "change")),
+                               web_ui_escape(short_image(platform_text(row, "image"))),
+                               web_ui_escape(platform_text(row, "updated_at")),
+                               web_ui_escape(platform_text(row, "message")));
+    }
+    content += "</tbody></table></section>";
+    return web_ui_shell("lake — " + name, name, content, signed_in);
+}
+
+std::string web_ui_logs(const control::Repository& repository,
+                        std::string_view environment,
+                        const nlohmann::json& logs,
+                        std::string_view stale_since,
+                        bool signed_in) {
+    const nlohmann::json items = logs.value("items", nlohmann::json::array());
+    const std::string next_since = platform_text(logs, "next_since");
+    std::string content = platform_heading(repository, "environment logs", environment, "platform");
+    content += platform_stale_banner(stale_since);
+    content += "<section class=\"panel\" id=\"platform-logs\" data-repository=\"" +
+               web_ui_escape(repository.id) + "\" data-environment=\"" +
+               web_ui_escape(environment) + "\" data-since=\"" + web_ui_escape(next_since) +
+               "\"><h2>Logs</h2><pre aria-live=\"polite\"><code>";
+    for (const nlohmann::json& item : items) {
+        content += web_ui_escape(platform_text(item, "ts") + " " + platform_text(item, "pod") +
+                                 "/" + platform_text(item, "container") + " " +
+                                 platform_text(item, "line") + "\n");
+    }
+    content += "</code></pre><p><a href=\"/logs?repository_id=" + url_component(repository.id) +
+               "&amp;environment=" + url_component(environment) +
+               "&amp;since=" + url_component(next_since) + "\">Refresh</a></p></section>";
+    content +=
+        R"(<script>(()=>{const root=document.querySelector('#platform-logs');if(!root)return;const output=root.querySelector('code');let since=root.dataset.since;const poll=async()=>{try{const response=await fetch('/v1/environment_logs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({repository_id:root.dataset.repository,environment:root.dataset.environment,since,limit:200,direction:'forward'})});const body=await response.json();if(!body.ok)return;for(const item of body.value.items){output.append(`${item.ts} ${item.pod}/${item.container} ${item.line}\n`);}since=body.value.next_since||since;}finally{setTimeout(poll,3000);}};setTimeout(poll,3000);})();</script>)";
+    return web_ui_shell("lake — logs", std::string(environment) + " logs", content, signed_in);
 }
 
 std::string web_ui_repository_tree(const control::Repository& repository,

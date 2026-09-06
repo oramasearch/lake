@@ -7,9 +7,14 @@
 # Build natively on amd64 — QEMU emulation of a C++26 build on Apple Silicon is far too slow.
 # From the lake repo root (context = this repo, submodules checked out):
 #   docker buildx build --builder <amd64-builder> --platform linux/amd64 \
+#     --build-context zetta_source=<zetta-bridge>/modules/zetta \
 #     -t oramasearch/lake:v1-sandbox --push .
 #
 # The runtime needs OpenSSL 3.6.3 for Argon2id, plus the C++ runtime.
+
+# The image workflow supplies the authorized zetta-bridge checkout as a named context. Only the
+# client transport sources are compiled; no Zetta source is copied into this repository.
+FROM zetta_source AS zetta-source
 
 # ---------- build stage ----------
 FROM ubuntu:24.04 AS build
@@ -50,12 +55,15 @@ RUN wget -qO /tmp/cmake.sh "https://github.com/Kitware/CMake/releases/download/v
 WORKDIR /src
 # Submodules (capy, corosio, http, beast2) are already checked out locally — no git/SSH in the build.
 COPY . /src
+COPY --from=zetta-source . /opt/zetta
 
 # Tests off (skips the GoogleTest fetch and the test targets). FetchContent pulls Boost 1.91 into
 # build/_deps at configure time (needs network). Build uses all cores.
+ARG LAKE_ZETTA_SOURCE_DIR=/opt/zetta
 RUN cmake -S . -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DLAKE_BUILD_TESTS=OFF \
+      -DLAKE_ZETTA_SOURCE_DIR="${LAKE_ZETTA_SOURCE_DIR}" \
       -DCMAKE_C_COMPILER=clang-19 \
       -DCMAKE_CXX_COMPILER=clang++-19 \
       -DOPENSSL_ROOT_DIR=/opt/openssl \

@@ -12,6 +12,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/platform_store.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/search/index.hpp"
 #include "temporary_directory.hpp"
@@ -535,6 +536,47 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.outcome, "denied");
     EXPECT_EQ(event->draft.details.at("mount_id"), mount_id);
+}
+
+TEST(PostgresPlatform, EnvironmentBindingAndMirrorRoundTrip) {
+    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    auto* platform_store = dynamic_cast<lake::control::PlatformStore*>(store.get());
+    ASSERT_NE(platform_store, nullptr);
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:platform-" + suffix, "platform-" + suffix + "@example.test", "Platform"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer =
+        store->create_customer({"individual", user->id, "", "platform-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository =
+        store->create_repository({customer->id, "platform-" + suffix, "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto environment =
+        platform_store->ensure_platform_environment(repository->id, "production");
+    ASSERT_TRUE(environment) << environment.error().message;
+    const auto same = platform_store->ensure_platform_environment(repository->id, "production");
+    ASSERT_TRUE(same) << same.error().message;
+    EXPECT_EQ(same->id, environment->id);
+    const auto object = store->get_policy_object(environment->object_id);
+    ASSERT_TRUE(object) << object.error().message;
+    EXPECT_EQ(object->object_type, "environment");
+    ASSERT_TRUE(platform_store->upsert_platform_mirror(
+        {"deployment",
+         "deployment-" + suffix,
+         {{"repository", repository->id}, {"environment", "production"}, {"phase", "ready"}},
+         "2026-09-06T00:00:00Z"}));
+    const auto rows = platform_store->list_platform_mirror("deployment");
+    ASSERT_TRUE(rows) << rows.error().message;
+    const auto found =
+        std::ranges::find(*rows, "deployment-" + suffix, &lake::control::PlatformMirrorRow::key);
+    ASSERT_NE(found, rows->end());
+    EXPECT_EQ(found->value.at("phase"), "ready");
 }
 
 } // namespace
