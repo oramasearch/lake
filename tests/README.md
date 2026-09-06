@@ -14,6 +14,11 @@ The default `lake-tests` target contains the portable suite plus Postgres-backed
 when `LAKE_TEST_DB_URI` is absent. `lake-postgres-tests` contains the focused control-store cases.
 Run both through CTest after configuring the repository with CMake.
 
+`HttpServer.IdleKeepAliveCloseWritesNothingToStderr` starts Lake with one Beast2 worker, captures
+the process stderr file descriptor through a test-owned pipe, completes a keep-alive request, and
+closes that connection while it is idle. A request on a second connection proves the worker
+processed the close before the test stops the server and asserts that the pipe stayed empty.
+
 Web UI string tests cover the content-hashed stylesheet link shared by the standard and hosted
 page heads, SHA-256 URL changes for different stylesheet bytes, content-hashed font references,
 and the immutable versus `no-cache` route policy. These checks use embedded or in-memory bytes and

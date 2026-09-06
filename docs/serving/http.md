@@ -67,4 +67,5 @@ are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
 **Verify.** `./build/lake --listen 127.0.0.1:4900 --node x --memory-store --admin-token t`, then
 `curl -i` the hello page, `/v1/server_info`, `/healthz` and an unmatched path;
-`ctest --test-dir build`.
+`ctest --test-dir build`. The focused idle-close proof is
+`ctest --test-dir build -R HttpServer.IdleKeepAliveCloseWritesNothingToStderr --output-on-failure`.
