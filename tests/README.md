@@ -25,8 +25,15 @@ checkpoint-bound inclusion proofs for every leaf, consistency between two tree s
 tile or proof bytes. See `fixtures/transparency/README.md` for regeneration commands.
 
 Agent-session coverage uses an injected clock and a real Ed25519 TAAP signature. The portable and
-Postgres cases mint a response-only key, verify its logged `delegation/1` attestation, attribute a
-signed drip to the durable agent, reject a modified body, and reject the key after expiry.
+Postgres cases mint a response-only key, verify its current-profile `delegation/1` attestation,
+find it by dispatcher identity, attribute a signed drip to the durable agent, reject a modified
+body, and reject the key after expiry.
+
+`IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` is the issue #4 acceptance scenario. It
+uses a real pinned-libliquid identity and Postgres rows to prove replay-resistant TAAP sign-in, an
+application PKCE authorization-code flow with relying-party JWKS verification, agent certificate
+issue/rotation/revocation checks, dynamic-secret lease/renew/revoke, signed audit visibility, and a
+libliquid-verified transparency inclusion proof.
 
 Platform coverage uses an append-only fake Zetta control source and fake Loki source against
 `InMemoryStore`. It proves latest-wins sync, environment policy-object creation, signed phase audit,
