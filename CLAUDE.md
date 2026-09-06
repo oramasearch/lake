@@ -283,7 +283,9 @@ that licence boundary.
 
 1. **Document the change in `docs/<topic>/*.md`** (see `docs/README.md`): what, why, how to
    verify, how to change. New topic → new folder + a row in `docs/README.md`. This is a must.
-2. Does `README.md` still describe what builds and serves? Update the status line and tables.
+2. `README.md` is the front door only (what it is, build and run, pointers); never append status or
+   feature sections to it. Update `docs/design/status.md` for the status of your area and
+   `docs/README.md` for any new page.
 3. Does this file's **Status** and **Open decisions** still hold?
 4. `cmake --build build && ctest --test-dir build` green, and the binary smoke-tested by hand.
 5. Commit means push.
