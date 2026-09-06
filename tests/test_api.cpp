@@ -824,6 +824,19 @@ json response_json(std::string_view response) {
     return json::parse(response.substr(separator + 4), nullptr, false);
 }
 
+std::string response_body(std::string_view response) {
+    const std::size_t separator = response.find("\r\n\r\n");
+    if (separator == std::string_view::npos) {
+        return {};
+    }
+    return std::string(response.substr(separator + 4));
+}
+
+std::string read_binary_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
 unsigned short unused_loopback_port() {
     const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0) {
@@ -904,6 +917,311 @@ private:
 };
 
 } // namespace
+
+TEST(RegistryProtocols, OciClientPushesAndPullsTwoLayersByteIdentical) {
+    TemporarySyncRoot temporary;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "oci-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = temporary.path().string();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string authorization = "Bearer registry-admin";
+
+    const std::string ping = http_request(server.port(), "GET", "/v2/", "", "application/json");
+    ASSERT_NE(ping.find(" 200 "), std::string::npos) << ping;
+    const std::string unauthorized = http_request(
+        server.port(), "POST", "/v2/lake-fixture/blobs/uploads/", "", "application/octet-stream");
+    EXPECT_NE(unauthorized.find(" 401 "), std::string::npos) << unauthorized;
+
+    const auto push_blob = [&](const std::string& contents) {
+        const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
+        const std::string started = http_request(server.port(),
+                                                 "POST",
+                                                 "/v2/lake-fixture/blobs/uploads/",
+                                                 "",
+                                                 "application/octet-stream",
+                                                 {},
+                                                 authorization);
+        EXPECT_NE(started.find(" 202 "), std::string::npos) << started;
+        const std::string location = response_header(started, "Location");
+        EXPECT_FALSE(location.empty()) << started;
+        const std::string completed = http_request(server.port(),
+                                                   "PUT",
+                                                   location + "?digest=" + digest,
+                                                   contents,
+                                                   "application/octet-stream",
+                                                   {},
+                                                   authorization);
+        EXPECT_NE(completed.find(" 201 "), std::string::npos) << completed;
+        EXPECT_EQ(response_header(completed, "Docker-Content-Digest"), digest);
+        return digest;
+    };
+
+    const std::string config = R"({"architecture":"arm64","os":"darwin"})";
+    const std::string first_layer("lake layer one\0with binary", 26);
+    const std::string second_layer = "lake layer two has different bytes\n";
+    const std::string config_digest = push_blob(config);
+    const std::string first_digest = push_blob(first_layer);
+    const std::string second_digest = push_blob(second_layer);
+    const json manifest{{"schemaVersion", 2},
+                        {"mediaType", "application/vnd.oci.image.manifest.v1+json"},
+                        {"config",
+                         {{"mediaType", "application/vnd.oci.image.config.v1+json"},
+                          {"digest", config_digest},
+                          {"size", config.size()}}},
+                        {"layers",
+                         {{{"mediaType", "application/vnd.oci.image.layer.v1.tar"},
+                           {"digest", first_digest},
+                           {"size", first_layer.size()}},
+                          {{"mediaType", "application/vnd.oci.image.layer.v1.tar"},
+                           {"digest", second_digest},
+                           {"size", second_layer.size()}}}}};
+    const std::string manifest_text = manifest.dump();
+    const std::string published = http_request(server.port(),
+                                               "PUT",
+                                               "/v2/lake-fixture/manifests/latest",
+                                               manifest_text,
+                                               "application/vnd.oci.image.manifest.v1+json",
+                                               {},
+                                               authorization);
+    ASSERT_NE(published.find(" 201 "), std::string::npos) << published;
+
+    const std::string pulled_manifest = http_request(
+        server.port(), "GET", "/v2/lake-fixture/manifests/latest", "", "application/json");
+    EXPECT_EQ(response_body(pulled_manifest), manifest_text);
+    for (const auto& [digest, expected] : std::array<std::pair<std::string, std::string>, 2>{
+             std::pair{first_digest, first_layer}, std::pair{second_digest, second_layer}}) {
+        const std::string pulled = http_request(server.port(),
+                                                "GET",
+                                                "/v2/lake-fixture/blobs/" + digest,
+                                                "",
+                                                "application/octet-stream");
+        EXPECT_EQ(response_body(pulled), expected);
+    }
+    server.stop();
+}
+
+TEST(RegistryProtocols, NpmPublishesAndInstallsWithTheRealClient) {
+    TemporarySyncRoot temporary;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "npm-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = (temporary.path() / "store").string();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    if (std::system("command -v npm >/dev/null 2>&1") != 0) {
+        const std::string tarball = "protocol-level npm fixture";
+        const json metadata{{"name", "lake-issue-3-fixture"},
+                            {"dist-tags", {{"latest", "1.0.0"}}},
+                            {"versions",
+                             {{"1.0.0",
+                               {{"name", "lake-issue-3-fixture"},
+                                {"version", "1.0.0"},
+                                {"dist", {{"tarball", "placeholder"}}}}}}},
+                            {"_attachments",
+                             {{"lake-issue-3-fixture-1.0.0.tgz",
+                               {{"content_type", "application/octet-stream"},
+                                {"data", base64_bytes(bytes(tarball))},
+                                {"length", tarball.size()}}}}}};
+        const std::string published = http_request(server.port(),
+                                                   "PUT",
+                                                   "/lake-issue-3-fixture",
+                                                   metadata.dump(),
+                                                   "application/json",
+                                                   {},
+                                                   "Bearer registry-admin");
+        ASSERT_NE(published.find(" 201 "), std::string::npos) << published;
+        const std::string pulled = http_request(server.port(),
+                                                "GET",
+                                                "/lake-issue-3-fixture/-/"
+                                                "lake-issue-3-fixture-1.0.0.tgz",
+                                                "",
+                                                "application/octet-stream");
+        EXPECT_EQ(response_body(pulled), tarball);
+        server.stop();
+        return;
+    }
+
+    const std::filesystem::path package = temporary.path() / "package";
+    const std::filesystem::path installed = temporary.path() / "installed";
+    const std::filesystem::path cache = temporary.path() / "npm-cache";
+    std::filesystem::create_directories(package);
+    std::filesystem::create_directories(installed);
+    {
+        std::ofstream output(package / "package.json");
+        output << R"({"name":"lake-issue-3-fixture","version":"1.0.0","main":"index.js"})";
+    }
+    {
+        std::ofstream output(package / "index.js");
+        output << "module.exports = 'published through lake';\n";
+    }
+    const std::string registry = "http://127.0.0.1:" + std::to_string(server.port());
+    const std::filesystem::path user_config = temporary.path() / "npmrc";
+    {
+        std::ofstream output(user_config);
+        output << "registry=" << registry << "/\n";
+        output << "//127.0.0.1:" << server.port() << "/:_authToken=registry-admin\n";
+    }
+    const std::filesystem::path publish_log = temporary.path() / "npm-publish.log";
+    const std::string publish_command = "npm publish '" + package.string() + "' --userconfig='" +
+                                        user_config.string() + "' --cache='" + cache.string() +
+                                        "' --ignore-scripts --loglevel=error >'" +
+                                        publish_log.string() + "' 2>&1";
+    ASSERT_EQ(std::system(publish_command.c_str()), 0) << read_binary_file(publish_log);
+    const std::filesystem::path install_log = temporary.path() / "npm-install.log";
+    const std::string install_command = "cd '" + installed.string() +
+                                        "' && npm install lake-issue-3-fixture@1.0.0"
+                                        " --userconfig='" +
+                                        user_config.string() + "' --cache='" + cache.string() +
+                                        "' --ignore-scripts --no-audit --no-fund --loglevel=error"
+                                        " >'" +
+                                        install_log.string() + "' 2>&1";
+    ASSERT_EQ(std::system(install_command.c_str()), 0) << read_binary_file(install_log);
+    EXPECT_EQ(read_binary_file(installed / "node_modules/lake-issue-3-fixture/index.js"),
+              "module.exports = 'published through lake';\n");
+    server.stop();
+}
+
+TEST(RegistryProtocols, PythonPackagePublishesAndInstallsWithPip) {
+    TemporarySyncRoot temporary;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "python-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = (temporary.path() / "store").string();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::filesystem::path wheel =
+        temporary.path() / "lake_issue_3_fixture-1.0.0-py3-none-any.whl";
+    const std::filesystem::path script = temporary.path() / "make_wheel.py";
+    {
+        std::ofstream output(script);
+        output << R"py(import pathlib
+import sys
+import zipfile
+
+wheel = pathlib.Path(sys.argv[1])
+files = {
+    "lake_issue_3_fixture/__init__.py": "value = 'published through lake'\n",
+    "lake_issue_3_fixture-1.0.0.dist-info/METADATA": (
+        "Metadata-Version: 2.1\nName: lake-issue-3-fixture\nVersion: 1.0.0\n"
+    ),
+    "lake_issue_3_fixture-1.0.0.dist-info/WHEEL": (
+        "Wheel-Version: 1.0\nGenerator: lake-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+    ),
+    "lake_issue_3_fixture-1.0.0.dist-info/RECORD": "",
+}
+with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+    for name, contents in files.items():
+        archive.writestr(name, contents)
+)py";
+    }
+    const std::string wheel_command = "python3 '" + script.string() + "' '" + wheel.string() + "'";
+    ASSERT_EQ(std::system(wheel_command.c_str()), 0);
+    const std::string wheel_bytes = read_binary_file(wheel);
+    const std::string boundary = "lake-issue-3-boundary";
+    std::string publication;
+    const auto add_field = [&](std::string_view name, std::string_view value) {
+        publication += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" +
+                       std::string(name) + "\"\r\n\r\n" + std::string(value) + "\r\n";
+    };
+    add_field("name", "lake-issue-3-fixture");
+    add_field("version", "1.0.0");
+    publication +=
+        "--" + boundary + "\r\nContent-Disposition: form-data; name=\"content\"; filename=\"" +
+        wheel.filename().string() + "\"\r\nContent-Type: application/octet-stream\r\n\r\n" +
+        wheel_bytes + "\r\n--" + boundary + "--\r\n";
+    const std::string published = http_request(server.port(),
+                                               "POST",
+                                               "/legacy/",
+                                               publication,
+                                               "multipart/form-data; boundary=" + boundary,
+                                               {},
+                                               "Bearer registry-admin");
+    ASSERT_NE(published.find(" 201 "), std::string::npos) << published;
+
+    const std::string simple =
+        http_request(server.port(), "GET", "/simple/lake-issue-3-fixture/", "", "text/html");
+    ASSERT_NE(simple.find(wheel.filename().string()), std::string::npos) << simple;
+    if (std::system("command -v pip3 >/dev/null 2>&1") == 0) {
+        const std::filesystem::path target = temporary.path() / "python-installed";
+        const std::filesystem::path install_log = temporary.path() / "pip-install.log";
+        const std::string registry =
+            "http://127.0.0.1:" + std::to_string(server.port()) + "/simple";
+        const std::string install_command =
+            "pip3 install --index-url '" + registry +
+            "' --trusted-host 127.0.0.1"
+            " --target '" +
+            target.string() +
+            "' --no-deps --disable-pip-version-check lake-issue-3-fixture==1.0.0 >'" +
+            install_log.string() + "' 2>&1";
+        ASSERT_EQ(std::system(install_command.c_str()), 0) << read_binary_file(install_log);
+        EXPECT_EQ(read_binary_file(target / "lake_issue_3_fixture/__init__.py"),
+                  "value = 'published through lake'\n");
+    } else {
+        const std::string downloaded = http_request(server.port(),
+                                                    "GET",
+                                                    "/packages/" + wheel.filename().string(),
+                                                    "",
+                                                    "application/octet-stream");
+        EXPECT_EQ(response_body(downloaded), wheel_bytes);
+    }
+    server.stop();
+}
+
+TEST(RegistryProtocols, DebuginfodServesExecutableDebuginfoAndSource) {
+    TemporarySyncRoot temporary;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "debug-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = (temporary.path() / "store").string();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::string executable = read_binary_file(LAKE_TEST_DEBUG_FIXTURE_PATH);
+    ASSERT_FALSE(executable.empty());
+    const std::string build_id =
+        lake::control::identity_crypto::sha256_hex(executable).substr(0, 40);
+    const std::string debug_info = executable;
+    const std::string source =
+        read_binary_file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "tests/debug_fixture.cpp");
+    const auto publish =
+        [&](std::string_view kind, std::string_view query, std::string_view contents) {
+            return http_request(server.port(),
+                                "PUT",
+                                "/_lake/debug/" + build_id + "/" + std::string(kind) +
+                                    std::string(query),
+                                contents,
+                                "application/octet-stream",
+                                {},
+                                "Bearer registry-admin");
+        };
+    EXPECT_NE(publish("executable", "", executable).find(" 201 "), std::string::npos);
+    EXPECT_NE(publish("debuginfo", "", debug_info).find(" 201 "), std::string::npos);
+    EXPECT_NE(publish("source", "?source=debug_fixture.cpp", source).find(" 201 "),
+              std::string::npos);
+    const auto fetch = [&](std::string_view suffix) {
+        return response_body(http_request(server.port(),
+                                          "GET",
+                                          "/buildid/" + build_id + "/" + std::string(suffix),
+                                          "",
+                                          "application/octet-stream"));
+    };
+    EXPECT_EQ(fetch("executable"), executable);
+    EXPECT_EQ(fetch("debuginfo"), debug_info);
+    EXPECT_EQ(fetch("source/debug_fixture.cpp"), source);
+    server.stop();
+}
 
 TEST(Registry, ServerInfoNeedsNoAuth) {
     Surface s;

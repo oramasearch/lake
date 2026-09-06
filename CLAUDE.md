@@ -43,8 +43,8 @@ Shared empty, pending, and error states retain the design-system shell and keybo
 anonymous readers receive only public repositories. These repository data pages are not part of
 the production state above.
 Lake links libliquid as a library-only submodule and opens one customer store at
-`LAKE_STORE_ROOT/<customer id>/store`; liquid #160, #165, and #192's client, server, protocol, and
-per-reference authorization and outcome contracts are pinned. The source tree serves repository
+`LAKE_STORE_ROOT/<customer id>/store`; liquid's client, server, sync, per-reference outcome, and
+transparency verifier contracts are pinned. The source tree serves repository
 push, pull,
 missing-object negotiation, chunk upload,
 and ranged reads through the registry, with per-change and protected-reference policy and signed
@@ -126,6 +126,11 @@ bind their Merkle root and tree size. Public tile and compact inclusion/consiste
 capabilities bind responses to exact signed checkpoints. The hosted `/transparency` identity
 monitor verifies the complete checkpoint root before returning matches and refuses modified tiles.
 The pinned liquid #207 verifier checks the identity-exit dynamic-secret inclusion proof end to end.
+The proof-bundle capability exports all checkpoint trust material and tiles for liquid's offline
+verifier. Liquid's persistent checkpoint trust rejects incompatible equal-size witness views.
+The source tree also serves OCI Distribution, npm, Python package, and debuginfod protocols from
+instance-local registry storage. Protected publication and public exact-byte reads are documented
+in `docs/api/registry.md`.
 Customer repositories and the transparency log replicate asynchronously from one active Lake to
 standbys. Repository pulls persist per-source liquid cursors after successful import. Log pulls
 require the destination's exact Merkle prefix, verify the proposed head and signed checkpoint, and

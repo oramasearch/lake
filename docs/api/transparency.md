@@ -29,9 +29,8 @@ complete signed metadata, verifies it, and appends it only after the role thresh
 bindings pass.
 
 The implementation follows the [TUF specification](https://theupdateframework.github.io/specification/latest/).
-The liquid client verifier from
-[`oramasearch/liquid#207`](https://github.com/oramasearch/liquid/issues/207) is pinned by Lake and
-verifies entry tiles, compact inclusion proofs, and compact consistency proofs.
+Lake consumes liquid's public transparency client, checkpoint-trust, tile, inclusion, and
+consistency verification APIs from the pinned submodule.
 RFC 3161 and RFC 4998 evidence verification is tracked in
 [`oramasearch/liquid#210`](https://github.com/oramasearch/liquid/issues/210).
 
@@ -266,6 +265,34 @@ The exact proof routes are `GET /v1/transparency_inclusion_proof` and
 `GET /v1/transparency_consistency_proof`. The registry also exposes both operations as MCP tools,
 and its OpenAPI document describes their query parameters and response envelopes.
 
+### Offline proof bundles and split-view detection
+
+`transparency_proof_bundle` takes one `leaf_index` in the current checkpoint. It returns
+`version: "lake_transparency_proof_bundle/1"` with Lake's public identity, effective witness
+configuration, the complete signed checkpoint, every exact-width entry and interior-hash tile
+committed by that checkpoint, and the checkpoint-bound inclusion proof for the selected leaf.
+The bundle is self-contained: a verifier does not need to resolve a Lake URL after export.
+
+The liquid verifier first checks the checkpoint signature and configured witness threshold, then
+checks each tile digest and reconstructs the committed root. It locates the canonical attestation
+in the verified entry stream, checks the compact inclusion path, and persists the trusted
+checkpoint under the log identity. A later equal-size view with a different root or checkpoint
+hash is a conflict. Clients exchange these retained checkpoint observations between witnesses;
+two observations for the same log and size that disagree are evidence of a split view.
+
+## What the scenario proves
+
+`TransparencyScenario.ExportedBundleVerifiesOfflineAndSplitViewIsDetected` appends canonical
+signed attestations, publishes a checkpoint, and exports a bundle. The test loads only that JSON
+into an in-memory `liquid::transparency::log_source`, which has no HTTP implementation or other
+network path, and runs liquid's production `log_client::verify_inclusion`. The verifier validates
+the checkpoint, all entry and parent-hash tiles, the attestation, and its inclusion proof.
+
+The same test models two witness observations of an equal-size checkpoint. It retains the first
+through liquid's checkpoint-trust API, changes both the root and checkpoint hash in the second,
+and requires liquid to return a conflict. This proves that a client retaining witness observations
+does not accept incompatible histories at the same tree size.
+
 ## Hosted monitoring
 
 `transparency_identity_scan` is Lake's hosted monitor for every customer and every other observer.
@@ -284,6 +311,8 @@ available, so a monitor can verify an older checkpoint even after later appends 
 Lake's monitor verifies inclusion in the selected checkpoint by recomputing the complete root.
 Lake serves the compact proofs and hash tiles described above. The identity-exit scenario invokes
 the pinned libliquid inclusion verifier directly over a dynamic-secret audit leaf and Lake's proof.
+The registry-exit scenario also verifies an exported bundle offline and exercises retained
+checkpoint trust to reject conflicting roots at the same tree size.
 
 The deterministic conformance vector is
 [`../../tests/fixtures/transparency/fixture.json`](../../tests/fixtures/transparency/fixture.json).
@@ -351,6 +380,7 @@ authorization object and `authorize`. Public monitoring reads are deliberately u
 | `transparency_checkpoint` | read | `{}` | current signed checkpoint, or `not_found` before one has met the requirements |
 | `transparency_tile` | read | non-negative `index`, optional `level` from 0 through 63, exact `width` from 1 through 1,024 | immutable entry or interior-hash tile as base64url with SHA-256 |
 | `transparency_inclusion_proof` | read | non-negative `leaf_index`, positive checkpoint `tree_size` | compact audit path and complete named checkpoint record |
+| `transparency_proof_bundle` | read | non-negative `leaf_index` in the current checkpoint | public identity, witness configuration, checkpoint, all required tiles, and one inclusion proof for offline verification |
 | `transparency_consistency_proof` | read | non-negative `old_tree_size` and `new_tree_size`, old no greater than new | compact audit path and complete named new-checkpoint record |
 | `transparency_identity_scan` | read | TAAP `identity` | verified checkpoint/root, scan measurements, and every matching attestation |
 | `timestamp_checkpoint` | action | `{}` | new RFC 4998 evidence record for the current checkpoint signature |
@@ -361,7 +391,7 @@ TUF initialization/publication/rotation, attestation append, checkpoint publicat
 creation, and timestamp renewal require `admin` on the instance transparency log. TUF metadata and
 timestamp-evidence reads require `read`. The operator credential follows the registry's existing
 explicit administrative bypass; row-resolved credentials go through `authorize`. Configuration,
-checkpoint, tile, proof, and identity-scan reads are public.
+checkpoint, tile, proof, proof-bundle, and identity-scan reads are public.
 
 `GET /audit` displays the effective mode and witness quorum through
 `transparency_log_configuration`; it does not read configuration outside the registry. Every
@@ -417,7 +447,10 @@ instance serialize their appends without losing entries.
 publication does not invoke its outbound client. The witnessed and anchored test verifies a
 threshold of valid Ed25519 witness cosignatures, refuses a checkpoint below that threshold, and
 retains an aggregation proof beside the anchored checkpoint. The registry test proves configuration
-and checkpoint capability dispatch with signed audit. `PostgresTransparency` repeats TUF, append,
+and checkpoint capability dispatch with signed audit.
+`TransparencyScenario.ExportedBundleVerifiesOfflineAndSplitViewIsDetected` runs the liquid client
+against an exported in-memory bundle without a network transport, then proves conflicting
+equal-size witness observations are rejected. `PostgresTransparency` repeats TUF, append,
 tile fetch, identity scan, configuration, checkpoint, and timestamp capabilities with the Postgres
 control store and verifies the resulting audit chain.
 `TransparencyTimestamp.CreatesAndRenewsRfc4998EvidenceFromStubTsa` creates a signed RFC 3161 token

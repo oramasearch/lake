@@ -42,6 +42,14 @@ application PKCE authorization-code flow with relying-party JWKS verification, a
 issue/rotation/revocation checks, dynamic-secret lease/renew/revoke, signed audit visibility, and a
 libliquid-verified transparency inclusion proof.
 
+Registry scenario coverage starts Lake on loopback with process-unique storage. A Distribution API
+client pushes and pulls a two-layer OCI image byte-for-byte; the installed `npm` and `pip3` clients
+publish or install native fixture packages with protocol fallbacks when either binary is absent;
+and the debuginfod paths return a CMake-built executable, debug information, and source exactly.
+The transparency scenario exports a self-contained bundle, verifies it with liquid from an
+in-memory source that has no network transport, and rejects conflicting equal-size checkpoint
+views retained under one log identity.
+
 Platform coverage uses an append-only fake Zetta control source and fake Loki source against
 `InMemoryStore`. It proves latest-wins sync, environment policy-object creation, signed phase audit,
 tombstones, mutation rows, secret detection, role checks, stale reads, degraded health state, log

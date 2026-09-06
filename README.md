@@ -25,9 +25,8 @@ liquid is the tool. lake is where it collects.
 > capabilities now create, rename, transfer, set `private` / `organization` / `public` visibility,
 > and tombstone repositories in migration `0006_repository_lifecycle`; every outcome is recorded
 > through the signed audit registry. Lake links libliquid as a library-only submodule and opens one
-> customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160, #165, and #192's
-> client, public server, protocol, and per-reference authorization and outcome contracts are
-> pinned. Lake
+> customer store below `LAKE_STORE_ROOT/<customer id>/store`. Liquid's client, public server,
+> sync protocol, per-reference outcomes, and transparency verifier contracts are pinned. Lake
 > serves push, pull, missing-object negotiation, chunk upload, and ranged chunk read through the
 > registry, with per-change and protected-reference policy,
 > offline-grant revocation checks, exact refusal reasons, independent reference application,
@@ -99,6 +98,13 @@ liquid is the tool. lake is where it collects.
 > `/transparency` identity monitor recomputes the root before returning matches, so a modified tile
 > is refused. Lake pins liquid #207's client verifier and the identity-exit scenario verifies a
 > dynamic-secret audit leaf against Lake's compact inclusion proof.
+> is refused. A self-contained proof-bundle capability exports the identity, trust configuration,
+> checkpoint, required tiles, and inclusion path for offline verification by liquid; retained
+> equal-size checkpoints with different roots are rejected as a split view.
+> OCI Distribution, npm, Python package, and debuginfod routes persist native artifacts under the
+> instance registry root. Writes use the administrator bearer and published bytes are public reads.
+> The protocol contract and executable-client coverage are in
+> [`docs/api/registry.md`](docs/api/registry.md).
 > Active/standby Lake instances also replicate customer repositories through durable liquid
 > cursors and replicate the transparency log only from a matching Merkle prefix. Signed
 > checkpoints are verified and adopted without rollback. The consistency model and operator
@@ -156,6 +162,8 @@ ctest --test-dir build
 | `GET /environments?repository_id=`, `/environment?repository_id=&name=`, `/logs?repository_id=&environment=` | platform summaries, deployment history, capability-backed environment/domain forms, and cursor-polling Loki-compatible logs; stale mirror reads show a warning |
 | `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, retained version comparison and conflict values, effective access, and scoped links; create, upload, rename, move, delete, restore, and sharing mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
+| `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*` | OCI Distribution, npm publication/install, and Python publication/install protocols; see [`docs/api/registry.md`](docs/api/registry.md) |
+| `/buildid/*`, `PUT /_lake/debug/*` | public debuginfod reads and protected executable, debug-information, and source publication |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |

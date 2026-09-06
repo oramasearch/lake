@@ -1,6 +1,6 @@
 # Agent session keys
 
-Lake mints one Ed25519 key for one agent session and delegates that key to a durable TAAP agent
+Lake mints one Ed25519 key for one agent session and binds that key to a durable TAAP agent
 identity. The private seed is returned once by `mint_agent_session_key`; Lake stores only the
 public key, delegation, expiry, scopes, and transparency-log commitment. A drip verified through
 `verify_agent_session_drip` is attributed to the durable identity retained with the session.
@@ -31,7 +31,7 @@ The input and output binary values use unpadded base64url. The returned private 
 
 The session identity fingerprint is derived from the canonical TAAP public-key object with key
 label `agent-session`. Lake signs a canonical libliquid `delegation/1` attestation whose actor
-subject is that session key and whose attributes are:
+subject is that session key. It uses liquid's current attenuation fields:
 
 | Attribute | Value |
 |---|---|
