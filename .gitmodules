@@ -12,7 +12,8 @@
 	branch = zetta-patches
 [submodule "modules/beast2"]
 	path = modules/beast2
-	url = https://github.com/cppalliance/beast2.git
+	url = https://github.com/oramasearch/beast2.git
+	branch = orama-main
 [submodule "modules/libpqxx"]
 	path = modules/libpqxx
 	url = https://github.com/jtv/libpqxx.git

@@ -60,10 +60,10 @@ out) and are the unit-tested surface.
   route and nothing answers otherwise: without the trailing handler an unmatched request
   **hangs**. Keep it last.
 
-**Known log noise.** Beast2's worker prints `read_header error: end of stream` to stderr for every
-idle keep-alive connection a client closes (`modules/beast2/src/http_worker.cpp:64`, a raw
-`std::cerr`, not the logger). In a pod that is one line per readiness probe. Not an error. The fix
-is a private beast2 patch carrier (bridge issue #4).
+**Idle closes.** A client closing an idle keep-alive connection is a normal end of stream and
+produces no stderr output. Lake pins `oramasearch/beast2` branch `orama-main`, whose carried patch
+suppresses the former `read_header error: end of stream` line. The carrier and its update procedure
+are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
 **Verify.** `./build/lake --listen 127.0.0.1:4900 --node x --memory-store --admin-token t`, then
 `curl -i` the hello page, `/v1/server_info`, `/healthz` and an unmatched path;
