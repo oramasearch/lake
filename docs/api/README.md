@@ -34,12 +34,16 @@ fidelity report.
 [`platform.md`](platform.md) defines the operator-control mirror, environment/domain mutations,
 and Loki-compatible log reads.
 
+[`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
+routes and their exact-byte integration coverage.
+
 ## Operational routes
 
 | Route | Contract |
 |---|---|
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Liveness and readiness are unauthenticated; metrics uses the same bearer or session cookie as capabilities. These are HTTP operational routes, not capabilities, so they are not rendered into OpenAPI or MCP. See [`../serving/telemetry.md`](../serving/telemetry.md). |
 | `/scim/v2/Users`, `/scim/v2/Users/:id`, `/scim/v2/Groups`, `/scim/v2/Groups/:id` | SCIM 2.0 list/get/create/PATCH/delete resources. The adapter renders SCIM media types and calls the registry capabilities authenticated by the provider bearer. See [`sso.md`](sso.md). |
+| `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*`, `/buildid/*` | Native artifact registry and debug-information protocols. Publication uses the administrator bearer; published artifacts are public reads. See [`registry.md`](registry.md). |
 
 ## Capabilities
 
@@ -63,6 +67,7 @@ and Loki-compatible log reads.
 | `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
 | `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata, per-path diffs with text hunks, or conflict values | [repositories.md](repositories.md) |
 | `list_artifacts`, `get_artifact` | read | repository id; optional action/output/content filters, cursor and limit; or result id | a result page, or one result with outputs, timing, cache state, verified attestations and trace | [repositories.md](repositories.md) |
+| `reindex_artifacts` | action (`write`) | repository id | registry-derived artifact-member index counts | [registry.md](registry.md) |
 | `drive_browse`, `drive_preview`, `drive_history` | read | repository id, ref, and optional or required path | authorized folder children, format-registry preview, or path changes | [drive.md](drive.md) |
 | `restore_drive_version` | action | repository id, ref, path, change id | new restoring change | [drive.md](drive.md) |
 | `share_drive_folder`, `drive_effective_access`, `drive_shared_with_me` | action/read | folder, recipient, role and evidence; folder; or no input | live grant, direct/inherited access panel, or direct live folders for the signed-in identity | [sharing.md](sharing.md) |
@@ -104,6 +109,7 @@ and Loki-compatible log reads.
 | `append_transparency_entries` | action | canonical TAAP attestations | appended indexes, tree size, and root | [transparency.md](transparency.md) |
 | `transparency_tile` | public read | level, tile index, and exact width | immutable base64url entry or interior-hash tile | [transparency.md](transparency.md) |
 | `transparency_inclusion_proof` | public read | leaf index and checkpoint tree size | compact audit path bound to a complete signed checkpoint record | [transparency.md](transparency.md) |
+| `transparency_proof_bundle` | public read | leaf index | identity, trust configuration, current checkpoint, all committed tiles, and one inclusion proof for offline verification | [transparency.md](transparency.md) |
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |

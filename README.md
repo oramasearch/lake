@@ -1,9 +1,13 @@
 # lake
 
-**The lake binary.** The hosted service at `lake.live` — forge, drive, platform,
-identity, secrets, PKI, artifact registry and search — over one content-addressed store.
+lake is the hosted service around liquid: forge, drive, platform, registry and transparency log,
+identity, secrets and PKI, and search, served by one C++26 binary with a server-rendered web UI.
+The control plane is Postgres, the data plane is Zetta, and repository data goes through
+libliquid, consumed as a library. The operator deploys it as a `Lake` custom resource. liquid is
+the tool; lake is where it collects. The longer statement, the six surfaces and where lake sits
+in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 
-liquid is the tool. lake is where it collects.
+## Status
 
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
 > capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth
@@ -25,9 +29,8 @@ liquid is the tool. lake is where it collects.
 > capabilities now create, rename, transfer, set `private` / `organization` / `public` visibility,
 > and tombstone repositories in migration `0006_repository_lifecycle`; every outcome is recorded
 > through the signed audit registry. Lake links libliquid as a library-only submodule and opens one
-> customer store below `LAKE_STORE_ROOT/<customer id>/store`. liquid #160, #165, and #192's
-> client, public server, protocol, and per-reference authorization and outcome contracts are
-> pinned. Lake
+> customer store below `LAKE_STORE_ROOT/<customer id>/store`. Liquid's client, public server,
+> sync protocol, per-reference outcomes, and transparency verifier contracts are pinned. Lake
 > serves push, pull, missing-object negotiation, chunk upload, and ranged chunk read through the
 > registry, with per-change and protected-reference policy,
 > offline-grant revocation checks, exact refusal reasons, independent reference application,
@@ -49,6 +52,11 @@ liquid is the tool. lake is where it collects.
 > `LAKE_STORE_ROOT/<customer>/index/`, reports `hot`, `snapshot`, or `scan` mode, publishes through
 > atomic manifest replacement, filters candidates with the batched policy engine, and records the
 > signed query outcome through the registry. Change pages render libliquid's per-path structural
+> Published artifact outputs are decomposed through libliquid's format registry after sync
+> publication and by the audited `reindex_artifacts` action for existing results. Scoped
+> `in:artifact:<name>[@<version>]` search returns text and source members with their artifact,
+> member path, digest, and line; binary and deeper-nested members remain listed only. Change pages
+> render libliquid's per-path structural
 > review with safe Markdown, text hunks, line comments, modes, blob identities, file statistics,
 > conflict values, checks, output paths, and verified attestation profiles. A Postgres-backed
 > scenario proves an unlanded Liquid review, cursor movement after rewrite, approval, publication,
@@ -102,6 +110,13 @@ liquid is the tool. lake is where it collects.
 > `/transparency` identity monitor recomputes the root before returning matches, so a modified tile
 > is refused. Lake pins liquid #207's client verifier and the identity-exit scenario verifies a
 > dynamic-secret audit leaf against Lake's compact inclusion proof.
+> is refused. A self-contained proof-bundle capability exports the identity, trust configuration,
+> checkpoint, required tiles, and inclusion path for offline verification by liquid; retained
+> equal-size checkpoints with different roots are rejected as a split view.
+> OCI Distribution, npm, Python package, and debuginfod routes persist native artifacts under the
+> instance registry root. Writes use the administrator bearer and published bytes are public reads.
+> The protocol contract and executable-client coverage are in
+> [`docs/api/registry.md`](docs/api/registry.md).
 > Active/standby Lake instances also replicate customer repositories through durable liquid
 > cursors and replicate the transparency log only from a matching Merkle prefix. Signed
 > checkpoints are verified and adopted without rollback. The consistency model and operator
@@ -122,22 +137,30 @@ liquid is the tool. lake is where it collects.
 > delegated to durable agents through logged `delegation/1` attestations. The private seed is
 > returned once and never stored; signed drips verify as the durable agent until expiry. The
 > contract is [`docs/api/agents.md`](docs/api/agents.md).
+The control surface serves in production: `Lake/prod` on AKS at https://lake.oramadev.net runs
+the capability registry as REST `/v1`, OpenAPI and MCP, the Postgres control plane, and the
+server-rendered pages behind the operator sign-in, with the state and runbook in
+[`docs/deployment/aks.md`](docs/deployment/aks.md). The source tree goes further than the deployed
+image: identity, SSO, forge pages, repository sync, search, secrets and PKI, drive and models,
+metering, the transparency log, replication and platform mirroring are implemented and tested
+here and wait on a new image, the operator's schema copy and volume support before they run in
+production. [`docs/design/status.md`](docs/design/status.md) lists each area with its migration
+and contract page.
 
 ## Build and run
 
-Requirements: CMake ≥ 3.28, Ninja, Clang 17+ (Homebrew LLVM on macOS), OpenSSL 3
-(`brew install openssl@3`). Clone with submodules — the HTTP stack is vendored.
-GitHub Actions repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5
-toolchain on every push and pull request; see [`docs/build/ci.md`](docs/build/ci.md).
+Requirements on macOS: CMake 3.28 or newer, Ninja, Homebrew LLVM (Clang 17 or newer), OpenSSL 3
+and libpq (`brew install llvm cmake ninja openssl@3 libpq`), Node for the UI checks in the test
+suite, and a checkout of `zetta-bridge` for `LAKE_ZETTA_SOURCE_DIR`. Clone with submodules; the
+HTTP stack and libliquid are vendored under `modules/`.
 
 ```sh
 git clone --recurse-submodules git@github.com:oramasearch/lake.git
 cd lake
 cmake -S . -B build -G Ninja \
   -DLAKE_ZETTA_SOURCE_DIR=/path/to/zetta-bridge/modules/zetta
-cmake --build build
-ctest --test-dir build
-./build/lake --listen 127.0.0.1:4900 --node hello
+cmake --build build -j 6
+ctest --test-dir build --output-on-failure
 ```
 
 | Route | Serves |
@@ -159,6 +182,8 @@ ctest --test-dir build
 | `GET /environments?repository_id=`, `/environment?repository_id=&name=`, `/logs?repository_id=&environment=` | platform summaries, deployment history, capability-backed environment/domain forms, and cursor-polling Loki-compatible logs; stale mirror reads show a warning |
 | `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, retained version comparison and conflict values, effective access, and scoped links; create, upload, rename, move, delete, restore, and sharing mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
+| `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*` | OCI Distribution, npm publication/install, and Python publication/install protocols; see [`docs/api/registry.md`](docs/api/registry.md) |
+| `/buildid/*`, `PUT /_lake/debug/*` | public debuginfod reads and protected executable, debug-information, and source publication |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
 | `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
@@ -198,64 +223,61 @@ Git-tag image plus `sha-<short-sha>`. `latest` and workstation-built deployment 
 
 Once the Actions credentials are configured, publish a deployment image by pushing an immutable
 Docker-compatible Git tag:
+Without `LAKE_TEST_DB_URI` the Postgres-backed cases skip. To run them against a local Postgres,
+create a database, apply the schema, and set the two variables:
 
 ```sh
-git tag <tag>
-git push origin <tag>
+createdb lake_test
+psql -d lake_test -f db/schema.sql
+LAKE_INSTANCE_KEK=$(openssl rand -hex 32) \
+LAKE_TEST_DB_URI="postgresql://$USER@127.0.0.1:5432/lake_test" \
+  ctest --test-dir build --output-on-failure
 ```
 
-The `Lake` CR on `orama-operator` runs it: `spec.image: oramasearch/lake:<tag>`,
-`spec.pullSecretName: oramasearch-dockerhub` (the Secret must exist in `spec.namespace`), port 4900
-by default, no args needed. Details, including the manual dispatch path, are in
-[`docs/build/ci.md`](docs/build/ci.md) and [`docs/build/container-image.md`](docs/build/container-image.md).
+Run the server with the in-memory control plane and check it answers:
 
-## Layout
+```sh
+./build/lake version
+./build/lake --listen 127.0.0.1:4900 --node dev --memory-store --admin-token t
+curl http://127.0.0.1:4900/v1/server_info
+```
 
-| Path | Role |
-|---|---|
-| `include/lake/api/server.hpp` | `ApiServer` / `ServerOptions` in Zetta's shape — no HTTP type appears here |
-| `src/api/http_server.cpp` | the **one** translation unit that knows Beast2, `boost::http` and Boost.JSON; serves the registry as REST, OpenAPI and MCP |
-| `include/lake/api/registry.hpp`, `sync_store.hpp`, `rest.hpp`, `mcp.hpp`, `capabilities.hpp` | the HTTP-free capability registry, liquid-sync boundary, and surface renderers |
-| `include/lake/control/`, `src/control/` | the control-plane store, policy engine, operator-Zetta platform client/mirror, application authentication, static-secret lifecycle and encryption service: interface, in-memory, Postgres (`postgres_store.cpp` is the one TU that names libpqxx) |
-| `include/lake/telemetry/metrics.hpp`, `src/telemetry/metrics.cpp` | dependency-free Prometheus registry and measured store decorator |
-| `include/lake/api/web_ui.hpp`, `src/api/web_ui.cpp` | pure HTML renderers (string in, string out) |
-| `include/lake/audit/`, `src/audit/` | canonical-CBOR audit signing, the lake identity lifecycle, JSON-lines export and chain verification (compiled through the Postgres TU so OpenSSL stays confined) |
-| `include/lake/transparency/`, `src/transparency/` | immutable TUF metadata storage, threshold verification, cross-role binding, root rotation, checkpoint-bound Merkle entry/hash tiles and compact proofs, identity monitoring, RFC 3161 timestamping, and RFC 4998 archive renewal |
-| `include/lake/control/agents.hpp`, `src/control/agents.cpp` | short-lived agent-session key minting, canonical TAAP delegation, expiry, and durable drip attribution |
-| `src/main.cpp` | CLI and the owner loop (`wait_for_work` / `drain`) |
-| `tests/` | GoogleTest; `ctest --test-dir build` |
-| `tools/ui/` | reproducible 1440×900 rendering for the static UI visual-direction mocks |
-| `assets/fonts/`, `cmake/embed_fonts.cmake` | OFL-licensed IBM Plex WOFF2 sources and their binary embed step |
-| `modules/` | `liquid` (library-only), `http`, `beast2`, `libpqxx` — vendored dependencies; Zetta remains an external source path selected by `LAKE_ZETTA_SOURCE_DIR` |
-| `Dockerfile`, `.dockerignore` | the Linux/amd64 image (see above); the context excludes `build/` and `.git/` |
-| `db/schema.sql` | **the control-plane schema, source of truth.** Identity and application user pools, offline authorization and recovery, tenants, repositories, organization administration, SSO federation, policy, audit, static secrets and wrapped encryption keys. The operator vendors a byte-identical copy and applies it per Lake through a `PostgresSchema`. |
+`--control-db` (or `LAKE_CONTROL_DB_URI`) selects a Postgres control plane instead, with
+`--instance-kek` and `--store-root` for repository data. Every flag and environment variable is in
+[`docs/serving/configuration.md`](docs/serving/configuration.md); the build in more detail, the
+test targets and CI are in [`docs/build/local.md`](docs/build/local.md) and
+[`docs/build/ci.md`](docs/build/ci.md).
 
-## What this is
+## Documentation
 
-One binary, C++26. **Enterprise.** Control plane on **Postgres** (for now; provisioned per `Lake`
-by the operator through CloudNativePG, reaching lake as `LAKE_CONTROL_DB_URI`), data plane on
-**Zetta** (the content-addressed store, drips, search), web serving in Zetta's style, and
-liquid's open-source store consumed as a library (`liquid::liquid`) for repository data. It runs on [`oramasearch/k0s`](https://github.com/oramasearch/k0s) and is deployed
-by [`oramasearch/orama-operator`](https://github.com/oramasearch/orama-operator) (as a `Lake` CR).
+[`docs/README.md`](docs/README.md) indexes one folder per topic. Every change to the system lands
+its page there in the same change; this file is only the front door. The most useful pages:
 
-| Surface | What it answers |
-|---|---|
-| Forge | *How did this change?* — change-based review, no CI YAML |
-| Drive | *Where is my stuff?* — for people who do not think in commits |
-| Platform | *Is it running?* — deploy on drip, preview environments |
-| Registry | OCI, npm, PyPI, Maven, apt, models and datasets — one deduplicated store |
-| Identity, secrets, PKI | TAAP/1 identities, application authentication, agent-session keys, dynamic secrets, one CA |
-| Search | BM25F plus a positional trigram index, over history and inside artifacts |
+- [`docs/design/overview.md`](docs/design/overview.md): what lake is and what it is built on.
+- [`docs/design/status.md`](docs/design/status.md): what the source tree implements, by area.
+- [`docs/api/README.md`](docs/api/README.md): the capability registry rendered as REST, OpenAPI
+  and MCP, with every capability and how to add one.
+- [`docs/serving/http.md`](docs/serving/http.md): the route table and the rules that keep the
+  server correct.
+- [`docs/serving/configuration.md`](docs/serving/configuration.md): flags and environment.
+- [`docs/ui/README.md`](docs/ui/README.md): the server-rendered pages and the session cookie.
+- [`docs/control-plane/schema.md`](docs/control-plane/schema.md): `db/schema.sql`, the tenant
+  model and how the schema reaches a Lake.
+- [`docs/deployment/aks.md`](docs/deployment/aks.md): the production instance and its runbook.
+- [`docs/build/layout.md`](docs/build/layout.md): the source tree.
 
-## Internal documentation
+The product specification is `oramasearch/liquid` `docs/features/18-lake-service.md`. lake is
+part of the liquid project; [`oramasearch/liquid-bridge`](https://github.com/oramasearch/liquid-bridge)
+holds the cross-module map and the action plan.
 
-[`docs/`](docs/) — one folder per topic: [design](docs/design/), [serving](docs/serving/),
-[control-plane](docs/control-plane/), [deployment](docs/deployment/), [build](docs/build/),
-[api](docs/api/), [ui](docs/ui/). Every change to the system lands
-its doc there in the same change; this README is the summary.
+## Repository rules
 
-## Where this sits
+[`CLAUDE.md`](CLAUDE.md) is the instruction file for every contributor and agent: the rules that
+keep the server Zetta-shaped, what lake is built on, what never changes, and what to do before
+finishing a change. [`AGENTS.md`](AGENTS.md) restates the non-negotiables for Codex.
 
-Part of the liquid project. See
-[`oramasearch/liquid-bridge`](https://github.com/oramasearch/liquid-bridge) for the
-cross-module map and the action plan.
+## Licence
+
+No licence is declared in this repository, and `CLAUDE.md` says it stays private. The licence
+decision for the liquid project is tracked in
+[oramasearch/liquid-bridge#2](https://github.com/oramasearch/liquid-bridge/issues/2).

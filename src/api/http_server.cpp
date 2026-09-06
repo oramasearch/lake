@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
@@ -599,6 +600,477 @@ struct MultipartForm {
     std::string error;
 };
 
+struct StoredArtifact {
+    std::vector<std::byte> bytes;
+    std::string content_type;
+    std::string digest;
+};
+
+template <class T> using ArtifactResult = std::expected<T, std::string>;
+
+class ArtifactRegistry {
+public:
+    ArtifactRegistry(std::string_view store_root, std::string_view instance_name) {
+        if (!store_root.empty() && safe_component(instance_name)) {
+            root_ = std::filesystem::path(store_root) / std::string(instance_name) / "registry";
+        }
+    }
+
+    [[nodiscard]] bool available() const {
+        return !root_.empty();
+    }
+
+    ArtifactResult<std::string> begin_upload(std::string_view repository) {
+        if (!safe_component(repository)) {
+            return std::unexpected("OCI repository name is invalid");
+        }
+        const std::string id = control::new_uuid_v4();
+        const auto saved = write(upload_path(id), {});
+        if (!saved) {
+            return std::unexpected(saved.error());
+        }
+        return id;
+    }
+
+    ArtifactResult<std::size_t> append_upload(std::string_view id,
+                                              std::span<const std::byte> bytes) {
+        if (!available()) {
+            return std::unexpected("artifact storage is not configured (LAKE_STORE_ROOT)");
+        }
+        if (!safe_component(id)) {
+            return std::unexpected("OCI upload identifier is invalid");
+        }
+        std::unique_lock lock(mutex_);
+        const std::filesystem::path path = upload_path(id);
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) {
+            return std::unexpected("could not create OCI upload directory: " + error.message());
+        }
+        std::ofstream output(path, std::ios::binary | std::ios::app);
+        if (!output) {
+            return std::unexpected("could not open OCI upload");
+        }
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        if (!output) {
+            return std::unexpected("could not append OCI upload");
+        }
+        return static_cast<std::size_t>(std::filesystem::file_size(path, error));
+    }
+
+    ArtifactResult<std::string> finish_upload(std::string_view id, std::string_view digest) {
+        if (!safe_component(id) || !valid_digest(digest)) {
+            return std::unexpected("OCI upload or digest is invalid");
+        }
+        const auto uploaded = read(upload_path(id));
+        if (!uploaded) {
+            return std::unexpected(uploaded.error());
+        }
+        const std::string actual = sha256_digest(*uploaded);
+        if (actual != digest) {
+            return std::unexpected("uploaded bytes do not match the requested digest");
+        }
+        const auto saved = write(blob_path(digest), *uploaded);
+        if (!saved) {
+            return std::unexpected(saved.error());
+        }
+        std::error_code ignored;
+        std::filesystem::remove(upload_path(id), ignored);
+        return actual;
+    }
+
+    ArtifactResult<StoredArtifact> blob(std::string_view digest) const {
+        if (!valid_digest(digest)) {
+            return std::unexpected("OCI digest is invalid");
+        }
+        const auto contents = read(blob_path(digest));
+        if (!contents) {
+            return std::unexpected(contents.error());
+        }
+        return StoredArtifact{*contents, "application/octet-stream", std::string(digest)};
+    }
+
+    ArtifactResult<std::string> put_manifest(std::string_view repository,
+                                             std::string_view reference,
+                                             std::string content_type,
+                                             std::span<const std::byte> bytes) {
+        if (!safe_component(repository) || !safe_component(reference)) {
+            return std::unexpected("OCI manifest name is invalid");
+        }
+        const std::string document(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        const nlohmann::json manifest = nlohmann::json::parse(document, nullptr, false);
+        if (manifest.is_discarded() || !manifest.is_object() ||
+            manifest.value("schemaVersion", 0) != 2) {
+            return std::unexpected("OCI manifest is not valid schema version 2 JSON");
+        }
+        const auto referenced = manifest_references(manifest);
+        if (!referenced) {
+            return std::unexpected(referenced.error());
+        }
+        for (const std::string& digest : *referenced) {
+            if (!read(blob_path(digest))) {
+                return std::unexpected("OCI manifest references an unknown blob: " + digest);
+            }
+        }
+        const std::string digest = sha256_digest(bytes);
+        const auto object_saved = write(blob_path(digest), bytes);
+        if (!object_saved) {
+            return std::unexpected(object_saved.error());
+        }
+        const nlohmann::json pointer{{"digest", digest}, {"content_type", content_type}};
+        const auto pointer_saved = write_text(manifest_path(repository, reference), pointer.dump());
+        if (!pointer_saved) {
+            return std::unexpected(pointer_saved.error());
+        }
+        return digest;
+    }
+
+    ArtifactResult<StoredArtifact> manifest(std::string_view repository,
+                                            std::string_view reference) const {
+        if (!safe_component(repository) || !safe_component(reference)) {
+            return std::unexpected("OCI manifest name is invalid");
+        }
+        if (valid_digest(reference)) {
+            auto object = blob(reference);
+            if (object) {
+                object->content_type = "application/vnd.oci.image.manifest.v1+json";
+            }
+            return object;
+        }
+        const auto pointer_text = read_text(manifest_path(repository, reference));
+        if (!pointer_text) {
+            return std::unexpected(pointer_text.error());
+        }
+        const nlohmann::json pointer = nlohmann::json::parse(*pointer_text, nullptr, false);
+        if (pointer.is_discarded() || !pointer.is_object()) {
+            return std::unexpected("stored OCI manifest pointer is invalid");
+        }
+        auto object = blob(pointer.value("digest", ""));
+        if (object) {
+            object->content_type =
+                pointer.value("content_type", "application/vnd.oci.image.manifest.v1+json");
+        }
+        return object;
+    }
+
+    ArtifactResult<void>
+    put_npm(std::string_view name, nlohmann::json metadata, std::string_view origin) {
+        if (!safe_package(name) || !metadata.contains("_attachments") ||
+            !metadata.at("_attachments").is_object()) {
+            return std::unexpected("npm publication is missing package attachments");
+        }
+        for (const auto& [filename, attachment] : metadata.at("_attachments").items()) {
+            if (!safe_component(filename) || !attachment.is_object() ||
+                !attachment.contains("data") || !attachment.at("data").is_string()) {
+                return std::unexpected("npm attachment is invalid");
+            }
+            const auto decoded = base64_decode(attachment.at("data").get<std::string>());
+            if (!decoded) {
+                return std::unexpected(decoded.error().message);
+            }
+            const auto saved = write(npm_tarball_path(name, filename), *decoded);
+            if (!saved) {
+                return std::unexpected(saved.error());
+            }
+            if (metadata.contains("versions") && metadata.at("versions").is_object()) {
+                for (auto& [version, record] : metadata["versions"].items()) {
+                    static_cast<void>(version);
+                    if (record.is_object() && record.contains("dist") &&
+                        record.at("dist").is_object()) {
+                        record["dist"]["tarball"] =
+                            std::string(origin) + "/" + std::string(name) + "/-/" + filename;
+                    }
+                }
+            }
+        }
+        metadata.erase("_attachments");
+        return write_text(npm_metadata_path(name), metadata.dump());
+    }
+
+    ArtifactResult<std::string> npm_metadata(std::string_view name) const {
+        if (!safe_package(name)) {
+            return std::unexpected("npm package name is invalid");
+        }
+        return read_text(npm_metadata_path(name));
+    }
+
+    ArtifactResult<std::vector<std::byte>> npm_tarball(std::string_view name,
+                                                       std::string_view filename) const {
+        if (!safe_package(name) || !safe_component(filename)) {
+            return std::unexpected("npm tarball name is invalid");
+        }
+        return read(npm_tarball_path(name, filename));
+    }
+
+    ArtifactResult<void> put_python(std::string_view name,
+                                    std::string_view version,
+                                    std::string_view filename,
+                                    std::span<const std::byte> bytes) {
+        const std::string normalized = normalize_python_name(name);
+        if (normalized.empty() || version.empty() || !safe_component(filename)) {
+            return std::unexpected("Python package publication is invalid");
+        }
+        const auto package_saved = write(python_package_path(filename), bytes);
+        if (!package_saved) {
+            return std::unexpected(package_saved.error());
+        }
+        nlohmann::json files = nlohmann::json::array();
+        const auto existing = read_text(python_index_path(normalized));
+        if (existing) {
+            files = nlohmann::json::parse(*existing, nullptr, false);
+        }
+        if (!files.is_array()) {
+            return std::unexpected("stored Python package index is invalid");
+        }
+        const bool present = std::ranges::any_of(files, [&](const nlohmann::json& item) {
+            return item.value("filename", "") == filename;
+        });
+        if (!present) {
+            files.push_back(
+                {{"filename", filename}, {"sha256", sha256_digest(bytes)}, {"version", version}});
+        }
+        return write_text(python_index_path(normalized), files.dump());
+    }
+
+    ArtifactResult<std::string> python_simple(std::string_view name,
+                                              std::string_view origin) const {
+        const std::string normalized = normalize_python_name(name);
+        if (normalized.empty()) {
+            return std::unexpected("Python package name is invalid");
+        }
+        const auto index = read_text(python_index_path(normalized));
+        if (!index) {
+            return std::unexpected(index.error());
+        }
+        const nlohmann::json files = nlohmann::json::parse(*index, nullptr, false);
+        if (!files.is_array()) {
+            return std::unexpected("stored Python package index is invalid");
+        }
+        std::string html = "<!doctype html><html><body>";
+        for (const nlohmann::json& file : files) {
+            const std::string filename = file.value("filename", "");
+            const std::string digest = file.value("sha256", "");
+            html += "<a href=\"" + std::string(origin) + "/packages/" + filename +
+                    "#sha256=" + digest.substr(7) + "\">" + filename + "</a>\n";
+        }
+        html += "</body></html>";
+        return html;
+    }
+
+    ArtifactResult<std::vector<std::byte>> python_package(std::string_view filename) const {
+        if (!safe_component(filename)) {
+            return std::unexpected("Python package filename is invalid");
+        }
+        return read(python_package_path(filename));
+    }
+
+    ArtifactResult<void> put_debug(std::string_view build_id,
+                                   std::string_view kind,
+                                   std::string_view source,
+                                   std::span<const std::byte> bytes) {
+        const auto path = debug_path(build_id, kind, source);
+        if (!path) {
+            return std::unexpected(path.error());
+        }
+        return write(*path, bytes);
+    }
+
+    ArtifactResult<std::vector<std::byte>>
+    debug(std::string_view build_id, std::string_view kind, std::string_view source) const {
+        const auto path = debug_path(build_id, kind, source);
+        if (!path) {
+            return std::unexpected(path.error());
+        }
+        return read(*path);
+    }
+
+private:
+    static bool safe_component(std::string_view value) {
+        if (value.empty() || value == "." || value == "..") {
+            return false;
+        }
+        return std::ranges::all_of(value, [](unsigned char character) {
+            return std::isalnum(character) || character == '-' || character == '_' ||
+                   character == '.' || character == ':';
+        });
+    }
+
+    static bool safe_package(std::string_view value) {
+        return safe_component(value) && value.find(':') == std::string_view::npos;
+    }
+
+    static bool valid_digest(std::string_view value) {
+        if (!value.starts_with("sha256:") || value.size() != 71) {
+            return false;
+        }
+        return std::ranges::all_of(value.substr(7), [](unsigned char character) {
+            return std::isxdigit(character) != 0 && !std::isupper(character);
+        });
+    }
+
+    static std::string sha256_digest(std::span<const std::byte> bytes) {
+        std::array<unsigned char, 32> digest{};
+        unsigned int size = 0;
+        EVP_Digest(bytes.data(), bytes.size(), digest.data(), &size, EVP_sha256(), nullptr);
+        std::string output = "sha256:";
+        for (const unsigned char byte : digest) {
+            output += std::format("{:02x}", byte);
+        }
+        return output;
+    }
+
+    static ArtifactResult<std::vector<std::string>>
+    manifest_references(const nlohmann::json& manifest) {
+        std::vector<std::string> output;
+        if (manifest.contains("config") && manifest.at("config").is_object()) {
+            output.push_back(manifest.at("config").value("digest", ""));
+        }
+        if (!manifest.contains("layers") || !manifest.at("layers").is_array()) {
+            return std::unexpected("OCI manifest has no layer array");
+        }
+        for (const nlohmann::json& layer : manifest.at("layers")) {
+            output.push_back(layer.value("digest", ""));
+        }
+        if (std::ranges::any_of(output,
+                                [](const std::string& digest) { return !valid_digest(digest); })) {
+            return std::unexpected("OCI manifest contains an invalid digest");
+        }
+        return output;
+    }
+
+    static std::string normalize_python_name(std::string_view name) {
+        std::string output;
+        for (const unsigned char character : name) {
+            if (std::isalnum(character)) {
+                output += static_cast<char>(std::tolower(character));
+            } else if (character == '-' || character == '_' || character == '.') {
+                if (output.empty() || output.back() != '-') {
+                    output += '-';
+                }
+            } else {
+                return {};
+            }
+        }
+        return output;
+    }
+
+    std::filesystem::path upload_path(std::string_view id) const {
+        return root_ / "uploads" / std::string(id);
+    }
+
+    std::filesystem::path blob_path(std::string_view digest) const {
+        return root_ / "blobs" / std::string(digest.substr(7));
+    }
+
+    std::filesystem::path manifest_path(std::string_view repository,
+                                        std::string_view reference) const {
+        return root_ / "manifests" / std::string(repository) / (std::string(reference) + ".json");
+    }
+
+    std::filesystem::path npm_metadata_path(std::string_view name) const {
+        return root_ / "npm" / std::string(name) / "metadata.json";
+    }
+
+    std::filesystem::path npm_tarball_path(std::string_view name, std::string_view filename) const {
+        return root_ / "npm" / std::string(name) / std::string(filename);
+    }
+
+    std::filesystem::path python_index_path(std::string_view name) const {
+        return root_ / "python" / "simple" / (std::string(name) + ".json");
+    }
+
+    std::filesystem::path python_package_path(std::string_view filename) const {
+        return root_ / "python" / "packages" / std::string(filename);
+    }
+
+    ArtifactResult<std::filesystem::path>
+    debug_path(std::string_view build_id, std::string_view kind, std::string_view source) const {
+        if (build_id.empty() || !std::ranges::all_of(build_id, [](unsigned char character) {
+                return std::isxdigit(character) != 0;
+            })) {
+            return std::unexpected("debug build identifier is invalid");
+        }
+        if (kind == "executable" || kind == "debuginfo") {
+            return root_ / "debug" / std::string(build_id) / std::string(kind);
+        }
+        if (kind != "source" || source.empty() || source.find("..") != std::string_view::npos) {
+            return std::unexpected("debug artifact kind or source path is invalid");
+        }
+        return root_ / "debug" / std::string(build_id) / "source" /
+               sha256_digest(std::as_bytes(std::span(source.data(), source.size()))).substr(7);
+    }
+
+    ArtifactResult<void> write_text(const std::filesystem::path& path, std::string_view text) {
+        return write(path, std::as_bytes(std::span(text)));
+    }
+
+    ArtifactResult<std::string> read_text(const std::filesystem::path& path) const {
+        const auto bytes = read(path);
+        if (!bytes) {
+            return std::unexpected(bytes.error());
+        }
+        return std::string(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+    }
+
+    ArtifactResult<void> write(const std::filesystem::path& path,
+                               std::span<const std::byte> bytes) {
+        if (!available()) {
+            return std::unexpected("artifact storage is not configured (LAKE_STORE_ROOT)");
+        }
+        std::unique_lock lock(mutex_);
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) {
+            return std::unexpected("could not create artifact directory: " + error.message());
+        }
+        const std::filesystem::path temporary = path.string() + ".tmp-" + control::new_uuid_v4();
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            return std::unexpected("could not open artifact temporary file");
+        }
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        if (!output) {
+            std::filesystem::remove(temporary, error);
+            return std::unexpected("could not write artifact bytes");
+        }
+        std::filesystem::rename(temporary, path, error);
+        if (error) {
+            std::filesystem::remove(path, error);
+            error.clear();
+            std::filesystem::rename(temporary, path, error);
+        }
+        if (error) {
+            std::filesystem::remove(temporary, error);
+            return std::unexpected("could not publish artifact: " + error.message());
+        }
+        return {};
+    }
+
+    ArtifactResult<std::vector<std::byte>> read(const std::filesystem::path& path) const {
+        if (!available()) {
+            return std::unexpected("artifact storage is not configured (LAKE_STORE_ROOT)");
+        }
+        std::unique_lock lock(mutex_);
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            return std::unexpected("artifact does not exist");
+        }
+        std::vector<char> contents{std::istreambuf_iterator<char>(input), {}};
+        std::vector<std::byte> output(contents.size());
+        std::ranges::transform(contents, output.begin(), [](char byte) {
+            return static_cast<std::byte>(static_cast<unsigned char>(byte));
+        });
+        return output;
+    }
+
+    std::filesystem::path root_;
+    mutable std::mutex mutex_;
+};
+
 std::string disposition_parameter(std::string_view disposition, std::string_view name) {
     const std::string marker = std::string(name) + "=\"";
     const std::size_t start = disposition.find(marker);
@@ -1141,6 +1613,14 @@ RepositoryArtifact repository_artifact_from_json(const nlohmann::json& value) {
                                                  trace.value("dependencies", std::uint64_t{0}),
                                                  trace.value("cache_hits", std::uint64_t{0}),
                                                  trace.value("cache_misses", std::uint64_t{0})};
+    }
+    for (const nlohmann::json& member : value.value("members", nlohmann::json::array())) {
+        artifact.members.push_back({json_string(member, "artifact"),
+                                    json_string(member, "version"),
+                                    json_string(member, "path"),
+                                    json_string(member, "digest"),
+                                    member.value("indexed", false),
+                                    json_string(member, "reason")});
     }
     return artifact;
 }
@@ -3708,6 +4188,7 @@ struct ApiServer::Impl {
     ServerOptions options;
     telemetry::Metrics metrics;
     mutable LiquidCustomerStores sync_store;
+    ArtifactRegistry artifacts;
     Registry registry;
     mutable control::pki::Service pki;
     mutable control::agents::Service agents;
@@ -3735,7 +4216,9 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point next_timestamp_renewal_check =
         std::chrono::steady_clock::now();
 
-    explicit Impl(ServerOptions opts) : options(std::move(opts)), sync_store(options.store_root) {
+    explicit Impl(ServerOptions opts)
+        : options(std::move(opts)), sync_store(options.store_root),
+          artifacts(options.store_root, options.node_name) {
         if (web_ui_stylesheet_url().empty()) {
             failure_reason = "could not calculate the stylesheet asset hash";
         }
@@ -7695,6 +8178,289 @@ struct ApiServer::Impl {
         return (request_is_https(route) ? "https://" : "http://") + host;
     }
 
+    bool registry_write_authorized(const boost::http::route_params& route) const {
+        const std::string bearer = bearer_of(route);
+        return !options.admin_token.empty() && !bearer.empty() &&
+               constant_time_equal(bearer, options.admin_token);
+    }
+
+    boost::http::route_task registry_error(boost::http::route_params& route,
+                                           boost::http::status status,
+                                           std::string message,
+                                           bool oci = false) {
+        nlohmann::json body;
+        if (oci) {
+            body = {{"errors",
+                     nlohmann::json::array(
+                         {{{"code",
+                            status == boost::http::status::not_found ? "BLOB_UNKNOWN" : "DENIED"},
+                           {"message", std::move(message)}}})}};
+        } else {
+            body = {{"ok", false}, {"error", std::move(message)}};
+        }
+        return send_text(route, status, body.dump(), "application/json; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_oci_ping(boost::http::route_params& route) {
+        route.res.set("Docker-Distribution-Api-Version", "registry/2.0");
+        return send_text(
+            route, boost::http::status::ok, "{}", "application/json; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_oci_upload_start(boost::http::route_params& route) {
+        if (!registry_write_authorized(route)) {
+            return registry_error(
+                route, boost::http::status::unauthorized, "registry bearer is required", true);
+        }
+        const std::string repository = route_value(route, "repository");
+        const auto started = artifacts.begin_upload(repository);
+        if (!started) {
+            return registry_error(route, boost::http::status::bad_request, started.error(), true);
+        }
+        const std::string location =
+            "/v2/" + repository + "/blobs/uploads/" + std::string(*started);
+        route.res.set(boost::http::field::location, location);
+        route.res.set("Docker-Upload-UUID", *started);
+        route.res.set(boost::http::field::range, "0-0");
+        return send_text(
+            route, boost::http::status::accepted, {}, "application/octet-stream", "no-store");
+    }
+
+    boost::http::route_task serve_oci_upload(boost::http::route_params& route, bool finish) {
+        if (!registry_write_authorized(route)) {
+            co_return co_await registry_error(
+                route, boost::http::status::unauthorized, "registry bearer is required", true);
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, "could not read OCI upload", true);
+        }
+        const std::span<const char> characters(body.data(), body.size());
+        const auto appended =
+            artifacts.append_upload(route_value(route, "upload"), std::as_bytes(characters));
+        if (!appended) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, appended.error(), true);
+        }
+        const std::string repository = route_value(route, "repository");
+        const std::string upload = route_value(route, "upload");
+        if (!finish) {
+            route.res.set(boost::http::field::location,
+                          "/v2/" + repository + "/blobs/uploads/" + upload);
+            route.res.set("Docker-Upload-UUID", upload);
+            route.res.set(boost::http::field::range,
+                          *appended == 0 ? "0-0" : "0-" + std::to_string(*appended - 1));
+            co_return co_await send_text(
+                route, boost::http::status::accepted, {}, "application/octet-stream", "no-store");
+        }
+        const auto completed = artifacts.finish_upload(upload, query_value(route, "digest"));
+        if (!completed) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, completed.error(), true);
+        }
+        route.res.set(boost::http::field::location,
+                      "/v2/" + repository + "/blobs/" + std::string(*completed));
+        route.res.set("Docker-Content-Digest", *completed);
+        co_return co_await send_text(
+            route, boost::http::status::created, {}, "application/octet-stream", "no-store");
+    }
+
+    boost::http::route_task serve_oci_blob(boost::http::route_params& route, bool head) {
+        const auto object = artifacts.blob(route_value(route, "digest"));
+        if (!object) {
+            co_return co_await registry_error(
+                route, boost::http::status::not_found, object.error(), true);
+        }
+        route.res.set("Docker-Content-Digest", object->digest);
+        co_return co_await send_bytes(route,
+                                      boost::http::status::ok,
+                                      object->content_type,
+                                      object->bytes,
+                                      object->digest,
+                                      {},
+                                      head);
+    }
+
+    boost::http::route_task serve_oci_manifest(boost::http::route_params& route, bool head) {
+        const std::string repository = route_value(route, "repository");
+        const std::string reference = route_value(route, "reference");
+        if (route.req.method() != boost::http::method::put) {
+            const auto object = artifacts.manifest(repository, reference);
+            if (!object) {
+                co_return co_await registry_error(
+                    route, boost::http::status::not_found, object.error(), true);
+            }
+            route.res.set("Docker-Content-Digest", object->digest);
+            co_return co_await send_bytes(route,
+                                          boost::http::status::ok,
+                                          object->content_type,
+                                          object->bytes,
+                                          object->digest,
+                                          {},
+                                          head);
+        }
+        if (!registry_write_authorized(route)) {
+            co_return co_await registry_error(
+                route, boost::http::status::unauthorized, "registry bearer is required", true);
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error || body.empty()) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, "OCI manifest body is required", true);
+        }
+        const std::string content_type =
+            route.req.count(boost::http::field::content_type) == 0
+                ? "application/vnd.oci.image.manifest.v1+json"
+                : std::string(route.req.at(boost::http::field::content_type));
+        const std::span<const char> characters(body.data(), body.size());
+        const auto published =
+            artifacts.put_manifest(repository, reference, content_type, std::as_bytes(characters));
+        if (!published) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, published.error(), true);
+        }
+        route.res.set(boost::http::field::location,
+                      "/v2/" + repository + "/manifests/" + reference);
+        route.res.set("Docker-Content-Digest", *published);
+        co_return co_await send_text(
+            route, boost::http::status::created, {}, "application/json; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_npm_metadata(boost::http::route_params& route) {
+        const std::string package = route_value(route, "package");
+        if (route.req.method() == boost::http::method::get) {
+            const auto metadata = artifacts.npm_metadata(package);
+            if (!metadata) {
+                co_return co_await registry_error(
+                    route, boost::http::status::not_found, metadata.error());
+            }
+            co_return co_await send_text(route,
+                                         boost::http::status::ok,
+                                         *metadata,
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        if (!registry_write_authorized(route)) {
+            co_return co_await registry_error(
+                route, boost::http::status::unauthorized, "registry bearer is required");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        const nlohmann::json metadata = nlohmann::json::parse(body, nullptr, false);
+        if (read_error || metadata.is_discarded() || !metadata.is_object()) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, "npm publication is invalid JSON");
+        }
+        const auto published = artifacts.put_npm(package, metadata, hub_origin(route));
+        if (!published) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, published.error());
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::created,
+                                     nlohmann::json{{"ok", true}, {"id", package}}.dump(),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_npm_tarball(boost::http::route_params& route) {
+        const auto tarball =
+            artifacts.npm_tarball(route_value(route, "package"), route_value(route, "filename"));
+        if (!tarball) {
+            co_return co_await registry_error(
+                route, boost::http::status::not_found, tarball.error());
+        }
+        co_return co_await send_bytes(
+            route, boost::http::status::ok, "application/octet-stream", *tarball);
+    }
+
+    boost::http::route_task serve_python_publish(boost::http::route_params& route) {
+        if (!registry_write_authorized(route)) {
+            co_return co_await registry_error(
+                route, boost::http::status::unauthorized, "registry bearer is required");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, "could not read Python publication");
+        }
+        const std::string content_type =
+            route.req.count(boost::http::field::content_type) == 0
+                ? ""
+                : std::string(route.req.at(boost::http::field::content_type));
+        MultipartForm form = parse_multipart(body, content_type);
+        if (!form.error.empty()) {
+            co_return co_await registry_error(route, boost::http::status::bad_request, form.error);
+        }
+        const auto published = artifacts.put_python(form.fields["name"],
+                                                    form.fields["version"],
+                                                    form.files.front().name,
+                                                    form.files.front().contents);
+        if (!published) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, published.error());
+        }
+        co_return co_await send_text(
+            route, boost::http::status::created, {}, "text/plain; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_python_simple(boost::http::route_params& route) {
+        const auto page = artifacts.python_simple(route_value(route, "package"), hub_origin(route));
+        if (!page) {
+            return registry_error(route, boost::http::status::not_found, page.error());
+        }
+        return send_text(
+            route, boost::http::status::ok, *page, "text/html; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_python_package(boost::http::route_params& route, bool head) {
+        const auto package = artifacts.python_package(route_value(route, "filename"));
+        if (!package) {
+            co_return co_await registry_error(
+                route, boost::http::status::not_found, package.error());
+        }
+        co_return co_await send_bytes(
+            route, boost::http::status::ok, "application/octet-stream", *package, {}, {}, head);
+    }
+
+    boost::http::route_task serve_debug_publish(boost::http::route_params& route) {
+        if (!registry_write_authorized(route)) {
+            co_return co_await registry_error(
+                route, boost::http::status::unauthorized, "registry bearer is required");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, "could not read debug artifact");
+        }
+        const std::span<const char> characters(body.data(), body.size());
+        const auto published = artifacts.put_debug(route_value(route, "build_id"),
+                                                   route_value(route, "kind"),
+                                                   query_value(route, "source"),
+                                                   std::as_bytes(characters));
+        if (!published) {
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, published.error());
+        }
+        co_return co_await send_text(
+            route, boost::http::status::created, {}, "application/octet-stream", "no-store");
+    }
+
+    boost::http::route_task serve_debug_artifact(boost::http::route_params& route,
+                                                 std::string kind) {
+        const auto artifact =
+            artifacts.debug(route_value(route, "build_id"), kind, route_value(route, "source"));
+        if (!artifact) {
+            co_return co_await registry_error(
+                route, boost::http::status::not_found, artifact.error());
+        }
+        co_return co_await send_bytes(route,
+                                      boost::http::status::ok,
+                                      kind == "source" ? "text/plain; charset=utf-8"
+                                                       : "application/octet-stream",
+                                      *artifact);
+    }
+
     boost::http::route_task send_hub_result(boost::http::route_params& route,
                                             const ApiResult& result,
                                             boost::http::status success = boost::http::status::ok) {
@@ -8196,6 +8962,7 @@ struct ApiServer::Impl {
             const std::string mode = result.value.value("mode", "hot");
             search_result.mode = mode == "scan"       ? search::QueryMode::Scan
                                  : mode == "snapshot" ? search::QueryMode::Snapshot
+                                 : mode == "artifact" ? search::QueryMode::Artifact
                                                       : search::QueryMode::Hot;
             search_result.scanned_changes = result.value.value("scanned_changes", std::size_t{0});
             for (const nlohmann::json& item : result.value.at("items")) {
@@ -8206,6 +8973,10 @@ struct ApiServer::Impl {
                     .change = item.at("change").get<std::string>(),
                     .snippet = item.at("snippet").get<std::string>(),
                     .score = item.at("score").get<double>(),
+                    .artifact = item.value("artifact", ""),
+                    .artifact_version = item.value("artifact_version", ""),
+                    .digest = item.value("digest", ""),
+                    .line = item.value("line", std::size_t{0}),
                 });
             }
         }
@@ -9672,6 +10443,114 @@ bool ApiServer::start() {
     router.add(http::method::post, "/mcp", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/mcp", impl.serve_mcp(route));
     });
+    router.add(http::method::get, "/v2/", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/v2/", impl.serve_oci_ping(route));
+    });
+    router.add(http::method::post,
+               "/v2/:repository/blobs/uploads/",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/v2/:repository/blobs/uploads/", impl.serve_oci_upload_start(route));
+               });
+    router.add(http::method::patch,
+               "/v2/:repository/blobs/uploads/:upload",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/v2/:repository/blobs/uploads/:upload",
+                                               impl.serve_oci_upload(route, false));
+               });
+    router.add(http::method::put,
+               "/v2/:repository/blobs/uploads/:upload",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/v2/:repository/blobs/uploads/:upload",
+                                               impl.serve_oci_upload(route, true));
+               });
+    router.add(http::method::get,
+               "/v2/:repository/blobs/:digest",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/v2/:repository/blobs/:digest", impl.serve_oci_blob(route, false));
+               });
+    router.add(http::method::head,
+               "/v2/:repository/blobs/:digest",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/v2/:repository/blobs/:digest", impl.serve_oci_blob(route, true));
+               });
+    for (const auto method : {http::method::get, http::method::head, http::method::put}) {
+        router.add(method,
+                   "/v2/:repository/manifests/:reference",
+                   [&impl, method](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route,
+                           "/v2/:repository/manifests/:reference",
+                           impl.serve_oci_manifest(route, method == http::method::head));
+                   });
+    }
+    router.add(
+        http::method::post, "/legacy/", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/legacy/", impl.serve_python_publish(route));
+        });
+    router.add(http::method::get,
+               "/simple/:package/",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/simple/:package/", impl.serve_python_simple(route));
+               });
+    router.add(http::method::get,
+               "/packages/:filename",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/packages/:filename", impl.serve_python_package(route, false));
+               });
+    router.add(http::method::head,
+               "/packages/:filename",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/packages/:filename", impl.serve_python_package(route, true));
+               });
+    router.add(http::method::put,
+               "/_lake/debug/:build_id/:kind",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/_lake/debug/:build_id/:kind", impl.serve_debug_publish(route));
+               });
+    router.add(http::method::get,
+               "/buildid/:build_id/executable",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/buildid/:build_id/executable",
+                                               impl.serve_debug_artifact(route, "executable"));
+               });
+    router.add(http::method::get,
+               "/buildid/:build_id/debuginfo",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/buildid/:build_id/debuginfo",
+                                               impl.serve_debug_artifact(route, "debuginfo"));
+               });
+    router.add(http::method::get,
+               "/buildid/:build_id/source/*source",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/buildid/:build_id/source/*source",
+                                               impl.serve_debug_artifact(route, "source"));
+               });
+    router.add(http::method::get,
+               "/:package/-/:filename",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/:package/-/:filename", impl.serve_npm_tarball(route));
+               });
+    router.add(
+        http::method::get, "/:package", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/:package", impl.serve_npm_metadata(route));
+        });
+    router.add(
+        http::method::put, "/:package", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/:package", impl.serve_npm_metadata(route));
+        });
     router.use([&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "unmatched", impl.serve_not_found(route));
     });

@@ -34,6 +34,12 @@ add_executable(lake-postgres-tests test_postgres.cpp)
 target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres GTest::gtest_main)
 gtest_discover_tests(lake-postgres-tests)
 
+add_executable(lake-debug-fixture debug_fixture.cpp)
+target_compile_options(lake-debug-fixture PRIVATE -g)
+target_compile_definitions(lake-tests PRIVATE
+  LAKE_TEST_DEBUG_FIXTURE_PATH="$<TARGET_FILE:lake-debug-fixture>")
+add_dependencies(lake-tests lake-debug-fixture)
+
 add_test(
   NAME lake-ui-token-gates
   COMMAND ${CMAKE_SOURCE_DIR}/tools/ui/test-token-gates.sh)

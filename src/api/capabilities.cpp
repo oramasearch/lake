@@ -201,7 +201,8 @@ json repository_artifact_schema() {
               {"started_at", {{"type", "string"}}},
               {"finished_at", {{"type", "string"}}},
               {"attestations", {{"type", "array"}}},
-              {"trace", {{"type", {"object", "null"}}}}}}};
+              {"trace", {{"type", {"object", "null"}}}},
+              {"members", {{"type", "array"}}}}}};
 }
 
 json repository_ref_json(const RepositoryContentRef& ref) {
@@ -275,6 +276,15 @@ json repository_artifact_json(const RepositoryArtifact& artifact) {
                                 {"verified", attestation.verified},
                                 {"reason", attestation.reason}});
     }
+    json members = json::array();
+    for (const RepositoryArtifactMember& member : artifact.members) {
+        members.push_back({{"artifact", member.artifact},
+                           {"version", member.version},
+                           {"path", member.path},
+                           {"digest", member.digest},
+                           {"indexed", member.indexed},
+                           {"reason", member.reason}});
+    }
     json trace = nullptr;
     if (artifact.trace) {
         trace = {{"id", artifact.trace->id},
@@ -302,7 +312,8 @@ json repository_artifact_json(const RepositoryArtifact& artifact) {
             {"started_at", artifact.started_at},
             {"finished_at", artifact.finished_at},
             {"attestations", std::move(attestations)},
-            {"trace", std::move(trace)}};
+            {"trace", std::move(trace)},
+            {"members", std::move(members)}};
 }
 
 template <class T, class ToJson>
@@ -453,7 +464,11 @@ json search_schema() {
               {"path", {{"type", "string"}}},
               {"change", {{"type", "string"}}},
               {"snippet", {{"type", "string"}}},
-              {"score", {{"type", "number"}}}}}};
+              {"score", {{"type", "number"}}},
+              {"artifact", {{"type", "string"}}},
+              {"artifact_version", {{"type", "string"}}},
+              {"digest", {{"type", "string"}}},
+              {"line", {{"type", "integer"}}}}}};
 }
 
 json search_output_schema() {
@@ -475,7 +490,11 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
                           {"path", hit.path},
                           {"change", hit.change},
                           {"snippet", hit.snippet},
-                          {"score", hit.score}});
+                          {"score", hit.score},
+                          {"artifact", hit.artifact},
+                          {"artifact_version", hit.artifact_version},
+                          {"digest", hit.digest},
+                          {"line", hit.line}});
     }
     return ApiResult::success({{"mode", search::to_string(result->mode)},
                                {"scanned_changes", result->scanned_changes},
@@ -3316,7 +3335,23 @@ void register_repository_capabilities(Registry& registry) {
             if (!artifact) {
                 return from_sync_store_error(artifact.error());
             }
-            return ApiResult::success(repository_artifact_json(*artifact));
+            RepositoryArtifact value = *artifact;
+            if (ctx.search) {
+                const auto members =
+                    ctx.search->artifact_members(repository->customer_id, repository->id, value.id);
+                if (!members) {
+                    return ApiResult::failure(members.error().code, members.error().message);
+                }
+                for (const search::ArtifactMember& member : *members) {
+                    value.members.push_back({member.artifact,
+                                             member.version,
+                                             member.path,
+                                             member.digest,
+                                             member.indexed,
+                                             member.reason});
+                }
+            }
+            return ApiResult::success(repository_artifact_json(value));
         }});
     registry.add(Capability{
         .name = "refs",
@@ -3425,6 +3460,13 @@ void register_repository_capabilities(Registry& registry) {
                 auto stored = context.store->set_repository_ref(repository->id, name, head);
                 if (!stored) {
                     return from_store_error(stored.error());
+                }
+            }
+            if (context.search) {
+                const auto indexed =
+                    context.search->reindex_artifacts(repository->customer_id, repository->id);
+                if (!indexed) {
+                    context.audit_details["artifact_index"] = indexed.error().message;
                 }
             }
             context.sync_response = std::move(*response);
@@ -4040,7 +4082,8 @@ void register_search_capability(Registry& registry) {
         .title = "Search repositories",
         .description = "Ranked BM25F search; quoted text is a substring query and "
                        "/expression/ is a regex query. Historical changes use scan "
-                       "mode.",
+                       "mode. Append in:artifact:<name>[@<version>] to search indexed "
+                       "members of one published artifact.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"query", {{"type", "string"}}},
@@ -4083,6 +4126,50 @@ void register_search_capability(Registry& registry) {
                                          {"scanned_changes", result->scanned_changes}};
             }
             return search_result(std::move(result));
+        }});
+    registry.add(Capability{
+        .name = "reindex_artifacts",
+        .title = "Reindex published artifacts",
+        .description = "Decompose every published artifact through libliquid's format registry "
+                       "and rebuild its artifact-member search index.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"id", {{"type", "string"}}}}},
+                         {"required", json::array({"id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"artifacts", {{"type", "integer"}}},
+                            {"members", {{"type", "integer"}}},
+                            {"indexed", {{"type", "integer"}}},
+                            {"binary", {{"type", "integer"}}},
+                            {"truncated", {{"type", "integer"}}}}}},
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = entity_object("repository", "id"),
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.search) {
+                return no_search();
+            }
+            if (!context.store) {
+                return no_store();
+            }
+            const auto repository = context.store->get_repository(input.at("id"));
+            if (!repository) {
+                return from_store_error(repository.error());
+            }
+            const auto result =
+                context.search->reindex_artifacts(repository->customer_id, repository->id);
+            if (!result) {
+                return ApiResult::failure(result.error().code, result.error().message);
+            }
+            context.audit_object = "repository/" + repository->id;
+            context.audit_details = {{"artifacts", result->artifacts},
+                                     {"members", result->members},
+                                     {"indexed", result->indexed},
+                                     {"binary", result->binary},
+                                     {"truncated", result->truncated}};
+            return ApiResult::success(context.audit_details);
         }});
 }
 

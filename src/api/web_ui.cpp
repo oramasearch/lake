@@ -2180,6 +2180,39 @@ std::string web_ui_artifact(const control::Repository& repository,
         content += "</tbody></table>";
     }
     content += "</section>";
+    content += "<section class=\"panel diff-entry\"><h2>Search inside</h2>"
+               "<p class=\"muted\">Search an output with "
+               "<code>in:artifact:&lt;output&gt;@&lt;result&gt;</code>. "
+               "Members nested more than one container deep are recorded but not indexed.</p>"
+               "<form class=\"filters\" method=\"get\" action=\"/search\">"
+               "<input type=\"hidden\" name=\"repository\" value=\"" +
+               web_ui_escape(repository.id) +
+               "\"><label>Symbol or text<input name=\"query\" "
+               "placeholder=\"symbol in:artifact:output.deb@result\" required></label>"
+               "<button type=\"submit\">Search</button></form></section>";
+    content += "<section class=\"panel diff-entry\"><h2>Indexed members</h2>";
+    if (artifact.members.empty()) {
+        content += "<p class=\"muted\">This artifact has not been indexed yet.</p>";
+    } else {
+        content += "<table><thead><tr><th>Artifact</th><th>Member</th><th>Digest</th>"
+                   "<th>Indexed</th><th>Search</th></tr></thead><tbody>";
+        for (const RepositoryArtifactMember& member : artifact.members) {
+            const std::string query =
+                member.path + " in:artifact:" + member.artifact + "@" + member.version;
+            content += std::format("<tr><td><code>{}</code></td><td><code>{}</code></td>"
+                                   "<td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                                   web_ui_escape(member.artifact),
+                                   web_ui_escape(member.path),
+                                   web_ui_escape(member.digest),
+                                   web_ui_escape(member.indexed ? "yes" : member.reason),
+                                   member.indexed ? row_link("/search?repository=" + repository.id +
+                                                                 "&query=" + url_component(query),
+                                                             "Search")
+                                                  : "—");
+        }
+        content += "</tbody></table>";
+    }
+    content += "</section>";
     content += std::format("<section class=\"panel diff-entry\"><h2>Timing</h2><dl>"
                            "<dt>queued</dt><dd>{} ms</dd><dt>sandbox</dt><dd>{} ms</dd>"
                            "<dt>execute</dt><dd>{} ms</dd><dt>hash</dt><dd>{} ms</dd>"
@@ -2709,26 +2742,28 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
 }
 
 std::string web_ui_search(const search::Query& query, const search::QueryResult& result) {
-    std::string content = "<p class=\"eyebrow\">search</p><h1>Search</h1>"
-                          "<p class=\"sub\">Ranked text, quoted substring, or /regex/ search "
-                          "across repositories you may read. A tag uses its immutable snapshot; "
-                          "a change or complete history uses scan mode.</p>"
-                          "<form class=\"filters\" method=\"get\" action=\"/search\">"
-                          "<label>Query<input name=\"query\" value=\"" +
-                          web_ui_escape(query.text) +
-                          "\" placeholder=\"Search repositories\" required></label>"
-                          "<label>Customer<input name=\"customer\" value=\"" +
-                          web_ui_escape(query.customer) +
-                          "\"></label><label>Repository<input name=\"repository\" value=\"" +
-                          web_ui_escape(query.repository) +
-                          "\"></label><label>Branch or tag<input name=\"ref\" value=\"" +
-                          web_ui_escape(query.ref) +
-                          "\"></label><label>Exact change<input name=\"change\" value=\"" +
-                          web_ui_escape(query.change) +
-                          "\"></label><label><input type=\"checkbox\" name=\"history\" " +
-                          (query.history ? "checked " : "") +
-                          "value=\"1\"> Scan complete history</label><button type=\"submit\">"
-                          "Search</button></form>";
+    std::string content =
+        "<p class=\"eyebrow\">search</p><h1>Search</h1>"
+        "<p class=\"sub\">Ranked text, quoted substring, or /regex/ search "
+        "across repositories you may read. A tag uses its immutable snapshot; "
+        "a change or complete history uses scan mode. Append "
+        "<code>in:artifact:&lt;name&gt;@&lt;version&gt;</code> to search a published "
+        "artifact.</p>"
+        "<form class=\"filters\" method=\"get\" action=\"/search\">"
+        "<label>Query<input name=\"query\" value=\"" +
+        web_ui_escape(query.text) +
+        "\" placeholder=\"Search repositories\" required></label>"
+        "<label>Customer<input name=\"customer\" value=\"" +
+        web_ui_escape(query.customer) +
+        "\"></label><label>Repository<input name=\"repository\" value=\"" +
+        web_ui_escape(query.repository) +
+        "\"></label><label>Branch or tag<input name=\"ref\" value=\"" + web_ui_escape(query.ref) +
+        "\"></label><label>Exact change<input name=\"change\" value=\"" +
+        web_ui_escape(query.change) +
+        "\"></label><label><input type=\"checkbox\" name=\"history\" " +
+        (query.history ? "checked " : "") +
+        "value=\"1\"> Scan complete history</label><button type=\"submit\">"
+        "Search</button></form>";
     if (query.text.empty()) {
         content += "<div class=\"panel empty\">Enter a query to search published "
                    "changes.</div>";
@@ -2743,17 +2778,20 @@ std::string web_ui_search(const search::Query& query, const search::QueryResult&
     if (!query.text.empty() && result.items.empty()) {
         content += "<div class=\"panel empty\">No readable matches.</div>";
     } else if (!result.items.empty()) {
-        content += "<table><thead><tr><th>Repository</th><th>Path</th><th>Change</"
-                   "th><th>Snippet</th></tr></thead><tbody>";
+        content += "<table><thead><tr><th>Repository</th><th>Artifact</th><th>Path</th>"
+                   "<th>Line</th><th>Change</th><th>Snippet</th></tr></thead><tbody>";
         for (const search::Hit& hit : result.items) {
-            content +=
-                std::format("<tr><td>{}/{}</td><td><code>{}</code></td><td><code>{}</code></td>"
-                            "<td>{}</td></tr>",
-                            web_ui_escape(hit.customer),
-                            web_ui_escape(hit.repository),
-                            web_ui_escape(hit.path),
-                            web_ui_escape(hit.change),
-                            web_ui_escape(hit.snippet));
+            content += std::format(
+                "<tr><td>{}/{}</td><td><code>{}</code></td><td><code>{}</code></td>"
+                "<td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+                web_ui_escape(hit.customer),
+                web_ui_escape(hit.repository),
+                web_ui_escape(hit.artifact.empty() ? "—"
+                                                   : hit.artifact + "@" + hit.artifact_version),
+                web_ui_escape(hit.path),
+                hit.line == 0 ? "—" : std::to_string(hit.line),
+                web_ui_escape(hit.change),
+                web_ui_escape(hit.snippet));
         }
         content += "</tbody></table>";
     }
