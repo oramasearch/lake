@@ -36,7 +36,9 @@ platform writes without changing readiness.
 The codebase now renders forge-designed repository homes, trees, highlighted files with line
 anchors and blame, change review with safe Markdown, comments, diff layouts and checks, issues,
 releases, webhook history and retry, branch protection with signed refusal audit, conflict values,
-paged artifact results with verified attestations and trace summaries, and effective access.
+paged artifact results with verified attestations and trace summaries, and effective access. The
+Postgres-backed forge scenario proves an unlanded Liquid review, cursor movement after rewrite,
+approval, publication, and graph-derived evidence without repository automation YAML.
 Shared empty, pending, and error states retain the design-system shell and keyboard order;
 anonymous readers receive only public repositories. These repository data pages are not part of
 the production state above.
