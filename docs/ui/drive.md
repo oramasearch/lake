@@ -1,6 +1,6 @@
 # Drive pages
 
-**Status: implemented for lake #43.** The drive is a server-rendered repository view for people
+**Status: implemented for lake #8 and #43.** The drive is a server-rendered repository view for people
 who work with folders and files. It uses the same liquid paths, stable node identifiers, blobs,
 changes, conflicts, policy checks, and audit records as every API caller.
 
@@ -48,6 +48,32 @@ The repository conflicts page links each path to `GET /drive/conflict`. That pag
 values are preserved, identifies each by digest and size, and shows a structural text difference
 when both values have a text renderer. Other formats retain the two-value presentation without
 claiming a textual comparison.
+
+The history table also lists every immutable digest from a conflict-bearing change. A user can
+therefore confirm both retained values without leaving the path history page.
+
+## What the scenario proves
+
+The Postgres-backed scenario suite starts an in-process Lake and exercises the public HTTP and
+Liquid client contracts:
+
+- `DriveScenario.UserSyncsSharesAndSeesHistoryEndToEnd` proves that a regular user can sign up,
+  synchronize a drive folder, share it with another regular user, and let that recipient browse the
+  folder through the API and read its rendered history.
+- `DriveScenario.ConcurrentOfflineEditsKeepBothNamedVersionsInHistory` proves that clients editing
+  the same file while disconnected retain both edits under distinct names, publish both paths, and
+  expose both immutable values through the history API and page. It requires the bootstrap actor
+  identity fix from [liquid #262](https://github.com/oramasearch/liquid/pull/262). The scenario
+  proof uses Liquid `6fcbd07`, which also includes the resolver stack fix from
+  [liquid #270](https://github.com/oramasearch/liquid/pull/270).
+- `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` proves that a drive folder is the
+  same Liquid repository: the public repository client pulls and materializes it, after which CMake
+  builds and runs the contained project.
+
+The last case exercises the repository create, pull, and materialize APIs directly. A dedicated
+`liquid clone` CLI command is tracked in
+[liquid #247](https://github.com/oramasearch/liquid/issues/247); it does not change the repository
+contract proven here.
 
 ## Rendering contract
 

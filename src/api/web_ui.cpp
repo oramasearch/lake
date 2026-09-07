@@ -3694,12 +3694,22 @@ std::string web_ui_drive_history(const control::Repository& repository,
     std::size_t version = 0;
     for (const nlohmann::json& change : changes) {
         std::vector<std::string> kinds = change.value("changes", std::vector<std::string>{});
+        const std::vector<std::string> conflicts =
+            change.value("new_conflicts", std::vector<std::string>{});
         const std::string change_id = change.value("id", "");
         const bool has_file = !change.value("new_blob", "").empty();
         content += "<tr><td>" + web_ui_escape(change.value("occurred_at", "")) + "</td><td><code>" +
                    web_ui_escape(change_id) + "</code><br>" +
                    web_ui_escape(change.value("message", "")) + "</td><td>" +
-                   web_ui_escape(joined(kinds)) + "</td>";
+                   web_ui_escape(joined(kinds));
+        if (!conflicts.empty()) {
+            content += "<br><span class=\"muted\">Conflict versions:</span><ul>";
+            for (const std::string& conflict : conflicts) {
+                content += "<li><code>" + web_ui_escape(conflict) + "</code></li>";
+            }
+            content += "</ul>";
+        }
+        content += "</td>";
         if (has_file) {
             content += "<td><input aria-label=\"Compare from " + web_ui_escape(change_id) +
                        "\" type=\"radio\" name=\"left\" value=\"" + web_ui_escape(change_id) + "\"";

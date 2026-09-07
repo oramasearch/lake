@@ -86,7 +86,10 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 > shared federation issuer store. All remain on the signed audit path.
 > Drive presents the same repositories as folders with stable-node ACLs, server-rendered previews,
 > effective-access sharing before creation, expiring links with stated revocation consequences, a
-> shared-with-me view, path history, and restore-as-a-new-change. Models and
+> shared-with-me view, path history, restore-as-a-new-change, and conflict values in history. The
+> pinned Liquid drive client now has a Postgres-backed end-to-end scenario covering regular-user
+> sign-up, folder synchronization and sharing, disconnected conflicts, repository pull, and a build
+> from the materialized files. Models and
 > datasets use native resumable liquid sync with chunk-level deduplication and unique-byte
 > metering. The Hugging Face-compatible adapter supports repository creation, file/folder upload,
 > basic LFS, listings, model metadata, snapshots, and named or digest downloads. Model reads and

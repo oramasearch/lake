@@ -109,13 +109,16 @@ Drive and models add migration `0015_drive`, stable-node folder ACLs, live recip
 expiring and revocable links, list/grid browse and repository mutations, browser-native and
 server-rendered format-registry previews, version comparison, conflict presentation, per-path
 history and restore, effective access before sharing, link management, and shared-with-me pages.
+The pinned Liquid drive client is covered end to end against an in-process Lake and Postgres:
+regular-user sign-up, synchronization, sharing, rendered history, disconnected conflict
+preservation, repository pull and materialization, and a native project build.
 Models and datasets use
 the liquid sync protocol for resumable deduplicated transfer and unique-byte metering. The
 compatible Hub routes support create,
 file/folder upload, basic LFS, list, info, snapshot, and named or digest downloads. Model metadata
 and the server-rendered model page include per-revision storage savings plus the verified liquid
-attestation chain from dataset and code revisions through the training run. The liquid sync client
-and Linux desktop work are tracked in liquid #195 and #196.
+attestation chain from dataset and code revisions through the training run. Linux desktop
+presentation remains tracked in liquid #196.
 TUF repository metadata adds immutable root, targets, snapshot, and timestamp objects at
 `LAKE_STORE_ROOT/<instance>/log/tuf/`, distinct-key threshold verification, version/expiry and
 cross-role binding checks, dual-threshold root rotation, and a rehearsed compromised-key
