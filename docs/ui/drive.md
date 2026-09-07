@@ -64,16 +64,15 @@ Liquid client contracts:
   the same file while disconnected retain both edits under distinct names, publish both paths, and
   expose both immutable values through the history API and page. It requires the bootstrap actor
   identity fix from [liquid #262](https://github.com/oramasearch/liquid/pull/262). The scenario
-  proof uses Liquid `6fcbd07`, which also includes the resolver stack fix from
-  [liquid #270](https://github.com/oramasearch/liquid/pull/270).
+  proof uses Liquid `11fdf44`, including the chunk-index compaction fix from
+  [liquid #274](https://github.com/oramasearch/liquid/pull/274).
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` proves that a drive folder is the
   same Liquid repository: the public repository client pulls and materializes it, after which CMake
   builds and runs the contained project.
 
-The last case exercises the repository create, pull, and materialize APIs directly. A dedicated
-`liquid clone` CLI command is tracked in
-[liquid #247](https://github.com/oramasearch/liquid/issues/247); it does not change the repository
-contract proven here.
+The last case exercises the repository create, pull, and materialize APIs directly. The same
+drive-client contract powers the `liquid clone` command implemented by
+[liquid #259](https://github.com/oramasearch/liquid/pull/259).
 
 ## Rendering contract
 
