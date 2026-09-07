@@ -4295,6 +4295,9 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     user_context.instance_kek = s.ctx.instance_kek;
     user_context.session_credential = true;
     user_context.scopes = principal->scopes;
+    user_context.credential_session_id = principal->session_id;
+    user_context.credential_kind = principal->kind;
+    user_context.credential_expires_at_unix = principal->expires_at_unix;
 
     const ApiResult enrollment = s.registry.call("enroll_mfa", json::object(), user_context);
     ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
@@ -4366,8 +4369,9 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
                                                     {"static", true},
                                                     {"reason", "migration"}},
                                                    user_context);
-    ASSERT_TRUE(static_token.ok) << static_token.error.message;
-    EXPECT_TRUE(static_token.value["session"]["expires_at"].is_null());
+    EXPECT_FALSE(static_token.ok);
+    EXPECT_EQ(static_token.error.code, "unauthorized");
+    EXPECT_FALSE(s.store.context_for(token.value["secret"]));
     auto audit_events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
     ASSERT_TRUE(audit_events);
     EXPECT_TRUE(std::ranges::any_of(*audit_events, [](const lake::audit::Event& event) {

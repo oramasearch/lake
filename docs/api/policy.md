@@ -24,7 +24,13 @@ principal receives its `admin` action, so one user cannot manage another user's 
 passkeys, or tokens. `authorize_batch` preserves that self-principal decision, so session and
 device lists can use the batched path before returning rows. API-token capability names are
 checked as scopes before policy evaluation;
-the operator bearer remains the explicit break-glass principal.
+the operator bearer remains the explicit break-glass principal. For `create_token`, passing the
+capability-name check does not grant arbitrary delegation: requested scopes must be a subset of
+the issuing credential, explicit expiry must fit its remaining lifetime, and a static child
+requires existing static authority. These checks live in the capability handler and are audited
+by the registry. The store retains the issuing session and rejects descendants after any
+ancestor or linked device is revoked or expires. The complete derivation and migration contract is
+[`identity.md`](identity.md#token-derivation-and-revocation).
 
 ## Objects and grants
 

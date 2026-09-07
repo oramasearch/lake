@@ -4733,6 +4733,9 @@ struct ApiServer::Impl {
                 ctx.acting_user_id = principal->user_id;
                 ctx.acting_identity = principal->taap_id;
                 ctx.credential_device_id = principal->device_id;
+                ctx.credential_session_id = principal->session_id;
+                ctx.credential_kind = principal->kind;
+                ctx.credential_expires_at_unix = principal->expires_at_unix;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;
             }

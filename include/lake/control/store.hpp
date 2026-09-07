@@ -134,6 +134,7 @@ struct Session {
     std::string id, user_id, device_id, pool_id, kind, name, reason, expires_at, revoked_at,
         created_at, last_used_at;
     std::vector<std::string> scopes;
+    std::string parent_session_id;
 };
 struct IssuedSession {
     Session session;
@@ -142,6 +143,7 @@ struct IssuedSession {
 struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
     std::vector<std::string> scopes;
+    std::optional<std::int64_t> expires_at_unix;
 };
 struct NewPasswordUser {
     std::string pool_id, email, password, display_name, device_name, identity_document;
@@ -161,6 +163,7 @@ struct NewToken {
     std::vector<std::string> scopes;
     int expires_in_seconds = 0;
     bool is_static = false;
+    std::string parent_session_id;
 };
 struct WebAuthnChallenge {
     std::string user_id, pool_id, ceremony, challenge, rp_id, origin;

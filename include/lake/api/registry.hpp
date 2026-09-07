@@ -94,6 +94,9 @@ struct ApiContext {
     std::string authentication_method;
     std::string device;
     std::string credential_device_id;
+    std::string credential_session_id;
+    std::string credential_kind;
+    std::optional<std::int64_t> credential_expires_at_unix;
     std::string identity_seed;
     std::string instance_kek;
     WebhookSender webhook_sender;
