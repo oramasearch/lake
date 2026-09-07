@@ -84,6 +84,9 @@ struct RepositoryFixtureStore final : SyncStore {
     bool shared_folder_moved = false;
     std::string commit_message;
     std::vector<RepositoryWriteOperation> committed_operations;
+    std::string resolved_conflict;
+    std::string conflict_resolution;
+    std::vector<std::byte> conflict_blob;
     SyncStoreResult<std::vector<std::string>>
     find_missing(const std::string&, const std::vector<std::string>&) override {
         return std::vector<std::string>{};
@@ -203,7 +206,29 @@ struct RepositoryFixtureStore final : SyncStore {
 
     SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string&, const std::string&) override {
-        return std::vector<RepositoryConflict>{{"readme.md", {"blob-1", "blob-2"}}};
+        return std::vector<RepositoryConflict>{
+            {.id = "conflict-1",
+             .base = "blob-base",
+             .left = "blob-1",
+             .right = "blob-2",
+             .region = {.path = "readme.md", .bytes = RepositoryConflictByteRange{0, 3}},
+             .kind = "suspicious-merge",
+             .explanation = "Both sides changed the greeting.",
+             .proposal = "blob-proposal",
+             .reasons = {"The edits choose different words."},
+             .version_blobs = {"blob-1", "blob-2"}}};
+    }
+
+    SyncStoreResult<RepositoryConflictResolution>
+    resolve_repository_conflict(const std::string&,
+                                const std::string&,
+                                const std::string& conflict_id,
+                                const std::string& resolution,
+                                std::vector<std::byte> blob) override {
+        resolved_conflict = conflict_id;
+        conflict_resolution = resolution;
+        conflict_blob = std::move(blob);
+        return RepositoryConflictResolution{conflict_id, "blob-resolved", "change-resolved"};
     }
 
     SyncStoreResult<std::string>
@@ -1916,6 +1941,14 @@ TEST(Rest, OpenApiCoversEveryCapability) {
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/chunks/{digest}"));
     EXPECT_TRUE(doc["paths"].contains("/v1/attach_model_provenance"));
     EXPECT_TRUE(doc["paths"].contains("/v1/verify_model_provenance"));
+    EXPECT_TRUE(doc["paths"].contains("/v1/resolve_conflict"));
+    const json& conflict =
+        doc["paths"]["/v1/list_conflicts"]["get"]["responses"]["200"]["content"]["application/json"]
+           ["schema"]["properties"]["value"]["properties"]["items"]["items"];
+    EXPECT_EQ(conflict["properties"]["kind"]["enum"],
+              json::array({"text", "structural", "crdt-suspicious", "suspicious-merge"}));
+    EXPECT_EQ(conflict["properties"]["region"]["properties"]["path"]["type"], "string");
+    EXPECT_EQ(conflict["properties"]["explanation"]["type"], "string");
     EXPECT_TRUE(doc["paths"].contains("/v1/transparency_inclusion_proof"));
     EXPECT_TRUE(doc["paths"].contains("/v1/transparency_consistency_proof"));
     const json& inclusion_value =
@@ -2055,6 +2088,13 @@ TEST(Mcp, InitializeListAndCall) {
     EXPECT_TRUE(std::ranges::any_of(tools["result"]["tools"], [](const json& tool) {
         return tool.value("name", "") == "transparency_consistency_proof";
     }));
+    const auto resolve_conflict =
+        std::ranges::find_if(tools["result"]["tools"], [](const json& tool) {
+            return tool.value("name", "") == "resolve_conflict";
+        });
+    ASSERT_NE(resolve_conflict, tools["result"]["tools"].end());
+    EXPECT_EQ(resolve_conflict->at("inputSchema").at("properties").at("resolution").at("enum"),
+              json::array({"accept_proposal", "left", "right", "blob"}));
 
     const json call = {
         {"jsonrpc", "2.0"},
@@ -2463,8 +2503,12 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     ASSERT_TRUE(difference.ok) << difference.error.message;
     EXPECT_EQ(difference.value["items"][0]["path"], "readme.md");
     EXPECT_EQ(difference.value["items"][0]["line_hunks"][0]["added_lines"][0], "hello");
-    EXPECT_EQ(s.call("list_conflicts", {{"id", repository_id}}).value["items"][0]["blobs"].size(),
-              2u);
+    const ApiResult conflicts = s.call("list_conflicts", {{"id", repository_id}});
+    ASSERT_TRUE(conflicts.ok) << conflicts.error.message;
+    EXPECT_EQ(conflicts.value["items"][0]["region"]["path"], "readme.md");
+    EXPECT_EQ(conflicts.value["items"][0]["kind"], "suspicious-merge");
+    EXPECT_EQ(conflicts.value["items"][0]["explanation"], "Both sides changed the greeting.");
+    EXPECT_EQ(conflicts.value["items"][0]["reasons"][0], "The edits choose different words.");
     const ApiResult artifacts = s.call("list_artifacts", {{"id", repository_id}, {"limit", 1}});
     ASSERT_TRUE(artifacts.ok) << artifacts.error.message;
     EXPECT_EQ(artifacts.value["items"][0]["id"], "result-1");
@@ -2713,6 +2757,23 @@ TEST(Drive, BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities) 
     ASSERT_TRUE(conflict.ok) << conflict.error.message;
     EXPECT_EQ(conflict.value["versions"].size(), 2u);
     EXPECT_EQ(conflict.value["difference"]["lines"][0]["kind"], "removed");
+    EXPECT_EQ(conflict.value["conflict"]["kind"], "suspicious-merge");
+    EXPECT_EQ(conflict.value["conflict"]["region"]["bytes"]["length"], 3u);
+
+    const ApiResult resolved = surface.call("resolve_conflict",
+                                            {{"repository_id", repository.value["id"]},
+                                             {"ref", "main"},
+                                             {"path", "readme.md"},
+                                             {"conflict_id", "conflict-1"},
+                                             {"resolution", "blob"},
+                                             {"blob", "cmVzb2x2ZWQ="}});
+    ASSERT_TRUE(resolved.ok) << resolved.error.message;
+    EXPECT_EQ(resolved.value["conflict"], "conflict-1");
+    EXPECT_EQ(resolved.value["value"], "blob-resolved");
+    EXPECT_EQ(resolved.value["change"], "change-resolved");
+    EXPECT_EQ(repository_store.resolved_conflict, "conflict-1");
+    EXPECT_EQ(repository_store.conflict_resolution, "blob");
+    EXPECT_EQ(repository_store.conflict_blob, bytes("resolved"));
 }
 
 TEST(Models, MetadataAndResolveUseRepositoryHistoryAndProvenance) {

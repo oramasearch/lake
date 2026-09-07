@@ -17,7 +17,7 @@ capability as REST and MCP, so authorization and audit recording have one path.
 | Releases | `GET /releases?repository_id=<id>` | `list_releases` | sanitized notes, tag and change identity, artifact output and verified-attestation counts |
 | Webhooks | `GET /webhooks?repository_id=<id>` | `list_webhooks`, `list_webhook_deliveries`, `retry_webhook_delivery` | endpoint subscriptions plus durable delivery attempts and failed-attempt retry |
 | Branch protection | `GET /protection?repository_id=<id>` | `list_branch_protections`, `audit` | ref rules and their signed denied-update audit records |
-| Conflicts | `GET /conflicts?repository_id=<id>` | `list_conflicts` | unresolved conflict paths and their blob values |
+| Conflicts | `GET /conflicts?repository_id=<id>` | `list_conflicts`, `resolve_conflict` | unresolved conflict kind, region, explanation, reasons, values, and write-authorized resolution controls |
 | Artifacts | `GET /artifacts?repository_id=<id>` | `list_artifacts` | filtered cursor pages of libliquid build results |
 | Artifact | `GET /artifact?repository_id=<id>&id=<result>` | `get_artifact` | one result, outputs, timing, cache/divergence state, verified attestations and trace summary |
 | Repository access | `GET /repository/access?id=<id>` | `entity_effective_access` | direct and inherited effective access |
@@ -36,6 +36,13 @@ its added, removed, modified, moved, mode-changed, and conflicted status; old an
 digests remain visible. Text hunks include their old/new ranges and escaped removed/added lines.
 Conflict digests are values on the path instead of an error state. A change with no visible hunks
 renders the explicit empty state.
+
+The conflicts page leads with plain conflict information rather than a digest list. Each card names
+the kind in person-facing words, the repository path and exact byte or stable-node region, Liquid's
+explanation, and every reason a suspicious proposal needs attention. Base, left, right, and optional
+proposal identities remain available as supporting evidence. Signed-in writers can keep either
+side, accept an available reviewed proposal, or supply prepared replacement text; the form calls
+`resolve_conflict` and the registry applies path authorization and signed audit.
 
 The change view groups those values into a forge review. Unified text is the server-rendered
 default, while one small script switches to an already-rendered side-by-side representation and

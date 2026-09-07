@@ -1,6 +1,6 @@
 # Drive API
 
-**Status: implemented for lake #8 and #43.** Drive is a repository view for people who work with
+**Status: implemented for lake #8, #43, and #116.** Drive is a repository view for people who work with
 folders and files. It does not create a second store: paths, blobs, changes, conflicts, refs, and
 deduplication remain liquid repository values.
 
@@ -17,7 +17,8 @@ deduplication remain liquid repository values.
 | `delete_drive_path` | `write` on the path | A new liquid deletion without history removal |
 | `drive_history` | `read` on the path or nearest retained parent | Changes whose structural diff names `path` as its old or new path |
 | `diff_drive_versions` | `read` on the path or nearest retained parent | The two immutable files and a structural text difference |
-| `drive_conflict` | `read` on the path | Preserved conflict values and a text difference when registered |
+| `drive_conflict` | `read` on the path | Conflict kind, exact region, explanation, reasons, preserved values, and a text difference when registered |
+| `resolve_conflict` | `write` on the path | The selected value and the Liquid change carrying its resolution record |
 | `restore_drive_version` | `write` on the path or nearest retained parent | A new liquid change containing the file bytes from `change_id` |
 
 A path object has `object_type=path` and external id `<repository UUID>:<liquid node id>`. The
@@ -41,10 +42,13 @@ current pure-renderer contract and fallback.
 
 The read routes are `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`,
 `/drive/history/diff`, and `/drive/conflict`. Mutations are POST-only at `/drive/folder`,
-`/drive/upload`, `/drive/rename`, `/drive/move`, `/drive/delete`, and `/drive/history/restore`.
+`/drive/upload`, `/drive/rename`, `/drive/move`, `/drive/delete`, `/drive/history/restore`, and
+`/drive/conflict/resolve`.
 Upload accepts `multipart/form-data`; the handler converts files to the capability's base64 input.
 All other handlers convert query or form values to capability inputs and redirect back to a drive
-read route after a successful change.
+read route after a successful change. Conflict resolution offers the left value, right value, an
+available reviewed proposal, or prepared replacement text. The form posts through
+`resolve_conflict`; it does not edit Liquid state directly.
 
 The consumer sync client, three-tree reconciliation, `liquid history <path>`, and first-class
 local conflict values belong to [liquid #195](https://github.com/oramasearch/liquid/issues/195).

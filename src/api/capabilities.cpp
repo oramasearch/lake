@@ -165,8 +165,41 @@ json repository_change_schema() {
 }
 
 json repository_conflict_schema() {
-    return {{"type", "object"},
-            {"properties", {{"path", {{"type", "string"}}}, {"blobs", {{"type", "array"}}}}}};
+    return {
+        {"type", "object"},
+        {"properties",
+         {{"id", {{"type", "string"}}},
+          {"base", {{"type", "string"}}},
+          {"left", {{"type", "string"}}},
+          {"right", {{"type", "string"}}},
+          {"region",
+           {{"type", "object"},
+            {"properties",
+             {{"path", {{"type", "string"}}},
+              {"bytes",
+               {{"type", "object"},
+                {"properties",
+                 {{"offset", {{"type", "integer"}, {"minimum", 0}}},
+                  {"length", {{"type", "integer"}, {"minimum", 0}}}}},
+                {"required", json::array({"offset", "length"})},
+                {"additionalProperties", false}}},
+              {"nodes",
+               {{"type", "object"},
+                {"properties", {{"first", {{"type", "string"}}}, {"last", {{"type", "string"}}}}},
+                {"required", json::array({"first", "last"})},
+                {"additionalProperties", false}}}}},
+            {"required", json::array({"path"})},
+            {"additionalProperties", false}}},
+          {"kind",
+           {{"type", "string"},
+            {"enum", json::array({"text", "structural", "crdt-suspicious", "suspicious-merge"})}}},
+          {"explanation", {{"type", "string"}}},
+          {"proposal", {{"type", "string"}}},
+          {"reasons", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+          {"node", {{"type", "string"}}}}},
+        {"required",
+         json::array({"id", "base", "left", "right", "region", "kind", "explanation", "reasons"})},
+        {"additionalProperties", false}};
 }
 
 json repository_diff_entry_schema() {
@@ -233,7 +266,30 @@ json repository_change_json(const RepositoryChange& change) {
 }
 
 json repository_conflict_json(const RepositoryConflict& conflict) {
-    return {{"path", conflict.path}, {"blobs", conflict.blobs}};
+    json region{{"path", conflict.region.path}};
+    if (conflict.region.bytes) {
+        region["bytes"] = {{"offset", conflict.region.bytes->offset},
+                           {"length", conflict.region.bytes->length}};
+    }
+    if (conflict.region.nodes) {
+        region["nodes"] = {{"first", conflict.region.nodes->first},
+                           {"last", conflict.region.nodes->last}};
+    }
+    json output{{"id", conflict.id},
+                {"base", conflict.base},
+                {"left", conflict.left},
+                {"right", conflict.right},
+                {"region", std::move(region)},
+                {"kind", conflict.kind},
+                {"explanation", conflict.explanation},
+                {"reasons", conflict.reasons}};
+    if (conflict.proposal) {
+        output["proposal"] = *conflict.proposal;
+    }
+    if (conflict.node) {
+        output["node"] = *conflict.node;
+    }
+    return output;
 }
 
 json repository_diff_entry_json(const RepositoryDiffEntry& entry) {
@@ -3231,7 +3287,7 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_conflicts",
         .title = "List repository conflicts",
-        .description = "Unresolved libliquid conflict values for one repository.",
+        .description = "Unresolved conflicts with their kind, region, explanation, and values.",
         .input_schema = id_input(),
         .output_schema = list_schema(repository_conflict_schema()),
         .kind = CapabilityKind::Read,

@@ -354,7 +354,9 @@ int main(int argc, char** argv) {
             "record conflict values");
     const auto conflicts =
         require(liquid::runtime::block_on(liquid_repository.conflicts()), "read conflict values");
-    if (conflicts.size() != 1U || conflicts.front().path != "conflict.txt") {
+    if (conflicts.size() != 1U || conflicts.front().region.path != "conflict.txt" ||
+        conflicts.front().kind != liquid::conflict_kind::structural ||
+        conflicts.front().explanation.empty()) {
         std::println(stderr, "lake-ui-fixture: conflict fixture was not preserved");
         return 1;
     }

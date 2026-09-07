@@ -2051,34 +2051,126 @@ std::string web_ui_branch_protection(const control::Repository& repository,
         "lake — branch protection", repository_name(repository), content, signed_in);
 }
 
+namespace {
+
+std::string conflict_kind_label(std::string_view kind) {
+    if (kind == "text") {
+        return "Text overlap";
+    }
+    if (kind == "structural") {
+        return "Structural overlap";
+    }
+    if (kind == "crdt-suspicious") {
+        return "Suspicious concurrent update";
+    }
+    if (kind == "suspicious-merge") {
+        return "Suspicious merge proposal";
+    }
+    return "Conflict";
+}
+
+std::string conflict_region_markup(const RepositoryConflictRegion& region) {
+    std::string output = "<code>" + web_ui_escape(region.path) + "</code>";
+    if (region.bytes) {
+        output += std::format(
+            " · byte offset {} · length {}", region.bytes->offset, region.bytes->length);
+    }
+    if (region.nodes) {
+        output += " · nodes " + identifier_markup(region.nodes->first) + " through " +
+                  identifier_markup(region.nodes->last);
+    }
+    return output;
+}
+
+std::string conflict_reasons_markup(const RepositoryConflict& conflict) {
+    if (conflict.reasons.empty()) {
+        return {};
+    }
+    std::string output = "<h3>Why this needs attention</h3><ul>";
+    for (const std::string& reason : conflict.reasons) {
+        output += "<li>" + web_ui_escape(reason) + "</li>";
+    }
+    output += "</ul>";
+    return output;
+}
+
+std::string conflict_resolution_markup(const control::Repository& repository,
+                                       std::string_view ref,
+                                       const RepositoryConflict& conflict,
+                                       std::string_view action,
+                                       bool signed_in) {
+    if (!signed_in) {
+        return "<p class=\"sub\">Sign in with write access to resolve this conflict.</p>";
+    }
+    std::string output =
+        std::format("<h3>Choose the value to keep</h3><form class=\"stack\" method=\"post\" "
+                    "action=\"{}\"><input type=\"hidden\" name=\"repository_id\" value=\"{}\">"
+                    "<input type=\"hidden\" name=\"ref\" value=\"{}\"><input type=\"hidden\" "
+                    "name=\"path\" value=\"{}\"><input type=\"hidden\" name=\"conflict_id\" "
+                    "value=\"{}\"><div class=\"actions\"><button class=\"secondary\" "
+                    "name=\"resolution\" value=\"left\" type=\"submit\">Keep left value</button>"
+                    "<button class=\"secondary\" name=\"resolution\" value=\"right\" "
+                    "type=\"submit\">Keep right value</button>",
+                    web_ui_escape(action),
+                    web_ui_escape(repository.id),
+                    web_ui_escape(ref),
+                    web_ui_escape(conflict.region.path),
+                    web_ui_escape(conflict.id));
+    if (conflict.proposal) {
+        output += "<button class=\"primary\" name=\"resolution\" value=\"accept_proposal\" "
+                  "type=\"submit\">Accept reviewed proposal</button>";
+    }
+    output += "</div><label>Prepared replacement text<textarea name=\"blob\" rows=\"6\"></textarea>"
+              "</label><button class=\"secondary\" name=\"resolution\" value=\"blob\" "
+              "type=\"submit\">Use prepared text</button></form>";
+    return output;
+}
+
+std::string conflict_values_markup(const RepositoryConflict& conflict) {
+    std::string output = "<dl><dt>Base value</dt><dd>" + identifier_markup(conflict.base) +
+                         "</dd><dt>Left value</dt><dd>" + identifier_markup(conflict.left) +
+                         "</dd><dt>Right value</dt><dd>" + identifier_markup(conflict.right) +
+                         "</dd>";
+    if (conflict.proposal) {
+        output +=
+            "<dt>Reviewed proposal</dt><dd>" + identifier_markup(*conflict.proposal) + "</dd>";
+    }
+    output += "</dl>";
+    return output;
+}
+
+} // namespace
+
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
                                         bool signed_in) {
-    std::string content = std::format("<p class=\"eyebrow\">repository conflicts</p><h1>"
-                                      "Conflicts</h1><p class=\"sub\">{}</p>",
-                                      web_ui_escape(repository_name(repository)));
+    std::string content =
+        std::format("<p class=\"eyebrow\">repository conflicts</p><h1>Conflicts</h1>"
+                    "<p class=\"sub\">{}</p>{}",
+                    web_ui_escape(repository_name(repository)),
+                    forge_tabs(repository, "conflicts"));
     if (conflicts.empty()) {
         content += "<div class=\"panel empty\">No unresolved conflict values.</div>";
     } else {
-        content += "<table><thead><tr><th>Path</th><th>Conflicting blobs</th><th>Comparison</th>"
-                   "</tr></thead><tbody>";
         for (const RepositoryConflict& conflict : conflicts) {
-            std::string blobs;
-            for (const std::string& blob : conflict.blobs) {
-                if (!blobs.empty()) {
-                    blobs += ", ";
-                }
-                blobs += blob;
-            }
-            content += std::format("<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td>"
-                                   "</tr>",
-                                   web_ui_escape(conflict.path),
-                                   web_ui_escape(blobs),
-                                   row_link("/drive/conflict?repository_id=" + repository.id +
-                                                "&ref=main&path=" + url_component(conflict.path),
-                                            "Compare versions"));
+            content += std::format(
+                "<article class=\"panel "
+                "conflict-value\"><header><h2><code>{}</code></h2>{}</header>"
+                "<p><strong>{}</strong></p><p>{}</p><p class=\"sub\">Affected region: {}</p>",
+                web_ui_escape(conflict.region.path),
+                badge_markup(conflict.kind),
+                web_ui_escape(conflict_kind_label(conflict.kind)),
+                web_ui_escape(conflict.explanation),
+                conflict_region_markup(conflict.region));
+            content += conflict_reasons_markup(conflict);
+            content += conflict_values_markup(conflict);
+            content += row_link("/drive/conflict?repository_id=" + repository.id +
+                                    "&ref=main&path=" + url_component(conflict.region.path),
+                                "Compare preserved values");
+            content += conflict_resolution_markup(
+                repository, "main", conflict, "/conflicts/resolve", signed_in);
+            content += "</article>";
         }
-        content += "</tbody></table>";
     }
     return web_ui_shell("lake — conflicts", repository_name(repository), content, signed_in);
 }
@@ -3703,7 +3795,7 @@ std::string web_ui_drive_history(const control::Repository& repository,
                    web_ui_escape(change.value("message", "")) + "</td><td>" +
                    web_ui_escape(joined(kinds));
         if (!conflicts.empty()) {
-            content += "<br><span class=\"muted\">Conflict versions:</span><ul>";
+            content += "<br><span class=\"muted\">Conflict records:</span><ul>";
             for (const std::string& conflict : conflicts) {
                 content += "<li><code>" + web_ui_escape(conflict) + "</code></li>";
             }
@@ -3784,14 +3876,20 @@ std::string web_ui_drive_version_diff(const control::Repository& repository,
 }
 
 std::string web_ui_drive_conflict(const control::Repository& repository,
-                                  std::string_view path,
+                                  std::string_view ref,
+                                  const RepositoryConflict& conflict,
                                   const std::vector<RepositoryFile>& versions,
                                   const std::optional<DriveVersionDiff>& difference,
                                   bool signed_in) {
-    std::string content = "<p class=\"eyebrow\">drive conflict</p><h1>Two versions of " +
-                          web_ui_escape(path) +
-                          "</h1><p class=\"sub\">Both versions are preserved. Compare them before "
-                          "choosing how to reconcile the file.</p><div class=\"grid\">";
+    std::string content =
+        "<p class=\"eyebrow\">drive conflict</p><h1>Two versions of " +
+        web_ui_escape(conflict.region.path) + "</h1><p><strong>" +
+        web_ui_escape(conflict_kind_label(conflict.kind)) + "</strong></p><p>" +
+        web_ui_escape(conflict.explanation) +
+        "</p><p class=\"sub\">Affected region: " + conflict_region_markup(conflict.region) +
+        "</p>" + conflict_reasons_markup(conflict) +
+        "<p class=\"sub\">Both versions are preserved. Compare them before "
+        "choosing how to reconcile the file.</p><div class=\"grid\">";
     for (std::size_t index = 0; index < versions.size(); ++index) {
         content += "<section class=\"panel\"><h2>Version " + std::to_string(index + 1) +
                    "</h2><dl><dt>Digest</dt><dd><code>" + web_ui_escape(versions[index].blob) +
@@ -3803,6 +3901,9 @@ std::string web_ui_drive_conflict(const control::Repository& repository,
                    ? drive_diff_markup(*difference)
                    : "<div class=\"panel\">A structural preview is not registered for this "
                      "format. The digests and sizes above identify both preserved values.</div>";
+    content += conflict_values_markup(conflict);
+    content +=
+        conflict_resolution_markup(repository, ref, conflict, "/drive/conflict/resolve", signed_in);
     return web_ui_shell("lake — drive conflict", repository_name(repository), content, signed_in);
 }
 

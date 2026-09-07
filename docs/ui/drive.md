@@ -1,6 +1,6 @@
 # Drive pages
 
-**Status: implemented for lake #8 and #43.** The drive is a server-rendered repository view for people
+**Status: implemented for lake #8, #43, and #116.** The drive is a server-rendered repository view for people
 who work with folders and files. It uses the same liquid paths, stable node identifiers, blobs,
 changes, conflicts, policy checks, and audit records as every API caller.
 
@@ -44,13 +44,22 @@ path. Each available version can be restored with `POST /drive/history/restore`;
 new change. Selecting two text versions opens `GET /drive/history/diff`, which reads both immutable
 revisions and renders their structural line difference.
 
-The repository conflicts page links each path to `GET /drive/conflict`. That page states that both
-values are preserved, identifies each by digest and size, and shows a structural text difference
-when both values have a text renderer. Other formats retain the two-value presentation without
-claiming a textual comparison.
+The repository conflicts page links each path to `GET /drive/conflict`. Both the repository and
+drive pages state the conflict kind in person-facing words, identify the exact path plus byte or
+stable-node region, show Liquid's explanation and suspicious-merge reasons, and retain the
+base/left/right and optional proposal identities as evidence. The drive page also identifies each
+preserved file by digest and size and shows a structural text difference when both values have a
+text renderer. Other formats retain the two-value presentation without claiming a textual
+comparison.
 
-The history table also lists every immutable digest from a conflict-bearing change. A user can
-therefore confirm both retained values without leaving the path history page.
+A signed-in writer can keep the left value, keep the right value, accept a reviewed proposal when
+one exists, or enter prepared replacement text. `POST /drive/conflict/resolve` adapts that form to
+the registry's `resolve_conflict` capability, which checks the path against the conflict region and
+returns the Liquid `conflict_resolution` value and containing change. Successful resolution returns
+the person to the containing drive folder.
+
+The history table lists each immutable conflict identity carried by a conflict-bearing change. The
+drive conflict page resolves that record and shows the preserved left and right values.
 
 ## What the scenario proves
 
@@ -60,12 +69,12 @@ Liquid client contracts:
 - `DriveScenario.UserSyncsSharesAndSeesHistoryEndToEnd` proves that a regular user can sign up,
   synchronize a drive folder, share it with another regular user, and let that recipient browse the
   folder through the API and read its rendered history.
-- `DriveScenario.ConcurrentOfflineEditsKeepBothNamedVersionsInHistory` proves that clients editing
-  the same file while disconnected retain both edits under distinct names, publish both paths, and
-  expose both immutable values through the history API and page. It requires the bootstrap actor
-  identity fix from [liquid #262](https://github.com/oramasearch/liquid/pull/262). The scenario
-  proof uses Liquid `11fdf44`, including the chunk-index compaction fix from
-  [liquid #274](https://github.com/oramasearch/liquid/pull/274).
+- `DriveScenario.ConcurrentOfflineEditsExposeAndResolveFirstClassConflict` proves that clients
+  editing the same file while disconnected retain both edits under distinct names, publish both
+  paths, expose the complete structural conflict and its preserved values through the API and page,
+  and resolve it through the public action. It requires the bootstrap actor identity fix from
+  [liquid #262](https://github.com/oramasearch/liquid/pull/262). The scenario proof uses the recorded
+  Liquid `main` pin, including first-class conflict records and structural convergence.
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` proves that a drive folder is the
   same Liquid repository: the public repository client pulls and materializes it, after which CMake
   builds and runs the contained project.

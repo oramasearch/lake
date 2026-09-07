@@ -253,7 +253,8 @@ std::string web_ui_drive_version_diff(const control::Repository& repository,
                                       const DriveVersionDiff& difference,
                                       bool signed_in);
 std::string web_ui_drive_conflict(const control::Repository& repository,
-                                  std::string_view path,
+                                  std::string_view ref,
+                                  const RepositoryConflict& conflict,
                                   const std::vector<RepositoryFile>& versions,
                                   const std::optional<DriveVersionDiff>& difference,
                                   bool signed_in);

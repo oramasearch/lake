@@ -1537,7 +1537,33 @@ RepositoryChange repository_change_from_json(const nlohmann::json& value) {
 }
 
 RepositoryConflict repository_conflict_from_json(const nlohmann::json& value) {
-    return {json_string(value, "path"), value.value("blobs", std::vector<std::string>{})};
+    RepositoryConflict output{
+        .id = json_string(value, "id"),
+        .base = json_string(value, "base"),
+        .left = json_string(value, "left"),
+        .right = json_string(value, "right"),
+        .region = {.path = json_string(value.at("region"), "path")},
+        .kind = json_string(value, "kind"),
+        .explanation = json_string(value, "explanation"),
+        .reasons = value.value("reasons", std::vector<std::string>{}),
+    };
+    const nlohmann::json& region = value.at("region");
+    if (region.contains("bytes")) {
+        output.region.bytes =
+            RepositoryConflictByteRange{region.at("bytes").value("offset", std::uint64_t{0}),
+                                        region.at("bytes").value("length", std::uint64_t{0})};
+    }
+    if (region.contains("nodes")) {
+        output.region.nodes = RepositoryConflictNodeRange{json_string(region.at("nodes"), "first"),
+                                                          json_string(region.at("nodes"), "last")};
+    }
+    if (value.contains("proposal")) {
+        output.proposal = json_string(value, "proposal");
+    }
+    if (value.contains("node")) {
+        output.node = json_string(value, "node");
+    }
+    return output;
 }
 
 RepositoryDiffEntry repository_diff_entry_from_json(const nlohmann::json& value) {
@@ -2338,38 +2364,108 @@ public:
         if (!conflicts) {
             return std::unexpected(error_of(conflicts.error()));
         }
-        std::vector<liquid::conflict> visible_conflicts = *conflicts;
-        if (visible_conflicts.empty()) {
-            const auto history = liquid::runtime::block_on((*repository)->subject->log());
-            if (!history) {
-                return std::unexpected(error_of(history.error()));
-            }
-            if (!history->empty()) {
-                visible_conflicts = history->front().conflicts;
-            }
-        }
         std::vector<RepositoryConflict> output;
-        output.reserve(visible_conflicts.size());
-        for (const liquid::conflict& conflict : visible_conflicts) {
-            std::vector<std::string> blobs;
-            blobs.reserve(conflict.refs.size());
-            for (const liquid::digest& blob : conflict.refs) {
-                const auto contents = liquid::runtime::block_on((*repository)->subject->blob(blob));
-                if (contents) {
-                    blobs.push_back(liquid::to_string(blob));
-                    continue;
-                }
-                const auto tree = liquid::runtime::block_on((*repository)->subject->tree(blob));
-                if (!tree) {
-                    blobs.push_back(liquid::to_string(blob));
-                    continue;
-                }
-                const auto entry = find_file(*(*repository)->subject, *tree, conflict.path);
-                blobs.push_back(entry ? liquid::to_string(entry->ref) : liquid::to_string(blob));
+        output.reserve(conflicts->size());
+        for (const liquid::conflict& conflict : *conflicts) {
+            RepositoryConflict mapped{
+                .id = liquid::to_string(conflict.id),
+                .base = liquid::to_string(conflict.base),
+                .left = liquid::to_string(conflict.left),
+                .right = liquid::to_string(conflict.right),
+                .region = {.path = conflict.region.path},
+                .kind = conflict_kind_name(conflict.kind),
+                .explanation = conflict.explanation,
+                .reasons = conflict.reasons,
+                .node = conflict.node,
+            };
+            if (conflict.region.bytes) {
+                mapped.region.bytes = RepositoryConflictByteRange{conflict.region.bytes->offset,
+                                                                  conflict.region.bytes->length};
             }
-            output.push_back({conflict.path, std::move(blobs)});
+            if (conflict.region.nodes) {
+                mapped.region.nodes =
+                    RepositoryConflictNodeRange{node_id_text(conflict.region.nodes->first),
+                                                node_id_text(conflict.region.nodes->last)};
+            }
+            if (conflict.proposal) {
+                mapped.proposal = liquid::to_string(*conflict.proposal);
+            }
+            for (const liquid::digest& value : {conflict.left, conflict.right}) {
+                const auto contents =
+                    liquid::runtime::block_on((*repository)->subject->blob(value));
+                if (contents) {
+                    mapped.version_blobs.push_back(liquid::to_string(value));
+                    continue;
+                }
+                const auto tree = liquid::runtime::block_on((*repository)->subject->tree(value));
+                if (!tree) {
+                    mapped.version_blobs.push_back(liquid::to_string(value));
+                    continue;
+                }
+                const auto entry = find_file(*(*repository)->subject, *tree, conflict.region.path);
+                mapped.version_blobs.push_back(entry ? liquid::to_string(entry->ref)
+                                                     : liquid::to_string(value));
+            }
+            output.push_back(std::move(mapped));
         }
         return output;
+    }
+
+    SyncStoreResult<RepositoryConflictResolution>
+    resolve_repository_conflict(const std::string& customer_id,
+                                const std::string& repository_id,
+                                const std::string& conflict_id,
+                                const std::string& resolution,
+                                std::vector<std::byte> blob) override {
+        std::lock_guard lock(mutex_);
+        auto repository = open_repository(customer_id, repository_id);
+        if (!repository) {
+            return std::unexpected(repository.error());
+        }
+        const auto parsed = liquid::parse_digest(conflict_id);
+        if (!parsed) {
+            return std::unexpected(error_of(parsed.error()));
+        }
+        liquid::conflict_resolution_request request;
+        if (resolution == "accept_proposal") {
+            request.kind = liquid::conflict_resolution_kind::accept_proposal;
+        } else if (resolution == "left") {
+            request.kind = liquid::conflict_resolution_kind::left;
+        } else if (resolution == "right") {
+            request.kind = liquid::conflict_resolution_kind::right;
+        } else if (resolution == "blob") {
+            request.kind = liquid::conflict_resolution_kind::blob;
+            request.blob = std::move(blob);
+        } else {
+            return std::unexpected(SyncStoreError{"invalid_input", "unknown conflict resolution"});
+        }
+        const auto resolved = liquid::runtime::block_on(
+            (*repository)->subject->resolve_conflict(*parsed, std::move(request)));
+        if (!resolved) {
+            return std::unexpected(error_of(resolved.error()));
+        }
+        const std::string change_id = liquid::to_string(resolved->value);
+        const auto history = liquid::runtime::block_on((*repository)->subject->log());
+        if (!history) {
+            return std::unexpected(error_of(history.error()));
+        }
+        const auto change = std::ranges::find_if(*history, [&](const liquid::change& candidate) {
+            return liquid::to_string(candidate.id.value) == change_id;
+        });
+        if (change == history->end()) {
+            return std::unexpected(
+                SyncStoreError{"store_unavailable", "resolved change is absent from history"});
+        }
+        const auto recorded =
+            std::ranges::find_if(change->resolutions, [&](const liquid::conflict_resolution& item) {
+                return liquid::to_string(item.conflict) == conflict_id;
+            });
+        if (recorded == change->resolutions.end()) {
+            return std::unexpected(SyncStoreError{
+                "store_unavailable", "resolved change does not name the conflict value"});
+        }
+        return RepositoryConflictResolution{
+            conflict_id, liquid::to_string(recorded->value), change_id};
     }
 
     SyncStoreResult<RepositoryStorageSummary>
@@ -3628,6 +3724,20 @@ private:
         return output;
     }
 
+    static std::string conflict_kind_name(liquid::conflict_kind kind) {
+        switch (kind) {
+        case liquid::conflict_kind::text:
+            return "text";
+        case liquid::conflict_kind::structural:
+            return "structural";
+        case liquid::conflict_kind::crdt_suspicious:
+            return "crdt-suspicious";
+        case liquid::conflict_kind::suspicious_merge:
+            return "suspicious-merge";
+        }
+        return "text";
+    }
+
     static std::string tree_diff_kind_name(liquid::tree_diff_kind kind) {
         switch (kind) {
         case liquid::tree_diff_kind::added:
@@ -4478,6 +4588,7 @@ struct ApiServer::Impl {
             "/webhooks/retry",
             "/protection",
             "/conflicts",
+            "/conflicts/resolve",
             "/artifact",
             "/drive",
             "/drive/preview",
@@ -4485,6 +4596,7 @@ struct ApiServer::Impl {
             "/drive/history",
             "/drive/history/diff",
             "/drive/conflict",
+            "/drive/conflict/resolve",
             "/drive/folder",
             "/drive/upload",
             "/drive/rename",
@@ -7702,15 +7814,58 @@ struct ApiServer::Impl {
         if (result.value.contains("difference")) {
             difference = drive_version_diff_from_json(result.value.at("difference"));
         }
+        const RepositoryConflict conflict =
+            repository_conflict_from_json(result.value.at("conflict"));
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_drive_conflict(repository_from_json(result.value.at("repository")),
-                                               path,
+                                               ref,
+                                               conflict,
                                                versions,
                                                difference,
                                                context.authorized),
                          "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    boost::http::route_task serve_conflict_resolution(boost::http::route_params& route,
+                                                      bool return_to_drive) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string repository_id = form_field(body, "repository_id");
+        const std::string ref = form_field(body, "ref");
+        const std::string path = form_field(body, "path");
+        const std::string resolution = form_field(body, "resolution");
+        nlohmann::json input{{"repository_id", repository_id},
+                             {"ref", ref},
+                             {"path", path},
+                             {"conflict_id", form_field(body, "conflict_id")},
+                             {"resolution", resolution}};
+        if (resolution == "blob") {
+            const std::string prepared = form_field(body, "blob");
+            std::vector<std::byte> bytes;
+            bytes.reserve(prepared.size());
+            std::ranges::transform(prepared, std::back_inserter(bytes), [](char value) {
+                return static_cast<std::byte>(value);
+            });
+            input["blob"] = base64_encode(bytes);
+        }
+        const ApiResult result = registry.call("resolve_conflict", std::move(input), context);
+        if (!result.ok) {
+            co_return co_await serve_repository_page_error(route, context, result);
+        }
+        if (return_to_drive) {
+            co_return co_await redirect(route,
+                                        "/drive?repository_id=" + oauth_url_encode(repository_id) +
+                                            "&ref=" + oauth_url_encode(ref) +
+                                            "&path=" + oauth_url_encode(path_parent(path)));
+        }
+        co_return co_await redirect(route,
+                                    "/conflicts?repository_id=" + oauth_url_encode(repository_id));
     }
 
     boost::http::route_task render_drive_share_page(boost::http::route_params& route,
@@ -10035,6 +10190,12 @@ bool ApiServer::start() {
         http::method::get, "/conflicts", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/conflicts", impl.serve_conflicts_page(route));
         });
+    router.add(http::method::post,
+               "/conflicts/resolve",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/conflicts/resolve", impl.serve_conflict_resolution(route, false));
+               });
     router.add(
         http::method::get, "/artifacts", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/artifacts", impl.serve_artifacts_page(route));
@@ -10081,6 +10242,13 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/conflict", impl.serve_drive_conflict_page(route));
+               });
+    router.add(http::method::post,
+               "/drive/conflict/resolve",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/drive/conflict/resolve",
+                                               impl.serve_conflict_resolution(route, true));
                });
     router.add(http::method::post,
                "/drive/folder",

@@ -17,6 +17,11 @@ branches. The recorded commits, rather than the configured branch names, determi
 `modules/liquid` owns its transitive submodules. Lake initializes them recursively but does not
 select their revisions independently.
 
+The Liquid pin includes first-class conflict values and structural CRDT convergence. Lake consumes
+the `conflict`, `conflict_reference`, and `conflict_resolution` records from that pin directly, so
+an update that changes those public records must update Lake's API, MCP, forge, drive, fixture, and
+documentation surfaces in the same branch.
+
 ## Beast2 carrier
 
 `oramasearch/beast2` is a private copy, not a GitHub fork. Its `main` branch mirrors public

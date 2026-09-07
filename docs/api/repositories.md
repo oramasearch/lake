@@ -29,7 +29,8 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 | `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
 | `get_change` | read | `id`, `change_id` | change identity and metadata |
 | `change_diff` | read | `id`, `change_id` | `{items: [{path, old_path, kind, changes, old_mode, new_mode, old_blob, new_blob, line_hunks, old_conflicts, new_conflicts}]}` |
-| `list_conflicts` | read | `id` | `{items: [{path, blobs}]}` |
+| `list_conflicts` | read | `id` | `{items: [{id, base, left, right, region, kind, explanation, proposal?, reasons, node?}]}` |
+| `resolve_conflict` | action | `repository_id`, `ref`, `path`, `conflict_id`, `resolution`, `blob?` | `{conflict, value, change}` |
 | `list_artifacts` | read | `id`, `action?`, `output?`, `content?`, `cursor?`, `limit?` | `{items: [result], next_cursor, done}` |
 | `get_artifact` | read | `id`, `result_id` | one result with outputs, timings, cache/divergence state, attestations and trace |
 | `refs` | read | `repository_id` | `404 not_found`, `409 conflict` (tombstoned) |
@@ -51,8 +52,20 @@ every successful or denied call.
 `repository_refs`, `repository_tree`, `repository_file`, `list_changes`, and `list_conflicts`
 read libliquid directly through the lake repository-store adapter. Tree output is recursive;
 every entry retains its stable node identity plus logical and stored sizes, and every file links
-to its backing blob identity and rendered contents. Conflict records remain
-first-class values containing a path and the competing blob references.
+to its backing blob identity and rendered contents.
+
+`list_conflicts` exposes Liquid's first-class conflict record without reducing it to digests. The
+record names its content identity; base, left, and right values; kind (`text`, `structural`,
+`crdt-suspicious`, or `suspicious-merge`); repository-relative region with either byte or stable-node
+range; plain explanation; optional reviewed proposal; detailed reasons; and optional affected node.
+Structural values can reference a tree. Lake retains those canonical digests in the API while its
+drive adapter resolves the affected path inside each tree for a two-file comparison.
+
+`resolve_conflict` is the write-authorized resolution action rendered into REST, OpenAPI, and MCP.
+`resolution` is `left`, `right`, `accept_proposal`, or `blob`; the last form requires base64 bytes in
+`blob`. The request path must match the conflict region so authorization cannot be borrowed from a
+different path. Liquid records the chosen value as a `conflict_resolution` in the returned change,
+and Lake returns both identities and records the signed audit outcome.
 
 `change_diff` compares the selected change with its first parent through libliquid's public
 `repository::diff` API. A root change is compared with an empty tree. The result retains every
@@ -125,7 +138,9 @@ customers, change visibility, rename, transfer, tombstone, verify policy denial,
 signed audit stream contains the deletion outcome. For Postgres, apply `db/schema.sql` through
 the operator’s `PostgresSchema` before running the integration test. `SyncHttp.*` proves push,
 incremental chunk transfer, pull, atomic bad-signature rejection, policy denial, and audit records.
-`PostgresSync.*` repeats the exchange with the production control store.
+`PostgresSync.*` repeats the exchange with the production control store. The repository, drive,
+OpenAPI, MCP, and renderer tests verify the complete conflict record and every advertised resolution
+kind.
 
 ## Change
 
