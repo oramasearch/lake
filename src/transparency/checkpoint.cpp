@@ -4,6 +4,8 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -13,6 +15,11 @@
 #include <ranges>
 #include <set>
 #include <string_view>
+#include <utility>
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 #include <openssl/evp.h>
 
@@ -20,6 +27,62 @@ namespace lake::transparency {
 namespace {
 
 using nlohmann::json;
+
+class PublicationLock {
+public:
+    explicit PublicationLock(int descriptor) : descriptor_(descriptor) {}
+
+    ~PublicationLock() {
+        if (descriptor_ >= 0) {
+            static_cast<void>(flock(descriptor_, LOCK_UN));
+            static_cast<void>(close(descriptor_));
+        }
+    }
+
+    PublicationLock(PublicationLock&& other) noexcept
+        : descriptor_(std::exchange(other.descriptor_, -1)) {}
+    PublicationLock& operator=(PublicationLock&&) = delete;
+    PublicationLock(const PublicationLock&) = delete;
+    PublicationLock& operator=(const PublicationLock&) = delete;
+
+    static Result<PublicationLock> acquire(const std::filesystem::path& directory) {
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        if (error) {
+            return std::unexpected(Error{"store_error", error.message()});
+        }
+        const int descriptor = open((directory / "publish.lock").c_str(), O_CREAT | O_RDWR, 0600);
+        if (descriptor < 0) {
+            return std::unexpected(
+                Error{"store_error", "could not open checkpoint publication lock"});
+        }
+        if (flock(descriptor, LOCK_EX) != 0) {
+            const std::string message = std::strerror(errno);
+            static_cast<void>(close(descriptor));
+            return std::unexpected(
+                Error{"store_error", "could not lock checkpoint publication: " + message});
+        }
+        return PublicationLock(descriptor);
+    }
+
+private:
+    int descriptor_ = -1;
+};
+
+Result<void> check_issued_at(const json& previous, const json& candidate) {
+    if (!previous.contains("issued_at")) {
+        return {};
+    }
+    if (!previous.at("issued_at").is_number_unsigned()) {
+        return std::unexpected(Error{"store_error", "stored checkpoint issued_at is malformed"});
+    }
+    if (!candidate.contains("issued_at") || !candidate.at("issued_at").is_number_unsigned() ||
+        candidate.at("issued_at").get<std::uint64_t>() <
+            previous.at("issued_at").get<std::uint64_t>()) {
+        return std::unexpected(Error{"conflict", "checkpoint issued_at would move backwards"});
+    }
+    return {};
+}
 
 struct PkeyDeleter {
     void operator()(EVP_PKEY* key) const {
@@ -278,11 +341,18 @@ json log_configuration_json(const LogConfiguration& configuration) {
 struct CheckpointService::Impl {
     std::filesystem::path directory;
     LogConfiguration configuration;
+    CheckpointClock signing_clock;
     bool valid_instance = false;
     mutable std::mutex mutex;
 
-    Impl(std::filesystem::path store_root, std::string instance_name, LogConfiguration configured)
-        : configuration(std::move(configured)) {
+    Impl(std::filesystem::path store_root,
+         std::string instance_name,
+         LogConfiguration configured,
+         CheckpointClock configured_clock)
+        : configuration(std::move(configured)), signing_clock(std::move(configured_clock)) {
+        if (!signing_clock) {
+            signing_clock = std::chrono::system_clock::now;
+        }
         valid_instance = valid_instance_name(instance_name);
         if (valid_instance) {
             directory = std::move(store_root) / std::move(instance_name) / "log" / "checkpoints";
@@ -319,13 +389,41 @@ struct CheckpointService::Impl {
         }
         return latest + 1;
     }
+
+    Result<json> body_for_signing(const json& checkpoint, std::uint64_t sequence) const {
+        json previous_body = json::object();
+        if (sequence > 1) {
+            const auto previous =
+                read_json(directory / (std::to_string(sequence - 1) + ".checkpoint.json"));
+            if (!previous || !previous->contains("checkpoint") ||
+                !previous->at("checkpoint").is_object()) {
+                return std::unexpected(Error{"store_error", "previous checkpoint is malformed"});
+            }
+            previous_body = previous->at("checkpoint");
+        }
+        const auto issued_at =
+            std::chrono::floor<std::chrono::seconds>(signing_clock()).time_since_epoch().count();
+        if (issued_at < 0) {
+            return std::unexpected(Error{"conflict", "checkpoint clock precedes the Unix epoch"});
+        }
+        json signed_body = checkpoint;
+        signed_body["issued_at"] = static_cast<std::uint64_t>(issued_at);
+        const auto monotonic = check_issued_at(previous_body, signed_body);
+        if (!monotonic) {
+            return std::unexpected(monotonic.error());
+        }
+        return signed_body;
+    }
 };
 
 CheckpointService::CheckpointService(std::filesystem::path store_root,
                                      std::string instance_name,
-                                     LogConfiguration configuration)
-    : impl_(std::make_shared<Impl>(
-          std::move(store_root), std::move(instance_name), std::move(configuration))) {}
+                                     LogConfiguration configuration,
+                                     CheckpointClock clock)
+    : impl_(std::make_shared<Impl>(std::move(store_root),
+                                   std::move(instance_name),
+                                   std::move(configuration),
+                                   std::move(clock))) {}
 
 Result<json> CheckpointService::publish(const json& checkpoint,
                                         const CheckpointSigner& signer,
@@ -345,7 +443,20 @@ Result<json> CheckpointService::publish(const json& checkpoint,
     if (!signer) {
         return std::unexpected(Error{"store_error", "no checkpoint signer is configured"});
     }
-    const auto signature = signer(checkpoint);
+    const auto publication_lock = PublicationLock::acquire(impl_->directory);
+    if (!publication_lock) {
+        return std::unexpected(publication_lock.error());
+    }
+    const auto sequence = impl_->next_sequence();
+    if (!sequence) {
+        return std::unexpected(sequence.error());
+    }
+    const auto prepared = impl_->body_for_signing(checkpoint, *sequence);
+    if (!prepared) {
+        return std::unexpected(prepared.error());
+    }
+    const json& signed_body = *prepared;
+    const auto signature = signer(signed_body);
     if (!signature) {
         return std::unexpected(signature.error());
     }
@@ -355,7 +466,7 @@ Result<json> CheckpointService::publish(const json& checkpoint,
         return std::unexpected(
             Error{"store_error", "checkpoint signer returned an invalid signature"});
     }
-    const std::string encoded = checkpoint.dump();
+    const std::string encoded = signed_body.dump();
     const auto checkpoint_hash = sha256(encoded);
     if (!checkpoint_hash) {
         return std::unexpected(checkpoint_hash.error());
@@ -369,7 +480,7 @@ Result<json> CheckpointService::publish(const json& checkpoint,
         for (const Witness& witness : impl_->configuration.witnesses) {
             const auto response = submitter(
                 witness.endpoint,
-                {{"checkpoint", checkpoint}, {"checkpoint_hash_sha256", *checkpoint_hash}});
+                {{"checkpoint", signed_body}, {"checkpoint_hash_sha256", *checkpoint_hash}});
             if (!response || !response->contains("signature") ||
                 !response->at("signature").is_string()) {
                 continue;
@@ -404,11 +515,7 @@ Result<json> CheckpointService::publish(const json& checkpoint,
         return std::unexpected(
             Error{"store_error", "could not create checkpoint directory: " + error.message()});
     }
-    const auto sequence = impl_->next_sequence();
-    if (!sequence) {
-        return std::unexpected(sequence.error());
-    }
-    json record{{"checkpoint", checkpoint},
+    json record{{"checkpoint", signed_body},
                 {"checkpoint_hash_sha256", *checkpoint_hash},
                 {"sequence", *sequence},
                 {"signature", *signature},
@@ -453,6 +560,15 @@ Result<json> CheckpointService::adopt(const json& record) {
     const std::uint64_t sequence = record.at("sequence").get<std::uint64_t>();
     if (sequence == 0) {
         return std::unexpected(Error{"invalid_input", "checkpoint sequence must be positive"});
+    }
+    const json& body = record.at("checkpoint");
+    if (body.contains("issued_at") && !body.at("issued_at").is_number_unsigned()) {
+        return std::unexpected(Error{
+            "invalid_input", "checkpoint issued_at must be non-negative integer Unix seconds"});
+    }
+    const auto publication_lock = PublicationLock::acquire(impl_->directory);
+    if (!publication_lock) {
+        return std::unexpected(publication_lock.error());
     }
     const std::string encoded = record.at("checkpoint").dump();
     const auto checkpoint_hash = sha256(encoded);
@@ -501,7 +617,8 @@ Result<json> CheckpointService::adopt(const json& record) {
     if (std::filesystem::exists(current_path)) {
         const auto current = read_json(current_path);
         if (!current || !current->contains("sequence") ||
-            !current->at("sequence").is_number_unsigned()) {
+            !current->at("sequence").is_number_unsigned() || !current->contains("checkpoint") ||
+            !current->at("checkpoint").is_object()) {
             return std::unexpected(Error{"store_error", "current checkpoint is malformed"});
         }
         const std::uint64_t current_sequence = current->at("sequence").get<std::uint64_t>();
@@ -514,6 +631,10 @@ Result<json> CheckpointService::adopt(const json& record) {
         }
         if (current_sequence > sequence) {
             return std::unexpected(Error{"conflict", "checkpoint replication would roll back"});
+        }
+        const auto monotonic = check_issued_at(current->at("checkpoint"), record.at("checkpoint"));
+        if (!monotonic) {
+            return std::unexpected(monotonic.error());
         }
     }
     const std::filesystem::path checkpoint_path =
