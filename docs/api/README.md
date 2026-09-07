@@ -22,6 +22,8 @@ envelope as `structuredContent` (and as text), with `isError` set.
 
 **Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
 the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
+The [identity contract](identity.md) includes response isolation: a completed sign-in cannot
+send its session cookie or redirect through another request, including a new client connection.
 Repository reads are the deliberate public-read exception: anonymous calls return only a public
 repository and its content; all other repository visibility levels remain protected.
 
