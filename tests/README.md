@@ -73,3 +73,8 @@ cursors, renderer strings, OpenAPI, and MCP discovery. A Beast2 Loki double veri
 coroutine HTTP client, selector request, secret bearer, line conversion, and cursor. The focused
 Postgres suite round-trips the same environment binding and JSON mirror through the production
 store.
+
+Share-link delivery tests cover signed-out folder traversal, registered previews, exact downloads,
+policy-restricted descendants, stable-node moves, and sibling/parent, expiry, and revocation
+refusals. The registry checks include OpenAPI/MCP discovery and MCP byte delivery; the Postgres
+scenario uses a regular user's private repository and text, binary, and empty files.

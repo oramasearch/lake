@@ -13,3 +13,9 @@ store, public HTTP routes, and public client libraries. They use the caller-prov
   conflict record and rendered explanation, then resolves the record through the public API.
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` synchronizes a CMake project,
   pulls and materializes the same repository with Liquid's public client, and builds and runs it.
+
+`SharedLinkScenario.*` in `drive_test.cpp` signs up a regular owner and syncs a private repository.
+It opens the share without a session, traverses a child folder, previews supported text, checks
+unsupported-format fallback, compares text/binary/empty downloads, verifies REST byte delivery,
+and refuses broad drive access. It covers both link roles, guessed sibling/parent and malformed
+paths, a descendant with inheritance disabled, expired links, and revocation after listing.

@@ -4081,22 +4081,78 @@ std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
     return web_ui_shell("lake — shared with me", "drive", content, true);
 }
 
+namespace {
+
+std::string shared_drive_url(std::string_view token,
+                             std::string_view ref,
+                             std::string_view path,
+                             std::string_view action = {}) {
+    std::string url = "/share/" + url_component(token);
+    if (!action.empty()) {
+        url += "/" + std::string(action);
+    }
+    return url + "?ref=" + url_component(ref) + "&path=" + url_component(path);
+}
+
+} // namespace
+
 std::string web_ui_drive_link(std::string_view path,
                               const std::vector<RepositoryTreeEntry>& entries,
-                              std::string_view error) {
+                              std::string_view error,
+                              std::string_view token,
+                              std::string_view ref,
+                              std::string_view root_path) {
     std::string content = "<p class=\"eyebrow\">shared drive folder</p><h1>" + web_ui_escape(path) +
                           "</h1>" + error_markup(error);
-    content += "<table><thead><tr><th>Name</th><th>Kind</th></tr></thead><tbody>";
+    if (!error.empty()) {
+        return web_ui_shell("lake — shared drive folder", "share link", content, false);
+    }
+    content += "<p class=\"sub\">View – browse and download. Access ends when this link expires "
+               "or is revoked. Downloaded copies are independent.</p>";
+    if (path != root_path && !root_path.empty()) {
+        content += "<div class=\"actions\">" +
+                   row_link(shared_drive_url(token, ref, root_path), "Shared folder") +
+                   row_link(shared_drive_url(token, ref, parent_path(path)), "Up one folder") +
+                   "</div>";
+    }
+    content += "<div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>Kind</th>"
+               "<th>Actions</th></tr></thead><tbody>";
     for (const RepositoryTreeEntry& entry : entries) {
-        content += std::format("<tr><td>{}</td><td>{}</td></tr>",
-                               web_ui_escape(entry.path),
-                               web_ui_escape(entry.kind));
+        const bool folder = entry.kind == "tree";
+        const bool file = entry.kind == "blob";
+        const std::string name = path_name(entry.path);
+        const std::string open_url =
+            shared_drive_url(token, ref, entry.path, folder ? "" : "preview");
+        content += "<tr><td>" + (folder || file ? row_link(open_url, name) : web_ui_escape(name)) +
+                   "</td><td>" + web_ui_escape(entry.kind) + "</td><td>";
+        if (file) {
+            content += "<a href=\"" +
+                       web_ui_escape(shared_drive_url(token, ref, entry.path, "download")) +
+                       "\" download>Download</a>";
+        } else if (folder) {
+            content += row_link(open_url, "Open folder");
+        }
+        content += "</td></tr>";
     }
-    if (entries.empty() && error.empty()) {
-        content += "<tr><td colspan=\"2\" class=\"empty\">This folder is empty.</td></tr>";
+    if (entries.empty()) {
+        content += "<tr><td colspan=\"3\" class=\"empty\">This folder is empty.</td></tr>";
     }
-    content += "</tbody></table>";
+    content += "</tbody></table></div>";
     return web_ui_shell("lake — shared drive folder", "share link", content, false);
+}
+
+std::string web_ui_drive_link_preview(std::string_view token,
+                                      std::string_view ref,
+                                      const RepositoryFile& file,
+                                      const DrivePreview& preview) {
+    const std::string content =
+        "<p class=\"eyebrow\">shared file preview</p><h1>" + web_ui_escape(path_name(file.path)) +
+        "</h1><p class=\"sub\">" + web_ui_escape(preview.format) + " · " +
+        web_ui_escape(display_size(file.size)) + "</p><div class=\"actions\">" +
+        row_link(shared_drive_url(token, ref, parent_path(file.path)), "Back to folder") +
+        "<a href=\"" + web_ui_escape(shared_drive_url(token, ref, file.path, "download")) +
+        "\" download>Download</a></div><div class=\"panel\">" + preview.html + "</div>";
+    return web_ui_shell("lake — shared file preview", "share link", content, false);
 }
 
 std::string web_ui_model(const nlohmann::json& model, bool signed_in) {

@@ -1073,3 +1073,37 @@ TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
     EXPECT_NE(keys.find("Key material is never returned"), std::string::npos);
     expect_theme_scripts(keys);
 }
+
+TEST(WebUi, SharedLinkProvidesScopedNavigationPreviewAndDownload) {
+    const std::vector<lake::api::RepositoryTreeEntry> entries{{"shared/child", "tree"},
+                                                              {"shared/hello & bye.txt", "blob"},
+                                                              {"shared/conflict", "conflict"}};
+    const std::string page =
+        lake::api::web_ui_drive_link("shared", entries, "", "token<&", "release one", "shared");
+    EXPECT_NE(page.find("View – browse and download"), std::string::npos);
+    EXPECT_NE(page.find("/share/token%3C%26?ref=release%20one&amp;path=shared%2Fchild"),
+              std::string::npos);
+    EXPECT_NE(page.find("/share/token%3C%26/preview?"), std::string::npos);
+    EXPECT_NE(page.find("hello &amp; bye.txt"), std::string::npos);
+    EXPECT_NE(page.find("download>Download"), std::string::npos);
+    EXPECT_EQ(page.find("Up one folder"), std::string::npos);
+    EXPECT_EQ(page.find("repository_id="), std::string::npos);
+    const std::string child =
+        lake::api::web_ui_drive_link("shared/child", {}, "", "token", "main", "shared");
+    EXPECT_NE(child.find("Up one folder"), std::string::npos);
+    EXPECT_NE(child.find("This folder is empty"), std::string::npos);
+    const lake::api::RepositoryFile file{"shared/child/hello.txt", "blob", "hello", 5};
+    const auto preview = lake::api::DriveFormatRegistry::defaults().preview(file);
+    ASSERT_TRUE(preview);
+    const std::string opened =
+        lake::api::web_ui_drive_link_preview("token", "main", file, *preview);
+    EXPECT_NE(opened.find("Back to folder"), std::string::npos);
+    EXPECT_NE(opened.find("/share/token/download?ref=main&amp;path=shared%2Fchild%2Fhello.txt"),
+              std::string::npos);
+    EXPECT_NE(opened.find("hello</pre>"), std::string::npos);
+    EXPECT_EQ(opened.find("repository_id="), std::string::npos);
+    const std::string denied =
+        lake::api::web_ui_drive_link("Shared folder", {}, "expired or revoked");
+    EXPECT_NE(denied.find("expired or revoked"), std::string::npos);
+    EXPECT_EQ(denied.find("download>Download"), std::string::npos);
+}

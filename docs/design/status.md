@@ -147,8 +147,9 @@ audit path.
 
 Drive presents the same repositories as folders with stable-node ACLs, server-rendered previews,
 effective-access sharing before creation, expiring links with stated revocation consequences, a
-shared-with-me view, path history, and restore-as-a-new-change (`0015_drive` stores link expiry
-and revocation; [`../api/drive.md`](../api/drive.md), [`../api/sharing.md`](../api/sharing.md),
+shared-with-me view, bearer-link descendant traversal, preview and exact-byte downloads with
+per-operation scope, expiry and revocation checks, path history, and restore-as-a-new-change
+(`0015_drive` stores link expiry and revocation; [`../api/drive.md`](../api/drive.md), [`../api/sharing.md`](../api/sharing.md),
 [`../ui/drive.md`](../ui/drive.md), [`../ui/sharing.md`](../ui/sharing.md)).
 
 Models and datasets use native resumable liquid sync with chunk-level deduplication and

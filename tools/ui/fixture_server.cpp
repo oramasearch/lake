@@ -269,6 +269,9 @@ int main(int argc, char** argv) {
                 "docs/architecture.md",
                 bytes("# Architecture\n\nServer-rendered pages and liquid data.\n"))),
             "write architecture document");
+    require(liquid::runtime::block_on(liquid_repository.write(
+                "docs/nested/hello.txt", bytes("Hello from the shared child folder.\n"))),
+            "write nested shared document");
     require(liquid::runtime::block_on(
                 liquid_repository.write("conflict.txt", bytes("primary version\nshared line\n"))),
             "write conflict source");

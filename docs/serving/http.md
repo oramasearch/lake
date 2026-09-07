@@ -69,3 +69,11 @@ are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 `curl -i` the hello page, `/v1/server_info`, `/healthz` and an unmatched path;
 `ctest --test-dir build`. The focused idle-close proof is
 `ctest --test-dir build -R HttpServer.IdleKeepAliveCloseWritesNothingToStderr --output-on-failure`.
+
+## Bearer-link recipient delivery
+
+`GET /share/:token` renders the shared root or its requested descendant folder. The sibling routes
+`GET /share/:token/preview` and `GET /share/:token/download` require a file `path`; all accept `ref`
+(default `main`). Each route calls its public share-link registry capability and uses `no-store`.
+The attachment carries the exact authorized bytes. Scope, role, expiry, and revocation checks live
+in the registry handlers and also apply to REST and MCP. See [sharing](../api/sharing.md).

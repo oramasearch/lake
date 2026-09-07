@@ -30,3 +30,7 @@ compatibility alias. `test-token-gates.sh` proves both gates reject local change
 `check-contrast.mjs` resolves the generated theme roles, calculates the WCAG contrast ratio for
 every governed text, status, focus, and boundary pair, and fails below the documented threshold.
 See [`docs/ui/design-system.md`](../../docs/ui/design-system.md).
+
+The `shared-link` page includes `docs/nested/hello.txt` to exercise folder traversal, preview,
+and download without a session. Its links stay under `/share/<token>` and call the same recipient
+capabilities as REST and MCP. See [sharing](../../docs/ui/sharing.md) for the delivery checks.
