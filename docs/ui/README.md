@@ -48,7 +48,7 @@ drive views. The unhashed stylesheet and font routes remain compatibility aliase
 | Releases | `GET /releases?repository_id=<uuid>` | sanitized release notes, change identity, artifacts, output counts, and verified attestations |
 | Webhooks | `GET /webhooks?repository_id=<uuid>` | sanitized endpoints and events with delivery status, attempts, errors, and failed-delivery retry |
 | Branch protection | `GET /protection?repository_id=<uuid>` | ref rules, required review and verification, update mode, pushers, and signed refusal audit |
-| Conflicts | `GET /conflicts?repository_id=<uuid>` | unresolved conflict values |
+| Conflicts | `GET /conflicts?repository_id=<uuid>`, `POST /conflicts/resolve` | conflict kind, exact region, explanation, suspicious-merge reasons, values, and resolution controls |
 | Artifacts | `GET /artifacts?repository_id=<uuid>[&action=<digest>&output=<path>&content=<digest>&cursor=<cursor>&limit=<n>]` | filtered cursor pages of build results |
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |
 | Search | `GET /search?query=<text>[&customer=<id>&repository=<id>&ref=<name>&change=<digest>&history=1]` | authorized hot branch-tip, immutable tag-snapshot, exact-change, or complete-history results with the selected query mode |
@@ -58,7 +58,7 @@ drive views. The unhashed stylesheet and font routes remain compatibility aliase
 | Encryption keys | `GET /encryption-keys?mount_id=<uuid>` | key names, current versions and derivation parent; never key material |
 | Drive folder | `GET /drive?repository_id=<uuid>&ref=<ref>&path=<path>[&view=list|grid&sort=name|size|modified&direction=asc|desc]` | breadcrumbs, folder and file cards or rows, size, modified time, and capability-backed create, upload, rename, move, and delete controls |
 | Drive preview | `GET /drive/preview`, `/drive/download` | server-rendered or browser-native preview for registered formats, with exact-byte download, size, and digest fallback |
-| Drive history | `GET /drive/history`, `/drive/history/diff`, `/drive/conflict` | retained path versions, restore-as-new-change controls, two-version text differences, and preserved conflict values |
+| Drive history | `GET /drive/history`, `/drive/history/diff`, `/drive/conflict`; `POST /drive/conflict/resolve` | retained path versions, restore-as-new-change controls, explained two-version conflicts, and write-authorized resolution |
 | Drive sharing | GET /drive/share, /drive/share/link, /share/<token> | effective access before sharing, People/Organization/Link choices, link state and revocation consequence, individual link detail, and the public shared-folder view; see [sharing.md](sharing.md) |
 | Shared with me | GET /shared-with-me | live folders granted directly to the signed-in identity, their grantor, allowed actions, and current availability; see [sharing.md](sharing.md) |
 

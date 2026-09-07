@@ -35,7 +35,8 @@ pages. Operator-control outages degrade platform health, preserve stale mirror r
 platform writes without changing readiness.
 The codebase now renders forge-designed repository homes, trees, highlighted files with line
 anchors and blame, change review with safe Markdown, comments, diff layouts and checks, issues,
-releases, webhook history and retry, branch protection with signed refusal audit, conflict values,
+releases, webhook history and retry, branch protection with signed refusal audit, explained conflict
+values with audited resolution,
 paged artifact results with verified attestations and trace summaries, and effective access. The
 Postgres-backed forge scenario proves an unlanded Liquid review, cursor movement after rewrite,
 approval, publication, and graph-derived evidence without repository automation YAML.
@@ -107,7 +108,8 @@ persist quorum, expiry, completion, and one-way share evidence while keeping sha
 reconstructed root material out of storage. Both use the signed registry audit path.
 Drive and models add migration `0015_drive`, stable-node folder ACLs, live recipient grants,
 expiring and revocable links, list/grid browse and repository mutations, browser-native and
-server-rendered format-registry previews, version comparison, conflict presentation, per-path
+server-rendered format-registry previews, version comparison, explained conflict presentation and
+resolution, per-path
 history and restore, effective access before sharing, link management, and shared-with-me pages.
 The pinned Liquid drive client is covered end to end against an in-process Lake and Postgres:
 regular-user sign-up, synchronization, sharing, rendered history, disconnected conflict

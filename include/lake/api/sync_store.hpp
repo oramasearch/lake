@@ -90,9 +90,40 @@ struct RepositoryBlameLine {
     std::string occurred_at;
 };
 
-struct RepositoryConflict {
+struct RepositoryConflictByteRange {
+    std::uint64_t offset = 0;
+    std::uint64_t length = 0;
+};
+
+struct RepositoryConflictNodeRange {
+    std::string first;
+    std::string last;
+};
+
+struct RepositoryConflictRegion {
     std::string path;
-    std::vector<std::string> blobs;
+    std::optional<RepositoryConflictByteRange> bytes;
+    std::optional<RepositoryConflictNodeRange> nodes;
+};
+
+struct RepositoryConflict {
+    std::string id;
+    std::string base;
+    std::string left;
+    std::string right;
+    RepositoryConflictRegion region;
+    std::string kind;
+    std::string explanation;
+    std::optional<std::string> proposal;
+    std::vector<std::string> reasons;
+    std::optional<std::string> node;
+    std::vector<std::string> version_blobs;
+};
+
+struct RepositoryConflictResolution {
+    std::string conflict;
+    std::string value;
+    std::string change;
 };
 
 struct RepositoryLineHunk {
@@ -309,6 +340,12 @@ public:
                         const std::string& result_id) = 0;
     virtual SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id, const std::string& repository_id) = 0;
+    virtual SyncStoreResult<RepositoryConflictResolution>
+    resolve_repository_conflict(const std::string& customer_id,
+                                const std::string& repository_id,
+                                const std::string& conflict_id,
+                                const std::string& resolution,
+                                std::vector<std::byte> blob) = 0;
     virtual SyncStoreResult<RepositoryStorageSummary> repository_storage(const std::string&,
                                                                          const std::string&) {
         return std::unexpected(SyncStoreError{"unsupported", "repository storage is unavailable"});

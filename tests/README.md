@@ -30,6 +30,11 @@ page heads, SHA-256 URL changes for different stylesheet bytes, content-hashed f
 and the immutable versus `no-cache` route policy. These checks use embedded or in-memory bytes and
 perform no filesystem or network I/O.
 
+Conflict coverage pins the complete Liquid-derived kind and region, plain explanation, reasons,
+proposal visibility, generated OpenAPI schema, MCP resolution tool, preserved drive comparison
+values, and every advertised resolution input. Renderer checks require the forge and drive pages to
+show those words before their write-authorized forms.
+
 `test_forge_scenario.cpp` is the Postgres-backed forge lifecycle proof. It drives repository sync
 and review operations through a real Lake server with Liquid's sync and forge clients, opens the
 candidate and landed HTML pages, maps a line comment after an inserted line, and lands the approved

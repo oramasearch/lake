@@ -58,7 +58,8 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 > member path, digest, and line; binary and deeper-nested members remain listed only. Change pages
 > render libliquid's per-path structural
 > review with safe Markdown, text hunks, line comments, modes, blob identities, file statistics,
-> conflict values, checks, output paths, and verified attestation profiles. A Postgres-backed
+> explained conflict kinds, regions, reasons, and resolution controls, checks, output paths, and
+> verified attestation profiles. A Postgres-backed
 > scenario proves an unlanded Liquid review, cursor movement after rewrite, approval, publication,
 > and graph-derived evidence without repository automation YAML. Issue, release, webhook, and
 > branch-protection pages expose their existing forge and signed-audit records. Artifact pages
@@ -86,7 +87,8 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 > shared federation issuer store. All remain on the signed audit path.
 > Drive presents the same repositories as folders with stable-node ACLs, server-rendered previews,
 > effective-access sharing before creation, expiring links with stated revocation consequences, a
-> shared-with-me view, path history, restore-as-a-new-change, and conflict values in history. The
+> shared-with-me view, path history, restore-as-a-new-change, and explained conflict values with
+> audited resolution. The
 > pinned Liquid drive client now has a Postgres-backed end-to-end scenario covering regular-user
 > sign-up, folder synchronization and sharing, disconnected conflicts, repository pull, and a build
 > from the materialized files. Models and
@@ -179,9 +181,9 @@ ctest --test-dir build --output-on-failure
 | `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/organization?id=`, `/team?id=`, `/member?id=`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
 | `GET /transparency?identity=<taap-id>` | public hosted identity monitor over checkpoint-verified bulk tiles |
-| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/issues`, `/issue`, `/releases`, `/webhooks`, `/protection`, `/conflicts`, `/artifacts`, `/artifact` | forge pages over authorized repository, review, issue, release, webhook, policy, signed-audit, and libliquid records; file pages include highlighted line anchors and blame, and change pages include review discussion, diff views, checks, and attestations. |
+| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/issues`, `/issue`, `/releases`, `/webhooks`, `/protection`, `/conflicts`, `/artifacts`, `/artifact`; `POST /conflicts/resolve` | forge pages over authorized repository, review, issue, release, webhook, policy, signed-audit, and libliquid records; conflict pages explain kind, region, and reasons before an audited resolution. |
 | `GET /environments?repository_id=`, `/environment?repository_id=&name=`, `/logs?repository_id=&environment=` | platform summaries, deployment history, capability-backed environment/domain forms, and cursor-polling Loki-compatible logs; stale mirror reads show a warning |
-| `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, retained version comparison and conflict values, effective access, and scoped links; create, upload, rename, move, delete, restore, and sharing mutations use POST under `/drive/` |
+| `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, explained conflict comparison, effective access, and scoped links; create, upload, rename, move, delete, restore, conflict resolution, and sharing mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`docs/api/models.md`](docs/api/models.md) |
 | `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*` | OCI Distribution, npm publication/install, and Python publication/install protocols; see [`docs/api/registry.md`](docs/api/registry.md) |
 | `/buildid/*`, `PUT /_lake/debug/*` | public debuginfod reads and protected executable, debug-information, and source publication |

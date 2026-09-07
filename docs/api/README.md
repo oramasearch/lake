@@ -65,7 +65,8 @@ routes and their exact-byte integration coverage.
 | `set_environment_env`, `unset_environment_env` | action (`write`) | repository, environment, key and plain value where setting | appended control-plane row | [platform.md](platform.md) |
 | `create_domain`, `delete_domain` | action (`deploy`) | repository, environment, host and TLS mode where creating | pending operator request | [platform.md](platform.md) |
 | `repository_refs`, `repository_tree`, `repository_file` | read | repository id plus ref or path where required | published refs, tree entries, or one file/blob | [repositories.md](repositories.md) |
-| `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata, per-path diffs with text hunks, or conflict values | [repositories.md](repositories.md) |
+| `list_changes`, `get_change`, `change_diff`, `list_conflicts` | read | repository id plus change id where required | change metadata, per-path diffs with text hunks, or conflicts with kind, region, explanation, proposal, and reasons | [repositories.md](repositories.md) |
+| `resolve_conflict` | action (`write`) | repository id, ref, path, conflict id, resolution kind, and optional base64 blob | conflict/value resolution record and new change | [repositories.md](repositories.md) |
 | `list_artifacts`, `get_artifact` | read | repository id; optional action/output/content filters, cursor and limit; or result id | a result page, or one result with outputs, timing, cache state, verified attestations and trace | [repositories.md](repositories.md) |
 | `reindex_artifacts` | action (`write`) | repository id | registry-derived artifact-member index counts | [registry.md](registry.md) |
 | `drive_browse`, `drive_preview`, `drive_history` | read | repository id, ref, and optional or required path | authorized folder children, format-registry preview, or path changes | [drive.md](drive.md) |

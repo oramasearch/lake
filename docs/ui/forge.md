@@ -70,6 +70,13 @@ representations and link back to their numbered new-line anchor, so switching la
 discussion. Reviewer, assignee, and allowed-pusher identities use the same compact rule and wrap
 as groups rather than overflowing their panels.
 
+`GET /conflicts?repository_id=<id>` presents the current first-class Liquid records beside the
+change review. It names each kind and exact region, explains the conflict in plain words, lists all
+suspicious-merge reasons, and keeps the base, left, right, and optional reviewed proposal identities
+as evidence. Signed-in writers resolve a record through `POST /conflicts/resolve`; the form calls
+the shared `resolve_conflict` capability and offers left, right, reviewed proposal, or prepared
+replacement text.
+
 ## What the scenario proves
 
 The Postgres-backed forge scenario starts with a Liquid drip stream and publishes a candidate on a

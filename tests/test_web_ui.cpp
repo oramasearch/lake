@@ -230,7 +230,7 @@ TEST(WebUi, DrivePagesExposeBrowseMutationHistoryAndConflictControls) {
         lake::api::web_ui_drive_history(repository, "main", "README.md", history, true);
     EXPECT_NE(versions.find("action=\"/drive/history/diff\""), std::string::npos);
     EXPECT_NE(versions.find("action=\"/drive/history/restore\""), std::string::npos);
-    EXPECT_NE(versions.find("Conflict versions:"), std::string::npos);
+    EXPECT_NE(versions.find("Conflict records:"), std::string::npos);
     EXPECT_NE(versions.find("left-value"), std::string::npos);
     EXPECT_NE(versions.find("right-value"), std::string::npos);
 
@@ -242,10 +242,26 @@ TEST(WebUi, DrivePagesExposeBrowseMutationHistoryAndConflictControls) {
     EXPECT_NE(diff.find("class=\"diff-remove\""), std::string::npos);
     EXPECT_NE(diff.find("class=\"diff-add\""), std::string::npos);
 
+    const lake::api::RepositoryConflict conflict_value{
+        .id = "conflict-1",
+        .base = "base-value",
+        .left = "old-blob",
+        .right = "new-blob",
+        .region = {.path = "README.md", .bytes = lake::api::RepositoryConflictByteRange{4, 3}},
+        .kind = "suspicious-merge",
+        .explanation = "Both sides changed the same greeting.",
+        .proposal = "proposal-value",
+        .reasons = {"The merged wording needs review."},
+    };
     const std::string conflict = lake::api::web_ui_drive_conflict(
-        repository, "README.md", {difference.left, difference.right}, difference, true);
+        repository, "main", conflict_value, {difference.left, difference.right}, difference, true);
     EXPECT_NE(conflict.find("Two versions of README.md"), std::string::npos);
+    EXPECT_NE(conflict.find("Suspicious merge proposal"), std::string::npos);
+    EXPECT_NE(conflict.find("Both sides changed the same greeting."), std::string::npos);
+    EXPECT_NE(conflict.find("The merged wording needs review."), std::string::npos);
     EXPECT_NE(conflict.find("What differs"), std::string::npos);
+    EXPECT_NE(conflict.find("action=\"/drive/conflict/resolve\""), std::string::npos);
+    EXPECT_NE(conflict.find("value=\"accept_proposal\""), std::string::npos);
     expect_theme_scripts(conflict);
 }
 
@@ -727,10 +743,23 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     EXPECT_NE(empty_change.find("No changes to display."), std::string::npos);
     EXPECT_EQ(empty_change.find("<code>readme.md</code>"), std::string::npos);
 
-    const lake::api::RepositoryConflict conflict{"<config>", {"left", "right"}};
+    const lake::api::RepositoryConflict conflict{
+        .id = "conflict<&>",
+        .base = "base",
+        .left = "left",
+        .right = "right",
+        .region = {.path = "<config>"},
+        .kind = "crdt-suspicious",
+        .explanation = "Two offline lock records disagree <now>.",
+        .reasons = {"The holders differ."},
+    };
     const std::string conflicts =
         lake::api::web_ui_repository_conflicts(repository, {conflict}, false);
     EXPECT_NE(conflicts.find("&lt;config&gt;"), std::string::npos);
+    EXPECT_NE(conflicts.find("Suspicious concurrent update"), std::string::npos);
+    EXPECT_NE(conflicts.find("Two offline lock records disagree &lt;now&gt;."), std::string::npos);
+    EXPECT_NE(conflicts.find("The holders differ."), std::string::npos);
+    EXPECT_EQ(conflicts.find("/conflicts/resolve"), std::string::npos);
 
     const lake::api::RepositoryArtifact artifact{
         .id = "result-1<&",

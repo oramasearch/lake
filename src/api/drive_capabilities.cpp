@@ -362,6 +362,33 @@ json diff_json(const DriveVersionDiff& difference) {
             {"lines", std::move(lines)}};
 }
 
+json conflict_json(const RepositoryConflict& conflict) {
+    json region{{"path", conflict.region.path}};
+    if (conflict.region.bytes) {
+        region["bytes"] = {{"offset", conflict.region.bytes->offset},
+                           {"length", conflict.region.bytes->length}};
+    }
+    if (conflict.region.nodes) {
+        region["nodes"] = {{"first", conflict.region.nodes->first},
+                           {"last", conflict.region.nodes->last}};
+    }
+    json output{{"id", conflict.id},
+                {"base", conflict.base},
+                {"left", conflict.left},
+                {"right", conflict.right},
+                {"region", std::move(region)},
+                {"kind", conflict.kind},
+                {"explanation", conflict.explanation},
+                {"reasons", conflict.reasons}};
+    if (conflict.proposal) {
+        output["proposal"] = *conflict.proposal;
+    }
+    if (conflict.node) {
+        output["node"] = *conflict.node;
+    }
+    return output;
+}
+
 std::expected<void, ApiError> require_drive_write(const json& input, ApiContext& context) {
     if (context.operator_credential || context.acting_identity == "admin") {
         return {};
@@ -911,7 +938,7 @@ void register_drive_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "drive_conflict",
         .title = "Present drive conflict",
-        .description = "Show preserved conflict versions and their text difference.",
+        .description = "Explain a conflict and show its preserved values and text difference.",
         .input_schema = drive_input_schema(true),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -929,13 +956,14 @@ void register_drive_capabilities(Registry& registry) {
                 return sync_error(conflicts.error());
             }
             const std::string path = input.at("path");
-            const auto found = std::ranges::find(*conflicts, path, &RepositoryConflict::path);
-            if (found == conflicts->end() || found->blobs.size() < 2) {
+            const auto found = std::ranges::find_if(
+                *conflicts, [&](const auto& conflict) { return conflict.region.path == path; });
+            if (found == conflicts->end() || found->version_blobs.size() < 2) {
                 return ApiResult::failure(
-                    "not_found", "no two-version conflict exists for this path", "/path");
+                    "not_found", "no unresolved conflict exists for this path", "/path");
             }
             std::vector<RepositoryFile> versions;
-            for (const std::string& blob : found->blobs) {
+            for (const std::string& blob : found->version_blobs) {
                 auto version = context.sync_store->repository_blob(
                     repository->customer_id, repository->id, path, blob);
                 if (!version) {
@@ -949,6 +977,7 @@ void register_drive_capabilities(Registry& registry) {
             }
             json result{{"repository", control::to_json(*repository)},
                         {"path", path},
+                        {"conflict", conflict_json(*found)},
                         {"versions", std::move(values)}};
             const auto left_preview = DriveFormatRegistry::defaults().preview(versions[0]);
             const auto right_preview = DriveFormatRegistry::defaults().preview(versions[1]);
@@ -960,8 +989,93 @@ void register_drive_capabilities(Registry& registry) {
             context.audit_customer_id = repository->customer_id;
             context.audit_kind = "drive.conflict.read";
             context.audit_object = "repository/" + repository->id + "/path/" + path;
-            context.audit_details = {{"path", path}, {"versions", found->blobs.size()}};
+            context.audit_details = {
+                {"conflict", found->id}, {"kind", found->kind}, {"path", path}};
             return ApiResult::success(std::move(result));
+        }});
+
+    registry.add(Capability{
+        .name = "resolve_conflict",
+        .title = "Resolve repository conflict",
+        .description =
+            "Resolve a conflict with its left, right, reviewed proposal, or supplied blob value.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"repository_id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"path", {{"type", "string"}}},
+                           {"conflict_id", {{"type", "string"}}},
+                           {"resolution",
+                            {{"type", "string"},
+                             {"enum", json::array({"accept_proposal", "left", "right", "blob"})}}},
+                           {"blob", {{"type", "string"}, {"contentEncoding", "base64"}}}}},
+                         {"required",
+                          json::array(
+                              {"repository_id", "ref", "path", "conflict_id", "resolution"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"conflict", {{"type", "string"}}},
+                            {"value", {{"type", "string"}}},
+                            {"change", {{"type", "string"}}}}},
+                          {"required", json::array({"conflict", "value", "change"})},
+                          {"additionalProperties", false}},
+        .kind = CapabilityKind::Action,
+        .object = "repository conflict",
+        .action = "write",
+        .resolve_object = drive_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto repository = context.store->get_repository(input.at("repository_id"));
+            if (!repository) {
+                return store_error(repository.error());
+            }
+            const auto conflicts =
+                context.sync_store->repository_conflicts(repository->customer_id, repository->id);
+            if (!conflicts) {
+                return sync_error(conflicts.error());
+            }
+            const std::string conflict_id = input.at("conflict_id");
+            const auto conflict =
+                std::ranges::find(*conflicts, conflict_id, &RepositoryConflict::id);
+            if (conflict == conflicts->end()) {
+                return ApiResult::failure(
+                    "not_found", "no unresolved conflict has that identifier", "/conflict_id");
+            }
+            const std::string path = input.at("path");
+            if (conflict->region.path != path) {
+                return ApiResult::failure(
+                    "invalid_input", "path does not match the conflict region", "/path");
+            }
+            std::vector<std::byte> blob;
+            const std::string resolution = input.at("resolution");
+            if (resolution == "blob") {
+                if (!input.contains("blob")) {
+                    return ApiResult::failure(
+                        "invalid_input", "blob resolution requires base64 bytes", "/blob");
+                }
+                const auto decoded = decode_base64(input.at("blob").get<std::string>(), "/blob");
+                if (!decoded) {
+                    return ApiResult::failure(
+                        decoded.error().code, decoded.error().message, decoded.error().path);
+                }
+                blob = std::move(*decoded);
+            }
+            const auto resolved = context.sync_store->resolve_repository_conflict(
+                repository->customer_id, repository->id, conflict_id, resolution, std::move(blob));
+            if (!resolved) {
+                return sync_error(resolved.error());
+            }
+            context.audit_customer_id = repository->customer_id;
+            context.audit_kind = "repository.conflict.resolved";
+            context.audit_object = "repository/" + repository->id + "/path/" + path;
+            context.audit_details = {{"change", resolved->change},
+                                     {"conflict", resolved->conflict},
+                                     {"path", path},
+                                     {"resolution", resolution},
+                                     {"value", resolved->value}};
+            return ApiResult::success({{"conflict", resolved->conflict},
+                                       {"value", resolved->value},
+                                       {"change", resolved->change}});
         }});
 
     registry.add(Capability{

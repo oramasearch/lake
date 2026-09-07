@@ -8,8 +8,8 @@ store, public HTTP routes, and public client libraries. They use the caller-prov
 
 - `DriveScenario.UserSyncsSharesAndSeesHistoryEndToEnd` signs up two regular users, synchronizes a
   folder, shares it, and checks the recipient's browse API and rendered history page.
-- `DriveScenario.ConcurrentOfflineEditsKeepBothNamedVersionsInHistory` synchronizes two clients,
-  edits the same file while they are disconnected, and checks both named files through the API and
-  both immutable values in rendered history.
+- `DriveScenario.ConcurrentOfflineEditsExposeAndResolveFirstClassConflict` synchronizes two clients,
+  edits the same file while they are disconnected, checks both named files, inspects the full
+  conflict record and rendered explanation, then resolves the record through the public API.
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` synchronizes a CMake project,
   pulls and materializes the same repository with Liquid's public client, and builds and runs it.

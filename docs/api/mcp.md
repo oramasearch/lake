@@ -20,6 +20,12 @@ capabilities, validation and errors as a REST client. Streaming liquid-sync regi
 omitted because MCP tool arguments cannot carry their binary request and response streams; they
 remain documented in OpenAPI and [`sync.md`](sync.md).
 
+Conflict tools use the same current Liquid model as REST. `list_conflicts` returns the conflict
+kind, exact byte or node region, explanation, reasons, base/left/right values, and optional reviewed
+proposal. `resolve_conflict` accepts `left`, `right`, `accept_proposal`, or `blob` with base64 bytes
+and returns the conflict digest, selected value digest, and change digest. Both schemas come from
+the registry and therefore appear unchanged in `tools/list`.
+
 ```sh
 curl -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lake.oramadev.net/mcp
 curl -H "Authorization: Bearer <token>" -H 'content-type: application/json' \

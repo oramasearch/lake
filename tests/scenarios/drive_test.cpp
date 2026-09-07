@@ -347,7 +347,7 @@ TEST_F(DriveScenario, UserSyncsSharesAndSeesHistoryEndToEnd) {
     EXPECT_NE(history.find(change), std::string::npos);
 }
 
-TEST_F(DriveScenario, ConcurrentOfflineEditsKeepBothNamedVersionsInHistory) {
+TEST_F(DriveScenario, ConcurrentOfflineEditsExposeAndResolveFirstClassConflict) {
     const ProvisionedRepository fixture = provision("conflict-owner");
     ASSERT_FALSE(fixture.owner.secret.empty());
     const std::filesystem::path first_folder = root_.path() / "first-client";
@@ -401,10 +401,33 @@ TEST_F(DriveScenario, ConcurrentOfflineEditsKeepBothNamedVersionsInHistory) {
     ASSERT_TRUE(history_api.value("ok", false)) << history_api.dump();
     const auto& items = history_api.at("value").at("items");
     const auto conflict_entry = std::ranges::find_if(items, [](const json& item) {
-        return item.value("new_conflicts", json::array()).size() >= 2;
+        return !item.value("new_conflicts", json::array()).empty();
     });
     ASSERT_NE(conflict_entry, items.end()) << history_api.dump();
     const std::vector<std::string> values = conflict_entry->at("new_conflicts");
+
+    const std::string conflicts_path = "/v1/list_conflicts?id=" + fixture.repository.id;
+    const json conflicts = response_json(
+        http_request(server_->port(), "GET", conflicts_path, {}, bearer(fixture.owner)));
+    ASSERT_TRUE(conflicts.value("ok", false)) << conflicts.dump();
+    ASSERT_EQ(conflicts.at("value").at("items").size(), 1U) << conflicts.dump();
+    const json& conflict = conflicts.at("value").at("items").at(0);
+    EXPECT_EQ(conflict.at("id"), values.at(0));
+    EXPECT_EQ(conflict.at("kind"), "structural");
+    EXPECT_EQ(conflict.at("region").at("path"), original);
+    EXPECT_TRUE(conflict.at("region").contains("nodes"));
+    EXPECT_FALSE(conflict.at("explanation").get<std::string>().empty());
+    EXPECT_FALSE(conflict.at("base").get<std::string>().empty());
+    EXPECT_FALSE(conflict.at("left").get<std::string>().empty());
+    EXPECT_FALSE(conflict.at("right").get<std::string>().empty());
+
+    const std::string drive_conflict_path =
+        "/v1/drive_conflict?repository_id=" + fixture.repository.id + "&ref=main&path=" + original;
+    const json drive_conflict = response_json(
+        http_request(server_->port(), "GET", drive_conflict_path, {}, bearer(fixture.owner)));
+    ASSERT_TRUE(drive_conflict.value("ok", false)) << drive_conflict.dump();
+    EXPECT_EQ(drive_conflict.at("value").at("conflict").at("id"), conflict.at("id"));
+    EXPECT_EQ(drive_conflict.at("value").at("versions").size(), 2U);
 
     const std::string history_path =
         "/drive/history?repository_id=" + fixture.repository.id + "&ref=main&path=" + original;
@@ -414,6 +437,35 @@ TEST_F(DriveScenario, ConcurrentOfflineEditsKeepBothNamedVersionsInHistory) {
     for (const std::string& value : values) {
         EXPECT_NE(history.find(value), std::string::npos) << history;
     }
+
+    const std::string conflict_page_path =
+        "/drive/conflict?repository_id=" + fixture.repository.id + "&ref=main&path=" + original;
+    const std::string conflict_page =
+        http_request(server_->port(), "GET", conflict_page_path, {}, bearer(fixture.owner));
+    EXPECT_NE(conflict_page.find(" 200 "), std::string::npos) << conflict_page;
+    EXPECT_NE(conflict_page.find("Structural overlap"), std::string::npos);
+    EXPECT_NE(conflict_page.find(conflict.at("explanation").get<std::string>()), std::string::npos);
+    EXPECT_NE(conflict_page.find("action=\"/drive/conflict/resolve\""), std::string::npos);
+
+    const json resolution_input{{"repository_id", fixture.repository.id},
+                                {"ref", "main"},
+                                {"path", original},
+                                {"conflict_id", conflict.at("id")},
+                                {"resolution", "left"}};
+    const json resolution = response_json(http_request(server_->port(),
+                                                       "POST",
+                                                       "/v1/resolve_conflict",
+                                                       resolution_input.dump(),
+                                                       bearer(fixture.owner)));
+    ASSERT_TRUE(resolution.value("ok", false)) << resolution.dump();
+    EXPECT_EQ(resolution.at("value").at("conflict"), conflict.at("id"));
+    EXPECT_FALSE(resolution.at("value").at("value").get<std::string>().empty());
+    EXPECT_FALSE(resolution.at("value").at("change").get<std::string>().empty());
+
+    const json resolved_conflicts = response_json(
+        http_request(server_->port(), "GET", conflicts_path, {}, bearer(fixture.owner)));
+    ASSERT_TRUE(resolved_conflicts.value("ok", false)) << resolved_conflicts.dump();
+    EXPECT_TRUE(resolved_conflicts.at("value").at("items").empty());
 }
 
 TEST_F(DriveScenario, SyncedFolderPullsAsRepositoryAndBuildsProject) {

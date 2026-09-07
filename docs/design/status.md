@@ -86,9 +86,10 @@ reviews, and workflow documents with an explicit fidelity report
 Forge-designed repository, source, review, issue, release, webhook, and branch-protection pages
 ([`../ui/forge.md`](../ui/forge.md), [`../api/forge.md`](../api/forge.md)). Change pages render
 libliquid's per-path structural review with safe Markdown, text hunks, line comments, modes, blob
-identities, file statistics, conflict values, checks, output paths, and verified attestation
-profiles. A Postgres-backed scenario proves an unlanded Liquid review, cursor movement after
-rewrite, approval, publication, and graph-derived evidence without repository automation YAML.
+identities, file statistics, explained and resolvable conflict values, checks, output paths, and
+verified attestation profiles. A Postgres-backed scenario proves an unlanded Liquid review, cursor
+movement after rewrite, approval, publication, and graph-derived evidence without repository
+automation YAML.
 Issue, release, webhook, and branch-protection pages expose their existing forge and signed-audit
 records. Artifact pages provide filtered cursor pages of results plus result outputs, timing,
 cache state, verified attestations, and retained trace summaries.
