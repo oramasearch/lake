@@ -12,7 +12,8 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 > **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
 > capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth
 > identity, organization SAML/OIDC providers, federation policy and SCIM 2.0 user/group
-> provisioning; row-resolved sessions, devices and scoped tokens; tenants, repositories,
+> provisioning; row-resolved sessions, devices and tokens bounded by issuer scopes, expiry and
+> ancestor revocation; tenants, repositories,
 > organization administration and policy over the Postgres control plane), public repository
 > reading through libliquid, forge-designed repository, source, review, issue, release, webhook,
 > and branch-protection pages, the OpenAPI

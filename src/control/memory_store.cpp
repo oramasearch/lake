@@ -762,6 +762,7 @@ nlohmann::json to_json(const Session& s) {
             {"device_id", nullable(s.device_id)},
             {"pool_id", s.pool_id},
             {"kind", s.kind},
+            {"parent_session_id", nullable(s.parent_session_id)},
             {"name", s.name},
             {"scopes", s.scopes},
             {"reason", s.reason},
@@ -928,6 +929,37 @@ IssuedSession add_session(std::vector<Session>& sessions,
                                scopes});
     sessions.back().reason += "\n" + hash;
     return {sessions.back(), secret};
+}
+
+bool active_session_lineage(const std::vector<Session>& sessions,
+                            const std::vector<Device>& devices,
+                            const Session& session) {
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const Session* current = &session;
+    std::set<std::string> visited;
+    while (current) {
+        if (!visited.insert(current->id).second || !current->revoked_at.empty() ||
+            current->user_id != session.user_id || current->pool_id != session.pool_id ||
+            (!current->expires_at.empty() && std::stoll(current->expires_at) <= now)) {
+            return false;
+        }
+        if (std::ranges::any_of(devices, [&](const Device& device) {
+                return device.id == current->device_id && !device.revoked_at.empty();
+            })) {
+            return false;
+        }
+        if (current->parent_session_id.empty()) {
+            return true;
+        }
+        const auto parent = std::ranges::find(sessions, current->parent_session_id, &Session::id);
+        if (parent == sessions.end()) {
+            return false;
+        }
+        current = &*parent;
+    }
+    return false;
 }
 
 std::string session_hash(const Session& session) {
@@ -1453,6 +1485,16 @@ Result<IssuedSession> InMemoryStore::create_token(const NewToken& input) {
     if (input.is_static && input.reason.empty())
         return std::unexpected(StoreError{"invalid_input", "a static token requires a reason"});
     std::lock_guard lock(mutex_);
+    std::string parent_expiry;
+    if (!input.parent_session_id.empty()) {
+        const auto parent = std::ranges::find(sessions_, input.parent_session_id, &Session::id);
+        if (parent == sessions_.end() || parent->user_id != input.user_id ||
+            parent->pool_id != input.pool_id ||
+            !active_session_lineage(sessions_, devices_, *parent)) {
+            return std::unexpected(StoreError{"unauthorized", "issuing session is not active"});
+        }
+        parent_expiry = parent->expires_at;
+    }
     const int lifetime = input.is_static ? 0
                                          : (input.expires_in_seconds > 0 ? input.expires_in_seconds
                                                                          : 60 * 60 * 24 * 30);
@@ -1467,6 +1509,13 @@ Result<IssuedSession> InMemoryStore::create_token(const NewToken& input) {
                                        lifetime);
     if (issued.secret.empty())
         return std::unexpected(StoreError{"store_error", "could not issue token"});
+    sessions_.back().parent_session_id = input.parent_session_id;
+    if (!parent_expiry.empty() &&
+        (issued.session.expires_at.empty() ||
+         std::stoll(issued.session.expires_at) > std::stoll(parent_expiry))) {
+        sessions_.back().expires_at = parent_expiry;
+    }
+    issued.session = sessions_.back();
     issued.session.reason = input.reason;
     return issued;
 }
@@ -1535,18 +1584,13 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
-    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::system_clock::now().time_since_epoch())
-                         .count();
     for (auto& session : sessions_) {
         if (!session.revoked_at.empty() ||
             !identity_crypto::verify_secret(session_hash(session), secret))
             continue;
-        if (!session.expires_at.empty() && std::stoll(session.expires_at) < now)
+        if (!active_session_lineage(sessions_, devices_, session)) {
             continue;
-        for (const auto& device : devices_)
-            if (device.id == session.device_id && !device.revoked_at.empty())
-                return std::unexpected(StoreError{"unauthorized", "device revoked"});
+        }
         const auto user = std::ranges::find_if(
             users_, [&](const User& row) { return row.id == session.user_id; });
         if (user == users_.end() || user->taap_id.empty())
@@ -1571,7 +1615,10 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
                          session.device_id,
                          session.pool_id,
                          session.kind,
-                         session.scopes};
+                         session.scopes,
+                         session.expires_at.empty()
+                             ? std::nullopt
+                             : std::optional<std::int64_t>(std::stoll(session.expires_at))};
     }
     return std::unexpected(StoreError{"unauthorized", "invalid, expired, or revoked credential"});
 }

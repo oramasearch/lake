@@ -4733,6 +4733,9 @@ struct ApiServer::Impl {
                 ctx.acting_user_id = principal->user_id;
                 ctx.acting_identity = principal->taap_id;
                 ctx.credential_device_id = principal->device_id;
+                ctx.credential_session_id = principal->session_id;
+                ctx.credential_kind = principal->kind;
+                ctx.credential_expires_at_unix = principal->expires_at_unix;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;
             }
@@ -9758,6 +9761,11 @@ bool ApiServer::start() {
 
     http::router<http::route_params> router;
     router.use([&impl, cors = http::cors()](http::route_params& route) -> http::route_task {
+        // Beast2 reuses this response across requests and client connections.
+        // Reset before CORS or handlers add fields belonging to this request.
+        route.res.clear();
+        route.res.set_start_line(http::status::ok, route.req.version());
+        route.res.set_keep_alive(route.req.keep_alive());
         const auto start = std::chrono::steady_clock::now();
         auto result = co_await cors(route);
         if (result.what() != http::route_what::next) {

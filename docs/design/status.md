@@ -29,9 +29,17 @@ reads are unauthenticated ([`../api/auth.md`](../api/auth.md)).
 
 ## Identity (source tree)
 
+HTTP response construction clears previous headers before CORS and routing, preventing a pooled
+worker from disclosing another client's session cookie or redirect. Public entry pages remain
+anonymous on reused and fresh connections; the contract and regression are in
+[`../serving/http.md`](../serving/http.md#response-isolation). A containing deployment is required
+to repair the live instance.
+
 Password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth identity,
 row-resolved sessions, devices and scoped tokens (migrations `0007_identity_core`,
-`0008_mfa_recovery`; [`../api/identity.md`](../api/identity.md)). Organization SAML/OIDC
+`0008_mfa_recovery`, `0021_token_attenuation`; [`../api/identity.md`](../api/identity.md)).
+Token derivation preserves issuer scopes, expiry and ancestor revocation; static children require
+existing static authority. Organization SAML/OIDC
 providers, federation policy and SCIM 2.0 user/group provisioning (`0010_sso_federation`;
 [`../api/sso.md`](../api/sso.md)).
 
