@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <ranges>
+#include <set>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -16,6 +17,7 @@
 
 #include <liquid/identity.hpp>
 #include <openssl/evp.h>
+#include <pqxx/pqxx>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -248,7 +250,24 @@ protected:
             if (uri == nullptr || *uri == '\0') {
                 GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
             }
-            store_ = lake::control::make_postgres_store(uri, instance_kek_);
+            postgres_uri_ = uri;
+            schema_ = "http_response_" + lake::control::new_uuid_v4();
+            std::erase(schema_, '-');
+            pqxx::connection connection(postgres_uri_);
+            pqxx::work tx(connection);
+            tx.exec("SET client_min_messages TO warning");
+            tx.exec("CREATE SCHEMA " + tx.quote_name(schema_));
+            tx.exec("SET search_path TO " + tx.quote_name(schema_));
+            std::ifstream schema_file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) /
+                                      "db/schema.sql");
+            const std::string schema_sql((std::istreambuf_iterator<char>(schema_file)), {});
+            ASSERT_FALSE(schema_sql.empty());
+            tx.exec(schema_sql);
+            tx.commit();
+            database_uri_ = postgres_uri_;
+            database_uri_ += database_uri_.contains('?') ? "&" : "?";
+            database_uri_ += "options=-csearch_path%3D" + schema_;
+            store_ = lake::control::make_postgres_store(database_uri_, instance_kek_);
             create_identity_document();
             ASSERT_FALSE(identity_document_.empty());
         } else {
@@ -264,6 +283,7 @@ protected:
         // One worker deterministically reuses its response even after a socket closes.
         options.worker_coroutines = 1;
         options.store = store_;
+        options.admin_token = "front-door-operator";
         options.instance_kek = instance_kek_;
         options.store_root =
             lake::test::fixture_path("http-store-" + lake::control::new_uuid_v4()).string();
@@ -274,6 +294,19 @@ protected:
         options.metering.compute_second_micros = 1000;
         server_ = std::make_unique<lake::api::ApiServer>(options);
         ASSERT_TRUE(server_->start()) << server_->reason();
+    }
+
+    void TearDown() override {
+        server_.reset();
+        store_.reset();
+        if (schema_.empty()) {
+            return;
+        }
+        pqxx::connection connection(postgres_uri_);
+        pqxx::work tx(connection);
+        tx.exec("SET client_min_messages TO warning");
+        tx.exec("DROP SCHEMA " + tx.quote_name(schema_) + " CASCADE");
+        tx.commit();
     }
 
     void create_identity_document() {
@@ -314,6 +347,9 @@ protected:
 
     std::shared_ptr<lake::control::Store> store_;
     std::unique_ptr<lake::api::ApiServer> server_;
+    std::string postgres_uri_;
+    std::string database_uri_;
+    std::string schema_;
     std::string email_;
     std::string identity_document_;
     const std::string password_ = "correct horse battery staple";
@@ -373,6 +409,56 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
                                                other_cookie);
     EXPECT_FALSE(denied.starts_with("HTTP/1.1 200"));
     EXPECT_FALSE(response_header(denied, "location").starts_with("/repository?id="));
+}
+
+TEST_P(HttpResponseIsolation, NavigationUsesTheResolvedViewerOnEveryPage) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string account_cookie = issued.substr(0, issued.find(';'));
+    ASSERT_FALSE(account_cookie.empty());
+    for (const std::string& cookie : {std::string(),
+                                      std::string("lake_session=invalid"),
+                                      account_cookie,
+                                      std::string("lake_session=front-door-operator")}) {
+        const bool administrator = cookie == "lake_session=front-door-operator";
+        const bool signed_in = administrator || cookie == account_cookie;
+        std::set<std::string> visited;
+        for (const std::string_view path : {"/", "/repositories", "/transparency"}) {
+            if (std::get<1>(GetParam())) {
+                connection = connect();
+            }
+            const std::string response = connection->request("GET", path, "", cookie);
+            ASSERT_TRUE(response.starts_with("HTTP/1.1 200"));
+            const auto begin = response.find("<nav class=\"primary-nav\"");
+            ASSERT_NE(begin, std::string::npos);
+            const std::string nav = response.substr(begin, response.find("</nav>", begin) - begin);
+            EXPECT_EQ(nav.contains("Administration"), administrator) << path;
+            EXPECT_EQ(nav.contains("href=\"/tokens\""), signed_in && !administrator) << path;
+            EXPECT_EQ(nav.contains("href=\"/shared-with-me\""), signed_in && !administrator)
+                << path;
+            EXPECT_EQ(nav.contains("href=\"/search\""), signed_in) << path;
+            EXPECT_FALSE(response.contains("Orama data plane"));
+            EXPECT_FALSE(response.contains("admin token"));
+            // Every offered global destination must serve a page to this same viewer.
+            std::size_t position = 0;
+            while ((position = nav.find("href=\"", position)) != std::string::npos) {
+                position += 6;
+                const std::string href = nav.substr(position, nav.find('"', position) - position);
+                if (!visited.insert(href).second) {
+                    continue;
+                }
+                const std::string destination = connection->request("GET", href, "", cookie);
+                EXPECT_TRUE(destination.starts_with("HTTP/1.1 200")) << href << " " << destination;
+            }
+        }
+    }
+    for (const std::string_view path : {"/search", "/settings", "/customers", "/audit"}) {
+        const std::string response = connection->request("GET", path);
+        EXPECT_EQ(response_header(response, "location"), "/sign-in") << path;
+    }
 }
 
 TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {

@@ -32,3 +32,6 @@ cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
 
 [api/provisioning.md](api/provisioning.md) specifies personal customer sign-up;
 [ui/sign-up-walkthrough.md](ui/sign-up-walkthrough.md) records the first-repository proof.
+
+[ui/front-door.md](ui/front-door.md) records the customer landing copy, viewer navigation,
+authentication routing, and browser proof.

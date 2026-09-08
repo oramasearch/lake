@@ -30,8 +30,10 @@ The four `HttpServer/HttpResponseIsolation` cases sign in a user and check anony
 redirects. Independent client cookies
 prove the anonymous client cannot open the signing user's sessions, while the original cookie
 still works. One worker forces response reuse on both the same socket and a new socket, with
-in-memory and production Postgres variants. Postgres fixtures generate valid Liquid identity
-documents. The contract and reproduction are in [`../docs/serving/http.md`](../docs/serving/http.md).
+in-memory and production Postgres variants. Each production variant creates a UUID-named schema
+inside the supplied test database, loads the schema there, and removes only that schema after the
+case. Postgres fixtures generate valid Liquid identity documents. The contract and reproduction
+are in [`../docs/serving/http.md`](../docs/serving/http.md).
 `HttpServer.ResponseResetPreservesCurrentProtocolAndCors` checks preflight header isolation and
 the current response's HTTP version, connection policy, status and CORS headers on a reused socket.
 
@@ -111,3 +113,11 @@ check configured quota inheritance, zero initial storage and cost with nonzero p
 repository in both stores. `personal_customer_test_support.hpp` resolves the tenant already
 created by sign-up; fixtures must not create a second one. See
 [`../docs/api/provisioning.md`](../docs/api/provisioning.md).
+
+Front-door renderer checks cover the landing journey and visitor/account/operator navigation.
+`HttpServer/HttpResponseIsolation.NavigationUsesTheResolvedViewerOnEveryPage` runs with both
+stores, valid and invalid cookies, and operator credentials; each advertised global link must
+return HTTP 200 for that same viewer. It also pins customer redirects to `/sign-in`. The browser
+proof is in [front-door.md](../docs/ui/front-door.md). `PostgresCapabilities.OrganizationAndPolicyRoundTrip`
+filters its deletion audit assertion by the exact `repository/<id>` object, so unrelated events
+cannot hide the record it created.

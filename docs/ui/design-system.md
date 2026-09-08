@@ -66,8 +66,9 @@ it consumes only the governed `--lake-*` roles from the generated token include.
 Every renderer uses the same application recipe:
 
 1. A skip link enters the focusable main landmark.
-2. A sticky sidebar groups workspace, administration, identity, and developer navigation and marks
-   the current page with `aria-current="page"`.
+2. A sticky sidebar shows the viewer's usable workspace, account, administration, and developer
+   destinations, and marks the current page with `aria-current="page"`.
+   [Front-door navigation](front-door.md) records the visitor, account, and operator matrix.
 3. A sticky top bar carries page context, session controls, and the theme control.
 4. A bounded content area presents the eyebrow, one `h1`, supporting copy, actions, panels, and
    dense data regions.

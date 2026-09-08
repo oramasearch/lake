@@ -3574,7 +3574,7 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     const std::string private_artifacts =
         http_get(server.port(), "/artifacts?repository_id=" + private_repository->id);
     EXPECT_NE(private_artifacts.find(" 302 "), std::string::npos);
-    EXPECT_NE(private_page.find("Location: /login"), std::string::npos);
+    EXPECT_NE(private_page.find("Location: /sign-in"), std::string::npos);
     const std::string private_api =
         http_get(server.port(), "/v1/get_repository?id=" + private_repository->id);
     EXPECT_NE(private_api.find(" 403 "), std::string::npos);

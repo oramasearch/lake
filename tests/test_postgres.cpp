@@ -161,11 +161,15 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
         call("rename_repository", {{"id", repository.value.at("id")}, {"name", "again-" + suffix}})
             .error.code,
         "conflict");
-    const ApiResult audit = call("audit", {{"limit", 1000}});
+    const ApiResult audit =
+        call("audit",
+             {{"object", "repository/" + repository.value.at("id").get<std::string>()},
+              {"outcome", "success"},
+              {"limit", 1}});
     ASSERT_TRUE(audit.ok) << audit.error.message;
-    EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
-        return event.at("action") == "delete_repository" && event.at("outcome") == "success";
-    }));
+    ASSERT_EQ(audit.value.at("items").size(), 1U);
+    EXPECT_EQ(audit.value.at("items").at(0).at("action"), "delete_repository");
+    EXPECT_EQ(audit.value.at("items").at(0).at("outcome"), "success");
 
     const ApiResult team = call("create_team",
                                 {{"organization_id", organization.value.at("id")},

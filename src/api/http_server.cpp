@@ -4757,6 +4757,14 @@ struct ApiServer::Impl {
         return ctx;
     }
 
+    WebUiViewer viewer_for(const ApiContext& context) const {
+        return {context.authorized, context.operator_credential};
+    }
+
+    WebUiViewer viewer_for(const boost::http::route_params& route) const {
+        return viewer_for(context_for(route));
+    }
+
     // Authentication and session events happen outside the registry, so they are
     // recorded here through the same audit::record path the registry uses.
     bool record_direct_event(const ApiContext& context, audit::EventDraft event) const {
@@ -5051,12 +5059,11 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_web_root(boost::http::route_params& route) {
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_hello(options.node_name, version_string(), context_for(route).authorized),
-            "text/html; charset=utf-8",
-            "no-store");
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_home(viewer_for(route)),
+                         "text/html; charset=utf-8",
+                         "no-store");
     }
 
     boost::http::route_task redirect(boost::http::route_params& route,
@@ -5080,7 +5087,7 @@ struct ApiServer::Impl {
             return redirect(route, "/repositories");
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_login(""),
+                         web_ui_login("", viewer_for(route)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5115,7 +5122,7 @@ struct ApiServer::Impl {
                     "application/json; charset=utf-8",
                     "no-store");
             }
-            const std::string body = web_ui_login("That token did not match.");
+            const std::string body = web_ui_login("That token did not match.", viewer_for(context));
             route.status(http::status::unauthorized);
             route.res.set(http::field::content_type, "text/html; charset=utf-8");
             route.res.set(http::field::cache_control, "no-store");
@@ -5191,11 +5198,11 @@ struct ApiServer::Impl {
                                                         const ApiContext& context,
                                                         const ApiResult& result) {
         if (!context.authorized && result.error.code == "unauthorized") {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         return send_text(route,
                          boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
-                         web_ui_error(result.error.code, result.error.message, context.authorized),
+                         web_ui_error(result.error.code, result.error.message, viewer_for(route)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5203,7 +5210,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_customers_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         std::vector<control::Customer> customers;
         const ApiResult rows = registry.call("list_customers", {{"limit", 500}}, ctx);
         if (!rows.ok) {
@@ -5214,7 +5221,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_customers(customers),
+                         web_ui_customers(customers, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5222,7 +5229,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_organizations_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         const ApiResult rows = registry.call("list_organizations", {{"limit", 500}}, ctx);
         if (!rows.ok) {
             return serve_page_error(route, rows);
@@ -5233,7 +5240,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_organizations(organizations),
+                         web_ui_organizations(organizations, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5241,7 +5248,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_organization_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string organization_id = query_value(route, "id");
         if (organization_id.empty()) {
@@ -5340,7 +5347,9 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          web_ui_organization(organization_from_json(organization_result.value),
                                              data,
-                                             query_value(route, "tab")),
+                                             query_value(route, "tab"),
+                                             "",
+                                             viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5348,7 +5357,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_team_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string team_id = query_value(route, "id");
         const ApiResult team = registry.call("get_team", {{"id", team_id}}, context);
@@ -5378,7 +5387,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_team(value, memberships, access),
+                         web_ui_team(value, memberships, access, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5388,7 +5397,7 @@ struct ApiServer::Impl {
                                               bool confirm_removal = false) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string member_id = query_value(route, "id");
         const ApiResult member = registry.call("get_membership", {{"id", member_id}}, context);
@@ -5415,7 +5424,8 @@ struct ApiServer::Impl {
             web_ui_member(value,
                           access,
                           error,
-                          confirm_removal || query_value(route, "confirm_removal") == "yes"),
+                          confirm_removal || query_value(route, "confirm_removal") == "yes",
+                          viewer_for(context)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -5423,7 +5433,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_sso_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string organization_id = query_value(route, "organization_id");
         if (organization_id.empty()) {
@@ -5464,7 +5474,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_sso(organization_id, providers, issuers, logs),
+                         web_ui_sso(organization_id, providers, issuers, logs, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5472,7 +5482,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_teams_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         const std::string organization_id = query_value(route, "organization_id");
         if (organization_id.empty())
             return redirect(route, "/organizations");
@@ -5487,7 +5497,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_teams(organization_id, teams),
+                         web_ui_teams(organization_id, teams, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5495,7 +5505,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_members_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         const std::string organization_id = query_value(route, "organization_id");
         const std::string team_id = query_value(route, "team_id");
         if (organization_id.empty())
@@ -5514,7 +5524,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_memberships(organization_id, team_id, memberships),
+                         web_ui_memberships(organization_id, team_id, memberships, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5522,7 +5532,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_invitations_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         const std::string organization_id = query_value(route, "organization_id");
         const std::string team_id = query_value(route, "team_id");
         if (organization_id.empty())
@@ -5541,7 +5551,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_invitations(organization_id, team_id, invitations),
+                         web_ui_invitations(organization_id, team_id, invitations, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5549,7 +5559,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_grants_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         const std::string object_id = query_value(route, "object_id");
         if (object_id.empty())
             return redirect(route, "/organizations");
@@ -5566,17 +5576,18 @@ struct ApiServer::Impl {
         for (const auto& value : grant_result.value.at("items")) {
             grants.push_back(grant_from_json(value));
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_grants(object_from_json(object_result.value), grants),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_grants(object_from_json(object_result.value), grants, viewer_for(ctx)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task serve_access_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         const std::string object_id = query_value(route, "object_id");
         if (object_id.empty())
             return redirect(route, "/organizations");
@@ -5595,7 +5606,8 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_effective_access(object_from_json(object_result.value), entries),
+                         web_ui_effective_access(
+                             object_from_json(object_result.value), entries, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
         return redirect(route, "/", "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
@@ -5623,7 +5635,7 @@ struct ApiServer::Impl {
                                                     std::string error = {}) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const ApiResult customer_rows = registry.call("list_customers", {{"limit", 500}}, context);
         if (!customer_rows.ok) {
@@ -5645,7 +5657,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_applications(applications, customers, error),
+                         web_ui_applications(applications, customers, error, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5675,24 +5687,25 @@ struct ApiServer::Impl {
     boost::http::route_task serve_application_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
         const ApiResult result = registry.call("get_application", {{"id", id}}, context);
         if (!result.ok) {
             return serve_page_error(route, result);
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_application(application_from_json(result.value)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_application(application_from_json(result.value), viewer_for(context)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task serve_application_users_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
         const ApiResult application = registry.call("get_application", {{"id", id}}, context);
@@ -5710,7 +5723,8 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_application_users(application_from_json(application.value), users),
+                         web_ui_application_users(
+                             application_from_json(application.value), users, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5736,7 +5750,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_application_organizations_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
         const ApiResult application = registry.call("get_application", {{"id", id}}, context);
@@ -5755,7 +5769,8 @@ struct ApiServer::Impl {
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_application_organizations(application_from_json(application.value),
-                                                          organizations),
+                                                          organizations,
+                                                          viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -5803,7 +5818,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_application_events_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
         const ApiResult application = registry.call("get_application", {{"id", id}}, context);
@@ -5822,7 +5837,8 @@ struct ApiServer::Impl {
         return send_text(
             route,
             boost::http::status::ok,
-            web_ui_application_events(application_from_json(application.value), events),
+            web_ui_application_events(
+                application_from_json(application.value), events, "", viewer_for(context)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -5856,7 +5872,8 @@ struct ApiServer::Impl {
         co_return co_await send_text(
             route,
             http::status::ok,
-            web_ui_application_events(*application, *rows, result.value.value("secret", "")),
+            web_ui_application_events(
+                *application, *rows, result.value.value("secret", ""), viewer_for(context)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -6033,7 +6050,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_sign_up(""),
+                         web_ui_sign_up("", viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6052,7 +6069,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_sign_in(""),
+                         web_ui_sign_in("", viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6071,7 +6088,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_mfa("", "", {}, context.authorized),
+                         web_ui_mfa("", "", {}, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6086,7 +6103,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_passkeys(""),
+                         web_ui_passkeys("", viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6105,7 +6122,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_passkey_sign_in(""),
+                         web_ui_passkey_sign_in("", viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6133,7 +6150,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_sessions(sessions, devices, error),
+                         web_ui_sessions(sessions, devices, error, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6155,7 +6172,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_tokens(sessions, "", error),
+                         web_ui_tokens(sessions, "", error, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6178,13 +6195,16 @@ struct ApiServer::Impl {
         } else if (error.empty()) {
             error = rows.error().message;
         }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_settings(
-                context.acting_identity, sessions, devices, query_value(route, "tab"), error),
-            "text/html; charset=utf-8",
-            "no-store");
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_settings(context.acting_identity,
+                                         sessions,
+                                         devices,
+                                         query_value(route, "tab"),
+                                         error,
+                                         viewer_for(context)),
+                         "text/html; charset=utf-8",
+                         "no-store");
     }
 
     boost::http::route_task serve_organization_invitation(boost::http::route_params& route) {
@@ -6206,7 +6226,7 @@ struct ApiServer::Impl {
             co_return co_await send_text(
                 route,
                 http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, context.authorized),
+                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -6233,7 +6253,7 @@ struct ApiServer::Impl {
             co_return co_await send_text(
                 route,
                 http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, context.authorized),
+                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -6256,7 +6276,7 @@ struct ApiServer::Impl {
             co_return co_await send_text(
                 route,
                 http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, context.authorized),
+                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -6280,7 +6300,7 @@ struct ApiServer::Impl {
             co_return co_await send_text(
                 route,
                 http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, context.authorized),
+                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -6299,12 +6319,13 @@ struct ApiServer::Impl {
         const auto [position, error] =
             std::from_chars(quota.data(), quota.data() + quota.size(), quota_bytes);
         if (error != std::errc{} || position != quota.data() + quota.size()) {
-            co_return co_await send_text(
-                route,
-                http::status::bad_request,
-                web_ui_error("invalid_input", "quota bytes must be a non-negative integer", true),
-                "text/html; charset=utf-8",
-                "no-store");
+            co_return co_await send_text(route,
+                                         http::status::bad_request,
+                                         web_ui_error("invalid_input",
+                                                      "quota bytes must be a non-negative integer",
+                                                      viewer_for(route)),
+                                         "text/html; charset=utf-8",
+                                         "no-store");
         }
         ApiContext context = context_for(route);
         const ApiResult result =
@@ -6315,7 +6336,7 @@ struct ApiServer::Impl {
             co_return co_await send_text(
                 route,
                 http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, context.authorized),
+                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -6340,7 +6361,7 @@ struct ApiServer::Impl {
         if (!result.ok) {
             co_return co_await send_text(route,
                                          http::int_to_status(rest_status(result)),
-                                         web_ui_sign_up(result.error.message),
+                                         web_ui_sign_up(result.error.message, viewer_for(context)),
                                          "text/html; charset=utf-8",
                                          "no-store");
         }
@@ -6368,7 +6389,7 @@ struct ApiServer::Impl {
         if (!result.ok) {
             co_return co_await send_text(route,
                                          http::int_to_status(rest_status(result)),
-                                         web_ui_sign_in(result.error.message),
+                                         web_ui_sign_in(result.error.message, viewer_for(context)),
                                          "text/html; charset=utf-8",
                                          "no-store");
         }
@@ -6390,11 +6411,12 @@ struct ApiServer::Impl {
                                                 {"device_name", form_field(body, "device_name")}},
                                                context);
         if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_mfa(result.error.message, "", {}, false),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_mfa(result.error.message, "", {}, viewer_for(context)),
+                "text/html; charset=utf-8",
+                "no-store");
         }
         co_return co_await redirect(
             route, "/sessions", browser_session_cookie(route, result.value.value("secret", "")));
@@ -6413,7 +6435,7 @@ struct ApiServer::Impl {
             co_return co_await send_text(
                 route,
                 http::int_to_status(rest_status(result)),
-                web_ui_mfa(result.error.message, "", {}, context.authorized),
+                web_ui_mfa(result.error.message, "", {}, viewer_for(context)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -6427,7 +6449,8 @@ struct ApiServer::Impl {
         co_return co_await send_text(
             route,
             http::status::ok,
-            web_ui_mfa("", result.value.value("otpauth_uri", ""), recovery_codes, true),
+            web_ui_mfa(
+                "", result.value.value("otpauth_uri", ""), recovery_codes, viewer_for(context)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -6445,7 +6468,7 @@ struct ApiServer::Impl {
             co_return co_await send_text(
                 route,
                 http::int_to_status(rest_status(result)),
-                web_ui_mfa(result.error.message, "", {}, context.authorized),
+                web_ui_mfa(result.error.message, "", {}, viewer_for(context)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -6468,7 +6491,7 @@ struct ApiServer::Impl {
         if (!result.ok) {
             co_return co_await send_text(route,
                                          http::int_to_status(rest_status(result)),
-                                         web_ui_sign_in(result.error.message),
+                                         web_ui_sign_in(result.error.message, viewer_for(context)),
                                          "text/html; charset=utf-8",
                                          "no-store");
         }
@@ -6485,11 +6508,12 @@ struct ApiServer::Impl {
         const ApiResult result = registry.call(
             "revoke_session", {{"session_id", form_field(body, "session_id")}}, context);
         if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_sessions({}, {}, result.error.message),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_sessions({}, {}, result.error.message, viewer_for(context)),
+                "text/html; charset=utf-8",
+                "no-store");
         }
         const std::string return_to =
             form_field(body, "return_to") == "/tokens" ? "/tokens" : "/sessions";
@@ -6506,11 +6530,12 @@ struct ApiServer::Impl {
         const ApiResult result =
             registry.call("revoke_device", {{"device_id", form_field(body, "device_id")}}, context);
         if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_sessions({}, {}, result.error.message),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_sessions({}, {}, result.error.message, viewer_for(context)),
+                "text/html; charset=utf-8",
+                "no-store");
         }
         co_return co_await redirect(route, "/sessions");
     }
@@ -6539,17 +6564,19 @@ struct ApiServer::Impl {
             }
         }
         if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_tokens(sessions, "", result.error.message),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
+            co_return co_await send_text(
+                route,
+                http::int_to_status(rest_status(result)),
+                web_ui_tokens(sessions, "", result.error.message, viewer_for(context)),
+                "text/html; charset=utf-8",
+                "no-store");
         }
-        co_return co_await send_text(route,
-                                     http::status::ok,
-                                     web_ui_tokens(sessions, result.value.value("secret", ""), ""),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
+        co_return co_await send_text(
+            route,
+            http::status::ok,
+            web_ui_tokens(sessions, result.value.value("secret", ""), "", viewer_for(context)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     std::optional<std::string> jwks_for(const std::string& url, bool refresh) {
@@ -6766,7 +6793,7 @@ struct ApiServer::Impl {
                                                      std::string_view object_type) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
         if (id.empty()) {
@@ -6781,12 +6808,13 @@ struct ApiServer::Impl {
         for (const nlohmann::json& value : access_result.value.at("items")) {
             entries.push_back(access_from_json(value));
         }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_effective_access(object_from_json(access_result.value.at("object")), entries),
-            "text/html; charset=utf-8",
-            "no-store");
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_effective_access(object_from_json(access_result.value.at("object")),
+                                                 entries,
+                                                 viewer_for(ctx)),
+                         "text/html; charset=utf-8",
+                         "no-store");
     }
 
     boost::http::route_task serve_repository_create(boost::http::route_params& route) {
@@ -6836,7 +6864,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_repositories(repositories, owners, ctx.authorized),
+                         web_ui_repositories(repositories, owners, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6861,7 +6889,7 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          web_ui_environments(repository_from_json(repository.value),
                                              environments.value,
-                                             context.authorized),
+                                             viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6895,7 +6923,7 @@ struct ApiServer::Impl {
                          web_ui_environment(repository_from_json(repository.value),
                                             environment.value,
                                             deployments.value,
-                                            context.authorized),
+                                            viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -6931,7 +6959,7 @@ struct ApiServer::Impl {
                                                  environment_name,
                                                  logs.value,
                                                  logs.value.value("stale_since", ""),
-                                                 context.authorized),
+                                                 viewer_for(context)),
                                      "text/html; charset=utf-8",
                                      "no-store");
     }
@@ -6940,11 +6968,12 @@ struct ApiServer::Impl {
                                                 std::string capability) {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
-            co_return co_await send_text(route,
-                                         boost::http::status::bad_request,
-                                         web_ui_error("invalid_input", "could not read form", true),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
+            co_return co_await send_text(
+                route,
+                boost::http::status::bad_request,
+                web_ui_error("invalid_input", "could not read form", viewer_for(route)),
+                "text/html; charset=utf-8",
+                "no-store");
         }
         nlohmann::json input{{"repository_id", form_field(body, "repository_id")},
                              {"environment", form_field(body, "environment")}};
@@ -6995,11 +7024,12 @@ struct ApiServer::Impl {
         for (const nlohmann::json& value : exports_result.value.at("items")) {
             exports.push_back(forge_record_from_json(value));
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_exports(repository_from_json(repository_result.value), exports),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_exports(repository_from_json(repository_result.value), exports, viewer_for(ctx)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task serve_export_download(boost::http::route_params& route) {
@@ -7097,7 +7127,7 @@ struct ApiServer::Impl {
         return send_text(
             route,
             boost::http::status::ok,
-            web_ui_repository(repository, owner ? &*owner : nullptr, data, ctx.authorized),
+            web_ui_repository(repository, owner ? &*owner : nullptr, data, viewer_for(ctx)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7153,7 +7183,7 @@ struct ApiServer::Impl {
             route,
             boost::http::status::ok,
             web_ui_repository_tree(
-                repository_from_json(repository_result.value), ref, entries, ctx.authorized),
+                repository_from_json(repository_result.value), ref, entries, viewer_for(ctx)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7229,7 +7259,7 @@ struct ApiServer::Impl {
             route,
             boost::http::status::ok,
             web_ui_repository_file(
-                repository_from_json(repository_result.value), ref, file, blame, ctx.authorized),
+                repository_from_json(repository_result.value), ref, file, blame, viewer_for(ctx)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7280,7 +7310,7 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          web_ui_repository_log(repository_from_json(repository_result.value),
                                                changes,
-                                               ctx.authorized),
+                                               viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7355,7 +7385,7 @@ struct ApiServer::Impl {
                                        repository_change_from_json(change_result.value),
                                        differences,
                                        review,
-                                       ctx.authorized),
+                                       viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7386,7 +7416,7 @@ struct ApiServer::Impl {
                                        query_value(route, "state"),
                                        query_value(route, "label"),
                                        query_value(route, "assignee"),
-                                       ctx.authorized),
+                                       viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7418,7 +7448,7 @@ struct ApiServer::Impl {
         if (!issue) {
             return send_text(route,
                              boost::http::status::not_found,
-                             web_ui_error("not_found", "issue not found", ctx.authorized),
+                             web_ui_error("not_found", "issue not found", viewer_for(ctx)),
                              "text/html; charset=utf-8",
                              "no-store");
         }
@@ -7438,7 +7468,7 @@ struct ApiServer::Impl {
             route,
             boost::http::status::ok,
             web_ui_issue(
-                repository_from_json(repository_result.value), *issue, comments, ctx.authorized),
+                repository_from_json(repository_result.value), *issue, comments, viewer_for(ctx)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7466,7 +7496,7 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          web_ui_releases(repository_from_json(repository_result.value),
                                          releases,
-                                         ctx.authorized),
+                                         viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7504,7 +7534,7 @@ struct ApiServer::Impl {
                          web_ui_webhooks(repository_from_json(repository_result.value),
                                          webhooks,
                                          deliveries,
-                                         ctx.authorized),
+                                         viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7560,7 +7590,7 @@ struct ApiServer::Impl {
             route,
             boost::http::status::ok,
             web_ui_branch_protection(
-                repository_from_json(repository_result.value), rules, events, ctx.authorized),
+                repository_from_json(repository_result.value), rules, events, viewer_for(ctx)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7587,7 +7617,7 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          web_ui_repository_conflicts(repository_from_json(repository_result.value),
                                                      conflicts,
-                                                     ctx.authorized),
+                                                     viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7612,7 +7642,7 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          web_ui_artifact(repository_from_json(repository_result.value),
                                          repository_artifact_from_json(artifact_result.value),
-                                         ctx.authorized),
+                                         viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7654,7 +7684,7 @@ struct ApiServer::Impl {
             route,
             boost::http::status::ok,
             web_ui_artifacts(
-                repository_from_json(repository_result.value), page, filter, ctx.authorized),
+                repository_from_json(repository_result.value), page, filter, viewer_for(ctx)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7696,7 +7726,7 @@ struct ApiServer::Impl {
                                              path,
                                              entries,
                                              folder_options,
-                                             context.authorized),
+                                             viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7727,7 +7757,7 @@ struct ApiServer::Impl {
                                               ref,
                                               file,
                                               preview,
-                                              context.authorized),
+                                              viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7780,7 +7810,7 @@ struct ApiServer::Impl {
                                               ref,
                                               path,
                                               changes,
-                                              context.authorized),
+                                              viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7812,7 +7842,7 @@ struct ApiServer::Impl {
                                       left,
                                       right,
                                       drive_version_diff_from_json(result.value),
-                                      context.authorized),
+                                      viewer_for(context)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7847,7 +7877,7 @@ struct ApiServer::Impl {
                                                conflict,
                                                versions,
                                                difference,
-                                               context.authorized),
+                                               viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7922,7 +7952,8 @@ struct ApiServer::Impl {
                                             access,
                                             links,
                                             created_link,
-                                            error),
+                                            error,
+                                            viewer_for(route)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7930,7 +7961,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_drive_share_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string ref =
             query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
@@ -7966,8 +7997,12 @@ struct ApiServer::Impl {
         return send_text(
             route,
             boost::http::status::ok,
-            web_ui_drive_share_link(
-                repository_from_json(result.value.at("repository")), ref, path, *link, error),
+            web_ui_drive_share_link(repository_from_json(result.value.at("repository")),
+                                    ref,
+                                    path,
+                                    *link,
+                                    error,
+                                    viewer_for(route)),
             "text/html; charset=utf-8",
             "no-store");
     }
@@ -7975,7 +8010,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_drive_share_link_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string ref =
             query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
@@ -8003,7 +8038,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_shared_with_me(folders, ""),
+                         web_ui_shared_with_me(folders, "", viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -8269,11 +8304,13 @@ struct ApiServer::Impl {
 
     boost::http::route_task serve_drive_share_error(boost::http::route_params& route,
                                                     const ApiResult& result) {
-        return send_text(route,
-                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
-                         web_ui_drive_link("Shared folder", {}, result.error.message),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        return send_text(
+            route,
+            boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+            web_ui_drive_link(
+                "Shared folder", {}, result.error.message, "", "main", "", viewer_for(route)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task serve_drive_share_link(boost::http::route_params& route) {
@@ -8294,7 +8331,8 @@ struct ApiServer::Impl {
                                            "",
                                            input.at("token").get<std::string>(),
                                            input.at("ref").get<std::string>(),
-                                           json_string(result.value, "root_path")),
+                                           json_string(result.value, "root_path"),
+                                           viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -8318,7 +8356,8 @@ struct ApiServer::Impl {
                          web_ui_drive_link_preview(input.at("token").get<std::string>(),
                                                    input.at("ref").get<std::string>(),
                                                    file,
-                                                   preview),
+                                                   preview,
+                                                   viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -8809,11 +8848,13 @@ struct ApiServer::Impl {
     boost::http::route_task serve_model_page(boost::http::route_params& route) {
         const auto repository = hub_repository(hub_id(route));
         if (!repository) {
-            return send_text(route,
-                             boost::http::status::not_found,
-                             web_ui_shell("lake — model", "not found", "<h1>Model not found</h1>"),
-                             "text/html; charset=utf-8",
-                             "no-store");
+            return send_text(
+                route,
+                boost::http::status::not_found,
+                web_ui_shell(
+                    "lake — model", "not found", "<h1>Model not found</h1>", viewer_for(route)),
+                "text/html; charset=utf-8",
+                "no-store");
         }
         ApiContext context = context_for(route);
         const ApiResult result =
@@ -8824,13 +8865,14 @@ struct ApiServer::Impl {
                              web_ui_shell("lake — model",
                                           "error",
                                           "<h1>Model unavailable</h1><p class=\"error\">" +
-                                              web_ui_escape(result.error.message) + "</p>"),
+                                              web_ui_escape(result.error.message) + "</p>",
+                                          viewer_for(context)),
                              "text/html; charset=utf-8",
                              "no-store");
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_model(result.value, context.authorized),
+                         web_ui_model(result.value, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -9168,7 +9210,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_search_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const search::Query query{.text = query_value(route, "query"),
                                   .customer = query_value(route, "customer"),
@@ -9222,7 +9264,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_search(query, search_result),
+                         web_ui_search(query, search_result, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -9230,7 +9272,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_metering_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string customer_id = query_value(route, "customer_id");
         nlohmann::json usage{{"customer_id", customer_id}, {"items", nlohmann::json::array()}};
@@ -9244,7 +9286,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_metering(usage),
+                         web_ui_metering(usage, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -9252,7 +9294,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_audit_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         const audit::Filter filter{
             .principal = query_value(route, "principal"),
             .object = query_value(route, "object"),
@@ -9291,7 +9333,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_audit(events, filter, log_configuration),
+                         web_ui_audit(events, filter, log_configuration, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -9310,7 +9352,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_transparency(identity, scan),
+                         web_ui_transparency(identity, scan, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -9318,7 +9360,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_secret_mounts_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         nlohmann::json input{{"limit", 500}};
         const std::string customer_id = query_value(route, "customer_id");
@@ -9339,7 +9381,7 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_secret_mounts(mounts),
+                         web_ui_secret_mounts(mounts, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -9347,7 +9389,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_secrets_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string mount_id = query_value(route, "mount_id");
         if (mount_id.empty()) {
@@ -9369,17 +9411,18 @@ struct ApiServer::Impl {
             }
             metadata = secret_metadata_from_json(metadata_result.value);
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_secrets(mount, name, metadata ? &*metadata : nullptr),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_secrets(mount, name, metadata ? &*metadata : nullptr, viewer_for(context)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task serve_encryption_keys_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/login");
+            return redirect(route, "/sign-in");
         }
         const std::string mount_id = query_value(route, "mount_id");
         if (mount_id.empty()) {
@@ -9401,7 +9444,8 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_encryption_keys(secret_mount_from_json(mount_result.value), keys),
+                         web_ui_encryption_keys(
+                             secret_mount_from_json(mount_result.value), keys, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }

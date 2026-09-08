@@ -309,11 +309,16 @@ TEST(WebUi, DriveSharingAnswersAccessExpiryAndRevocationQuestions) {
     expect_theme_scripts(shared_with_me);
 }
 
-TEST(WebUi, HelloIsASelfContainedDocument) {
-    const auto html = lake::api::web_ui_hello("node-1", lake::version_string());
+TEST(WebUi, HomeExplainsTheRepositoryJourney) {
+    const auto html = lake::api::web_ui_home();
     EXPECT_TRUE(html.starts_with("<!doctype html>"));
-    EXPECT_NE(html.find("hello from lake"), std::string::npos);
-    EXPECT_NE(html.find("node-1"), std::string::npos);
+    EXPECT_NE(html.find("Keep your code and files together."), std::string::npos);
+    EXPECT_NE(html.find("Lake hosts your Liquid repositories"), std::string::npos);
+    EXPECT_NE(html.find("1. Create an account"), std::string::npos);
+    EXPECT_NE(html.find("2. Create a repository"), std::string::npos);
+    EXPECT_NE(html.find("3. Push with Liquid"), std::string::npos);
+    EXPECT_NE(html.find("LIQUID_TOKEN"), std::string::npos);
+    EXPECT_NE(html.find("requires access to its source repository"), std::string::npos);
     EXPECT_NE(html.find(lake::api::web_ui_stylesheet_url()), std::string::npos);
     EXPECT_EQ(html.find("href=\"/style.css\""), std::string::npos);
     EXPECT_NE(html.find("class=\"skip-link\""), std::string::npos);
@@ -335,7 +340,7 @@ TEST(WebUi, EveryPageHeadUsesTheSharedStylesheetLink) {
                                                  nlohmann::json::object(),
                                                  "created",
                                                  "updated"};
-    const std::string shell = lake::api::web_ui_hello("node", "version");
+    const std::string shell = lake::api::web_ui_home();
     const std::string hosted = lake::api::web_ui_application_sign_in(application, "");
     const std::string link = "<link rel=\"stylesheet\" href=\"" +
                              std::string(lake::api::web_ui_stylesheet_url()) + "\">";
@@ -343,23 +348,76 @@ TEST(WebUi, EveryPageHeadUsesTheSharedStylesheetLink) {
     EXPECT_EQ(occurrences(hosted, link), 1u);
 }
 
-TEST(WebUi, HelloEscapesNodeName) {
-    const auto html = lake::api::web_ui_hello("<b>evil</b>", "0.0.1");
-    EXPECT_EQ(html.find("<b>evil</b>"), std::string::npos);
-    EXPECT_NE(html.find("&lt;b&gt;evil&lt;/b&gt;"), std::string::npos);
+TEST(WebUi, CustomerPagesDoNotAdvertiseImplementationOrOperatorCredentials) {
+    for (const auto& html : {lake::api::web_ui_home(),
+                             lake::api::web_ui_home(true),
+                             lake::api::web_ui_sign_up(""),
+                             lake::api::web_ui_sign_in(""),
+                             lake::api::web_ui_login(""),
+                             lake::api::web_ui_error("not_found", "No repository", true)}) {
+        for (const std::string_view forbidden : {"Zetta",
+                                                 "Beast2",
+                                                 "Capy",
+                                                 "Corosio",
+                                                 "admin token",
+                                                 "Orama data plane",
+                                                 "hello world"}) {
+            EXPECT_EQ(html.find(forbidden), std::string::npos) << forbidden;
+        }
+    }
 }
 
-TEST(WebUi, NavigationAndSession) {
-    const std::string out = lake::api::web_ui_hello("n", "0.0.1", false);
-    EXPECT_NE(out.find("href=\"/customers\""), std::string::npos);
-    EXPECT_NE(out.find("href=\"/repositories\""), std::string::npos);
-    EXPECT_NE(out.find("href=\"/organizations\""), std::string::npos);
-    EXPECT_NE(out.find("href=\"/metering\""), std::string::npos);
-    EXPECT_NE(out.find("href=\"/sign-in\""), std::string::npos);
-    const std::string in = lake::api::web_ui_hello("n", "0.0.1", true);
-    EXPECT_NE(in.find("action=\"/logout\""), std::string::npos);
-    EXPECT_NE(in.find("aria-current=\"page\""), std::string::npos);
-    expect_theme_scripts(in);
+TEST(WebUi, NavigationMatchesVisitorAccountAndOperatorAccess) {
+    const std::string visitor = lake::api::web_ui_home();
+    EXPECT_NE(visitor.find("Public repositories"), std::string::npos);
+    EXPECT_NE(visitor.find("href=\"/sign-in\""), std::string::npos);
+    EXPECT_NE(visitor.find("href=\"/sign-up\""), std::string::npos);
+    for (const std::string_view path : {"/shared-with-me",
+                                        "/search",
+                                        "/customers",
+                                        "/organizations",
+                                        "/applications",
+                                        "/metering",
+                                        "/secret-mounts",
+                                        "/audit",
+                                        "/settings",
+                                        "/sessions",
+                                        "/passkeys",
+                                        "/tokens",
+                                        "/v1/openapi.json",
+                                        "/login"}) {
+        EXPECT_EQ(visitor.find("href=\"" + std::string(path) + "\""), std::string::npos) << path;
+    }
+    const std::string account = lake::api::web_ui_home(true);
+    EXPECT_EQ(account.find("Administration"), std::string::npos);
+    EXPECT_NE(account.find("href=\"/tokens\""), std::string::npos);
+    EXPECT_NE(account.find("href=\"/shared-with-me\""), std::string::npos);
+    EXPECT_NE(account.find("action=\"/logout\""), std::string::npos);
+    EXPECT_NE(account.find("aria-current=\"page\""), std::string::npos);
+    const std::string administrator = lake::api::web_ui_home({true, true});
+    EXPECT_NE(administrator.find("Administration"), std::string::npos);
+    EXPECT_NE(administrator.find("href=\"/customers\""), std::string::npos);
+    for (const std::string_view path :
+         {"/shared-with-me", "/settings", "/sessions", "/passkeys", "/tokens"}) {
+        EXPECT_EQ(administrator.find("href=\"" + std::string(path) + "\""), std::string::npos)
+            << path;
+    }
+    EXPECT_EQ(lake::api::web_ui_home({false, true}).find("Administration"), std::string::npos);
+    expect_theme_scripts(account);
+    const lake::control::Repository repository{
+        .id = "r1", .name = "public-project", .visibility = "public"};
+    const lake::api::RepositoryHomeData data;
+    const std::string public_home = lake::api::web_ui_repository(repository, nullptr, data, false);
+    for (const std::string_view path :
+         {"/environments?", "/webhooks?", "/protection?", "/repository/access?"}) {
+        EXPECT_EQ(public_home.find(path), std::string::npos) << path;
+    }
+    const std::string owner_home = lake::api::web_ui_repository(repository, nullptr, data, true);
+    EXPECT_NE(owner_home.find("/webhooks?"), std::string::npos);
+    EXPECT_EQ(owner_home.find("/protection?"), std::string::npos);
+    const std::string operator_home =
+        lake::api::web_ui_repository(repository, nullptr, data, {true, true});
+    EXPECT_NE(operator_home.find("/protection?"), std::string::npos);
 }
 
 TEST(WebUi, MeteringRendersQuotaWarningAndHourlyUsage) {

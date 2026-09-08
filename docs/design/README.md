@@ -9,3 +9,6 @@ contract in `docs/api/identity.md` updated with changes to token derivation.
 
 Personal customer ownership on sign-up is specified in [../api/provisioning.md](../api/provisioning.md)
 and reflected in [status.md](status.md).
+
+The customer landing journey and viewer navigation are recorded in
+[../ui/front-door.md](../ui/front-door.md) and reflected in [status.md](status.md).

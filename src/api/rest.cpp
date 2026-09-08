@@ -218,15 +218,16 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
                          "repository-scoped binary routes. JSON capabilities are also served as "
                          "MCP tools on POST /mcp."}};
     document["servers"] = nlohmann::json::array({{{"url", "/"}}});
-    document["components"] = {{"securitySchemes",
-                               {{"bearer_token",
-                                 {{"type", "http"},
-                                  {"scheme", "bearer"},
-                                  {"description",
-                                   "the Lake's admin token (Secret lake-<name>-admin, injected as "
-                                   "LAKE_ADMIN_TOKEN). Required on "
-                                   "every capability except server_info."}}}}},
-                              {"schemas", {{"error_envelope", error_envelope_schema()}}}};
+    document["components"] = {
+        {"securitySchemes",
+         {{"bearer_token",
+           {{"type", "http"},
+            {"scheme", "bearer"},
+            {"description",
+             "An account token from /tokens, limited by its scopes and your "
+             "repository access. Public operations do not require a token. "
+             "Operator credentials are reserved for instance administration."}}}}},
+        {"schemas", {{"error_envelope", error_envelope_schema()}}}};
     document["security"] = nlohmann::json::array({{{"bearer_token", nlohmann::json::array()}}});
 
     nlohmann::json paths = nlohmann::json::object();

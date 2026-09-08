@@ -9,7 +9,7 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 
 ## Status
 
-> **Status: the control surface serves.** `lake` binds, serves the hello page, the `/v1`
+> **Status: the control surface serves.** `lake` binds, serves the account and repository landing page, the `/v1`
 > capabilities (password, TOTP with one-use recovery codes, lake-signed passkey bindings, OAuth
 > identity, organization SAML/OIDC providers, federation policy and SCIM 2.0 user/group
 > provisioning; personal customer ownership on password sign-up; row-resolved sessions, devices and tokens bounded by issuer scopes, expiry and
@@ -171,7 +171,7 @@ ctest --test-dir build --output-on-failure
 
 | Route | Serves |
 |---|---|
-| `GET /` | the hello page in the server-rendered Orama application shell |
+| `GET /` | the account → repository → push journey, with navigation matched to the viewer |
 | `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by every page |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
@@ -182,7 +182,7 @@ ctest --test-dir build --output-on-failure
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |
 | `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
-| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/organization?id=`, `/team?id=`, `/member?id=`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | the server-rendered pages behind the sign-in (`/login`, `POST /session`, `POST /logout`) |
+| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/organization?id=`, `/team?id=`, `/member?id=`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | server-rendered pages with ordinary `/sign-in` for protected reads and public repository browsing; operator entry remains `/login` and `POST /session` |
 | `GET /transparency?identity=<taap-id>` | public hosted identity monitor over checkpoint-verified bulk tiles |
 | `GET /repository/tree`, `/file`, `/changes`, `/change`, `/issues`, `/issue`, `/releases`, `/webhooks`, `/protection`, `/conflicts`, `/artifacts`, `/artifact`; `POST /conflicts/resolve` | forge pages over authorized repository, review, issue, release, webhook, policy, signed-audit, and libliquid records; conflict pages explain kind, region, and reasons before an audited resolution. |
 | `GET /environments?repository_id=`, `/environment?repository_id=&name=`, `/logs?repository_id=&environment=` | platform summaries, deployment history, capability-backed environment/domain forms, and cursor-polling Loki-compatible logs; stale mirror reads show a warning |
