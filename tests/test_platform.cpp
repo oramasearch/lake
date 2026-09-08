@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -191,7 +192,10 @@ private:
     std::string authorization_;
 };
 
-json deployment_row(const std::string& repository, std::string phase, std::string updated_at) {
+json deployment_row(const std::string& repository,
+                    std::string phase,
+                    std::string updated_at,
+                    std::string ordering_token = {}) {
     return {{"operator", "operator-a"},
             {"lake", "lake.example"},
             {"repository", repository},
@@ -206,7 +210,25 @@ json deployment_row(const std::string& repository, std::string phase, std::strin
             {"namespace", "lake-production"},
             {"url", "https://app.example"},
             {"message", ""},
-            {"updated_at", std::move(updated_at)}};
+            {"updated_at", std::move(updated_at)},
+            {"ordering_token", std::move(ordering_token)}};
+}
+
+json environment_env_row(const std::string& repository,
+                         std::string key,
+                         std::string value,
+                         bool deleted,
+                         std::string updated_at,
+                         std::string ordering_token = {}) {
+    return {{"lake", "lake.example"},
+            {"repository", repository},
+            {"environment", "production"},
+            {"key", std::move(key)},
+            {"value", std::move(value)},
+            {"deleted", deleted},
+            {"set_by", "admin"},
+            {"updated_at", std::move(updated_at)},
+            {"ordering_token", std::move(ordering_token)}};
 }
 
 class PlatformFixture : public testing::Test {
@@ -220,7 +242,10 @@ protected:
     Registry registry;
     ApiContext context;
 
-    void SetUp() override {
+    void reset_platform() {
+        store = std::make_shared<lake::control::InMemoryStore>();
+        control = std::make_shared<FakeZettaControl>();
+        loki = std::make_shared<FakeLoki>();
         const auto user = store->create_user({"admin", "admin@example.test", "Admin"});
         ASSERT_TRUE(user);
         const auto customer = store->create_customer({"individual", user->id, "", "admin"});
@@ -228,8 +253,6 @@ protected:
         const auto created = store->create_repository({customer->id, "platform", "", "private"});
         ASSERT_TRUE(created);
         repository = *created;
-        control->deployments.push_back(
-            deployment_row(repository.id, "deploying", "2026-09-06T00:01:00Z"));
         platform = std::make_unique<lake::control::PlatformService>(
             store,
             control,
@@ -239,6 +262,12 @@ protected:
                 .identity_seed = "",
                 .instance_kek = "platform-test-kek",
             });
+    }
+
+    void SetUp() override {
+        reset_platform();
+        control->deployments.push_back(
+            deployment_row(repository.id, "deploying", "2026-09-06T00:01:00Z"));
         lake::api::register_core_capabilities(registry, "test");
         context.store = store.get();
         context.platform = platform.get();
@@ -276,6 +305,14 @@ TEST(ZettaControlLiteral, QuotesApostrophesAndRejectsControlCharacters) {
     const auto rejected = lake::control::quote_zetta_literal(std::string("line\nvalue"));
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().code, "invalid_input");
+}
+
+TEST(MemoryStoreTimestamps, EncodeLexicographicallySortableMicroseconds) {
+    const auto value = std::chrono::system_clock::time_point{} + std::chrono::seconds(1) +
+                       std::chrono::microseconds(234567);
+    const auto later = value + std::chrono::microseconds(1);
+    EXPECT_EQ(lake::control::iso8601_at(value), "1970-01-01T00:00:01.234567Z");
+    EXPECT_LT(lake::control::iso8601_at(value), lake::control::iso8601_at(later));
 }
 
 TEST(LokiHttpSource, UsesQueryRangeAndReturnsAStableCursor) {
@@ -331,22 +368,10 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
 }
 
 TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRows) {
-    control->environment_env.push_back({{"lake", "lake.example"},
-                                        {"repository", repository.id},
-                                        {"environment", "production"},
-                                        {"key", "COLOR"},
-                                        {"value", "blue"},
-                                        {"deleted", false},
-                                        {"set_by", "admin"},
-                                        {"updated_at", "2026-09-06T00:01:00Z"}});
-    control->environment_env.push_back({{"lake", "lake.example"},
-                                        {"repository", repository.id},
-                                        {"environment", "production"},
-                                        {"key", "COLOR"},
-                                        {"value", ""},
-                                        {"deleted", true},
-                                        {"set_by", "admin"},
-                                        {"updated_at", "2026-09-06T00:02:00Z"}});
+    control->environment_env.push_back(
+        environment_env_row(repository.id, "COLOR", "blue", false, "2026-09-06T00:01:00Z"));
+    control->environment_env.push_back(
+        environment_env_row(repository.id, "COLOR", "", true, "2026-09-06T00:02:00Z"));
     ASSERT_TRUE(sync());
     auto environment = platform->get_environment(repository.id, "production");
     ASSERT_TRUE(environment);
@@ -359,6 +384,7 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
                                 {"value", "green"}});
     ASSERT_TRUE(set.ok) << set.error.message;
     ASSERT_EQ(control->environment_env.back().at("value"), "green");
+    EXPECT_FALSE(control->environment_env.back().at("ordering_token").get<std::string>().empty());
     const std::string credential = std::string("AKIA") + "0123456789ABCDEF";
     ApiResult secret = call_async("set_environment_env",
                                   {{"repository_id", repository.id},
@@ -374,6 +400,7 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
                                    {"host", "www.example.test"},
                                    {"tls", "acme"}});
     ASSERT_TRUE(domain.ok) << domain.error.message;
+    EXPECT_FALSE(control->domains.back().at("ordering_token").get<std::string>().empty());
     environment = platform->get_environment(repository.id, "production");
     ASSERT_TRUE(environment);
     ASSERT_EQ(environment->at("domains").size(), 1U);
@@ -390,6 +417,81 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
     environment = platform->get_environment(repository.id, "production");
     ASSERT_TRUE(environment);
     EXPECT_EQ(environment->at("domains").at(0).at("status"), "ready");
+}
+
+TEST_F(PlatformFixture, SameInstantEnvironmentEditsRespectOrderingToken) {
+    constexpr std::string_view instant = "2026-09-06T00:01:00.000000Z";
+    control->environment_env = {
+        environment_env_row(repository.id,
+                            "SET_THEN_UNSET",
+                            "green",
+                            false,
+                            std::string(instant),
+                            "00000000-0000-4000-8000-000000000001"),
+        environment_env_row(repository.id,
+                            "SET_THEN_UNSET",
+                            "",
+                            true,
+                            std::string(instant),
+                            "00000000-0000-4000-8000-000000000002"),
+        environment_env_row(repository.id,
+                            "UNSET_THEN_SET",
+                            "",
+                            true,
+                            std::string(instant),
+                            "00000000-0000-4000-8000-000000000001"),
+        environment_env_row(repository.id,
+                            "UNSET_THEN_SET",
+                            "blue",
+                            false,
+                            std::string(instant),
+                            "00000000-0000-4000-8000-000000000002"),
+    };
+
+    ASSERT_TRUE(sync());
+    const auto environment = platform->get_environment(repository.id, "production");
+    ASSERT_TRUE(environment);
+    ASSERT_EQ(environment->at("env").size(), 1U);
+    EXPECT_EQ(environment->at("env").at(0).at("key"), "UNSET_THEN_SET");
+    EXPECT_EQ(environment->at("env").at(0).at("value"), "blue");
+}
+
+TEST_F(PlatformFixture, PlatformReducersProduceTheSameResultForEveryInputOrder) {
+    constexpr std::string_view instant = "2026-09-06T00:01:00.000000Z";
+    std::array<int, 3> order = {0, 1, 2};
+    do {
+        reset_platform();
+        const std::vector<json> environment_rows = {
+            environment_env_row(repository.id, "COLOR", "red", false, std::string(instant), "01"),
+            environment_env_row(repository.id, "COLOR", "green", false, std::string(instant), "02"),
+            environment_env_row(repository.id, "COLOR", "blue", false, std::string(instant), "03"),
+        };
+        const std::vector<json> deployment_rows = {
+            deployment_row(repository.id, "pending", std::string(instant), "01"),
+            deployment_row(repository.id, "deploying", std::string(instant), "02"),
+            deployment_row(repository.id, "ready", std::string(instant), "03"),
+        };
+        for (const int index : order) {
+            control->environment_env.push_back(environment_rows.at(index));
+            control->deployments.push_back(deployment_rows.at(index));
+        }
+        ASSERT_TRUE(sync());
+        const auto environment = platform->get_environment(repository.id, "production");
+        ASSERT_TRUE(environment);
+        ASSERT_EQ(environment->at("env").size(), 1U);
+        EXPECT_EQ(environment->at("env").at(0).at("value"), "blue");
+        EXPECT_EQ(environment->at("deployment").at("phase"), "ready");
+
+        const auto events = store->list_audit_events({});
+        ASSERT_TRUE(events);
+        std::vector<std::string> phases;
+        for (const lake::audit::Event& event : *events) {
+            if (event.draft.kind == "platform.deployment.phase") {
+                phases.push_back(event.draft.details.at("phase"));
+            }
+        }
+        EXPECT_EQ(phases, (std::vector<std::string>{"pending", "deploying", "ready"}));
+    } while (std::ranges::next_permutation(order).found);
 }
 
 TEST_F(PlatformFixture, LogsReturnLinesAndCursor) {

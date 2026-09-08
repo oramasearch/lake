@@ -6,6 +6,7 @@
 #include <set>
 #include <span>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -101,6 +102,22 @@ std::string domain_key(const json& row) {
            text_of(row, "host");
 }
 
+std::string normalized_updated_at(const json& value) {
+    std::string updated_at = text_of(value, "updated_at");
+    if (updated_at.ends_with('Z') && updated_at.find('.') == std::string::npos) {
+        updated_at.insert(updated_at.size() - 1, ".000000");
+    }
+    return updated_at;
+}
+
+auto row_order(const json& row) {
+    return std::tuple{normalized_updated_at(row), text_of(row, "ordering_token"), row.dump()};
+}
+
+bool is_newer_row(const json& candidate, const json& current) {
+    return row_order(current) < row_order(candidate);
+}
+
 using KeyFunction = std::string (*)(const json&);
 
 PlatformResult<std::map<std::string, json>> latest_by_key(const ZettaRows& rows,
@@ -118,7 +135,7 @@ PlatformResult<std::map<std::string, json>> latest_by_key(const ZettaRows& rows,
                 PlatformError{"store_error", "Zetta returned an incomplete platform row"});
         }
         const auto found = latest.find(key);
-        if (found == latest.end() || text_of(found->second, "updated_at") < updated_at) {
+        if (found == latest.end() || is_newer_row(row, found->second)) {
             latest[key] = row;
         }
     }
@@ -131,8 +148,7 @@ std::vector<json> new_deployment_phases(const ZettaRows& rows,
     for (const json& row : rows) {
         const std::string key = deployment_key(row);
         const auto previous = previous_deployments.find(key);
-        if (previous != previous_deployments.end() &&
-            text_of(row, "updated_at") <= text_of(previous->second, "updated_at")) {
+        if (previous != previous_deployments.end() && !is_newer_row(row, previous->second)) {
             continue;
         }
         rows_by_deployment[key].push_back(row);
@@ -140,8 +156,7 @@ std::vector<json> new_deployment_phases(const ZettaRows& rows,
 
     std::vector<json> phases;
     for (auto& [key, deployment_rows] : rows_by_deployment) {
-        std::ranges::sort(
-            deployment_rows, {}, [](const json& row) { return text_of(row, "updated_at"); });
+        std::ranges::sort(deployment_rows, {}, row_order);
         const auto previous = previous_deployments.find(key);
         std::string previous_phase = previous == previous_deployments.end()
                                          ? std::string{}
@@ -171,8 +186,7 @@ std::vector<json> deployment_values(const std::vector<PlatformMirrorRow>& rows,
         }
         output.push_back(row.value);
     }
-    std::ranges::sort(
-        output, std::greater{}, [](const json& row) { return text_of(row, "updated_at"); });
+    std::ranges::sort(output, std::greater{}, row_order);
     return output;
 }
 
@@ -641,7 +655,8 @@ PlatformService::set_environment_env(std::string repository_id,
              {"value", value},
              {"deleted", deleted},
              {"set_by", actor},
-             {"updated_at", updated_at}};
+             {"updated_at", updated_at},
+             {"ordering_token", new_uuid_v4()}};
     auto append_completed = co_await control_->append(std::string(environment_env_table), row);
     if (!append_completed) {
         mark_failed();
@@ -698,7 +713,8 @@ PlatformService::change_domain(std::string repository_id,
              {"message", ""},
              {"deleted", deleted},
              {"requested_by", actor},
-             {"updated_at", updated_at}};
+             {"updated_at", updated_at},
+             {"ordering_token", new_uuid_v4()}};
     auto append_completed = co_await control_->append(std::string(domains_table), row);
     if (!append_completed) {
         mark_failed();

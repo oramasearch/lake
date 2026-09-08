@@ -33,8 +33,8 @@ import validation.
 [`github-import.md`](github-import.md) defines recorded GitHub migration input and its explicit
 fidelity report.
 
-[`platform.md`](platform.md) defines the operator-control mirror, environment/domain mutations,
-and Loki-compatible log reads.
+[`platform.md`](platform.md) defines the operator-control mirror, its total row-ordering guarantee,
+environment/domain mutations, and Loki-compatible log reads.
 
 [`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
 routes and their exact-byte integration coverage.

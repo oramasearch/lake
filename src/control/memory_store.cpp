@@ -32,7 +32,10 @@ std::string new_uuid_v4() {
 }
 
 std::string iso8601_at(std::chrono::system_clock::time_point value) {
-    return std::format("{:%FT%T}Z", std::chrono::floor<std::chrono::seconds>(value));
+    const auto seconds = std::chrono::floor<std::chrono::seconds>(value);
+    const auto microseconds =
+        std::chrono::duration_cast<std::chrono::microseconds>(value - seconds).count();
+    return std::format("{:%FT%T}.{:06}Z", seconds, microseconds);
 }
 
 std::string now_iso8601() {

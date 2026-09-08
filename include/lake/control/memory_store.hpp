@@ -492,6 +492,7 @@ private:
 };
 
 std::string new_uuid_v4();
+std::string iso8601_at(std::chrono::system_clock::time_point value);
 std::string now_iso8601();
 
 } // namespace lake::control
