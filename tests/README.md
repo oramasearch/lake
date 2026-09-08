@@ -25,6 +25,16 @@ the process stderr file descriptor through a test-owned pipe, completes a keep-a
 closes that connection while it is idle. A request on a second connection proves the worker
 processed the close before the test stops the server and asserts that the pipe stayed empty.
 
+The four `HttpServer/HttpResponseIsolation` cases sign in a user and check anonymous `/`,
+`/sign-up`, `/sign-in`, `/v1/server_info`, and `/v1/openapi.json` responses for stale cookies and
+redirects. Independent client cookies
+prove the anonymous client cannot open the signing user's sessions, while the original cookie
+still works. One worker forces response reuse on both the same socket and a new socket, with
+in-memory and production Postgres variants. Postgres fixtures generate valid Liquid identity
+documents. The contract and reproduction are in [`../docs/serving/http.md`](../docs/serving/http.md).
+`HttpServer.ResponseResetPreservesCurrentProtocolAndCors` checks preflight header isolation and
+the current response's HTTP version, connection policy, status and CORS headers on a reused socket.
+
 Web UI string tests cover the content-hashed stylesheet link shared by the standard and hosted
 page heads, SHA-256 URL changes for different stylesheet bytes, content-hashed font references,
 and the immutable versus `no-cache` route policy. These checks use embedded or in-memory bytes and
@@ -73,3 +83,19 @@ cursors, renderer strings, OpenAPI, and MCP discovery. A Beast2 Loki double veri
 coroutine HTTP client, selector request, secret bearer, line conversion, and cursor. The focused
 Postgres suite round-trips the same environment binding and JSON mirror through the production
 store.
+
+Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
+time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts
+loopback HTTP servers, publishes through the HTTP capability, and prints two checkpoints accepted by
+Liquid's existing signature verifier with non-decreasing `issued_at` values. Changing the time
+without re-signing is refused even after recomputing the checkpoint hash. The contract and full
+verification commands are in [`../docs/api/transparency.md`](../docs/api/transparency.md).
+Share-link delivery tests cover signed-out folder traversal, registered previews, exact downloads,
+policy-restricted descendants, stable-node moves, and sibling/parent, expiry, and revocation
+refusals. The registry checks include OpenAPI/MCP discovery and MCP byte delivery; the Postgres
+scenario uses a regular user's private repository and text, binary, and empty files.
+`test_token_attenuation.cpp` drives REST and MCP against both stores. It proves refused scope,
+static and lifetime amplification, permitted descendants, recursive session/device revocation,
+expired PostgreSQL ancestors, application-pool issuance without an additional JWT, and one signed audit event per call without bearer values. Each
+PostgreSQL case owns an isolated schema in `LAKE_TEST_DB_URI` and removes it afterward. Run the
+full static and shared CTest suites with PostgreSQL configured; see `docs/api/identity.md`.

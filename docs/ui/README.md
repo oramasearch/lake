@@ -59,7 +59,7 @@ drive views. The unhashed stylesheet and font routes remain compatibility aliase
 | Drive folder | `GET /drive?repository_id=<uuid>&ref=<ref>&path=<path>[&view=list|grid&sort=name|size|modified&direction=asc|desc]` | breadcrumbs, folder and file cards or rows, size, modified time, and capability-backed create, upload, rename, move, and delete controls |
 | Drive preview | `GET /drive/preview`, `/drive/download` | server-rendered or browser-native preview for registered formats, with exact-byte download, size, and digest fallback |
 | Drive history | `GET /drive/history`, `/drive/history/diff`, `/drive/conflict`; `POST /drive/conflict/resolve` | retained path versions, restore-as-new-change controls, explained two-version conflicts, and write-authorized resolution |
-| Drive sharing | GET /drive/share, /drive/share/link, /share/<token> | effective access before sharing, People/Organization/Link choices, link state and revocation consequence, individual link detail, and the public shared-folder view; see [sharing.md](sharing.md) |
+| Drive sharing | GET /drive/share, /drive/share/link, /share/<token>, /share/<token>/preview, /share/<token>/download | effective access before sharing, People/Organization/Link choices, link state and revocation consequence, individual link detail, and signed-out scoped traversal, preview, and exact-byte download; see [sharing.md](sharing.md) |
 | Shared with me | GET /shared-with-me | live folders granted directly to the signed-in identity, their grantor, allowed actions, and current availability; see [sharing.md](sharing.md) |
 
 **Session.** `POST /session` compares the form token with the operator token in constant time; on

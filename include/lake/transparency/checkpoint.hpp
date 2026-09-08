@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -43,6 +44,7 @@ Result<void> validate_log_configuration(const LogConfiguration& configuration);
 nlohmann::json log_configuration_json(const LogConfiguration& configuration);
 
 using CheckpointSigner = std::function<Result<nlohmann::json>(const nlohmann::json& checkpoint)>;
+using CheckpointClock = std::function<std::chrono::system_clock::time_point()>;
 using TransparencySubmitter = std::function<Result<nlohmann::json>(const std::string& endpoint,
                                                                    const nlohmann::json& request)>;
 
@@ -50,7 +52,8 @@ class CheckpointService {
 public:
     CheckpointService(std::filesystem::path store_root,
                       std::string instance_name,
-                      LogConfiguration configuration);
+                      LogConfiguration configuration,
+                      CheckpointClock clock = {});
 
     Result<nlohmann::json> publish(const nlohmann::json& checkpoint,
                                    const CheckpointSigner& signer,

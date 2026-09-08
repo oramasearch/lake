@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <optional>
 #include <string>
@@ -21,6 +23,9 @@
 #include <nlohmann/json.hpp>
 
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
+
+#include <pqxx/pqxx>
 
 #include <liquid/drive.hpp>
 #include <liquid/identity.hpp>
@@ -289,6 +294,257 @@ protected:
     std::shared_ptr<lake::control::Store> store_;
     std::unique_ptr<lake::api::ApiServer> server_;
 };
+
+std::string response_body(std::string_view response) {
+    const std::size_t separator = response.find("\r\n\r\n");
+    return separator == std::string_view::npos ? std::string{}
+                                               : std::string(response.substr(separator + 4));
+}
+
+std::string share_token_hash(std::string_view token) {
+    constexpr std::string_view key = "lake-drive-share-link/1";
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size = 0;
+    HMAC(EVP_sha256(),
+         key.data(),
+         static_cast<int>(key.size()),
+         reinterpret_cast<const unsigned char*>(token.data()),
+         token.size(),
+         digest.data(),
+         &size);
+    constexpr std::string_view hex = "0123456789abcdef";
+    std::string output;
+    for (unsigned int index = 0; index < size; ++index) {
+        output += hex[digest[index] >> 4];
+        output += hex[digest[index] & 15];
+    }
+    return output;
+}
+
+class SharedLinkScenario : public DriveScenario {
+protected:
+    void SetUp() override {
+        DriveScenario::SetUp();
+        if (IsSkipped() || HasFatalFailure()) {
+            return;
+        }
+        fixture_ = provision("share-owner");
+        ASSERT_FALSE(fixture_.owner.secret.empty());
+        for (int value = 0; value < 256; ++value) {
+            binary_ += static_cast<char>(value);
+        }
+        const auto folder = root_.path() / "shared-source";
+        write_text(folder / "shared" / "hello.txt", "hello recipient\n");
+        write_text(folder / "shared" / "child" / "nested.txt", "nested recipient\n");
+        write_text(folder / "shared" / "child" / "bytes.bin", binary_);
+        write_text(folder / "shared" / "child" / "empty.bin", "");
+        write_text(folder / "shared-sibling" / "secret.txt", "private sibling\n");
+        auto client = liquid::runtime::block_on(
+            liquid::drive_client::open(folder,
+                                       repository_url(fixture_.repository),
+                                       {.bearer_token = fixture_.owner.secret, .durable = false}));
+        ASSERT_TRUE(client) << client.error().message;
+        ASSERT_TRUE(liquid::runtime::block_on(client->sync()));
+        link_ = create_link("read");
+        ASSERT_TRUE(link_.contains("token")) << link_.dump();
+    }
+
+    json create_link(std::string_view role) {
+        const json input{{"repository_id", fixture_.repository.id},
+                         {"ref", "main"},
+                         {"path", "shared"},
+                         {"role", role},
+                         {"expires_at", "2999-01-01T00:00:00Z"}};
+        const auto response = http_request(server_->port(),
+                                           "POST",
+                                           "/v1/create_drive_share_link",
+                                           input.dump(),
+                                           bearer(fixture_.owner));
+        EXPECT_NE(response.find(" 200 "), std::string::npos) << response;
+        return response_json(response).value("value", json::object());
+    }
+
+    std::string
+    shared_request(std::string_view suffix, std::string_view path, std::string_view token = {}) {
+        const std::string selected_token =
+            token.empty() ? link_.at("token").get<std::string>() : std::string(token);
+        return http_request(server_->port(),
+                            "GET",
+                            "/share/" + selected_token + std::string(suffix) +
+                                "?ref=main&path=" + std::string(path));
+    }
+
+    void expect_refused(std::string_view path, std::string_view token = {}) {
+        for (const std::string suffix : {"", "/preview", "/download"}) {
+            const auto response = shared_request(suffix, path, token);
+            EXPECT_NE(response.find(" 403 "), std::string::npos)
+                << suffix << " " << path << " " << response;
+            EXPECT_EQ(response_body(response).find("private sibling"), std::string::npos);
+        }
+        const std::string selected_token =
+            token.empty() ? link_.at("token").get<std::string>() : std::string(token);
+        for (const std::string capability : {"resolve_drive_share_link",
+                                             "preview_drive_share_link",
+                                             "download_drive_share_link"}) {
+            const auto response = http_request(server_->port(),
+                                               "GET",
+                                               "/v1/" + capability + "?token=" + selected_token +
+                                                   "&ref=main&path=" + std::string(path));
+            EXPECT_NE(response.find(" 403 "), std::string::npos) << response;
+            EXPECT_EQ(response_json(response)["error"]["code"], "unauthorized");
+        }
+    }
+
+    ProvisionedRepository fixture_;
+    json link_;
+    std::string binary_;
+};
+
+TEST_F(SharedLinkScenario, SignedOutRecipientTraversesPreviewsAndDownloadsExactBytes) {
+    const std::string token = link_.at("token");
+    const auto root = http_request(server_->port(), "GET", "/share/" + token);
+    ASSERT_NE(root.find(" 200 "), std::string::npos) << root;
+    EXPECT_NE(root.find("path=shared%2Fchild"), std::string::npos);
+    EXPECT_EQ(root.find("shared-sibling"), std::string::npos);
+    const auto child = shared_request("", "shared/child");
+    ASSERT_NE(child.find(" 200 "), std::string::npos) << child;
+    EXPECT_NE(child.find("nested.txt"), std::string::npos);
+    EXPECT_NE(child.find("Up one folder"), std::string::npos);
+    const auto preview = shared_request("/preview", "shared/child/nested.txt");
+    ASSERT_NE(preview.find(" 200 "), std::string::npos) << preview;
+    EXPECT_NE(preview.find("nested recipient"), std::string::npos);
+    EXPECT_NE(preview.find("download>Download"), std::string::npos);
+    const auto fallback = shared_request("/preview", "shared/child/bytes.bin");
+    ASSERT_NE(fallback.find(" 200 "), std::string::npos) << fallback;
+    EXPECT_NE(fallback.find("No preview is available"), std::string::npos);
+    for (const std::string path : {"shared/hello.txt",
+                                   "shared/child/nested.txt",
+                                   "shared/child/bytes.bin",
+                                   "shared/child/empty.bin"}) {
+        const auto download = shared_request("/download", path);
+        ASSERT_NE(download.find(" 200 "), std::string::npos) << download;
+        EXPECT_NE(download.find("attachment; filename="), std::string::npos);
+        EXPECT_EQ(response_body(download), read_text(root_.path() / "shared-source" / path));
+    }
+    const auto api = response_json(http_request(server_->port(),
+                                                "GET",
+                                                "/v1/download_drive_share_link?token=" + token +
+                                                    "&ref=main&path=shared/child/bytes.bin"));
+    ASSERT_TRUE(api.value("ok", false)) << api;
+    std::vector<std::byte> raw;
+    for (const unsigned char byte : binary_) {
+        raw.push_back(static_cast<std::byte>(byte));
+    }
+    std::string encoded = api["value"]["content_base64"];
+    while (encoded.ends_with('=')) {
+        encoded.pop_back();
+    }
+    std::replace(encoded.begin(), encoded.end(), '+', '-');
+    std::replace(encoded.begin(), encoded.end(), '/', '_');
+    EXPECT_EQ(encoded, base64url(raw));
+    const auto unrestricted =
+        http_request(server_->port(),
+                     "GET",
+                     "/drive/download?repository_id=" + fixture_.repository.id +
+                         "&ref=main&path=shared/hello.txt");
+    EXPECT_EQ(unrestricted.find(" 200 "), std::string::npos);
+    const auto write = http_request(server_->port(),
+                                    "POST",
+                                    "/v1/create_drive_folder",
+                                    json{{"repository_id", fixture_.repository.id},
+                                         {"ref", "main"},
+                                         {"path", "shared"},
+                                         {"name", "unauthorized"}}
+                                        .dump(),
+                                    "Bearer " + token);
+    EXPECT_NE(write.find(" 403 "), std::string::npos) << write;
+    const json writable = create_link("write");
+    const auto write_role_read =
+        shared_request("/download", "shared/hello.txt", writable.at("token").get<std::string>());
+    EXPECT_NE(write_role_read.find(" 200 "), std::string::npos) << write_role_read;
+}
+
+TEST_F(SharedLinkScenario, ScopeAndRevocationRefuseEveryRead) {
+    for (const std::string path : {"shared-sibling/secret.txt",
+                                   "shared-sibling",
+                                   "",
+                                   "..",
+                                   "shared/../shared-sibling/secret.txt",
+                                   "shared%2F..%2Fshared-sibling%2Fsecret.txt",
+                                   "shared%2F%2Fhello.txt",
+                                   "shared%2F%00hello.txt"}) {
+        expect_refused(path);
+    }
+    ASSERT_NE(shared_request("", "shared").find(" 200 "), std::string::npos);
+    const auto revoked = http_request(server_->port(),
+                                      "POST",
+                                      "/v1/revoke_drive_share_link",
+                                      json{{"link_id", link_.at("id")}}.dump(),
+                                      bearer(fixture_.owner));
+    ASSERT_NE(revoked.find(" 200 "), std::string::npos) << revoked;
+    expect_refused("shared");
+    expect_refused("shared/hello.txt");
+}
+
+TEST_F(SharedLinkScenario, ExpiryAfterListingStopsPreviewAndDownload) {
+    const auto persisted = store_->get_drive_share_link(link_.at("id"));
+    ASSERT_TRUE(persisted);
+    const std::string expiring_token = lake::control::new_uuid_v4();
+    const auto expiry = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) +
+                        std::chrono::hours(1);
+    const auto expiring =
+        store_->create_drive_share_link({fixture_.repository.id,
+                                         persisted->object_id,
+                                         persisted->node_id,
+                                         persisted->path,
+                                         "read",
+                                         share_token_hash(expiring_token),
+                                         std::format("{:%Y-%m-%dT%H:%M:%SZ}", expiry),
+                                         fixture_.owner.taap_id,
+                                         "expiring-link-proof"});
+    ASSERT_TRUE(expiring) << expiring.error().message;
+    const auto listing = shared_request("", "shared", expiring_token);
+    ASSERT_NE(listing.find(" 200 "), std::string::npos) << listing;
+    // Age only this fixture's row after a successful listing, without a timing race on busy hosts.
+    pqxx::connection connection(database_uri_);
+    pqxx::work transaction(connection);
+    transaction.exec_params("UPDATE drive_share_links SET created_at = now() - interval '2 hours', "
+                            "expires_at = now() - interval '1 hour' WHERE id = $1::uuid",
+                            expiring->id);
+    transaction.commit();
+    expect_refused("shared", expiring_token);
+    expect_refused("shared/hello.txt", expiring_token);
+}
+
+TEST_F(SharedLinkScenario, DescendantPolicyCanRefuseTheLinkWithoutChangingItsRoot) {
+    const auto browse = response_json(
+        http_request(server_->port(),
+                     "GET",
+                     "/v1/resolve_drive_share_link?token=" + link_.at("token").get<std::string>() +
+                         "&ref=main"));
+    ASSERT_TRUE(browse.value("ok", false)) << browse;
+    std::string node;
+    for (const auto& entry : browse["value"]["items"]) {
+        if (entry["path"] == "shared/child") {
+            node = entry["node_id"];
+        }
+    }
+    ASSERT_FALSE(node.empty());
+    const auto root_link = store_->get_drive_share_link(link_.at("id"));
+    ASSERT_TRUE(root_link);
+    ASSERT_TRUE(store_->create_policy_object({"path",
+                                              fixture_.repository.id + ":" + node,
+                                              root_link->object_id,
+                                              fixture_.owner.taap_id,
+                                              "restricted-child-proof",
+                                              false}));
+    expect_refused("shared/child");
+    expect_refused("shared/child/nested.txt");
+    const auto root = shared_request("", "shared");
+    EXPECT_NE(root.find(" 200 "), std::string::npos) << root;
+    EXPECT_EQ(root.find("path=shared%2Fchild"), std::string::npos);
+    EXPECT_NE(shared_request("/download", "shared/hello.txt").find(" 200 "), std::string::npos);
+}
 
 TEST_F(DriveScenario, UserSyncsSharesAndSeesHistoryEndToEnd) {
     const ProvisionedRepository fixture = provision("owner");

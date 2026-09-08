@@ -22,6 +22,8 @@ envelope as `structuredContent` (and as text), with `isError` set.
 
 **Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
 the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
+The [identity contract](identity.md) includes response isolation: a completed sign-in cannot
+send its session cookie or redirect through another request, including a new client connection.
 Repository reads are the deliberate public-read exception: anonymous calls return only a public
 repository and its content; all other repository visibility levels remain protected.
 
@@ -72,7 +74,8 @@ routes and their exact-byte integration coverage.
 | `drive_browse`, `drive_preview`, `drive_history` | read | repository id, ref, and optional or required path | authorized folder children, format-registry preview, or path changes | [drive.md](drive.md) |
 | `restore_drive_version` | action | repository id, ref, path, change id | new restoring change | [drive.md](drive.md) |
 | `share_drive_folder`, `drive_effective_access`, `drive_shared_with_me` | action/read | folder, recipient, role and evidence; folder; or no input | live grant, direct/inherited access panel, or direct live folders for the signed-in identity | [sharing.md](sharing.md) |
-| `create_drive_share_link`, `resolve_drive_share_link`, `revoke_drive_share_link` | action/read | folder, role, expiry; token; or link id | scoped link, folder contents, or revoked link | [sharing.md](sharing.md) |
+| `create_drive_share_link`, `resolve_drive_share_link`, `revoke_drive_share_link` | action/read | folder, role, expiry; token, ref, optional descendant path; or link id | scoped link, authorized folder contents, or revoked link | [sharing.md](sharing.md) |
+| `preview_drive_share_link`, `download_drive_share_link` | read, bearer link | token, ref, file path | scoped format-registry preview or exact base64 bytes; expiry and revocation checked on every call | [sharing.md](sharing.md) |
 | `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id, revision, and file path where required | compatible model/dataset metadata, storage/provenance, or exact file | [models.md](models.md) |
 | `prepare_repository_upload`, `stage_repository_file`, `commit_repository_files` | action | repository id plus upload plan, verified staged bytes, or file operations | upload modes, unique stored bytes, or immutable committed revision | [models.md](models.md) |
 | `attach_model_provenance`, `verify_model_provenance` | action | model and dataset revisions plus canonical liquid attestations, or model revision | attached or re-verified dataset-to-model training chain | [models.md](models.md) |
@@ -105,7 +108,7 @@ routes and their exact-byte integration coverage.
 | `rotate_tuf_root` | action | next root signed by old and new thresholds | immutable successor root | [transparency.md](transparency.md) |
 | `tuf_metadata` | read | role and optional version | exact encoded and parsed role metadata | [transparency.md](transparency.md) |
 | `transparency_log_configuration` | read | — | effective mode, witnesses, quorum, and aggregator | [transparency.md](transparency.md) |
-| `publish_transparency_checkpoint` | action | — | signed current checkpoint after mode requirements | [transparency.md](transparency.md) |
+| `publish_transparency_checkpoint` | action | — | signed current checkpoint including UTC Unix-second `issued_at`, after mode requirements | [transparency.md](transparency.md) |
 | `transparency_checkpoint` | read | — | current signed checkpoint | [transparency.md](transparency.md) |
 | `append_transparency_entries` | action | canonical TAAP attestations | appended indexes, tree size, and root | [transparency.md](transparency.md) |
 | `transparency_tile` | public read | level, tile index, and exact width | immutable base64url entry or interior-hash tile | [transparency.md](transparency.md) |
@@ -133,7 +136,7 @@ routes and their exact-byte integration coverage.
 | `begin_passkey_sign_in`, `sign_in_passkey` | action, public entry | pool, then WebAuthn assertion | request options, then browser session + secret | [identity.md](identity.md) |
 | `register_oauth_provider` | action, operator | issuer, client id, secret, scopes | confirmation | [identity.md](identity.md) |
 | `start_oauth` | action, public entry | pool, provider, device name, identity document for a new user | authorization URL | [identity.md](identity.md) |
-| `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | token/session data | [identity.md](identity.md) |
+| `create_token`, `list_sessions`, `revoke_session` | action/read | name/scopes or session id | tokens bounded by issuer scopes and expiry, with parent revocation | [identity.md](identity.md) |
 | `list_devices`, `revoke_device` | read/action | device id for revocation | device data, including passkey credential IDs and signed bindings | [identity.md](identity.md) |
 | `issue_offline_grant`, `list_offline_grants`, `revoke_offline_grant`, `check_cached_read` | action/read | device, repository-read scopes, duration, or signed credential | bounded cached-read grant or verification | [offline.md](offline.md) |
 | `recover_with_code`, `begin_email_recovery`, `begin_admin_recovery`, `approve_admin_recovery`, `complete_recovery` | action | recovery proof, organization/user, or one-use token | recovery state or fresh browser session | [recovery.md](recovery.md) |

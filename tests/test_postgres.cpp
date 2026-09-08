@@ -266,6 +266,7 @@ TEST(PostgresCapabilities, DriveShareLinksRoundTrip) {
                                                       user->taap_id,
                                                       "request-link-" + suffix});
     ASSERT_TRUE(link) << link.error().message;
+    EXPECT_EQ(link->expires_at, "2999-01-01T00:00:00.000000Z");
     EXPECT_EQ(store->get_drive_share_link(link->id)->path, "shared");
     EXPECT_EQ(store->get_drive_share_link_by_token_hash("token-hash-" + suffix)->id, link->id);
     const auto listed = store->list_drive_share_links(repository->id, folder->id, 10);
