@@ -3146,6 +3146,7 @@ void register_repository_capabilities(Registry& registry) {
                                 if (!ctx.store) {
                                     return no_store();
                                 }
+                                ctx.audit_object = "repository/" + in.at("id").get<std::string>();
                                 const control::RepositoryDeletion deletion{
                                     .deleted_at = timestamp_after(std::chrono::seconds::zero()),
                                     .retention_until = timestamp_after(std::chrono::days{30}),

@@ -65,6 +65,12 @@ Identity documents are verified through libliquid's public canonical-CBOR codec.
 sign-up atomically provisions a personal customer and its inherited ownership grant, then directs
 the user to a first-repository form. Generated handles, default quotas, and zero-byte metering are
 documented in `docs/api/provisioning.md`.
+The source-tree landing page describes hosted Liquid repositories and the existing account,
+private-repository, and account-token push path. Shared navigation receives the resolved viewer:
+public repository browsing for visitors, personal workspace and account links for users, and
+Administration for operator credentials. Customer authentication redirects use `/sign-in`;
+`/login` remains an explicit operator entry. See `docs/ui/front-door.md`.
+
 Migration `0020_identity_exit` adds fresh, replay-resistant libliquid TAAP-key sign-in and a
 one-use application authorization-code flow with exact redirects, PKCE S256, nonce-bound ID
 tokens, and the existing Ed25519 application JWKS.
@@ -219,7 +225,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `tools/ui/screenshot.sh` reproduces the 1440×900 review images.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
-  never add a second path. Pages that read the store redirect to `/login` without it; `/metrics`
+  never add a second path. Protected pages redirect to `/sign-in` without a valid credential; `/metrics`
   uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
 - **One registry.** Every capability is registered from `src/api/capabilities.cpp` or its
   area-specific registration file; REST,

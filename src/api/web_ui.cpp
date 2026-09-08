@@ -331,7 +331,7 @@ std::string stylesheet_link() {
 
 bool navigation_is_current(std::string_view title, std::string_view key) {
     if (key == "home") {
-        return title == "lake — hello";
+        return title == "lake — your repositories, together";
     }
     if (key == "repositories") {
         return title == "lake — repositories" || title == "lake — tree" || title == "lake — file" ||
@@ -374,28 +374,42 @@ std::string nav_link(std::string_view href,
                        label);
 }
 
-std::string nav(bool signed_in, std::string_view title) {
+std::string nav(WebUiViewer viewer, std::string_view title) {
     std::string out = "<nav class=\"primary-nav\" aria-label=\"Primary\">"
                       "<p class=\"nav-label\">Workspace</p>";
     out += nav_link("/", "Home", "home", "home", title);
-    out += nav_link("/repositories", "Repositories", "repository", "repositories", title);
-    out += nav_link("/shared-with-me", "Shared with me", "repository", "shared", title);
-    out += nav_link("/search", "Search", "search", "search", title);
-    out += "<p class=\"nav-label\">Administration</p>";
-    out += nav_link("/customers", "Customers", "customers", "customers", title);
-    out += nav_link("/organizations", "Organizations", "organization", "organizations", title);
-    out += nav_link("/applications", "Applications", "api", "applications", title);
-    out += nav_link("/metering", "Metering", "metering", "metering", title);
-    out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", title);
-    out += nav_link("/audit", "Audit", "audit", "audit", title);
-    if (signed_in) {
-        out += "<p class=\"nav-label\">Identity</p>";
-        out += nav_link("/sessions", "Sessions", "identity", "session", title);
-        out += nav_link("/passkeys", "Passkeys", "identity", "passkey", title);
-        out += nav_link("/tokens", "Tokens", "identity", "token", title);
+    out += nav_link("/repositories",
+                    viewer.signed_in ? "Repositories" : "Public repositories",
+                    "repository",
+                    "repositories",
+                    title);
+    if (viewer.signed_in) {
+        if (!viewer.administrator) {
+            out += nav_link(
+                "/shared-with-me", "Shared with me", "repository", "shared with me", title);
+        }
+        out += nav_link("/search", "Search", "search", "search", title);
     }
-    out += "<p class=\"nav-label\">Developer</p>";
-    out += nav_link("/v1/openapi.json", "API", "api", "api", title);
+    if (viewer.administrator) {
+        out += "<p class=\"nav-label\">Administration</p>";
+        out += nav_link("/customers", "Customers", "customers", "customers", title);
+        out += nav_link("/organizations", "Organizations", "organization", "organizations", title);
+        out += nav_link("/applications", "Applications", "api", "applications", title);
+        out += nav_link("/metering", "Metering", "metering", "metering", title);
+        out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", title);
+        out += nav_link("/audit", "Audit", "audit", "audit", title);
+    }
+    if (viewer.signed_in && !viewer.administrator) {
+        out += "<p class=\"nav-label\">Account</p>";
+        out += nav_link("/settings", "Settings", "identity", "settings", title);
+        out += nav_link("/sessions", "Sessions", "identity", "sessions", title);
+        out += nav_link("/passkeys", "Passkeys", "identity", "passkeys", title);
+        out += nav_link("/tokens", "Tokens", "identity", "tokens", title);
+    }
+    if (viewer.signed_in) {
+        out += "<p class=\"nav-label\">Developer</p>";
+        out += nav_link("/v1/openapi.json", "API", "api", "api", title);
+    }
     out += "</nav>";
     return out;
 }
@@ -406,7 +420,7 @@ std::string session_control(bool signed_in) {
                "action=\"/logout\"><button type=\"submit\">Sign out</button></form></span>";
     }
     return "<span class=\"session\"><a href=\"/sign-in\">Sign in</a><a "
-           "href=\"/sign-up\">Sign up</a></span>";
+           "href=\"/sign-up\">Create account</a></span>";
 }
 
 std::string row_link(std::string_view href, std::string_view text) {
@@ -429,7 +443,8 @@ std::string repository_name(const control::Repository& repository) {
     return repository.name.empty() ? repository.id : repository.name;
 }
 
-std::string forge_tabs(const control::Repository& repository, std::string_view current) {
+std::string
+forge_tabs(const control::Repository& repository, std::string_view current, WebUiViewer viewer) {
     const std::string id = url_component(repository.id);
     const std::vector<std::tuple<std::string, std::string, std::string>> tabs{
         {"Code", "/repository?id=" + id, "code"},
@@ -443,6 +458,13 @@ std::string forge_tabs(const control::Repository& repository, std::string_view c
     };
     std::string output = "<nav class=\"tabs forge-tabs\" aria-label=\"Repository\">";
     for (const auto& [label, href, key] : tabs) {
+        if (!viewer.signed_in && (key == "platform" || key == "webhooks")) {
+            continue;
+        }
+        // The protection page includes the instance audit capability.
+        if (key == "protection" && !viewer.administrator) {
+            continue;
+        }
         output += std::format("<a href=\"{}\"{}>{}</a>",
                               web_ui_escape(href),
                               key == current ? " aria-current=\"page\"" : "",
@@ -911,7 +933,7 @@ std::string application_shell(const control::Application& application,
 std::string web_ui_shell(std::string_view title,
                          std::string_view meta,
                          std::string_view content,
-                         bool signed_in) {
+                         WebUiViewer viewer) {
     return std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -919,7 +941,7 @@ std::string web_ui_shell(std::string_view title,
         "<a class=\"skip-link\" href=\"#main-content\">Skip to content</a>"
         "<div class=\"app-shell\"><aside class=\"sidebar\"><a class=\"brand\" href=\"/\">"
         "<span class=\"brand-mark\">{}</span><span>lake</span></a>{}"
-        "<div class=\"sidebar-footer\">Orama data plane</div></aside>"
+        "</aside>"
         "<div class=\"app-frame\"><header class=\"topbar\"><div class=\"topbar-context\">{}</div>"
         "<div class=\"topbar-actions\"><button class=\"theme-toggle\" type=\"button\" "
         "data-theme-toggle aria-label=\"Toggle theme\">{}<span class=\"sr-only\">Toggle "
@@ -930,67 +952,86 @@ std::string web_ui_shell(std::string_view title,
         theme_preference_script,
         stylesheet_link(),
         web_ui_icon("lake"),
-        nav(signed_in, title),
+        nav(viewer, title),
         web_ui_escape(meta),
         web_ui_icon("theme"),
-        session_control(signed_in),
+        session_control(viewer.signed_in),
         content,
         theme_toggle_script);
 }
 
-std::string web_ui_error(std::string_view code, std::string_view message, bool signed_in) {
+std::string web_ui_error(std::string_view code, std::string_view message, WebUiViewer viewer) {
     const std::string content = std::format(
         "<div class=\"state-page error-state\" role=\"alert\"><p class=\"eyebrow\">{}</p>"
         "<h1>We could not load this page</h1><p class=\"sub\">{}</p>"
         "<p><a class=\"button primary\" href=\"/repositories\">Back to repositories</a></p></div>",
         web_ui_escape(code),
         web_ui_escape(message));
-    return web_ui_shell("lake — error", code, content, signed_in);
+    return web_ui_shell("lake — error", code, content, viewer);
 }
 
-std::string web_ui_loading(std::string_view subject, bool signed_in) {
+std::string web_ui_loading(std::string_view subject, WebUiViewer viewer) {
     const std::string content =
         std::format("<div class=\"state-page loading-state\" role=\"status\" aria-live=\"polite\" "
                     "aria-busy=\"true\"><p class=\"eyebrow\">loading</p><h1>{}</h1>"
                     "<p class=\"sub\">Loading.</p><div class=\"loading-bars\" "
                     "aria-hidden=\"true\"><span></span><span></span><span></span></div></div>",
                     web_ui_escape(subject));
-    return web_ui_shell("lake — loading", subject, content, signed_in);
+    return web_ui_shell("lake — loading", subject, content, viewer);
 }
 
-std::string web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in) {
-    const std::string content =
-        std::format("<p class=\"eyebrow\">hello world</p><h1>hello from lake</h1>"
-                    "<p class=\"sub\">liquid is the tool. lake is where it collects.</p>"
-                    "<div class=\"panel\"><p>This node is <code>{}</code>, running lake "
-                    "<code>{}</code>, serving over the same "
-                    "Beast2 + Capy/Corosio stack as Zetta.</p><p>Explore <a "
-                    "href=\"/customers\">customers</a> and "
-                    "<a href=\"/repositories\">repositories</a> (sign in with the admin "
-                    "token), or use the API: "
-                    "<code>GET /v1/openapi.json</code>, MCP at <code>POST "
-                    "/mcp</code>.</p></div>",
-                    web_ui_escape(node_name),
-                    web_ui_escape(version));
-    return web_ui_shell(
-        "lake — hello", std::format("{} · {}", node_name, version), content, signed_in);
+std::string web_ui_home(WebUiViewer viewer) {
+    std::string content =
+        "<p class=\"eyebrow\">Repositories for your work</p>"
+        "<h1>Keep your code and files together.</h1>"
+        "<p class=\"sub\">Lake hosts your Liquid repositories so you can store your work, "
+        "browse its history, and share it with other people.</p>";
+    if (viewer.signed_in) {
+        content += "<p class=\"actions\"><a href=\"/repositories\">Open your repositories</a></p>";
+    } else {
+        content += "<p class=\"actions\"><a href=\"/sign-up\">Create account</a> "
+                   "<a href=\"/sign-in\">Sign in</a></p>";
+    }
+    content += "<h2>From your first account to your first push</h2>"
+               "<div class=\"grid\">"
+               "<section class=\"card\"><h3>1. Create an account</h3>"
+               "<p>Use your email, a password, and your public Liquid identity document. "
+               "You get a personal space with a generated handle that you own.</p>"
+               "<p>Sign-up explains how to install Liquid and export the public document. "
+               "Installing Liquid currently requires access to its source repository.</p></section>"
+               "<section class=\"card\"><h3>2. Create a repository</h3>"
+               "<p>Choose a name in your personal space. Your new repository starts private, "
+               "and you can manage it with your account.</p></section>"
+               "<section class=\"card\"><h3>3. Push with Liquid</h3>"
+               "<p>Liquid is the command-line tool that sends your local work to Lake. "
+               "Create a token with write access in your account's Tokens page. "
+               "Use it as <code>LIQUID_TOKEN</code> when you run <code>liquid push</code> "
+               "with your repository's URL.</p>";
+    if (viewer.signed_in && !viewer.administrator) {
+        content += "<p><a href=\"/tokens\">Create a token</a></p>";
+    }
+    content += "</section></div>";
+    return web_ui_shell("lake — your repositories, together", "Welcome to Lake", content, viewer);
 }
 
-std::string web_ui_login(std::string_view error) {
-    std::string content = "<p class=\"eyebrow\">session</p><h1>Sign in</h1><p class=\"sub\">Paste "
-                          "the Lake's admin token.</p>";
+std::string web_ui_login(std::string_view error, WebUiViewer viewer) {
+    std::string content =
+        "<p class=\"eyebrow\">Operator access</p><h1>Operator sign in</h1>"
+        "<p class=\"sub\">Use your operator credential to manage this Lake. "
+        "For your own repositories, <a href=\"/sign-in\">sign in to your account</a>.</p>";
     if (!error.empty())
         content += std::format("<p class=\"error\">{}</p>", web_ui_escape(error));
-    content += "<form class=\"login\" method=\"post\" action=\"/session\"><label>Admin token<input "
+    content += "<form class=\"login\" method=\"post\" action=\"/session\"><label>Operator "
+               "credential<input "
                "type=\"password\" "
                "name=\"token\" "
-               "placeholder=\"admin token\" autocomplete=\"current-password\" "
+               "placeholder=\"Operator credential\" autocomplete=\"current-password\" "
                "required></label><button "
                "type=\"submit\">Sign in</button></form>";
-    return web_ui_shell("lake — sign in", "sign in", content, false);
+    return web_ui_shell("lake — operator sign in", "Operator access", content, viewer);
 }
 
-std::string web_ui_customers(const std::vector<control::Customer>& customers) {
+std::string web_ui_customers(const std::vector<control::Customer>& customers, WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">control plane</p><h1>Customers</h1><p "
                           "class=\"sub\">The tenants. "
                           "Each is an individual or an organization and owns its repositories.</p>";
@@ -1014,19 +1055,25 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers) {
         content += "</tbody></table>";
     }
     return web_ui_shell(
-        "lake — customers", std::format("{} customers", customers.size()), content, true);
+        "lake — customers", std::format("{} customers", customers.size()), content, viewer);
 }
 
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners,
-                                bool signed_in) {
-    std::string content = "<p class=\"eyebrow\">control "
-                          "plane</p><h1>Repositories</h1><p class=\"sub\">Every "
-                          "repository, newest first, addressed as "
-                          "&lt;customer&gt;/&lt;name&gt;.</p>";
+                                WebUiViewer viewer) {
+    std::string content =
+        viewer.signed_in
+            ? "<p class=\"eyebrow\">Your work</p><h1>Repositories</h1>"
+              "<p class=\"sub\">Repositories you can access, newest first.</p>"
+            : "<p class=\"eyebrow\">Explore</p><h1>Public repositories</h1>"
+              "<p class=\"sub\">Browse code, files, and history shared publicly on this Lake.</p>";
     if (repositories.empty()) {
-        content += "<div class=\"panel empty\">No repositories yet. Create your first repository "
-                   "to store files and review changes.</div>";
+        content +=
+            viewer.signed_in
+                ? "<div class=\"panel empty\">No repositories yet. Create your first repository "
+                  "to store files and review changes.</div>"
+                : "<div class=\"panel empty\">No public repositories yet. "
+                  "<a href=\"/sign-up\">Create an account</a> to start your own.</div>";
     } else {
         content += "<table><thead><tr><th>Repository</th><th>Owner</th><th>Visibility</"
                    "th><th>Description</th><th>Created</th></tr></thead><tbody>";
@@ -1045,13 +1092,12 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
         }
         content += "</tbody></table>";
     }
-    if (signed_in && !owners.empty()) {
+    if (viewer.signed_in && !owners.empty()) {
         content +=
             "<section class=\"panel\"><h2>Create a repository</h2>"
-            "<p>Your personal customer owns your repositories. Its generated handle is permanent. "
-            "An empty customer has no storage charge.</p>"
+            "<p>Your personal space owns your repositories. Its generated handle is permanent.</p>"
             "<form class=\"stack\" method=\"post\" action=\"/repository/create\">"
-            "<label>Customer<select name=\"customer_id\" required>";
+            "<label>Space<select name=\"customer_id\" required>";
         for (const auto& [id, owner] : owners) {
             content += "<option value=\"" + web_ui_escape(id) + "\">" + web_ui_escape(owner.name) +
                        "</option>";
@@ -1068,13 +1114,13 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
     return web_ui_shell("lake — repositories",
                         std::format("{} repositories", repositories.size()),
                         content,
-                        signed_in);
+                        viewer);
 }
 
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const RepositoryHomeData& data,
-                              bool signed_in) {
+                              WebUiViewer viewer) {
     const std::string owner_name = owner ? owner->name : repository.customer_id;
     const std::string default_ref = data.refs.empty() ? "main" : data.refs.front().name;
     std::string content = std::format(
@@ -1085,7 +1131,7 @@ std::string web_ui_repository(const control::Repository& repository,
         web_ui_escape(repository.name),
         web_ui_escape(repository.description.empty() ? "No description." : repository.description),
         web_ui_escape(repository.visibility),
-        forge_tabs(repository, "code"));
+        forge_tabs(repository, "code", viewer));
     if (!repository.deleted_at.empty()) {
         content += std::format("<div class=\"notice status-danger\"><strong>Tombstoned.</strong> "
                                "Deleted {}. Collection may reclaim unreferenced content after "
@@ -1227,7 +1273,8 @@ std::string web_ui_repository(const control::Repository& repository,
         "<p>{}</p></section><section class=\"panel repository-meta\"><h2>About</h2><dl>"
         "<dt>Identifier</dt><dd>{}</dd><dt>Owner</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd>"
         "<dt>Updated</dt><dd>{}</dd></dl></section></aside></div>",
-        row_link("/repository/access?id=" + repository.id, "View access details"),
+        viewer.signed_in ? row_link("/repository/access?id=" + repository.id, "View access details")
+                         : "",
         identifier_markup(repository.id),
         row_link("/repositories?customer_id=" + repository.customer_id, owner_name),
         web_ui_escape(repository.created_at),
@@ -1235,16 +1282,16 @@ std::string web_ui_repository(const control::Repository& repository,
     return web_ui_shell("lake — " + owner_name + "/" + repository.name,
                         owner_name + "/" + repository.name,
                         content,
-                        signed_in);
+                        viewer);
 }
 
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const std::vector<RepositoryContentRef>& refs,
-                              bool signed_in) {
+                              WebUiViewer viewer) {
     RepositoryHomeData data;
     data.refs = refs;
-    return web_ui_repository(repository, owner, data, signed_in);
+    return web_ui_repository(repository, owner, data, viewer);
 }
 
 namespace {
@@ -1287,21 +1334,23 @@ std::string platform_url(std::string_view url) {
 std::string platform_heading(const control::Repository& repository,
                              std::string_view eyebrow,
                              std::string_view title,
-                             std::string_view current) {
+                             std::string_view current,
+                             WebUiViewer viewer) {
     return std::format("<p class=\"eyebrow\">{}</p><h1>{}</h1>{}",
                        web_ui_escape(eyebrow),
                        web_ui_escape(title),
-                       forge_tabs(repository, current));
+                       forge_tabs(repository, current, viewer));
 }
 
 } // namespace
 
 std::string web_ui_environments(const control::Repository& repository,
                                 const nlohmann::json& environments,
-                                bool signed_in) {
+                                WebUiViewer viewer) {
     const std::string stale_since = platform_text(environments, "stale_since");
     const nlohmann::json items = environments.value("items", nlohmann::json::array());
-    std::string content = platform_heading(repository, "platform", "Environments", "platform");
+    std::string content =
+        platform_heading(repository, "platform", "Environments", "platform", viewer);
     content += platform_stale_banner(stale_since);
     content += "<p class=\"sub\">Deployments mirrored from the operator control plane.</p>";
     if (items.empty()) {
@@ -1330,20 +1379,20 @@ std::string web_ui_environments(const control::Repository& repository,
         content += "</tbody></table>";
     }
     return web_ui_shell(
-        "lake — environments", std::format("{} environments", items.size()), content, signed_in);
+        "lake — environments", std::format("{} environments", items.size()), content, viewer);
 }
 
 std::string web_ui_environment(const control::Repository& repository,
                                const nlohmann::json& environment,
                                const nlohmann::json& deployments,
-                               bool signed_in) {
+                               WebUiViewer viewer) {
     const std::string name = platform_text(environment, "name");
     const std::string stale_since = platform_text(environment, "stale_since");
     const nlohmann::json deployment = environment.value("deployment", nlohmann::json::object());
     const nlohmann::json env = environment.value("env", nlohmann::json::array());
     const nlohmann::json domains = environment.value("domains", nlohmann::json::array());
     const nlohmann::json history = deployments.value("items", nlohmann::json::array());
-    std::string content = platform_heading(repository, "environment", name, "platform");
+    std::string content = platform_heading(repository, "environment", name, "platform", viewer);
     content += platform_stale_banner(stale_since);
     const std::string url = platform_text(deployment, "url");
     content += std::format(
@@ -1420,17 +1469,18 @@ std::string web_ui_environment(const control::Repository& repository,
                                web_ui_escape(platform_text(row, "message")));
     }
     content += "</tbody></table></section>";
-    return web_ui_shell("lake — " + name, name, content, signed_in);
+    return web_ui_shell("lake — " + name, name, content, viewer);
 }
 
 std::string web_ui_logs(const control::Repository& repository,
                         std::string_view environment,
                         const nlohmann::json& logs,
                         std::string_view stale_since,
-                        bool signed_in) {
+                        WebUiViewer viewer) {
     const nlohmann::json items = logs.value("items", nlohmann::json::array());
     const std::string next_since = platform_text(logs, "next_since");
-    std::string content = platform_heading(repository, "environment logs", environment, "platform");
+    std::string content =
+        platform_heading(repository, "environment logs", environment, "platform", viewer);
     content += platform_stale_banner(stale_since);
     content += "<section class=\"panel\" id=\"platform-logs\" data-repository=\"" +
                web_ui_escape(repository.id) + "\" data-environment=\"" +
@@ -1446,20 +1496,20 @@ std::string web_ui_logs(const control::Repository& repository,
                "&amp;since=" + url_component(next_since) + "\">Refresh</a></p></section>";
     content +=
         R"(<script>(()=>{const root=document.querySelector('#platform-logs');if(!root)return;const output=root.querySelector('code');let since=root.dataset.since;const poll=async()=>{try{const response=await fetch('/v1/environment_logs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({repository_id:root.dataset.repository,environment:root.dataset.environment,since,limit:200,direction:'forward'})});const body=await response.json();if(!body.ok)return;for(const item of body.value.items){output.append(`${item.ts} ${item.pod}/${item.container} ${item.line}\n`);}since=body.value.next_since||since;}finally{setTimeout(poll,3000);}};setTimeout(poll,3000);})();</script>)";
-    return web_ui_shell("lake — logs", std::string(environment) + " logs", content, signed_in);
+    return web_ui_shell("lake — logs", std::string(environment) + " logs", content, viewer);
 }
 
 std::string web_ui_repository_tree(const control::Repository& repository,
                                    std::string_view ref,
                                    const std::vector<RepositoryTreeEntry>& entries,
-                                   bool signed_in) {
+                                   WebUiViewer viewer) {
     std::string content = path_breadcrumbs(repository, ref, "") +
                           std::format("<p class=\"eyebrow\">repository tree</p><h1>{}</h1>"
                                       "<p class=\"sub\">Browse <code>{}</code> by path and last "
                                       "change.</p>{}",
                                       web_ui_escape(repository_name(repository)),
                                       web_ui_escape(ref),
-                                      forge_tabs(repository, "code"));
+                                      forge_tabs(repository, "code", viewer));
     if (entries.empty()) {
         content += "<div class=\"panel empty\"><strong>This ref has no files.</strong><p>Push a "
                    "change to publish its first tree.</p></div>";
@@ -1493,14 +1543,14 @@ std::string web_ui_repository_tree(const control::Repository& repository,
         }
         content += "</ul></section>";
     }
-    return web_ui_shell("lake — tree", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — tree", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_repository_file(const control::Repository& repository,
                                    std::string_view ref,
                                    const RepositoryFile& file,
                                    const std::vector<RepositoryBlameLine>& blame,
-                                   bool signed_in) {
+                                   WebUiViewer viewer) {
     const std::string query = "repository_id=" + url_component(repository.id) +
                               "&ref=" + url_component(ref) + "&path=" + url_component(file.path);
     std::string content =
@@ -1515,25 +1565,25 @@ std::string web_ui_repository_file(const control::Repository& repository,
                     web_ui_escape(ref),
                     row_link("/file/raw?" + query, "Raw"),
                     row_link("/file/download?" + query, "Download"),
-                    forge_tabs(repository, "code"),
+                    forge_tabs(repository, "code", viewer),
                     identifier_markup(file.blob),
                     byte_count(file.size),
                     syntax_language(file.path) ? file_language(file.path) : "Plain text",
                     source_view(file, blame));
     content +=
         R"(<script id="file-range-script">(()=>{const rows=[...document.querySelectorAll('[data-line]')];const select=()=>{rows.forEach(r=>r.classList.remove('selected'));const match=location.hash.match(/^#L(\d+)(?:-L(\d+))?$/);if(!match)return;const first=Number(match[1]);const last=Number(match[2]||match[1]);rows.forEach(r=>{const line=Number(r.dataset.line);if(line>=first&&line<=last)r.classList.add('selected');});};let anchor=null;document.addEventListener('click',event=>{const link=event.target.closest('[data-line-range]');if(!link)return;const line=Number(link.closest('[data-line]').dataset.line);if(event.shiftKey&&anchor!==null){event.preventDefault();const first=Math.min(anchor,line);const last=Math.max(anchor,line);location.hash=`L${first}-L${last}`;}else{anchor=line;}});addEventListener('hashchange',select);select();})();</script>)";
-    return web_ui_shell("lake — file", file.path, content, signed_in);
+    return web_ui_shell("lake — file", file.path, content, viewer);
 }
 
 std::string web_ui_repository_file(const control::Repository& repository,
                                    const RepositoryFile& file,
-                                   bool signed_in) {
-    return web_ui_repository_file(repository, "main", file, {}, signed_in);
+                                   WebUiViewer viewer) {
+    return web_ui_repository_file(repository, "main", file, {}, viewer);
 }
 
 std::string web_ui_repository_log(const control::Repository& repository,
                                   const std::vector<RepositoryChange>& changes,
-                                  bool signed_in) {
+                                  WebUiViewer viewer) {
     std::string content = std::format("<p class=\"eyebrow\">repository history</p><h1>Change "
                                       "log</h1><p class=\"sub\">{}</p>",
                                       web_ui_escape(repository_name(repository)));
@@ -1554,14 +1604,14 @@ std::string web_ui_repository_log(const control::Repository& repository,
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell("lake — changes", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — changes", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
                           const ChangeReviewData& review,
-                          bool signed_in) {
+                          WebUiViewer viewer) {
     std::string parents;
     for (const std::string& parent : change.parents) {
         if (!parents.empty()) {
@@ -1586,7 +1636,7 @@ std::string web_ui_change(const control::Repository& repository,
         "<dd>{}</dd><dt>parents</dt><dd>{}</dd></dl></div>",
         web_ui_escape(title.empty() ? "Untitled change" : title),
         web_ui_escape(repository_name(repository)),
-        forge_tabs(repository, "changes"),
+        forge_tabs(repository, "changes", viewer),
         identifier_markup(change.id),
         web_ui_escape(change.id),
         identifier_markup(change.author),
@@ -1791,14 +1841,14 @@ std::string web_ui_change(const control::Repository& repository,
     }
     content +=
         R"(</section><script id="change-review-script">(()=>{const views=[...document.querySelectorAll('[data-diff-view]')];document.addEventListener('click',async event=>{const copy=event.target.closest('[data-copy]');if(copy){await navigator.clipboard.writeText(copy.dataset.copy);copy.textContent='Copied';return;}const toggle=event.target.closest('[data-view]');if(!toggle)return;views.forEach(view=>{view.hidden=view.dataset.diffView!==toggle.dataset.view;});document.querySelectorAll('[data-view]').forEach(button=>{button.setAttribute('aria-pressed',String(button===toggle));});});})();</script>)";
-    return web_ui_shell("lake — change", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — change", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
-                          bool signed_in) {
-    return web_ui_change(repository, change, differences, {}, signed_in);
+                          WebUiViewer viewer) {
+    return web_ui_change(repository, change, differences, {}, viewer);
 }
 
 std::string web_ui_issues(const control::Repository& repository,
@@ -1806,7 +1856,7 @@ std::string web_ui_issues(const control::Repository& repository,
                           std::string_view state,
                           std::string_view label,
                           std::string_view assignee,
-                          bool signed_in) {
+                          WebUiViewer viewer) {
     std::string content = std::format(
         "<p class=\"eyebrow\">issue tracker</p><h1>Issues</h1><p class=\"sub\">{}</p>{}"
         "<form class=\"filters\" method=\"get\" action=\"/issues\">"
@@ -1817,7 +1867,7 @@ std::string web_ui_issues(const control::Repository& repository,
         "<label>Assignee<input name=\"assignee\" value=\"{}\"></label>"
         "<button type=\"submit\">Filter</button></form>",
         web_ui_escape(repository_name(repository)),
-        forge_tabs(repository, "issues"),
+        forge_tabs(repository, "issues", viewer),
         web_ui_escape(repository.id),
         state.empty() ? " selected" : "",
         state == "open" ? " selected" : "",
@@ -1859,13 +1909,13 @@ std::string web_ui_issues(const control::Repository& repository,
     if (visible == 0) {
         content += "<div class=\"panel empty\">No issues match these filters.</div>";
     }
-    return web_ui_shell("lake — issues", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — issues", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_issue(const control::Repository& repository,
                          const control::ForgeRecord& issue,
                          const std::vector<control::ForgeRecord>& comments,
-                         bool signed_in) {
+                         WebUiViewer viewer) {
     const std::vector<std::string> labels = issue.value.value("labels", std::vector<std::string>{});
     const std::vector<std::string> assignees =
         issue.value.value("assignees", std::vector<std::string>{});
@@ -1890,7 +1940,7 @@ std::string web_ui_issue(const control::Repository& repository,
         identifier_markup(issue.id),
         web_ui_escape(issue.created_at),
         badge_markup(issue.value.value("state", "open")),
-        forge_tabs(repository, "issues"),
+        forge_tabs(repository, "issues", viewer),
         web_ui_markdown(issue.value.value("body", "")));
     if (comments.empty()) {
         content += "<div class=\"panel empty\">No discussion yet.</div>";
@@ -1911,17 +1961,17 @@ std::string web_ui_issue(const control::Repository& repository,
                     assignees.empty() ? "<span class=\"muted\">Unassigned</span>"
                                       : identifier_list_markup(assignees),
                     references_markup);
-    return web_ui_shell("lake — issue", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — issue", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_releases(const control::Repository& repository,
                             const std::vector<control::ForgeRecord>& releases,
-                            bool signed_in) {
+                            WebUiViewer viewer) {
     std::string content =
         std::format("<p class=\"eyebrow\">repository releases</p><h1>Releases</h1>"
                     "<p class=\"sub\">{}</p>{}",
                     web_ui_escape(repository_name(repository)),
-                    forge_tabs(repository, "releases"));
+                    forge_tabs(repository, "releases", viewer));
     if (releases.empty()) {
         content += "<div class=\"panel empty\">No releases have been published.</div>";
     }
@@ -1954,18 +2004,18 @@ std::string web_ui_releases(const control::Repository& repository,
         }
         content += "</article>";
     }
-    return web_ui_shell("lake — releases", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — releases", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_webhooks(const control::Repository& repository,
                             const std::vector<control::ForgeRecord>& webhooks,
                             const std::vector<control::ForgeRecord>& deliveries,
-                            bool signed_in) {
+                            WebUiViewer viewer) {
     std::string content =
         std::format("<p class=\"eyebrow\">repository automation</p><h1>Webhooks</h1>"
                     "<p class=\"sub\">{} · signed delivery history</p>{}",
                     web_ui_escape(repository_name(repository)),
-                    forge_tabs(repository, "webhooks"));
+                    forge_tabs(repository, "webhooks", viewer));
     if (webhooks.empty()) {
         content += "<div class=\"panel empty\">No webhooks are configured.</div>";
     }
@@ -1995,7 +2045,7 @@ std::string web_ui_webhooks(const control::Repository& repository,
                 delivery.value.value("status", 0),
                 web_ui_escape(delivery.value.value("error", "no error")),
                 identifier_markup(delivery.id));
-            if (!delivered && signed_in) {
+            if (!delivered && viewer.signed_in) {
                 content += std::format(
                     "<form method=\"post\" action=\"/webhooks/retry\"><input type=\"hidden\" "
                     "name=\"repository_id\" value=\"{}\"><input type=\"hidden\" "
@@ -2012,18 +2062,18 @@ std::string web_ui_webhooks(const control::Repository& repository,
         }
         content += "</section>";
     }
-    return web_ui_shell("lake — webhooks", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — webhooks", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_branch_protection(const control::Repository& repository,
                                      const std::vector<control::ForgeRecord>& rules,
                                      const std::vector<audit::Event>& events,
-                                     bool signed_in) {
+                                     WebUiViewer viewer) {
     std::string content =
         std::format("<p class=\"eyebrow\">repository policy</p><h1>Branch protection</h1>"
                     "<p class=\"sub\">{}</p>{}<section><h2>Rules</h2>",
                     web_ui_escape(repository_name(repository)),
-                    forge_tabs(repository, "protection"));
+                    forge_tabs(repository, "protection", viewer));
     if (rules.empty()) {
         content += "<div class=\"panel empty\">No branch protection rules.</div>";
     }
@@ -2067,8 +2117,7 @@ std::string web_ui_branch_protection(const control::Repository& repository,
         content += "<div class=\"panel empty\">No protected updates have been refused.</div>";
     }
     content += "</section>";
-    return web_ui_shell(
-        "lake — branch protection", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — branch protection", repository_name(repository), content, viewer);
 }
 
 namespace {
@@ -2163,12 +2212,12 @@ std::string conflict_values_markup(const RepositoryConflict& conflict) {
 
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
-                                        bool signed_in) {
+                                        WebUiViewer viewer) {
     std::string content =
         std::format("<p class=\"eyebrow\">repository conflicts</p><h1>Conflicts</h1>"
                     "<p class=\"sub\">{}</p>{}",
                     web_ui_escape(repository_name(repository)),
-                    forge_tabs(repository, "conflicts"));
+                    forge_tabs(repository, "conflicts", viewer));
     if (conflicts.empty()) {
         content += "<div class=\"panel empty\">No unresolved conflict values.</div>";
     } else {
@@ -2188,17 +2237,17 @@ std::string web_ui_repository_conflicts(const control::Repository& repository,
                                     "&ref=main&path=" + url_component(conflict.region.path),
                                 "Compare preserved values");
             content += conflict_resolution_markup(
-                repository, "main", conflict, "/conflicts/resolve", signed_in);
+                repository, "main", conflict, "/conflicts/resolve", viewer.signed_in);
             content += "</article>";
         }
     }
-    return web_ui_shell("lake — conflicts", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — conflicts", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_artifacts(const control::Repository& repository,
                              const RepositoryArtifactPage& page,
                              const RepositoryArtifactFilter& filter,
-                             bool signed_in) {
+                             WebUiViewer viewer) {
     std::string content = std::format(
         "<p class=\"eyebrow\">repository artifacts</p><h1>Build results</h1>"
         "<p class=\"sub\">{}</p><form class=\"filters\" method=\"get\" action=\"/artifacts\" "
@@ -2254,12 +2303,12 @@ std::string web_ui_artifacts(const control::Repository& repository,
     }
     content +=
         std::format("<p>{}</p>", row_link("/repository?id=" + repository.id, "Back to repository"));
-    return web_ui_shell("lake — artifacts", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — artifacts", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_artifact(const control::Repository& repository,
                             const RepositoryArtifact& artifact,
-                            bool signed_in) {
+                            WebUiViewer viewer) {
     std::string content =
         std::format("<p class=\"eyebrow\">artifact result</p><h1>{}</h1><p class=\"sub\">{}</p>"
                     "<div class=\"panel\"><dl><dt>action</dt><dd><code>{}</code></dd>"
@@ -2375,10 +2424,11 @@ std::string web_ui_artifact(const control::Repository& repository,
     content += std::format("</section><p>{} · {}</p>",
                            row_link("/artifacts?repository_id=" + repository.id, "All artifacts"),
                            row_link("/repository?id=" + repository.id, "Back to repository"));
-    return web_ui_shell("lake — artifact", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — artifact", repository_name(repository), content, viewer);
 }
 
-std::string web_ui_organizations(const std::vector<control::Organization>& organizations) {
+std::string web_ui_organizations(const std::vector<control::Organization>& organizations,
+                                 WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Organizations</h1>"
                           "<p class=\"sub\">Organizations, teams, members, and delegated "
                           "administration.</p>";
@@ -2409,13 +2459,14 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
     return web_ui_shell("lake — organizations",
                         std::format("{} organizations", organizations.size()),
                         content,
-                        true);
+                        viewer);
 }
 
 std::string web_ui_organization(const control::Organization& organization,
                                 const OrganizationSettingsData& data,
                                 std::string_view tab,
-                                std::string_view error) {
+                                std::string_view error,
+                                WebUiViewer viewer) {
     const std::string selected = tab.empty() ? "overview" : std::string(tab);
     const std::string base = "/organization?id=" + organization.id + "&tab=";
     std::string content =
@@ -2545,12 +2596,13 @@ std::string web_ui_organization(const control::Organization& organization,
         }
         content += "</section>";
     }
-    return web_ui_shell("lake — organization settings", organization.display_name, content, true);
+    return web_ui_shell("lake — organization settings", organization.display_name, content, viewer);
 }
 
 std::string web_ui_team(const control::Team& team,
                         const std::vector<control::Membership>& memberships,
-                        const std::vector<control::EffectiveAccessEntry>& access) {
+                        const std::vector<control::EffectiveAccessEntry>& access,
+                        WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">organization settings</p><h1>" +
         web_ui_escape(team.display_name.empty() ? team.name : team.display_name) +
@@ -2571,13 +2623,14 @@ std::string web_ui_team(const control::Team& team,
     }
     content += "</section><section class=\"panel\"><h2>Effective access</h2><p>" +
                std::to_string(access.size()) + " access entries.</p></section>";
-    return web_ui_shell("lake — team settings", team.name, content, true);
+    return web_ui_shell("lake — team settings", team.name, content, viewer);
 }
 
 std::string web_ui_member(const control::Membership& membership,
                           const std::vector<control::EffectiveAccessEntry>& access,
                           std::string_view error,
-                          bool confirm_removal) {
+                          bool confirm_removal,
+                          WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">organization settings</p><h1>Member</h1>" + error_markup(error) +
         "<section class=\"panel\"><dl><dt>Principal</dt><dd><code>" +
@@ -2605,14 +2658,15 @@ std::string web_ui_member(const control::Membership& membership,
     }
     content += "</section><section class=\"panel\"><h2>Effective access</h2><p>" +
                std::to_string(access.size()) + " entries at this scope.</p></section>";
-    return web_ui_shell("lake — member settings", membership.principal_taap_id, content, true);
+    return web_ui_shell("lake — member settings", membership.principal_taap_id, content, viewer);
 }
 
 std::string web_ui_settings(std::string_view identity,
                             const std::vector<control::Session>& sessions,
                             const std::vector<control::Device>& devices,
                             std::string_view tab,
-                            std::string_view error) {
+                            std::string_view error,
+                            WebUiViewer viewer) {
     const std::string selected = tab.empty() ? "profile" : std::string(tab);
     std::string content = "<p class=\"eyebrow\">personal settings</p><h1>Settings</h1><nav "
                           "class=\"tabs\" aria-label=\"Personal settings\">";
@@ -2641,13 +2695,14 @@ std::string web_ui_settings(std::string_view identity,
                    "are configured.</p>";
     }
     content += "</section>";
-    return web_ui_shell("lake — settings", selected, content, true);
+    return web_ui_shell("lake — settings", selected, content, viewer);
 }
 
 std::string web_ui_sso(std::string_view organization_id,
                        const std::vector<control::SsoProvider>& providers,
                        const std::vector<control::FederationIssuer>& issuers,
-                       const std::vector<control::ProvisioningLog>& logs) {
+                       const std::vector<control::ProvisioningLog>& logs,
+                       WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">organization identity</p><h1>Enterprise SSO</h1>"
                           "<p class=\"sub\">Provider configuration, federation policy, and SCIM "
                           "provisioning evidence.</p>";
@@ -2704,11 +2759,12 @@ std::string web_ui_sso(std::string_view organization_id,
         content += "</tbody></table>";
     }
     return web_ui_shell(
-        "lake — enterprise SSO", "organization " + std::string(organization_id), content, true);
+        "lake — enterprise SSO", "organization " + std::string(organization_id), content, viewer);
 }
 
 std::string web_ui_teams(std::string_view organization_id,
-                         const std::vector<control::Team>& teams) {
+                         const std::vector<control::Team>& teams,
+                         WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">organization</p><h1>Teams</h1>"
                           "<p class=\"sub\">Roles on an organization flow to its teams unless "
                           "inheritance is cut.</p>";
@@ -2732,12 +2788,13 @@ std::string web_ui_teams(std::string_view organization_id,
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell("lake — teams", web_ui_escape(organization_id), content, true);
+    return web_ui_shell("lake — teams", web_ui_escape(organization_id), content, viewer);
 }
 
 std::string web_ui_memberships(std::string_view organization_id,
                                std::string_view team_id,
-                               const std::vector<control::Membership>& memberships) {
+                               const std::vector<control::Membership>& memberships,
+                               WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">authorization</p><h1>Members</h1>"
                           "<p class=\"sub\">Every role is backed by an "
                           "org_membership/1 attestation.</p>";
@@ -2760,12 +2817,13 @@ std::string web_ui_memberships(std::string_view organization_id,
         content += "</tbody></table>";
     }
     const std::string scope = team_id.empty() ? std::string(organization_id) : std::string(team_id);
-    return web_ui_shell("lake — members", scope, content, true);
+    return web_ui_shell("lake — members", scope, content, viewer);
 }
 
 std::string web_ui_invitations(std::string_view organization_id,
                                std::string_view team_id,
-                               const std::vector<control::Invitation>& invitations) {
+                               const std::vector<control::Invitation>& invitations,
+                               WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">organization</p><h1>Invitations</h1>"
                           "<p class=\"sub\">Email and handle invitations expire and become "
                           "attested memberships.</p>";
@@ -2788,11 +2846,12 @@ std::string web_ui_invitations(std::string_view organization_id,
         content += "</tbody></table>";
     }
     const std::string scope = team_id.empty() ? std::string(organization_id) : std::string(team_id);
-    return web_ui_shell("lake — invitations", scope, content, true);
+    return web_ui_shell("lake — invitations", scope, content, viewer);
 }
 
 std::string web_ui_grants(const control::PolicyObject& object,
-                          const std::vector<control::Grant>& grants) {
+                          const std::vector<control::Grant>& grants,
+                          WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">policy</p><h1>Direct grants</h1>"
                           "<p class=\"sub\">Attestation-backed roles directly "
                           "attached to this object.</p>";
@@ -2817,11 +2876,12 @@ std::string web_ui_grants(const control::PolicyObject& object,
     content += std::format("<p>{}</p>",
                            row_link("/access?object_id=" + object.id, "View effective access"));
     return web_ui_shell(
-        "lake — grants", object.object_type + ":" + object.external_id, content, true);
+        "lake — grants", object.object_type + ":" + object.external_id, content, viewer);
 }
 
 std::string web_ui_effective_access(const control::PolicyObject& object,
-                                    const std::vector<control::EffectiveAccessEntry>& entries) {
+                                    const std::vector<control::EffectiveAccessEntry>& entries,
+                                    WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">sharing</p><h1>Effective access</h1>"
                           "<p class=\"sub\">Who can access this object, what they can do, and "
                           "where it comes from.</p>";
@@ -2850,10 +2910,11 @@ std::string web_ui_effective_access(const control::PolicyObject& object,
         content += "</tbody></table>";
     }
     return web_ui_shell(
-        "lake — effective access", object.object_type + ":" + object.external_id, content, true);
+        "lake — effective access", object.object_type + ":" + object.external_id, content, viewer);
 }
 
-std::string web_ui_search(const search::Query& query, const search::QueryResult& result) {
+std::string
+web_ui_search(const search::Query& query, const search::QueryResult& result, WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">search</p><h1>Search</h1>"
         "<p class=\"sub\">Ranked text, quoted substring, or /regex/ search "
@@ -2907,10 +2968,11 @@ std::string web_ui_search(const search::Query& query, const search::QueryResult&
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell("lake — search", query.text.empty() ? "search" : query.text, content, true);
+    return web_ui_shell(
+        "lake — search", query.text.empty() ? "search" : query.text, content, viewer);
 }
 
-std::string web_ui_metering(const nlohmann::json& usage) {
+std::string web_ui_metering(const nlohmann::json& usage, WebUiViewer viewer) {
     const std::string customer_id = usage.value("customer_id", "");
     std::string content =
         "<p class=\"eyebrow\">economics</p><h1>Metering</h1>"
@@ -2921,7 +2983,7 @@ std::string web_ui_metering(const nlohmann::json& usage) {
         "\" required></label><button type=\"submit\">Show usage</button></form>";
     if (customer_id.empty()) {
         content += "<div class=\"panel empty\">Choose a customer.</div>";
-        return web_ui_shell("lake — metering", "metering", content, true);
+        return web_ui_shell("lake — metering", "metering", content, viewer);
     }
     if (usage.value("over_quota", false)) {
         content +=
@@ -2959,12 +3021,13 @@ std::string web_ui_metering(const nlohmann::json& usage) {
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell("lake — metering", customer_id, content, true);
+    return web_ui_shell("lake — metering", customer_id, content, viewer);
 }
 
 std::string web_ui_audit(const std::vector<audit::Event>& events,
                          const audit::Filter& filter,
-                         const nlohmann::json& log_configuration) {
+                         const nlohmann::json& log_configuration,
+                         WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">control plane</p><h1>Audit log</h1><p "
                           "class=\"sub\">Signed, "
                           "hash-linked events. Use the filters to narrow the evidence view.</p>"
@@ -3018,10 +3081,11 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
     content += "<p class=\"sub\">API: <code>GET /v1/audit</code>, <code>GET "
                "/v1/export_audit</code>, "
                "and <code>GET /v1/verify_audit</code>.</p>";
-    return web_ui_shell("lake — audit", std::format("{} events", events.size()), content, true);
+    return web_ui_shell("lake — audit", std::format("{} events", events.size()), content, viewer);
 }
 
-std::string web_ui_transparency(std::string_view identity, const nlohmann::json& scan) {
+std::string
+web_ui_transparency(std::string_view identity, const nlohmann::json& scan, WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">public evidence</p><h1>Transparency monitor</h1>"
         "<p class=\"sub\">Scan checkpoint-bound bulk tiles for every TAAP attestation that "
@@ -3062,10 +3126,11 @@ std::string web_ui_transparency(std::string_view identity, const nlohmann::json&
     content += "<p class=\"sub\">API: <code>GET /v1/transparency_identity_scan</code>, "
                "<code>GET /v1/transparency_tile</code>, and "
                "<code>GET /v1/transparency_checkpoint</code>.</p>";
-    return web_ui_shell("lake — transparency", "public monitor", content, false);
+    return web_ui_shell("lake — transparency", "public monitor", content, viewer);
 }
 
-std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts) {
+std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts,
+                                 WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">control plane</p><h1>Secret mounts</h1>"
         "<p class=\"sub\">Organization-scoped static secrets and named encryption keys. "
@@ -3092,12 +3157,13 @@ std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts
         content += "</tbody></table>";
     }
     return web_ui_shell(
-        "lake — secret mounts", std::format("{} mounts", mounts.size()), content, true);
+        "lake — secret mounts", std::format("{} mounts", mounts.size()), content, viewer);
 }
 
 std::string web_ui_secrets(const control::SecretMount& mount,
                            std::string_view name,
-                           const control::SecretMetadata* metadata) {
+                           const control::SecretMetadata* metadata,
+                           WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">static secrets</p><h1>" + web_ui_escape(mount.name) +
         "</h1><p class=\"sub\">Inspect version metadata without rendering secret values. "
@@ -3133,11 +3199,12 @@ std::string web_ui_secrets(const control::SecretMount& mount,
     content += "<p class=\"sub\"><a href=\"/encryption-keys?mount_id=" + web_ui_escape(mount.id) +
                "\">Named encryption keys</a> · API: <code>POST /v1/put_secret</code>, "
                "<code>GET /v1/read_secret</code>, <code>GET /v1/secret_metadata</code>.</p>";
-    return web_ui_shell("lake — secrets", mount.name, content, true);
+    return web_ui_shell("lake — secrets", mount.name, content, viewer);
 }
 
 std::string web_ui_encryption_keys(const control::SecretMount& mount,
-                                   const std::vector<control::EncryptionKey>& keys) {
+                                   const std::vector<control::EncryptionKey>& keys,
+                                   WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">encryption service</p><h1>" +
                           web_ui_escape(mount.name) +
                           " keys</h1><p class=\"sub\">Named, versioned keys for encryption, "
@@ -3163,10 +3230,10 @@ std::string web_ui_encryption_keys(const control::SecretMount& mount,
                "\">Static secrets</a> · API: <code>POST /v1/encrypt</code>, "
                "<code>POST /v1/decrypt</code>, <code>POST /v1/rewrap</code>.</p>";
     return web_ui_shell(
-        "lake — encryption keys", std::format("{} keys", keys.size()), content, true);
+        "lake — encryption keys", std::format("{} keys", keys.size()), content, viewer);
 }
 
-std::string web_ui_sign_up(std::string_view error) {
+std::string web_ui_sign_up(std::string_view error, WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">identity</p><h1>Create an account</h1>"
         "<p class=\"sub\">Get a personal customer you own, then create your first "
@@ -3193,10 +3260,10 @@ export PATH="$HOME/.local/bin:$PATH"</code></pre></details></li>
 <label>TAAP/1 identity document<textarea name="identity_document" spellcheck="false" required></textarea></label>
 <button class="primary" type="submit">Create account</button></form>
 <p class="muted">Already registered? <a href="/sign-in">Sign in</a>.</p>)html";
-    return web_ui_shell("lake — sign up", "identity", content, false);
+    return web_ui_shell("lake — sign up", "identity", content, viewer);
 }
 
-std::string web_ui_sign_in(std::string_view error) {
+std::string web_ui_sign_in(std::string_view error, WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Sign in</h1>"
                           "<p class=\"sub\">Use a password, passkey, or "
                           "configured social provider.</p>";
@@ -3214,16 +3281,16 @@ std::string web_ui_sign_in(std::string_view error) {
 <label>TAAP/1 identity document for first sign-in<textarea name="identity_document" spellcheck="false"></textarea></label>
 <button class="primary" type="submit">Continue to provider</button></form></div></div>
 <p class="muted"><a href="/sign-up">Create an account</a> · <a href="/login">Operator sign-in</a></p>)html";
-    return web_ui_shell("lake — sign in", "identity", content, false);
+    return web_ui_shell("lake — sign in", "identity", content, viewer);
 }
 
 std::string web_ui_mfa(std::string_view error,
                        std::string_view otpauth_uri,
                        const std::vector<std::string>& recovery_codes,
-                       bool signed_in) {
+                       WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Multi-factor authentication</h1>";
     content += error_markup(error);
-    if (signed_in) {
+    if (viewer.signed_in) {
         content += "<p class=\"sub\">Enroll or replace a TOTP authenticator for password "
                    "sign-in. A new enrollment replaces existing recovery codes.</p>";
         if (!otpauth_uri.empty()) {
@@ -3253,10 +3320,10 @@ std::string web_ui_mfa(std::string_view error,
 <label>Device name<input type="text" name="device_name" value="browser" required></label>
 <button class="primary" type="submit">Verify and sign in</button></form>)html";
     }
-    return web_ui_shell("lake — MFA", "identity", content, signed_in);
+    return web_ui_shell("lake — MFA", "identity", content, viewer);
 }
 
-std::string web_ui_passkeys(std::string_view error) {
+std::string web_ui_passkeys(std::string_view error, WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Passkeys</h1>"
                           "<p class=\"sub\">Register an attestation-less passkey "
                           "for this account.</p>";
@@ -3265,17 +3332,17 @@ std::string web_ui_passkeys(std::string_view error) {
         R"html(<div class="panel"><label>Passkey name <input id="passkey-name" type="text" value="passkey"></label>
 <div class="actions"><button class="primary" id="register-passkey" type="button">Register passkey</button><span id="passkey-status" class="muted"></span></div></div>
 <script>(()=>{const b=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+'==='.slice((s.length+3)%4)),c=>c.charCodeAt(0));const e=a=>btoa(String.fromCharCode(...new Uint8Array(a))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');const q=(u,o)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)}).then(r=>r.json());document.getElementById('register-passkey').onclick=async()=>{const s=document.getElementById('passkey-status');try{const a=await q('/v1/begin_passkey_registration',{});if(!a.ok)throw Error(a.error.message);const o=a.value.public_key,c=o.challenge;o.challenge=b(o.challenge);o.user.id=b(o.user.id);const k=await navigator.credentials.create({publicKey:o});const z=await q('/v1/register_passkey',{challenge:c,client_data_json:e(k.response.clientDataJSON),attestation_object:e(k.response.attestationObject),name:document.getElementById('passkey-name').value});if(!z.ok)throw Error(z.error.message);s.textContent='Passkey registered.'}catch(x){s.textContent=x.message}}})();</script>)html";
-    return web_ui_shell("lake — passkeys", "identity", content, true);
+    return web_ui_shell("lake — passkeys", "identity", content, viewer);
 }
 
-std::string web_ui_passkey_sign_in(std::string_view error) {
+std::string web_ui_passkey_sign_in(std::string_view error, WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Sign in with a passkey</h1>";
     content += error_markup(error);
     content +=
         R"html(<div class="panel"><label>Device name <input id="device-name" type="text" value="browser"></label>
 <div class="actions"><button class="primary" id="use-passkey" type="button">Use passkey</button><span id="passkey-status" class="muted"></span></div></div>
 <script>(()=>{const b=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')+'==='.slice((s.length+3)%4)),c=>c.charCodeAt(0));const e=a=>btoa(String.fromCharCode(...new Uint8Array(a))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');const q=(u,o)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)}).then(r=>r.json());document.getElementById('use-passkey').onclick=async()=>{const s=document.getElementById('passkey-status');try{const a=await q('/v1/begin_passkey_sign_in',{});if(!a.ok)throw Error(a.error.message);const o=a.value.public_key,c=o.challenge;o.challenge=b(o.challenge);const k=await navigator.credentials.get({publicKey:o});const z=await q('/v1/sign_in_passkey',{challenge:c,credential_id:e(k.rawId),client_data_json:e(k.response.clientDataJSON),authenticator_data:e(k.response.authenticatorData),signature:e(k.response.signature),device_name:document.getElementById('device-name').value});if(!z.ok)throw Error(z.error.message);location='/sessions'}catch(x){s.textContent=x.message}}})();</script>)html";
-    return web_ui_shell("lake — passkey sign in", "identity", content, false);
+    return web_ui_shell("lake — passkey sign in", "identity", content, viewer);
 }
 
 std::string web_ui_application_sign_up(const control::Application& application,
@@ -3386,7 +3453,8 @@ std::string web_ui_application_passkey_sign_in(const control::Application& appli
 
 std::string web_ui_applications(const std::vector<control::Application>& applications,
                                 const std::vector<control::Customer>& customers,
-                                std::string_view error) {
+                                std::string_view error,
+                                WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">auth as a service</p><h1>Applications</h1>";
     content += error_markup(error);
     content += "<div class=\"grid\"><div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>"
@@ -3420,11 +3488,13 @@ std::string web_ui_applications(const std::vector<control::Application>& applica
         "domain<input name=\"custom_sign_in_domain\"></label><label>Accent color<input "
         "name=\"accent_color\" value=\"#0b6e99\"></label><button class=\"primary\" type=\"submit\">"
         "Register</button></form></div></div>";
-    return web_ui_shell(
-        "lake — applications", std::format("{} applications", applications.size()), content, true);
+    return web_ui_shell("lake — applications",
+                        std::format("{} applications", applications.size()),
+                        content,
+                        viewer);
 }
 
-std::string web_ui_application(const control::Application& application) {
+std::string web_ui_application(const control::Application& application, WebUiViewer viewer) {
     const std::string id = web_ui_escape(application.id);
     std::string content =
         "<p class=\"eyebrow\">application</p><h1>" + web_ui_escape(application.name) +
@@ -3440,11 +3510,12 @@ std::string web_ui_application(const control::Application& application) {
         "\">Organizations</a> · <a href=\"/application/events?id=" + id +
         "\">Webhook events</a> · <a href=\"/apps/" + id + "/sign-in\">Hosted sign-in</a></p>";
     return web_ui_shell(
-        "lake — application: " + application.name, application.pool_id, content, true);
+        "lake — application: " + application.name, application.pool_id, content, viewer);
 }
 
 std::string web_ui_application_users(const control::Application& application,
-                                     const std::vector<control::ApplicationUser>& users) {
+                                     const std::vector<control::ApplicationUser>& users,
+                                     WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">application users</p><h1>" +
                           web_ui_escape(application.name) +
                           " users</h1><div class=\"table-wrap\"><table><thead><tr><th>Email</th>"
@@ -3461,12 +3532,13 @@ std::string web_ui_application_users(const control::Application& application,
     }
     content += "</tbody></table></div>";
     return web_ui_shell(
-        "lake — application users", std::format("{} users", users.size()), content, true);
+        "lake — application users", std::format("{} users", users.size()), content, viewer);
 }
 
-std::string web_ui_application_organizations(
-    const control::Application& application,
-    const std::vector<control::ApplicationOrganization>& organizations) {
+std::string
+web_ui_application_organizations(const control::Application& application,
+                                 const std::vector<control::ApplicationOrganization>& organizations,
+                                 WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">application organizations</p><h1>" + web_ui_escape(application.name) +
         " organizations</h1><div class=\"table-wrap\"><table><thead><tr><th>Name</th><th>TAAP "
@@ -3494,12 +3566,13 @@ std::string web_ui_application_organizations(
     return web_ui_shell("lake — application organizations",
                         std::format("{} organizations", organizations.size()),
                         content,
-                        true);
+                        viewer);
 }
 
 std::string web_ui_application_events(const control::Application& application,
                                       const std::vector<control::ApplicationWebhookEvent>& events,
-                                      std::string_view webhook_secret) {
+                                      std::string_view webhook_secret,
+                                      WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">application webhooks</p><h1>" +
                           web_ui_escape(application.name) + " event log</h1>";
     if (!webhook_secret.empty()) {
@@ -3525,12 +3598,13 @@ std::string web_ui_application_events(const control::Application& application,
         "changed\" "
         "required></label><button class=\"primary\" type=\"submit\">Create</button></form></div>";
     return web_ui_shell(
-        "lake — application events", std::format("{} events", events.size()), content, true);
+        "lake — application events", std::format("{} events", events.size()), content, viewer);
 }
 
 std::string web_ui_sessions(const std::vector<control::Session>& sessions,
                             const std::vector<control::Device>& devices,
-                            std::string_view error) {
+                            std::string_view error,
+                            WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Sessions and devices</h1>"
                           "<p class=\"sub\">Revocation takes effect on the next request.</p>";
     content += error_markup(error);
@@ -3565,15 +3639,19 @@ std::string web_ui_sessions(const std::vector<control::Session>& sessions,
     if (devices.empty())
         content += "<tr><td colspan=\"4\" class=\"empty\">No devices.</td></tr>";
     content += "</tbody></table>";
-    return web_ui_shell("lake — sessions", "identity", content, true);
+    return web_ui_shell("lake — sessions", "identity", content, viewer);
 }
 
 std::string web_ui_tokens(const std::vector<control::Session>& sessions,
                           std::string_view issued_secret,
-                          std::string_view error) {
+                          std::string_view error,
+                          WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>API tokens</h1>"
                           "<p class=\"sub\">Create named, scoped sessions and "
-                          "revoke them here.</p>";
+                          "revoke them here.</p>"
+                          "<p>For Liquid push and pull, use these capability scopes: "
+                          "<code>refs,find_missing,push,pull,upload_chunks,read_chunk</code>. "
+                          "The token keeps your existing repository permissions.</p>";
     content += error_markup(error);
     if (!issued_secret.empty())
         content += std::format("<p class=\"notice\">Copy this token now: <code>{}</code></p>",
@@ -3613,11 +3691,12 @@ std::string web_ui_tokens(const std::vector<control::Session>& sessions,
     if (count == 0)
         content += "<tr><td colspan=\"6\" class=\"empty\">No API tokens.</td></tr>";
     content += "</tbody></table>";
-    return web_ui_shell("lake — tokens", "identity", content, true);
+    return web_ui_shell("lake — tokens", "identity", content, viewer);
 }
 
 std::string web_ui_exports(const control::Repository& repository,
-                           const std::vector<control::ForgeRecord>& exports) {
+                           const std::vector<control::ForgeRecord>& exports,
+                           WebUiViewer viewer) {
     std::string content = std::format(
         "<p class=\"eyebrow\">portability</p><h1>Repository export</h1><p class=\"sub\">"
         "Download a signed archive for <code>{}</code>.</p><div class=\"panel\"><form "
@@ -3641,7 +3720,7 @@ std::string web_ui_exports(const control::Repository& repository,
         content += "<tr><td colspan=\"3\" class=\"empty\">No exports requested.</td></tr>";
     }
     content += "</tbody></table>";
-    return web_ui_shell("lake — exports", repository_name(repository), content, true);
+    return web_ui_shell("lake — exports", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_drive_folder(const control::Repository& repository,
@@ -3649,7 +3728,7 @@ std::string web_ui_drive_folder(const control::Repository& repository,
                                 std::string_view path,
                                 const std::vector<RepositoryTreeEntry>& entries,
                                 const DriveFolderOptions& options,
-                                bool signed_in) {
+                                WebUiViewer viewer) {
     const std::string query = drive_query(repository, ref, path);
     const std::string base = "/drive?repository_id=" + url_component(repository.id) +
                              "&ref=" + url_component(ref) + "&path=";
@@ -3687,7 +3766,7 @@ std::string web_ui_drive_folder(const control::Repository& repository,
                                   : "<option value=\"asc\" selected>Ascending</option><option "
                                     "value=\"desc\">Descending</option>";
     content += "</select></label><button type=\"submit\">Apply</button></form>";
-    if (signed_in) {
+    if (viewer.signed_in) {
         content += "<div class=\"drive-create grid\"><section class=\"panel\"><h2>New folder</h2>"
                    "<form class=\"stack\" method=\"post\" action=\"/drive/folder\">";
         content += drive_hidden_context(repository, ref, path);
@@ -3721,11 +3800,11 @@ std::string web_ui_drive_folder(const control::Repository& repository,
             content += "<article class=\"card drive-card\"><p>" + badge_markup(entry.kind) +
                        "</p><h2>" + row_link(href, name) + "</h2><p class=\"muted\">" +
                        web_ui_escape(size) + " · " + web_ui_escape(modified) + "</p>" +
-                       drive_entry_actions(repository, ref, entry, signed_in) + "</article>";
+                       drive_entry_actions(repository, ref, entry, viewer.signed_in) + "</article>";
         } else {
             content += "<tr><td>" + row_link(href, name) + " " + badge_markup(entry.kind) +
                        "</td><td>" + web_ui_escape(size) + "</td><td>" + web_ui_escape(modified) +
-                       "</td><td>" + drive_entry_actions(repository, ref, entry, signed_in) +
+                       "</td><td>" + drive_entry_actions(repository, ref, entry, viewer.signed_in) +
                        "</td></tr>";
         }
     }
@@ -3735,7 +3814,7 @@ std::string web_ui_drive_folder(const control::Repository& repository,
                        : "<tr><td colspan=\"4\" class=\"empty\">This folder is empty.</td></tr>";
     }
     content += options.view == "grid" ? "</div>" : "</tbody></table></div>";
-    if (signed_in) {
+    if (viewer.signed_in) {
         content += R"html(<script id="drive-drop-island">
 (() => {
   const zone = document.getElementById('drive-drop-zone');
@@ -3766,14 +3845,14 @@ std::string web_ui_drive_folder(const control::Repository& repository,
 })();
 </script>)html";
     }
-    return web_ui_shell("lake — drive", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — drive", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_drive_preview(const control::Repository& repository,
                                  std::string_view ref,
                                  const RepositoryFile& file,
                                  const DrivePreview& preview,
-                                 bool signed_in) {
+                                 WebUiViewer viewer) {
     const std::string parent = parent_path(file.path);
     const std::string download = "/drive/download?" + drive_query(repository, ref, file.path);
     const std::string content =
@@ -3795,14 +3874,14 @@ std::string web_ui_drive_preview(const control::Repository& repository,
             web_ui_escape(download),
             web_ui_escape(drive_query(repository, ref, file.path)),
             preview.html);
-    return web_ui_shell("lake — preview", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — preview", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_drive_history(const control::Repository& repository,
                                  std::string_view ref,
                                  std::string_view path,
                                  const std::vector<nlohmann::json>& changes,
-                                 bool signed_in) {
+                                 WebUiViewer viewer) {
     std::string content = drive_breadcrumbs(repository, ref, parent_path(path));
     content += std::format(
         "<p class=\"eyebrow\">drive history</p><h1>{}</h1><p class=\"sub\">Every version is "
@@ -3844,7 +3923,7 @@ std::string web_ui_drive_history(const control::Repository& repository,
                        "\"";
             content += version == 0 ? " checked" : "";
             content += "></td><td>";
-            if (signed_in) {
+            if (viewer.signed_in) {
                 content += "<button type=\"submit\" form=\"restore-" + std::to_string(version) +
                            "\">Restore</button>";
             } else {
@@ -3865,7 +3944,7 @@ std::string web_ui_drive_history(const control::Repository& repository,
         content += "<p><button type=\"submit\">Compare selected text versions</button></p>";
     }
     content += "</form>";
-    if (signed_in) {
+    if (viewer.signed_in) {
         version = 0;
         for (const nlohmann::json& change : changes) {
             if (change.value("new_blob", "").empty()) {
@@ -3879,7 +3958,7 @@ std::string web_ui_drive_history(const control::Repository& repository,
             ++version;
         }
     }
-    return web_ui_shell("lake — drive history", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — drive history", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_drive_version_diff(const control::Repository& repository,
@@ -3888,7 +3967,7 @@ std::string web_ui_drive_version_diff(const control::Repository& repository,
                                       std::string_view left_revision,
                                       std::string_view right_revision,
                                       const DriveVersionDiff& difference,
-                                      bool signed_in) {
+                                      WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">drive version comparison</p><h1>" +
                           web_ui_escape(path) +
                           "</h1><p class=\"sub\">Two preserved text versions. "
@@ -3904,8 +3983,7 @@ std::string web_ui_drive_version_diff(const control::Repository& repository,
                web_ui_escape(right_revision) + "</code><p>" + display_size(difference.right.size) +
                " · <code>" + web_ui_escape(difference.right.blob) + "</code></p></section></div>";
     content += drive_diff_markup(difference);
-    return web_ui_shell(
-        "lake — drive version diff", repository_name(repository), content, signed_in);
+    return web_ui_shell("lake — drive version diff", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_drive_conflict(const control::Repository& repository,
@@ -3913,7 +3991,7 @@ std::string web_ui_drive_conflict(const control::Repository& repository,
                                   const RepositoryConflict& conflict,
                                   const std::vector<RepositoryFile>& versions,
                                   const std::optional<DriveVersionDiff>& difference,
-                                  bool signed_in) {
+                                  WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">drive conflict</p><h1>Two versions of " +
         web_ui_escape(conflict.region.path) + "</h1><p><strong>" +
@@ -3935,9 +4013,9 @@ std::string web_ui_drive_conflict(const control::Repository& repository,
                    : "<div class=\"panel\">A structural preview is not registered for this "
                      "format. The digests and sizes above identify both preserved values.</div>";
     content += conflict_values_markup(conflict);
-    content +=
-        conflict_resolution_markup(repository, ref, conflict, "/drive/conflict/resolve", signed_in);
-    return web_ui_shell("lake — drive conflict", repository_name(repository), content, signed_in);
+    content += conflict_resolution_markup(
+        repository, ref, conflict, "/drive/conflict/resolve", viewer.signed_in);
+    return web_ui_shell("lake — drive conflict", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_drive_share(const control::Repository& repository,
@@ -3946,7 +4024,8 @@ std::string web_ui_drive_share(const control::Repository& repository,
                                const std::vector<control::EffectiveAccessEntry>& access,
                                const std::vector<nlohmann::json>& links,
                                std::string_view created_link,
-                               std::string_view error) {
+                               std::string_view error,
+                               WebUiViewer viewer) {
     std::string content = std::format(
         "<p class=\"eyebrow\">drive sharing</p><h1>Share {}</h1><p class=\"sub\">Before sharing, "
         "review who can access this folder, what they can do, whether access is inherited, and "
@@ -4039,14 +4118,15 @@ std::string web_ui_drive_share(const control::Repository& repository,
         content += "<tr><td colspan=\"4\" class=\"empty\">No links.</td></tr>";
     }
     content += "</tbody></table>";
-    return web_ui_shell("lake — drive sharing", repository_name(repository), content, true);
+    return web_ui_shell("lake — drive sharing", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_drive_share_link(const control::Repository& repository,
                                     std::string_view ref,
                                     std::string_view path,
                                     const nlohmann::json& link,
-                                    std::string_view error) {
+                                    std::string_view error,
+                                    WebUiViewer viewer) {
     const std::string state = share_link_state(link);
     std::string content =
         "<p class=\"eyebrow\">drive share</p><h1>Link for " + web_ui_escape(path) +
@@ -4075,11 +4155,12 @@ std::string web_ui_drive_share_link(const control::Repository& repository,
     }
     content +=
         row_link("/drive/share?" + drive_query(repository, ref, path), "Back to folder shares");
-    return web_ui_shell("lake — drive share link", repository_name(repository), content, true);
+    return web_ui_shell("lake — drive share link", repository_name(repository), content, viewer);
 }
 
 std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
-                                  std::string_view error) {
+                                  std::string_view error,
+                                  WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">drive</p><h1>Shared with me</h1><p class=\"sub\">Live "
         "folders shared directly with your identity. A move keeps the same folder identity; "
@@ -4111,7 +4192,7 @@ std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
             "</tr>";
     }
     content += "</tbody></table>";
-    return web_ui_shell("lake — shared with me", "drive", content, true);
+    return web_ui_shell("lake — shared with me", "drive", content, viewer);
 }
 
 namespace {
@@ -4134,11 +4215,12 @@ std::string web_ui_drive_link(std::string_view path,
                               std::string_view error,
                               std::string_view token,
                               std::string_view ref,
-                              std::string_view root_path) {
+                              std::string_view root_path,
+                              WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">shared drive folder</p><h1>" + web_ui_escape(path) +
                           "</h1>" + error_markup(error);
     if (!error.empty()) {
-        return web_ui_shell("lake — shared drive folder", "share link", content, false);
+        return web_ui_shell("lake — shared drive folder", "share link", content, viewer);
     }
     content += "<p class=\"sub\">View – browse and download. Access ends when this link expires "
                "or is revoked. Downloaded copies are independent.</p>";
@@ -4171,13 +4253,14 @@ std::string web_ui_drive_link(std::string_view path,
         content += "<tr><td colspan=\"3\" class=\"empty\">This folder is empty.</td></tr>";
     }
     content += "</tbody></table></div>";
-    return web_ui_shell("lake — shared drive folder", "share link", content, false);
+    return web_ui_shell("lake — shared drive folder", "share link", content, viewer);
 }
 
 std::string web_ui_drive_link_preview(std::string_view token,
                                       std::string_view ref,
                                       const RepositoryFile& file,
-                                      const DrivePreview& preview) {
+                                      const DrivePreview& preview,
+                                      WebUiViewer viewer) {
     const std::string content =
         "<p class=\"eyebrow\">shared file preview</p><h1>" + web_ui_escape(path_name(file.path)) +
         "</h1><p class=\"sub\">" + web_ui_escape(preview.format) + " · " +
@@ -4185,10 +4268,10 @@ std::string web_ui_drive_link_preview(std::string_view token,
         row_link(shared_drive_url(token, ref, parent_path(file.path)), "Back to folder") +
         "<a href=\"" + web_ui_escape(shared_drive_url(token, ref, file.path, "download")) +
         "\" download>Download</a></div><div class=\"panel\">" + preview.html + "</div>";
-    return web_ui_shell("lake — shared file preview", "share link", content, false);
+    return web_ui_shell("lake — shared file preview", "share link", content, viewer);
 }
 
-std::string web_ui_model(const nlohmann::json& model, bool signed_in) {
+std::string web_ui_model(const nlohmann::json& model, WebUiViewer viewer) {
     const nlohmann::json& storage = model.at("storage");
     std::string content =
         "<p class=\"eyebrow\">model</p><h1>" + web_ui_escape(model.value("modelId", "")) +
@@ -4265,7 +4348,7 @@ std::string web_ui_model(const nlohmann::json& model, bool signed_in) {
         content += "<tr><td colspan=\"4\" class=\"empty\">No revisions.</td></tr>";
     }
     content += "</tbody></table>";
-    return web_ui_shell("lake — model", model.value("modelId", ""), content, signed_in);
+    return web_ui_shell("lake — model", model.value("modelId", ""), content, viewer);
 }
 
 } // namespace lake::api

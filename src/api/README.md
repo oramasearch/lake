@@ -17,3 +17,8 @@ retry semantics shared by all transports. See `docs/api/provisioning.md`.
 The sign-up registry contract includes personal customer provisioning. Its form redirects to
 repositories, whose create form calls `create_repository` through the same registry. See
 `docs/api/provisioning.md` and `docs/ui/identity.md`.
+
+The landing page and all shared-shell renderers receive `WebUiViewer` from the common credential
+resolver. Global and repository navigation omit destinations unavailable to that viewer; customer
+authentication redirects use `/sign-in`. OpenAPI describes account tokens. The behavior and
+verification are in [front-door.md](../../docs/ui/front-door.md).

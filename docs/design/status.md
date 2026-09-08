@@ -221,3 +221,11 @@ Password sign-up in the Lake pool provisions one personal customer with inherite
 the account transaction. The page links the Liquid public-document command and installation,
 then offers a first private repository. Default quotas and zero-byte metering are specified in
 [`../api/provisioning.md`](../api/provisioning.md).
+
+## Customer entry and navigation
+
+The source-tree homepage explains hosted Liquid repositories and the existing sign-up → personal
+customer ownership → private repository → account-token push path. It replaces the deployment
+hello page without putting node identity, version, or transport details in the customer shell.
+Visitors see Home, Public repositories, Sign in, and Create account. Account and operator
+navigation differ according to the common credential resolver. See [front-door.md](../ui/front-door.md).

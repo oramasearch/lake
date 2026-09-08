@@ -9,14 +9,15 @@ Organization and personal settings are in [`settings.md`](settings.md).
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed
 self-hosted font URLs, an accessible shared shell, and a persisted light/dark theme control,
-unit-tested as strings. The grouped navigation covers workspace, administration, applications,
-identity, and developer pages; contextual links lead to exports, SSO, repository content, and
-drive views. The unhashed stylesheet and font routes remain compatibility aliases with
+unit-tested as strings. Navigation uses the resolved viewer: visitors can browse public
+repositories, account holders see workspace and account links, and operators see Administration.
+The landing copy, navigation matrix, and browser proof are in [front-door.md](front-door.md).
+Contextual links lead to exports, SSO, repository content, and drive views. The unhashed stylesheet and font routes remain compatibility aliases with
 `Cache-Control: no-cache`.
 
 | Page | Route | Shows |
 |---|---|---|
-| Home | `GET /` | the node, version, links |
+| Home | `GET /` | hosted repositories, the account → repository → push journey, and usable next actions |
 | User identity | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`, `/settings`, `/sessions`, `/passkeys`, `/tokens` | password, TOTP, OAuth, profile, passkeys, sessions/devices, notifications, and scoped tokens; see [identity.md](identity.md) |
 | Applications | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | registration, theme, pool users, organizations, webhooks, and delivery history; see [identity.md](identity.md) |
 | Application identity | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed pool-specific identity on lake's host or a configured custom host |
@@ -64,8 +65,7 @@ drive views. The unhashed stylesheet and font routes remain compatibility aliase
 
 **Session.** `POST /session` compares the form token with the operator token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the
-request arrived over HTTPS, read from `X-Forwarded-Proto`) and redirects. Every page that reads
-the store requires it and redirects to `/login` otherwise; `POST /logout` clears it. The cookie
+request arrived over HTTPS, read from `X-Forwarded-Proto`) and redirects. Protected pages require a resolved credential and redirect to `/sign-in` otherwise; `POST /logout` clears it. The cookie
 value is the same secret the API takes as a bearer, resolved by the same code (`context_for`), so
 the UI never has a second auth path. User sign-in forms call registry capabilities and set the
 same cookie. A wrong operator token answers `401` with the form and a message.
@@ -95,7 +95,7 @@ puts protected input or output into HTML.
 
 **Verify.** `./build/lake --listen 127.0.0.1:4902 --memory-store --admin-token t`, then with a
 cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (200, the table),
-`curl -b j -X POST /logout` (302), `curl -b j /repositories` (302 to `/login`).
+`curl -b j -X POST /logout` (302), `curl -b j /repositories` (public repository list; protected pages redirect to `/sign-in`).
 
 **Next.** A customer detail page and mutation forms for the remaining control-plane actions.
 

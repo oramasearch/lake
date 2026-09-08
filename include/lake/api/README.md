@@ -11,3 +11,8 @@ The registry owns the response envelope and its success/error schemas. REST and 
 shared contract, and input validation recursively checks object fields and array items with JSON
 pointer errors. See [`docs/api/README.md`](../../../docs/api/README.md) for the envelope decision
 and HTTP conformance proof.
+
+`WebUiViewer` is presentation state, passed explicitly to shared-shell page renderers. Its
+operator flag comes from the resolved credential and does not authorize a capability. Boolean
+renderer arguments remain compatible and mean an ordinary account, never an operator. See
+[front-door.md](../../../docs/ui/front-door.md).

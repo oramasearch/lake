@@ -19,10 +19,23 @@
 // documented progressive-enhancement scripts) and unit-tested here.
 namespace lake::api {
 
+// Presentation state from the common credential resolver. It never grants access;
+// registry policy still authorizes every data read and action.
+struct WebUiViewer {
+    bool signed_in = false;
+    bool administrator = false;
+
+    WebUiViewer() = default;
+    WebUiViewer(bool authenticated) : signed_in(authenticated) {}
+    WebUiViewer(bool authenticated, bool operator_credential)
+        : signed_in(authenticated), administrator(authenticated && operator_credential) {}
+};
+
 std::string web_ui_escape(std::string_view text);
 std::string web_ui_markdown(std::string_view markdown);
-std::string web_ui_error(std::string_view code, std::string_view message, bool signed_in = false);
-std::string web_ui_loading(std::string_view subject, bool signed_in = false);
+std::string
+web_ui_error(std::string_view code, std::string_view message, WebUiViewer viewer = false);
+std::string web_ui_loading(std::string_view subject, WebUiViewer viewer = false);
 std::string web_ui_hashed_asset_url(std::string_view path, std::string_view contents);
 std::string_view web_ui_stylesheet();
 std::string_view web_ui_stylesheet_url();
@@ -34,34 +47,36 @@ std::string web_ui_icon(std::string_view name);
 // A self-hosted IBM Plex WOFF2 face embedded in the binary. Unknown names return an empty view.
 std::string_view web_ui_font(std::string_view name);
 
-// The page frame: title, shared navigation, and page content. signed_in switches
-// the session link.
+// The page frame uses the resolved viewer for navigation and session controls.
 std::string web_ui_shell(std::string_view title,
                          std::string_view meta,
                          std::string_view content,
-                         bool signed_in = false);
+                         WebUiViewer viewer = false);
 
-std::string
-web_ui_hello(std::string_view node_name, std::string_view version, bool signed_in = false);
-std::string web_ui_login(std::string_view error);
+std::string web_ui_home(WebUiViewer viewer = false);
+std::string web_ui_login(std::string_view error, WebUiViewer viewer = false);
 std::string web_ui_sso(std::string_view organization_id,
                        const std::vector<control::SsoProvider>& providers,
                        const std::vector<control::FederationIssuer>& issuers,
-                       const std::vector<control::ProvisioningLog>& logs);
-std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts);
+                       const std::vector<control::ProvisioningLog>& logs,
+                       WebUiViewer viewer = true);
+std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts,
+                                 WebUiViewer viewer = true);
 std::string web_ui_secrets(const control::SecretMount& mount,
                            std::string_view name,
-                           const control::SecretMetadata* metadata);
+                           const control::SecretMetadata* metadata,
+                           WebUiViewer viewer = true);
 std::string web_ui_encryption_keys(const control::SecretMount& mount,
-                                   const std::vector<control::EncryptionKey>& keys);
-std::string web_ui_sign_up(std::string_view error);
-std::string web_ui_sign_in(std::string_view error);
+                                   const std::vector<control::EncryptionKey>& keys,
+                                   WebUiViewer viewer = true);
+std::string web_ui_sign_up(std::string_view error, WebUiViewer viewer = false);
+std::string web_ui_sign_in(std::string_view error, WebUiViewer viewer = false);
 std::string web_ui_mfa(std::string_view error,
                        std::string_view otpauth_uri,
                        const std::vector<std::string>& recovery_codes,
-                       bool signed_in);
-std::string web_ui_passkeys(std::string_view error);
-std::string web_ui_passkey_sign_in(std::string_view error);
+                       WebUiViewer viewer);
+std::string web_ui_passkeys(std::string_view error, WebUiViewer viewer = true);
+std::string web_ui_passkey_sign_in(std::string_view error, WebUiViewer viewer = false);
 std::string web_ui_application_sign_up(const control::Application& application,
                                        std::string_view error);
 std::string web_ui_application_sign_in(const control::Application& application,
@@ -71,27 +86,34 @@ std::string web_ui_application_passkey_sign_in(const control::Application& appli
                                                std::string_view error);
 std::string web_ui_applications(const std::vector<control::Application>& applications,
                                 const std::vector<control::Customer>& customers,
-                                std::string_view error);
-std::string web_ui_application(const control::Application& application);
+                                std::string_view error,
+                                WebUiViewer viewer = true);
+std::string web_ui_application(const control::Application& application, WebUiViewer viewer = true);
 std::string web_ui_application_users(const control::Application& application,
-                                     const std::vector<control::ApplicationUser>& users);
-std::string web_ui_application_organizations(
-    const control::Application& application,
-    const std::vector<control::ApplicationOrganization>& organizations);
+                                     const std::vector<control::ApplicationUser>& users,
+                                     WebUiViewer viewer = true);
+std::string
+web_ui_application_organizations(const control::Application& application,
+                                 const std::vector<control::ApplicationOrganization>& organizations,
+                                 WebUiViewer viewer = true);
 std::string web_ui_application_events(const control::Application& application,
                                       const std::vector<control::ApplicationWebhookEvent>& events,
-                                      std::string_view webhook_secret = {});
+                                      std::string_view webhook_secret = {},
+                                      WebUiViewer viewer = true);
 std::string web_ui_sessions(const std::vector<control::Session>& sessions,
                             const std::vector<control::Device>& devices,
-                            std::string_view error);
+                            std::string_view error,
+                            WebUiViewer viewer = true);
 std::string web_ui_tokens(const std::vector<control::Session>& sessions,
                           std::string_view issued_secret,
-                          std::string_view error);
-std::string web_ui_customers(const std::vector<control::Customer>& customers);
+                          std::string_view error,
+                          WebUiViewer viewer = true);
+std::string web_ui_customers(const std::vector<control::Customer>& customers,
+                             WebUiViewer viewer = true);
 // owners: customer id → customer, for the owner column.
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners,
-                                bool signed_in = true);
+                                WebUiViewer viewer = true);
 
 struct RepositoryHomeData {
     std::vector<RepositoryContentRef> refs;
@@ -105,38 +127,38 @@ struct RepositoryHomeData {
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const RepositoryHomeData& data,
-                              bool signed_in = true);
+                              WebUiViewer viewer = true);
 std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const std::vector<RepositoryContentRef>& refs = {},
-                              bool signed_in = true);
+                              WebUiViewer viewer = true);
 std::string web_ui_environments(const control::Repository& repository,
                                 const nlohmann::json& environments,
-                                bool signed_in = true);
+                                WebUiViewer viewer = true);
 std::string web_ui_environment(const control::Repository& repository,
                                const nlohmann::json& environment,
                                const nlohmann::json& deployments,
-                               bool signed_in = true);
+                               WebUiViewer viewer = true);
 std::string web_ui_logs(const control::Repository& repository,
                         std::string_view environment,
                         const nlohmann::json& logs,
                         std::string_view stale_since,
-                        bool signed_in = true);
+                        WebUiViewer viewer = true);
 std::string web_ui_repository_tree(const control::Repository& repository,
                                    std::string_view ref,
                                    const std::vector<RepositoryTreeEntry>& entries,
-                                   bool signed_in);
+                                   WebUiViewer viewer);
 std::string web_ui_repository_file(const control::Repository& repository,
                                    std::string_view ref,
                                    const RepositoryFile& file,
                                    const std::vector<RepositoryBlameLine>& blame,
-                                   bool signed_in);
+                                   WebUiViewer viewer);
 std::string web_ui_repository_file(const control::Repository& repository,
                                    const RepositoryFile& file,
-                                   bool signed_in);
+                                   WebUiViewer viewer);
 std::string web_ui_repository_log(const control::Repository& repository,
                                   const std::vector<RepositoryChange>& changes,
-                                  bool signed_in);
+                                  WebUiViewer viewer);
 struct ChangeReviewData {
     std::vector<control::ForgeRecord> reviews;
     std::vector<control::ForgeRecord> comments;
@@ -147,43 +169,44 @@ std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
                           const ChangeReviewData& review,
-                          bool signed_in);
+                          WebUiViewer viewer);
 std::string web_ui_change(const control::Repository& repository,
                           const RepositoryChange& change,
                           const std::vector<RepositoryDiffEntry>& differences,
-                          bool signed_in);
+                          WebUiViewer viewer);
 std::string web_ui_issues(const control::Repository& repository,
                           const std::vector<control::ForgeRecord>& issues,
                           std::string_view state,
                           std::string_view label,
                           std::string_view assignee,
-                          bool signed_in);
+                          WebUiViewer viewer);
 std::string web_ui_issue(const control::Repository& repository,
                          const control::ForgeRecord& issue,
                          const std::vector<control::ForgeRecord>& comments,
-                         bool signed_in);
+                         WebUiViewer viewer);
 std::string web_ui_releases(const control::Repository& repository,
                             const std::vector<control::ForgeRecord>& releases,
-                            bool signed_in);
+                            WebUiViewer viewer);
 std::string web_ui_webhooks(const control::Repository& repository,
                             const std::vector<control::ForgeRecord>& webhooks,
                             const std::vector<control::ForgeRecord>& deliveries,
-                            bool signed_in);
+                            WebUiViewer viewer);
 std::string web_ui_branch_protection(const control::Repository& repository,
                                      const std::vector<control::ForgeRecord>& rules,
                                      const std::vector<audit::Event>& events,
-                                     bool signed_in);
+                                     WebUiViewer viewer);
 std::string web_ui_repository_conflicts(const control::Repository& repository,
                                         const std::vector<RepositoryConflict>& conflicts,
-                                        bool signed_in);
+                                        WebUiViewer viewer);
 std::string web_ui_artifacts(const control::Repository& repository,
                              const RepositoryArtifactPage& page,
                              const RepositoryArtifactFilter& filter,
-                             bool signed_in);
+                             WebUiViewer viewer);
 std::string web_ui_artifact(const control::Repository& repository,
                             const RepositoryArtifact& artifact,
-                            bool signed_in);
-std::string web_ui_organizations(const std::vector<control::Organization>& organizations);
+                            WebUiViewer viewer);
+std::string web_ui_organizations(const std::vector<control::Organization>& organizations,
+                                 WebUiViewer viewer = true);
 struct OrganizationSettingsData {
     std::vector<control::Team> teams;
     std::vector<control::Membership> memberships;
@@ -197,91 +220,112 @@ struct OrganizationSettingsData {
 std::string web_ui_organization(const control::Organization& organization,
                                 const OrganizationSettingsData& data,
                                 std::string_view tab,
-                                std::string_view error = {});
+                                std::string_view error = {},
+                                WebUiViewer viewer = true);
 std::string web_ui_team(const control::Team& team,
                         const std::vector<control::Membership>& memberships,
-                        const std::vector<control::EffectiveAccessEntry>& access);
+                        const std::vector<control::EffectiveAccessEntry>& access,
+                        WebUiViewer viewer = true);
 std::string web_ui_member(const control::Membership& membership,
                           const std::vector<control::EffectiveAccessEntry>& access,
                           std::string_view error = {},
-                          bool confirm_removal = false);
+                          bool confirm_removal = false,
+                          WebUiViewer viewer = true);
 std::string web_ui_settings(std::string_view identity,
                             const std::vector<control::Session>& sessions,
                             const std::vector<control::Device>& devices,
                             std::string_view tab,
-                            std::string_view error = {});
-std::string web_ui_teams(std::string_view organization_id, const std::vector<control::Team>& teams);
+                            std::string_view error = {},
+                            WebUiViewer viewer = true);
+std::string web_ui_teams(std::string_view organization_id,
+                         const std::vector<control::Team>& teams,
+                         WebUiViewer viewer = true);
 std::string web_ui_memberships(std::string_view organization_id,
                                std::string_view team_id,
-                               const std::vector<control::Membership>& memberships);
+                               const std::vector<control::Membership>& memberships,
+                               WebUiViewer viewer = true);
 std::string web_ui_invitations(std::string_view organization_id,
                                std::string_view team_id,
-                               const std::vector<control::Invitation>& invitations);
+                               const std::vector<control::Invitation>& invitations,
+                               WebUiViewer viewer = true);
 std::string web_ui_grants(const control::PolicyObject& object,
-                          const std::vector<control::Grant>& grants);
+                          const std::vector<control::Grant>& grants,
+                          WebUiViewer viewer = true);
 std::string web_ui_effective_access(const control::PolicyObject& object,
-                                    const std::vector<control::EffectiveAccessEntry>& entries);
-std::string web_ui_search(const search::Query& query, const search::QueryResult& result);
-std::string web_ui_metering(const nlohmann::json& usage);
-std::string web_ui_transparency(std::string_view identity, const nlohmann::json& scan);
+                                    const std::vector<control::EffectiveAccessEntry>& entries,
+                                    WebUiViewer viewer = true);
+std::string web_ui_search(const search::Query& query,
+                          const search::QueryResult& result,
+                          WebUiViewer viewer = true);
+std::string web_ui_metering(const nlohmann::json& usage, WebUiViewer viewer = true);
+std::string web_ui_transparency(std::string_view identity,
+                                const nlohmann::json& scan,
+                                WebUiViewer viewer = false);
 std::string web_ui_audit(const std::vector<audit::Event>& events,
                          const audit::Filter& filter,
-                         const nlohmann::json& log_configuration = nlohmann::json::object());
+                         const nlohmann::json& log_configuration = nlohmann::json::object(),
+                         WebUiViewer viewer = true);
 std::string web_ui_exports(const control::Repository& repository,
-                           const std::vector<control::ForgeRecord>& exports);
+                           const std::vector<control::ForgeRecord>& exports,
+                           WebUiViewer viewer = true);
 std::string web_ui_drive_folder(const control::Repository& repository,
                                 std::string_view ref,
                                 std::string_view path,
                                 const std::vector<RepositoryTreeEntry>& entries,
                                 const DriveFolderOptions& options,
-                                bool signed_in);
+                                WebUiViewer viewer);
 std::string web_ui_drive_preview(const control::Repository& repository,
                                  std::string_view ref,
                                  const RepositoryFile& file,
                                  const DrivePreview& preview,
-                                 bool signed_in);
+                                 WebUiViewer viewer);
 std::string web_ui_drive_history(const control::Repository& repository,
                                  std::string_view ref,
                                  std::string_view path,
                                  const std::vector<nlohmann::json>& changes,
-                                 bool signed_in);
+                                 WebUiViewer viewer);
 std::string web_ui_drive_version_diff(const control::Repository& repository,
                                       std::string_view ref,
                                       std::string_view path,
                                       std::string_view left_revision,
                                       std::string_view right_revision,
                                       const DriveVersionDiff& difference,
-                                      bool signed_in);
+                                      WebUiViewer viewer);
 std::string web_ui_drive_conflict(const control::Repository& repository,
                                   std::string_view ref,
                                   const RepositoryConflict& conflict,
                                   const std::vector<RepositoryFile>& versions,
                                   const std::optional<DriveVersionDiff>& difference,
-                                  bool signed_in);
+                                  WebUiViewer viewer);
 std::string web_ui_drive_share(const control::Repository& repository,
                                std::string_view ref,
                                std::string_view path,
                                const std::vector<control::EffectiveAccessEntry>& access,
                                const std::vector<nlohmann::json>& links,
                                std::string_view created_link,
-                               std::string_view error);
+                               std::string_view error,
+                               WebUiViewer viewer = true);
 std::string web_ui_drive_share_link(const control::Repository& repository,
                                     std::string_view ref,
                                     std::string_view path,
                                     const nlohmann::json& link,
-                                    std::string_view error);
+                                    std::string_view error,
+                                    WebUiViewer viewer = true);
 std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
-                                  std::string_view error);
+                                  std::string_view error,
+                                  WebUiViewer viewer = true);
 std::string web_ui_drive_link(std::string_view path,
                               const std::vector<RepositoryTreeEntry>& entries,
                               std::string_view error,
                               std::string_view token = {},
                               std::string_view ref = "main",
-                              std::string_view root_path = {});
+                              std::string_view root_path = {},
+                              WebUiViewer viewer = false);
 std::string web_ui_drive_link_preview(std::string_view token,
                                       std::string_view ref,
                                       const RepositoryFile& file,
-                                      const DrivePreview& preview);
-std::string web_ui_model(const nlohmann::json& model, bool signed_in);
+                                      const DrivePreview& preview,
+                                      WebUiViewer viewer = false);
+std::string web_ui_model(const nlohmann::json& model, WebUiViewer viewer);
 
 } // namespace lake::api
