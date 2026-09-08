@@ -17,7 +17,7 @@ inline constexpr std::string_view deployments_table = "deployments";
 inline constexpr std::string_view environment_env_table = "environment_env";
 inline constexpr std::string_view domains_table = "domains";
 
-inline constexpr std::array<std::string_view, 15> deployment_columns = {
+inline constexpr std::array<std::string_view, 16> deployment_columns = {
     "operator",
     "lake",
     "repository",
@@ -33,8 +33,9 @@ inline constexpr std::array<std::string_view, 15> deployment_columns = {
     "url",
     "message",
     "updated_at",
+    "ordering_token",
 };
-inline constexpr std::array<std::string_view, 8> environment_env_columns = {
+inline constexpr std::array<std::string_view, 9> environment_env_columns = {
     "lake",
     "repository",
     "environment",
@@ -43,8 +44,9 @@ inline constexpr std::array<std::string_view, 8> environment_env_columns = {
     "deleted",
     "set_by",
     "updated_at",
+    "ordering_token",
 };
-inline constexpr std::array<std::string_view, 10> domain_columns = {
+inline constexpr std::array<std::string_view, 11> domain_columns = {
     "lake",
     "repository",
     "environment",
@@ -55,6 +57,7 @@ inline constexpr std::array<std::string_view, 10> domain_columns = {
     "deleted",
     "requested_by",
     "updated_at",
+    "ordering_token",
 };
 
 struct ZettaControlError {

@@ -22,12 +22,14 @@ log reads return `store_unavailable`.
 
 | Table | Columns | Append owner |
 |---|---|---|
-| `orama_control.deployments` | `operator, lake, repository, environment, kind, change, image, deployment_id, requested_by, requested_at, phase, namespace, url, message, updated_at` | liquid appends desired rows; operator appends phase, namespace, URL, and message status rows; Lake is read-only |
-| `orama_control.environment_env` | `lake, repository, environment, key, value, deleted, set_by, updated_at` | Lake appends plain values/tombstones; operator reconciles them into the environment |
-| `orama_control.domains` | `lake, repository, environment, host, tls, status, message, deleted, requested_by, updated_at` | Lake appends requests/tombstones; operator materializes `LakeDomain` and appends status |
+| `orama_control.deployments` | `operator, lake, repository, environment, kind, change, image, deployment_id, requested_by, requested_at, phase, namespace, url, message, updated_at, ordering_token` | liquid appends desired rows; operator appends phase, namespace, URL, and message status rows; Lake is read-only |
+| `orama_control.environment_env` | `lake, repository, environment, key, value, deleted, set_by, updated_at, ordering_token` | Lake appends plain values/tombstones; operator reconciles them into the environment |
+| `orama_control.domains` | `lake, repository, environment, host, tls, status, message, deleted, requested_by, updated_at, ordering_token` | Lake appends requests/tombstones; operator materializes `LakeDomain` and appends status |
 
-The tables are append-only. Latest `updated_at` wins per deployment id, environment key, or domain
-host. Domain `tls` is exactly `acme` or `provided`; `deleted = true` is a tombstone. The operator
+The tables are append-only. Lake writes microsecond UTC timestamps and a UUID `ordering_token` for
+environment-value and domain rows. The mirror orders rows by `(updated_at, ordering_token, canonical
+row)`, so a missing token on an older row sorts as empty and its canonical row resolves any remaining
+tie. Domain `tls` is exactly `acme` or `provided`; `deleted = true` is a tombstone. The operator
 must namespace every row consistently and preserve historical rows.
 
 The table definitions remain a proposal until liquid #84 publishes its deployment page and

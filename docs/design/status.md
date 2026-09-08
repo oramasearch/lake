@@ -106,7 +106,8 @@ signed query outcome through the registry ([`../api/search.md`](../api/search.md
 ## Platform (source tree)
 
 Platform environments mirror append-only deployment, plain environment-variable, and domain rows
-from the operator's Zetta control plane (`0019_platform`). Policy-checked capabilities and
+from the operator's Zetta control plane (`0019_platform`). Microsecond timestamps, per-row ordering
+tokens, and a legacy fallback make mirror reduction independent of source-row order. Policy-checked capabilities and
 server-rendered environment/detail/log pages remain readable from the auditable Postgres mirror
 during an operator-control outage; mutations are refused until sync recovers
 ([`../api/platform.md`](../api/platform.md),

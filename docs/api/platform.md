@@ -32,12 +32,25 @@ one code source in `include/lake/control/zetta_control.hpp`.
 
 | Table | Columns | Writer |
 |---|---|---|
-| `orama_control.deployments` | `operator, lake, repository, environment, kind, change, image, deployment_id, requested_by, requested_at, phase, namespace, url, message, updated_at` | desired rows by liquid; status rows by the operator |
-| `orama_control.environment_env` | `lake, repository, environment, key, value, deleted, set_by, updated_at` | Lake; operator reads |
-| `orama_control.domains` | `lake, repository, environment, host, tls, status, message, deleted, requested_by, updated_at` | requests by Lake; status rows by the operator |
+| `orama_control.deployments` | `operator, lake, repository, environment, kind, change, image, deployment_id, requested_by, requested_at, phase, namespace, url, message, updated_at, ordering_token` | desired rows by liquid; status rows by the operator |
+| `orama_control.environment_env` | `lake, repository, environment, key, value, deleted, set_by, updated_at, ordering_token` | Lake; operator reads |
+| `orama_control.domains` | `lake, repository, environment, host, tls, status, message, deleted, requested_by, updated_at, ordering_token` | requests by Lake; operator materializes status |
 
-Rows are append-only. Reads select rows for `lake = LAKE_PUBLIC_HOST`; latest `updated_at` wins
-per `deployment_id`, `(repository, environment, key)`, or `(repository, environment, host)`.
+Rows are append-only. Lake writes `updated_at` as a UTC ISO 8601 timestamp with exactly six
+fractional digits and a UUID `ordering_token` on every environment-value and domain row. Reads
+select rows for `lake = LAKE_PUBLIC_HOST` and choose the lexicographically greatest
+`(updated_at, ordering_token, canonical row)` tuple per `deployment_id`,
+`(repository, environment, key)`, or `(repository, environment, host)`. This total order means
+every permutation of a set of rows produces the same current value and deployment-phase sequence.
+Consumers may rely on a later set or tombstone winning when its tuple is greater; an immediate set
+followed by an unset therefore resolves to the tombstone, and the reverse resolves to the set.
+
+Rows written before this contract have no `ordering_token`; Lake treats the missing field as the
+empty string and expands their second-resolution timestamps to zero microseconds for comparison.
+The canonical row is the final tie-break for legacy rows, so historical and mixed rows also reduce
+deterministically. There is no Lake Postgres migration: the token remains in the existing mirrored
+JSON document, and older Zetta rows project the absent field as null.
+
 `deleted = true` is the environment/domain tombstone. The Zetta SQL capability is GET-bound and
 accepts one statement, so Lake emits only fixed-table `SELECT` and `INSERT` statements. Values are
 SQL literals quoted by Lake: apostrophes double, values must be scalar, and ASCII control
