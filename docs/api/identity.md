@@ -26,6 +26,14 @@ revokes the seed and every remaining recovery code. Tokens are named sessions wi
 capability-name scopes. Ordinary tokens
 default to a 30-day expiry; a non-expiring static token requires a non-empty reason.
 
+Every HTTP response starts with empty headers before CORS or a route handler runs. A session
+cookie belongs only to the request that successfully completed its authentication ceremony;
+ordinary anonymous GETs of `/`, `/sign-up`, and `/sign-in` issue no `lake_session` cookie and
+inherit no `Location` header. This holds on keep-alive connections and when a worker accepts a
+new connection. Separate clients retain separate cookie jars: signing in one cannot authenticate
+another visiting public pages. The shared construction rule is in
+[`../serving/http.md`](../serving/http.md#response-isolation).
+
 TOTP seeds are never stored in credential JSON as plaintext. OpenSSL AES-256-GCM seals each value
 with a purpose-specific random data key; `keystore` stores that key wrapped under the required
 32-byte hexadecimal `LAKE_INSTANCE_KEK`. Recovery codes use independent Argon2id hashes and are
@@ -127,6 +135,14 @@ identity test repeats a successful registration, binding verification and assert
 persisted challenge and credential rows.
 The identity-exit Postgres scenario covers fresh liquid-key sign-in, persisted replay protection,
 and use of that session in the relying-party authorization-code flow.
+
+`HttpServer/HttpResponseIsolation.SignInCannotAuthenticateAnotherClient` runs with both stores
+and both reused and fresh connections. It signs in A, visits each public page without credentials
+as B, also checks `/v1/server_info` and `/v1/openapi.json`, adopts any received cookie as a browser
+would, and requires B's `/sessions` request to
+redirect to `/sign-in`. A's own cookie must still open its sessions page. Assertions never print
+credential values. Run the complete Postgres-backed suite, including these four cases, with
+`LAKE_TEST_DB_URI` and `LAKE_INSTANCE_KEK` configured as in [`../build/local.md`](../build/local.md).
 
 ## How to change
 

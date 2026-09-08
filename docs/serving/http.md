@@ -65,6 +65,39 @@ produces no stderr output. Lake pins `oramasearch/beast2` branch `orama-main`, w
 suppresses the former `read_header error: end of stream` line. The carrier and its update procedure
 are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
+## Response isolation
+
+Beast2 pools workers across connections. At the pinned revision, each worker retains its
+`route_params::res` and resets the start line and connection policy without clearing old fields.
+Lake previously overwrote only selected headers when sending a response. A sign-in response's
+`Set-Cookie` and `Location` could consequently reach a different client on the next connection,
+as well as a later request on a keep-alive connection. A browser accepting that leaked cookie
+could access the signing user's sessions. This is a cross-user session disclosure.
+
+Lake's first router middleware now clears the complete response, restores the current request's
+HTTP version and keep-alive policy, and then runs CORS. The serializer still refers to the same
+response object. Every route, including preflight, errors, redirects, static files and binary
+responses, therefore begins without another request's headers or payload metadata. Handlers may
+then add headers belonging to the current response. Keep this reset before CORS and dispatch;
+resetting in a send helper would discard headers deliberately added by the current handler.
+
+The four `HttpServer/HttpResponseIsolation` cases use one worker to force reuse, real password
+sign-in, independent client cookies, all three public entry pages, public JSON and OpenAPI
+responses, and protected session reads.
+Both in-memory and Postgres variants cover the same socket and a newly accepted socket. The
+tests fail against the previous response path because B receives A's cookie and can open
+`/sessions`; after the reset B remains anonymous and A remains authenticated.
+`HttpServer.ResponseResetPreservesCurrentProtocolAndCors` also alternates HTTP/1.0 and HTTP/1.1
+over one connection, checks preflight and error responses, and requires preflight-only fields to
+disappear while current CORS headers, status, protocol version and keep-alive policy remain correct.
+
+Verify the complete native suites with Postgres, and reproduce against a local binary using
+`curl -q -sS -D headers.private http://127.0.0.1:<port>/sign-up -o signup.html`. After another client
+signs in, this GET must return 200 without `Set-Cookie` or `Location`. Repeat using isolated cookie
+jars and both reused and fresh connections. Redact every cookie and account value before sharing
+headers. A containing deployment and the same production reproduction are required to establish
+that the live instance is repaired; this source change does not redeploy it.
+
 **Verify.** `./build/lake --listen 127.0.0.1:4900 --node x --memory-store --admin-token t`, then
 `curl -i` the hello page, `/v1/server_info`, `/healthz` and an unmatched path;
 `ctest --test-dir build`. The focused idle-close proof is
