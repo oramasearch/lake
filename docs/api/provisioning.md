@@ -51,11 +51,31 @@ The in-memory test store mirrors customer ownership and stages password/session 
 before publishing rows under its mutex. It retains its pre-existing synthetic identity model;
 production document verification and rollback are tested against PostgreSQL.
 
+## Identity document and first repository
+
+The supported client command is `liquid identity show --document`: unpadded base64url canonical
+CBOR, with the private key retained by Liquid. The sign-up page links the exact
+[installation instructions](https://github.com/oramasearch/liquid/blob/main/docs/build/local.md)
+and [identity reference](https://github.com/oramasearch/liquid/blob/main/docs/reference/cli/identity.md).
+Malformed encoding, truncated CBOR, and invalid signatures remain refusals before user creation.
+Encoding and CBOR errors say what failed and tell the visitor to export the complete document again.
+
+After sign-up, `/repositories` offers a private repository form. `POST /repository/create`
+calls `create_repository` through the registry and redirects to the created repository. An
+unauthenticated caller or a user naming another customer's ID cannot create a repository there.
+The homepage and navigation redesign remain [#135](https://github.com/oramasearch/lake/issues/135).
+
 ## Verify and change
 
 Run the full native PostgreSQL-backed static and shared suites described in
 [../build/local.md](../build/local.md). `PostgresProvisioning.*` checks ownership, immutable valid
 names, absence of a quota override, repeated/concurrent requests, cross-customer denial, malformed
 input, and complete rollback after a deliberately failed session insert followed by a successful
-retry. Changing provisioning must preserve these checks and the application pool boundary.
-Any future handle rename or quota policy must update this contract and the registry capability.
+retry. `HttpResponseIsolation.FreshSignUpOwnsFirstRepositoryWithZeroInitialMetering` runs with
+memory and PostgreSQL stores over real HTTP and the production repository store. It checks the
+redirect, first-repository form, zero hourly storage and cost with nonzero prices, configured quota
+inheritance, and first-repository access without an operator credential.
+
+Changing provisioning must preserve these checks and the application pool boundary. Any future
+handle rename or quota policy needs to update this contract and the registry capability first.
+The visual walkthrough and recorded proof are in [../ui/sign-up-walkthrough.md](../ui/sign-up-walkthrough.md).

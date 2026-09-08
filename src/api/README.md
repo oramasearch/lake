@@ -14,3 +14,6 @@ before capability handlers run. The contract and HTTP conformance proof are in
 [`docs/api/README.md`](../../docs/api/README.md).
 The sign-up registry contract includes personal customer provisioning, with atomic ownership and
 retry semantics shared by all transports. See `docs/api/provisioning.md`.
+The sign-up registry contract includes personal customer provisioning. Its form redirects to
+repositories, whose create form calls `create_repository` through the same registry. See
+`docs/api/provisioning.md` and `docs/ui/identity.md`.

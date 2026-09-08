@@ -98,3 +98,7 @@ cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (2
 `curl -b j -X POST /logout` (302), `curl -b j /repositories` (302 to `/login`).
 
 **Next.** A customer detail page and mutation forms for the remaining control-plane actions.
+
+The [sign-up walkthrough](sign-up-walkthrough.md) covers public identity export, personal customer
+ownership, zero initial metering, and creating a first private repository at both requested widths
+and themes. The `POST /repository/create` form adapter calls the existing registry capability.

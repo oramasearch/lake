@@ -265,6 +265,13 @@ protected:
         options.worker_coroutines = 1;
         options.store = store_;
         options.instance_kek = instance_kek_;
+        options.store_root =
+            lake::test::fixture_path("http-store-" + lake::control::new_uuid_v4()).string();
+        options.metering.storage_quota_bytes = 1ULL << 30;
+        options.metering.storage_gib_hour_micros = 1000;
+        options.metering.transfer_in_gib_micros = 1000;
+        options.metering.transfer_out_gib_micros = 1000;
+        options.metering.compute_second_micros = 1000;
         server_ = std::make_unique<lake::api::ApiServer>(options);
         ASSERT_TRUE(server_->start()) << server_->reason();
     }
@@ -313,6 +320,60 @@ protected:
     const std::string instance_kek_ =
         "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 };
+
+TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMetering) {
+    if (std::get<0>(GetParam())) {
+        create_identity_document();
+    }
+    const std::string email = "first-repository-" + lake::control::new_uuid_v4() + "@example.test";
+    auto client = connect();
+    const std::string signup =
+        client->request("POST",
+                        "/identity/sign-up",
+                        "email=" + email + "&display_name=Newcomer&password=" + password_ +
+                            "&device_name=browser&identity_document=" + identity_document_);
+    ASSERT_TRUE(signup.starts_with("HTTP/1.1 302")) << signup;
+    EXPECT_EQ(response_header(signup, "location"), "/repositories");
+    const std::string cookie = response_header(signup, "set-cookie")
+                                   .substr(0, response_header(signup, "set-cookie").find(';'));
+    ASSERT_FALSE(cookie.empty());
+    const std::string page = client->request("GET", "/repositories", "", cookie);
+    EXPECT_NE(page.find("action=\"/repository/create\""), std::string::npos);
+    const std::string customers_response = client->request("GET", "/v1/list_customers", "", cookie);
+    const auto customers =
+        nlohmann::json::parse(customers_response.substr(customers_response.find("\r\n\r\n") + 4));
+    ASSERT_TRUE(customers.at("ok"));
+    ASSERT_EQ(customers.at("value").at("items").size(), 1U);
+    const std::string customer_id = customers.at("value").at("items").at(0).at("id");
+    const std::string usage_response =
+        client->request("GET", "/v1/metering_usage?customer_id=" + customer_id, "", cookie);
+    const auto usage =
+        nlohmann::json::parse(usage_response.substr(usage_response.find("\r\n\r\n") + 4));
+    ASSERT_TRUE(usage.at("ok")) << usage.dump();
+    EXPECT_EQ(usage.at("value").at("cost_micros"), 0);
+    EXPECT_EQ(usage.at("value").at("quota_bytes"), 1ULL << 30);
+    ASSERT_EQ(usage.at("value").at("items").size(), 1U);
+    EXPECT_EQ(usage.at("value").at("items").at(0).at("stored_bytes"), 0);
+    EXPECT_FALSE(usage.at("value").at("over_quota"));
+    const std::string created = client->request("POST",
+                                                "/repository/create",
+                                                "customer_id=" + customer_id +
+                                                    "&name=first-repository&description=My+files",
+                                                cookie);
+    ASSERT_TRUE(created.starts_with("HTTP/1.1 302")) << created;
+    const std::string destination = response_header(created, "location");
+    ASSERT_TRUE(destination.starts_with("/repository?id="));
+    const std::string repository = client->request("GET", destination, "", cookie);
+    EXPECT_TRUE(repository.starts_with("HTTP/1.1 200")) << repository;
+    EXPECT_NE(repository.find("/first-repository"), std::string::npos);
+    const std::string other_cookie = "lake_session=invalid";
+    const std::string denied = client->request("POST",
+                                               "/repository/create",
+                                               "customer_id=" + customer_id + "&name=forbidden",
+                                               other_cookie);
+    EXPECT_FALSE(denied.starts_with("HTTP/1.1 200"));
+    EXPECT_FALSE(response_header(denied, "location").starts_with("/repository?id="));
+}
 
 TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {
     for (const std::string_view path :

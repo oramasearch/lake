@@ -1371,7 +1371,7 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
                      "battery+staple&device_name=browser&identity_document=%7B%7D",
                      "application/x-www-form-urlencoded");
     EXPECT_NE(created.find(" 302 "), std::string::npos) << created;
-    EXPECT_EQ(response_header(created, "Location"), "/sessions");
+    EXPECT_EQ(response_header(created, "Location"), "/repositories");
     const std::string set_cookie = response_header(created, "Set-Cookie");
     EXPECT_NE(set_cookie.find("HttpOnly"), std::string::npos);
     const std::size_t cookie_end = set_cookie.find(';');
