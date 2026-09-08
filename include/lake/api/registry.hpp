@@ -60,7 +60,12 @@ struct ApiResult {
     double duration_ms = 0.0;
     static ApiResult success(nlohmann::json output);
     static ApiResult failure(std::string code, std::string message, std::string path = {});
+    nlohmann::json envelope() const;
 };
+
+// The wire contract belongs to the registry, alongside ApiResult::envelope().
+nlohmann::json success_envelope_schema(const nlohmann::json& value_schema);
+nlohmann::json error_envelope_schema();
 
 struct WebhookDeliveryResult {
     int status = 0;
@@ -171,9 +176,8 @@ struct Capability {
     AsyncCapabilityHandler async_handler;
 };
 
-// Boundary validation against the schema subset lake declares: required keys,
-// declared keys only, declared JSON types. Returns ok on success, invalid_input
-// (path-qualified) otherwise.
+// Recursive boundary validation: required and declared keys, JSON types and array
+// items. Errors carry an escaped JSON pointer to the failing field or item.
 ApiResult validate_input(const Capability& capability, const nlohmann::json& input);
 
 class Registry {

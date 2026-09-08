@@ -24,6 +24,44 @@ ApiResult ApiResult::failure(std::string code, std::string message, std::string 
     return result;
 }
 
+nlohmann::json ApiResult::envelope() const {
+    nlohmann::json envelope;
+    envelope["ok"] = ok;
+    if (ok) {
+        envelope["value"] = value;
+    } else {
+        envelope["error"] = {
+            {"code", error.code}, {"message", error.message}, {"path", error.path}};
+    }
+    envelope["duration_ms"] = duration_ms;
+    return envelope;
+}
+
+nlohmann::json error_envelope_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"ok", {{"const", false}}},
+              {"error",
+               {{"type", "object"},
+                {"properties",
+                 {{"code", {{"type", "string"}}},
+                  {"message", {{"type", "string"}}},
+                  {"path", {{"type", "string"}}}}},
+                {"required", nlohmann::json::array({"code", "message"})}}},
+              {"duration_ms", {{"type", "number"}}}}},
+            {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
+}
+
+nlohmann::json success_envelope_schema(const nlohmann::json& output_schema) {
+    nlohmann::json value = output_schema.is_object() && !output_schema.empty()
+                               ? output_schema
+                               : nlohmann::json{{"type", "object"}};
+    return {{"type", "object"},
+            {"properties",
+             {{"ok", {{"const", true}}}, {"value", value}, {"duration_ms", {{"type", "number"}}}}},
+            {"required", nlohmann::json::array({"ok", "value", "duration_ms"})}};
+}
+
 std::string_view to_string(CapabilityKind kind) {
     return kind == CapabilityKind::Read ? "read" : "action";
 }
@@ -31,6 +69,8 @@ std::string_view to_string(CapabilityKind kind) {
 namespace {
 
 bool matches_type(const nlohmann::json& value, const std::string& type) {
+    if (type == "null")
+        return value.is_null();
     if (type == "string")
         return value.is_string();
     if (type == "integer")
@@ -44,6 +84,78 @@ bool matches_type(const nlohmann::json& value, const std::string& type) {
     if (type == "array")
         return value.is_array();
     return true;
+}
+
+std::string pointer_child(const std::string& parent, const std::string& key) {
+    std::string path = parent + "/";
+    for (const char character : key) {
+        if (character == '~') {
+            path += "~0";
+        } else if (character == '/') {
+            path += "~1";
+        } else {
+            path += character;
+        }
+    }
+    return path;
+}
+
+ApiResult
+validate_value(const nlohmann::json& schema, const nlohmann::json& value, const std::string& path) {
+    const auto type = schema.find("type");
+    if (type != schema.end()) {
+        const bool matches =
+            type->is_array()
+                ? std::ranges::any_of(*type,
+                                      [&](const auto& alternative) {
+                                          return matches_type(
+                                              value, alternative.template get<std::string>());
+                                      })
+                : matches_type(value, type->get<std::string>());
+        if (!matches) {
+            return ApiResult::failure("invalid_input", "expected type " + type->dump(), path);
+        }
+    }
+    if (value.is_array() && schema.contains("items")) {
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            auto result = validate_value(
+                schema.at("items"), value[index], pointer_child(path, std::to_string(index)));
+            if (!result.ok) {
+                return result;
+            }
+        }
+    }
+    if (!value.is_object()) {
+        return ApiResult::success(nullptr);
+    }
+    const auto properties = schema.value("properties", nlohmann::json::object());
+    for (const auto& required : schema.value("required", nlohmann::json::array())) {
+        const std::string key = required.get<std::string>();
+        if (!value.contains(key) || value[key].is_null()) {
+            return ApiResult::failure(
+                "invalid_input", key + " is required", pointer_child(path, key));
+        }
+    }
+    for (auto field = value.begin(); field != value.end(); ++field) {
+        const std::string child = pointer_child(path, field.key());
+        if (!properties.contains(field.key())) {
+            if (path.empty() ||
+                schema.value("additionalProperties", nlohmann::json(true)) == false) {
+                return ApiResult::failure(
+                    "invalid_input", "unexpected field " + field.key(), child);
+            }
+            continue;
+        }
+        // Preserve the existing optional top-level null-as-absent input convention.
+        if (path.empty() && field.value().is_null()) {
+            continue;
+        }
+        auto result = validate_value(properties.at(field.key()), field.value(), child);
+        if (!result.ok) {
+            return result;
+        }
+    }
+    return ApiResult::success(nullptr);
 }
 
 struct CallState {
@@ -164,29 +276,7 @@ ApiResult finish_call(const std::string& name, ApiResult result, ApiContext& con
 ApiResult validate_input(const Capability& capability, const nlohmann::json& input) {
     if (!input.is_object())
         return ApiResult::failure("invalid_input", "input must be a JSON object");
-    const nlohmann::json properties =
-        capability.input_schema.value("properties", nlohmann::json::object());
-    for (const auto& required :
-         capability.input_schema.value("required", nlohmann::json::array())) {
-        const std::string key = required.get<std::string>();
-        if (!input.contains(key) || input[key].is_null()) {
-            return ApiResult::failure("invalid_input", key + " is required", "/" + key);
-        }
-    }
-    for (auto it = input.begin(); it != input.end(); ++it) {
-        if (!properties.contains(it.key())) {
-            return ApiResult::failure(
-                "invalid_input", "unexpected field " + it.key(), "/" + it.key());
-        }
-        if (it.value().is_null())
-            continue;
-        const std::string type = properties[it.key()].value("type", "");
-        if (!type.empty() && !matches_type(it.value(), type)) {
-            return ApiResult::failure(
-                "invalid_input", it.key() + " must be a " + type, "/" + it.key());
-        }
-    }
-    return ApiResult::success(nullptr);
+    return validate_value(capability.input_schema, input, "");
 }
 
 bool Registry::add(Capability capability) {

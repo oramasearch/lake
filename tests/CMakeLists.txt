@@ -1,4 +1,12 @@
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import jsonschema"
+  RESULT_VARIABLE LAKE_JSONSCHEMA_RESULT)
+if(NOT LAKE_JSONSCHEMA_RESULT EQUAL 0)
+  message(FATAL_ERROR "Lake schema conformance tests require Python jsonschema")
+endif()
+
 add_executable(lake-tests test_web_ui.cpp
+  test_schema_conformance.cpp
   scenarios/drive_test.cpp
   test_apps.cpp
   test_api.cpp
@@ -25,6 +33,7 @@ target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx Ope
   Boost::beast2 Boost::http Boost::corosio GTest::gtest_main)
 target_include_directories(lake-tests PRIVATE ${PROJECT_SOURCE_DIR}/modules/liquid/src)
 target_compile_definitions(lake-tests PRIVATE
+  LAKE_TEST_PYTHON="${Python3_EXECUTABLE}"
   LAKE_TEST_CMAKE_COMMAND="${CMAKE_COMMAND}"
   LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>"
   LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

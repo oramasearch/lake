@@ -6,3 +6,8 @@ these public headers.
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
+
+The registry owns the response envelope and its success/error schemas. REST and MCP use that
+shared contract, and input validation recursively checks object fields and array items with JSON
+pointer errors. See [`docs/api/README.md`](../../../docs/api/README.md) for the envelope decision
+and HTTP conformance proof.

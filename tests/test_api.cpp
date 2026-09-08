@@ -1684,6 +1684,32 @@ TEST(Registry, ValidatesInput) {
     EXPECT_EQ(s.call("no_such").error.code, "unknown_capability");
 }
 
+TEST(Registry, NestedArraysReportEscapedJsonPointers) {
+    Capability capability;
+    capability.input_schema = {
+        {"type", "object"},
+        {"properties",
+         {{"rows",
+           {{"type", "array"},
+            {"items",
+             {{"type", "object"},
+              {"properties", {{"a~/b", {{"type", "array"}, {"items", {{"type", "integer"}}}}}}},
+              {"required", {"a~/b"}},
+              {"additionalProperties", false}}}}}}},
+        {"required", {"rows"}},
+        {"additionalProperties", false}};
+    json input{{"rows", {{{"a~/b", {1, 2}}}}}};
+    EXPECT_TRUE(validate_input(capability, input).ok);
+    input["rows"][0]["a~/b"][1] = "wrong";
+    const auto wrong_item = validate_input(capability, input);
+    EXPECT_EQ(wrong_item.error.code, "invalid_input");
+    EXPECT_EQ(wrong_item.error.path, "/rows/0/a~0~1b/1");
+    input["rows"][0] = json::object();
+    EXPECT_EQ(validate_input(capability, input).error.path, "/rows/0/a~0~1b");
+    input["rows"][0] = false;
+    EXPECT_EQ(validate_input(capability, input).error.path, "/rows/0");
+}
+
 TEST(Audit, RegistryRecordsEachCapabilityOutcomeAndDetectsDeletedRows) {
     Surface s;
     for (const auto& capability : s.registry.list()) {
@@ -2086,7 +2112,11 @@ TEST(Mcp, InitializeListAndCall) {
             return tool.value("name", "") == "transparency_inclusion_proof";
         });
     ASSERT_NE(inclusion_tool, tools["result"]["tools"].end());
-    EXPECT_TRUE(inclusion_tool->at("outputSchema").at("properties").contains("audit_path"));
+    EXPECT_TRUE(inclusion_tool->at("outputSchema")
+                    .at("properties")
+                    .at("value")
+                    .at("properties")
+                    .contains("audit_path"));
     EXPECT_TRUE(std::ranges::any_of(tools["result"]["tools"], [](const json& tool) {
         return tool.value("name", "") == "transparency_consistency_proof";
     }));
@@ -2662,7 +2692,8 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
             std::ranges::find_if(listed, [&](const json& entry) { return entry["name"] == name; });
         ASSERT_NE(tool, listed.end());
         EXPECT_EQ(tool->at("inputSchema"), surface.registry.find(name)->input_schema);
-        EXPECT_EQ(tool->at("outputSchema"), surface.registry.find(name)->output_schema);
+        EXPECT_EQ(tool->at("outputSchema"),
+                  success_envelope_schema(surface.registry.find(name)->output_schema));
     }
     surface.ctx.authorized = false;
     surface.ctx.acting_identity.clear();

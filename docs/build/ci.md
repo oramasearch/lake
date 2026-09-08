@@ -17,6 +17,10 @@ runs:
 ctest --test-dir build --output-on-failure
 ```
 
+The native toolchain also installs `python3-jsonschema` for the HTTP response conformance test.
+CI selects `/usr/bin/python3`, which owns that distribution package. CMake checks the import
+before configuring test targets.
+
 The workflow installs pinned `huggingface_hub` 1.30.0 in a Python virtual environment before the
 test step. The model/dataset client integration therefore runs in CI; a local environment without
 the package reports an explicit skip while the direct C++ HTTP coverage still runs.

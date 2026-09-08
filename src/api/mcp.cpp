@@ -1,7 +1,5 @@
 #include "lake/api/mcp.hpp"
 
-#include "lake/api/rest.hpp"
-
 namespace lake::api {
 namespace {
 
@@ -55,7 +53,7 @@ std::optional<std::string> mcp_dispatch(const Registry& registry,
                                    {"description", capability->description},
                                    {"inputSchema", capability->input_schema}};
             if (capability->output_schema.is_object() && !capability->output_schema.empty()) {
-                tool["outputSchema"] = capability->output_schema;
+                tool["outputSchema"] = success_envelope_schema(capability->output_schema);
             }
             tools.push_back(std::move(tool));
         }
@@ -68,7 +66,7 @@ std::optional<std::string> mcp_dispatch(const Registry& registry,
         if (tool_name.empty())
             return jsonrpc_error(id, -32602, "params.name is required");
         const ApiResult call_result = registry.call(tool_name, arguments, context);
-        nlohmann::json payload = rest_envelope(call_result);
+        nlohmann::json payload = call_result.envelope();
         nlohmann::json result;
         result["content"] = nlohmann::json::array({{{"type", "text"}, {"text", payload.dump()}}});
         result["structuredContent"] = std::move(payload);
@@ -97,7 +95,7 @@ liquid::runtime::task<std::optional<std::string>> mcp_dispatch_async(const Regis
     const ApiResult call_result =
         completed ? std::move(*completed)
                   : ApiResult::failure("store_error", completed.error().message);
-    nlohmann::json payload = rest_envelope(call_result);
+    nlohmann::json payload = call_result.envelope();
     nlohmann::json result;
     result["content"] = nlohmann::json::array({{{"type", "text"}, {"text", payload.dump()}}});
     result["structuredContent"] = std::move(payload);

@@ -1,0 +1,117 @@
+{
+    "root": {
+        "signatures": [
+            {
+                "keyid": "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a",
+                "sig":
+                    "d2085e82b6e8479b1baa7091c518c25c625227a26c1c5002912a8cbfb0d5b1f08f3a80bd993e26645a2a3954c782fe72b7cdb6ab93c968f4d91c30ca36d2c401"
+            }
+        ],
+        "signed": {
+            "_type": "root",
+            "consistent_snapshot": true,
+            "expires": "2099-01-01T00:00:00Z",
+            "keys": {
+                "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a": {
+                    "keytype": "ed25519",
+                    "keyval": {
+                        "public": "06fe1c5bb9bf3c0911dc36cebc6bd93b99392bc743db8e77468102026cd1e01a"
+                    },
+                    "scheme": "ed25519"
+                }
+            },
+            "roles": {
+                "root": {
+                    "keyids": [
+                        "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a"
+                    ],
+                    "threshold": 1
+                },
+                "snapshot": {
+                    "keyids": [
+                        "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a"
+                    ],
+                    "threshold": 1
+                },
+                "targets": {
+                    "keyids": [
+                        "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a"
+                    ],
+                    "threshold": 1
+                },
+                "timestamp": {
+                    "keyids": [
+                        "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a"
+                    ],
+                    "threshold": 1
+                }
+            },
+            "spec_version": "1.0.36",
+            "version": 1
+        }
+    },
+    "snapshot": {
+        "signatures": [
+            {
+                "keyid": "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a",
+                "sig":
+                    "8a37865d330a45b35efc456d3b383133cfcf5f1b1450c2e78d0603caa7e2304d7fe29cf68618201e6d53cdee7731e15a96307ddb2f09767c022154dfe814dd0f"
+            }
+        ],
+        "signed": {
+            "_type": "snapshot",
+            "expires": "2099-01-01T00:00:00Z",
+            "meta": {
+                "targets.json": {
+                    "hashes": {
+                        "sha256": "9a49a7a337fec8a0138aa02c6a9f11cbfa8be5d28c2a1accb4e540f44fcea3d1"
+                    },
+                    "length": 341,
+                    "version": 1
+                }
+            },
+            "spec_version": "1.0.36",
+            "version": 1
+        }
+    },
+    "targets": {
+        "signatures": [
+            {
+                "keyid": "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a",
+                "sig":
+                    "82426da0a933d74e8824661a62fcfa2770d864cd937a216c7d4ab400ed2939ff3097f9fb42ceb921e6766db02c6f6ce82a91b8a91553535f37cf7ccda8a76708"
+            }
+        ],
+        "signed": {
+            "_type": "targets",
+            "expires": "2099-01-01T00:00:00Z",
+            "spec_version": "1.0.36",
+            "targets": {},
+            "version": 1
+        }
+    },
+    "timestamp": {
+        "signatures": [
+            {
+                "keyid": "94c01dcf75821160343964a2dd4b4a996009cda55f3152e68b57d04859116c5a",
+                "sig":
+                    "0baa982fa741a09deaa35b23a25cbf967cddf05a5eac59945c8942aebbfe5f2d02fdf1770b5a75ccf4495450ed71a2bcfcfd474841daa02ca72ff4d19caf0800"
+            }
+        ],
+        "signed": {
+            "_type": "timestamp",
+            "expires": "2099-01-01T00:00:00Z",
+            "meta": {
+                "snapshot.json": {
+                    "hashes": {
+                        "sha256": "08b00c892004ef8005878779a17107d8680c1edb9c20ac512a76d413ccf15c43"
+                    },
+                    "length": 467,
+                    "version": 1
+                }
+            },
+            "spec_version": "1.0.36",
+            "version": 1
+        }
+    }
+}

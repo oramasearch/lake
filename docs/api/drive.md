@@ -60,3 +60,20 @@ Lake uses the push and pull protocol documented in [`sync.md`](sync.md).
 format and page rendering. `Drive.BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities`
 covers the capability boundary. The Postgres-backed suite, Linux image build, token gate, and live
 seeded screenshot run are the release proof.
+
+## Upload input schema
+
+`upload_drive_files` takes `repository_id`, `ref`, `path`, and a nonempty `files` array.
+Each item is an object with required string fields `name` (one file name within the folder)
+and `content` (padded base64 file bytes). An empty `content` string creates an empty file;
+additional item fields are rejected. The registry advertises these nested fields and
+`contentEncoding: base64` in both OpenAPI and MCP.
+
+Registry validation rejects wrong item and field types before the handler runs. For example,
+`files: [1]` returns REST `400 invalid_input` with `error.path: "/files/0"`; a missing or
+non-string content field identifies `/files/0/content`. Invalid base64 uses the same field path.
+MCP carries the same error under its documented [response envelope](README.md).
+
+Verify with the HTTP schema conformance test described in [the API contract](README.md).
+When changing upload fields, update the registry item schema, byte decoder when needed, and HTTP
+malformed-input cases together.

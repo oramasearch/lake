@@ -49,31 +49,6 @@ nlohmann::json coerce(const nlohmann::json& property, const std::string& raw) {
     return raw;
 }
 
-nlohmann::json error_envelope_schema() {
-    return {{"type", "object"},
-            {"properties",
-             {{"ok", {{"const", false}}},
-              {"error",
-               {{"type", "object"},
-                {"properties",
-                 {{"code", {{"type", "string"}}},
-                  {"message", {{"type", "string"}}},
-                  {"path", {{"type", "string"}}}}},
-                {"required", nlohmann::json::array({"code", "message"})}}},
-              {"duration_ms", {{"type", "number"}}}}},
-            {"required", nlohmann::json::array({"ok", "error"})}};
-}
-
-nlohmann::json success_envelope_schema(const nlohmann::json& output_schema) {
-    nlohmann::json value = output_schema.is_object() && !output_schema.empty()
-                               ? output_schema
-                               : nlohmann::json{{"type", "object"}};
-    return {{"type", "object"},
-            {"properties",
-             {{"ok", {{"const", true}}}, {"value", value}, {"duration_ms", {{"type", "number"}}}}},
-            {"required", nlohmann::json::array({"ok", "value"})}};
-}
-
 nlohmann::json error_response(std::string_view description) {
     return {
         {"description", std::string(description)},
@@ -227,17 +202,7 @@ int rest_status(const ApiResult& result) {
 }
 
 nlohmann::json rest_envelope(const ApiResult& result) {
-    nlohmann::json envelope;
-    envelope["ok"] = result.ok;
-    if (result.ok) {
-        envelope["value"] = result.value;
-    } else {
-        envelope["error"] = {{"code", result.error.code},
-                             {"message", result.error.message},
-                             {"path", result.error.path}};
-    }
-    envelope["duration_ms"] = result.duration_ms;
-    return envelope;
+    return result.envelope();
 }
 
 nlohmann::json openapi_document(const Registry& registry, std::string_view version) {
