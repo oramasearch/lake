@@ -24,7 +24,8 @@ and eight recovery codes once; replacing the enrollment invalidates the previous
 Recovery codes are single-use. `disable_mfa` requires a fresh TOTP or unused recovery code and
 revokes the seed and every remaining recovery code. Tokens are named sessions with explicit
 capability-name scopes. Ordinary tokens
-default to a 30-day expiry; a non-expiring static token requires a non-empty reason.
+default to the lesser of 30 days and the issuer’s remaining lifetime. Non-expiring static
+tokens require static authority and a non-empty reason; see the derivation policy below.
 
 Every HTTP response starts with empty headers before CORS or a route handler runs. A session
 cookie belongs only to the request that successfully completed its authentication ceremony;
@@ -112,16 +113,63 @@ the user's own control-plane capabilities. API tokens receive only the scopes re
 OAuth proves control of the provider account, while the verified TAAP document remains the user's
 durable identity.
 
+## Token derivation and revocation
+
+`create_token` derives authority from the credential that authenticated the request. Its handler in
+`src/api/capabilities.cpp` applies these rules once for REST, OpenAPI, MCP, and hosted pages:
+
+- Every requested capability must be in the issuer’s scopes. An issuer with `*` may issue named
+  scopes or `*`; a named-scope issuer cannot issue `*`. `create_token` itself must be granted.
+- An explicit ordinary-token lifetime must be positive, fit a signed 32-bit seconds value, and
+  fit within the issuer’s remaining lifetime. A longer lifetime is refused with `unauthorized`.
+  When omitted, the lifetime is the lesser of 30 days and that remaining lifetime. The store caps
+  the persisted expiry at the parent’s exact timestamp, including time spent handling issuance.
+- Browser and TAAP sessions are expiring issuers and cannot create static tokens. Static authority
+  is derivable only from an already static credential, with the same scope restrictions and a
+  non-empty reason. The trusted operator context retains its explicit root authority; the public
+  token capability adds no static-authority bootstrap flow.
+- Every session-derived token retains `parent_session_id`, the issuer’s immutable row ID. The
+  store verifies that issuer belongs to the same user and pool and is still active before issue.
+  Every subsequent authentication verifies the entire ancestor chain, including each ancestor’s
+  expiry, revocation and linked device. Revoking a parent, any ancestor, or its device makes all
+  descendants unusable on their next request. Children do **not** survive their parent.
+  Parent deletion cascades to descendants. Ancestry revocation is evaluated at authentication;
+  a child’s own `revoked_at` need not change when an ancestor is revoked.
+- Application-pool API-token issuance returns only the derived session bearer, with its usual
+  session lifecycle event. It does not also issue an independent application JWT.
+- Refused amplification creates no session. Each refusal and successful issuance passes through
+  `Registry::call` and produces exactly one signed audit event. Audit records contain outcome,
+  principal and request metadata, never the supplied or issued bearer values.
+
+Migration `0021_token_attenuation` adds the parent foreign key and its index. Existing API and
+static tokens have no trustworthy derivation history, so the migration revokes those tokens once.
+Users must reissue tokens from an active sign-in session. Reapplying the schema preserves tokens
+issued after the migration. Deploy the schema before the new binary; the operator handoff and
+new guard are in [`../control-plane/schema.md`](../control-plane/schema.md).
+
 ## How to verify
 
 ```sh
-cmake --build build
-ctest --test-dir build --output-on-failure -R 'Identity|OAuth|WebAuthn'
+cmake --build build -j 6
+ctest --test-dir build --output-on-failure
 ```
+
+Set `LAKE_TEST_DB_URI` to a fresh schema-loaded PostgreSQL database and `LAKE_INSTANCE_KEK` to a
+random 32-byte hex key as in [`../build/local.md`](../build/local.md). Run the full CTest suite in
+both the static build and a `-DBUILD_SHARED_LIBS=ON` build; filtered runs are diagnostic only.
+
+`Transports/TokenAttenuation` repeats the scope, lifetime, static-authority, recursive parent and
+device-revocation cases through real REST and MCP requests against both stores. PostgreSQL cases
+also prove expired-ancestor refusal, ancestry across store reopen, cascading parent deletion, and
+one-time legacy-token invalidation with safe schema reapplication. Each test checks that denied
+issuance adds no session, that each call has exactly one audit event, that the full audit chain verifies, and that none of its
+bearer values appears anywhere in the audit export. Each PostgreSQL case creates and removes its
+own schema inside the supplied test database to isolate credential and audit fixtures.
 
 The `Identity.PasswordSessionsTokensAndRevocation` test covers Argon2id password sign-up, MFA
 enrollment, recovery-code sign-in and one-use enforcement, fresh-verification disablement, session
-resolution, narrowed token scope, static-token reason validation, and next-request revocation.
+resolution, narrowed token scope, static-token reason validation and refusal from an expiring
+issuer, and next-request parent revocation.
 `OAuth.AuthorizationCodePkceOidcAndCachedJwks` runs the browser redirects against a stub OpenID
 Connect provider, verifies PKCE at its token endpoint, signs an id token, serves JWKS, checks the
 session cookie, proves cache reuse, and rejects state replay.
@@ -146,7 +194,9 @@ credential values. Run the complete Postgres-backed suite, including these four 
 
 ## How to change
 
-Add a capability through `src/api/capabilities.cpp`, with its input and output schema. Extend
+Keep attenuation policy in `src/api/capabilities.cpp` and ancestry validity/expiry persistence in
+both stores. Carry issuer metadata through the common authenticated context, never through
+client-supplied token fields. Add a capability with its input and output schema. Extend
 `Store` and both store implementations together. Keep new credential rows pool-scoped and add the
 capability to `docs/api/README.md` in the same change. The OAuth callback is the documented
 exception because the provider invokes it as a browser redirect.

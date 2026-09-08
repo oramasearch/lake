@@ -40,7 +40,10 @@ denial, and failure.
 
 The existing public identity capabilities accept the application's `pool_id`. A successful
 application sign-up or sign-in adds `access_token`, `token_type: Bearer`, and `expires_in` to the
-ordinary session result. Suspending a user revokes that user's sessions in this pool immediately;
+ordinary session result. API-token issuance through `create_token` returns only the derived
+session bearer, bounded by issuer scopes, expiry and ancestry; it does not also mint an independent
+application JWT. Its `session.started` lifecycle event is retained. The derivation policy and REST/MCP
+PostgreSQL coverage are in [identity.md](identity.md#token-derivation-and-revocation). Suspending a user revokes that user's sessions in this pool immediately;
 deleting one removes this pool's credentials and sessions. Neither action touches another pool.
 
 ## Hosted pages and HTTP routes

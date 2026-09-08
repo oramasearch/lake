@@ -287,21 +287,23 @@ ApiResult application_session_result(control::Result<control::IssuedSession> iss
     if (!user) {
         return from_store_error(user.error());
     }
-    auto key = context.store->current_application_signing_key(application->id);
-    if (!key) {
-        return from_store_error(key.error());
+    if (issued->session.kind != "api_token" && issued->session.kind != "static") {
+        auto key = context.store->current_application_signing_key(application->id);
+        if (!key) {
+            return from_store_error(key.error());
+        }
+        const std::string host = application->custom_sign_in_domain.empty()
+                                     ? context.public_host
+                                     : application->custom_sign_in_domain;
+        const std::string issuer = "https://" + host + "/v1/apps/" + application->id;
+        auto token = control::apps::issue_jwt(*application, *key, *user, issuer);
+        if (!token) {
+            return ApiResult::failure("store_error", token.error());
+        }
+        output["access_token"] = *token;
+        output["token_type"] = "Bearer";
+        output["expires_in"] = 900;
     }
-    const std::string host = application->custom_sign_in_domain.empty()
-                                 ? context.public_host
-                                 : application->custom_sign_in_domain;
-    const std::string issuer = "https://" + host + "/v1/apps/" + application->id;
-    auto token = control::apps::issue_jwt(*application, *key, *user, issuer);
-    if (!token) {
-        return ApiResult::failure("store_error", token.error());
-    }
-    output["access_token"] = *token;
-    output["token_type"] = "Bearer";
-    output["expires_in"] = 900;
     if (lifecycle_event == "user.created") {
         const ApiResult created =
             emit_application_event(*application, "user.created", control::to_json(*user), context);

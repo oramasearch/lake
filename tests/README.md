@@ -83,3 +83,9 @@ cursors, renderer strings, OpenAPI, and MCP discovery. A Beast2 Loki double veri
 coroutine HTTP client, selector request, secret bearer, line conversion, and cursor. The focused
 Postgres suite round-trips the same environment binding and JSON mirror through the production
 store.
+
+`test_token_attenuation.cpp` drives REST and MCP against both stores. It proves refused scope,
+static and lifetime amplification, permitted descendants, recursive session/device revocation,
+expired PostgreSQL ancestors, application-pool issuance without an additional JWT, and one signed audit event per call without bearer values. Each
+PostgreSQL case owns an isolated schema in `LAKE_TEST_DB_URI` and removes it afterward. Run the
+full static and shared CTest suites with PostgreSQL configured; see `docs/api/identity.md`.

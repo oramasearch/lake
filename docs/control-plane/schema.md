@@ -284,7 +284,7 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`identity_exit_guard` today), so a new migration means a new guard and the next Job re-runs the
+(`token_attenuation_guard` in the source tree), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -308,7 +308,8 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    `auth_app_guard`; agent sessions add `0017_agent_sessions` and `agent_guard`; settings adds
    `0018_settings_surface` and `settings_guard`; platform adds `0019_platform` and
    `platform_guard`; the identity-exit scenario adds `0020_identity_exit` and
-   `identity_exit_guard`. The operator copy remains deferred to the single
+   `identity_exit_guard`; token attenuation adds `0021_token_attenuation` and
+   `token_attenuation_guard`. The operator copy remains deferred to the single
    wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
@@ -322,6 +323,21 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit')" \
-  -c "SELECT to_regclass('identity_exit_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation')" \
+  -c "SELECT to_regclass('token_attenuation_guard')"
 ```
+
+## Token attenuation migration
+
+`0021_token_attenuation` adds `sessions.parent_session_id`, a self-referencing foreign key with
+`ON DELETE CASCADE`, and an index for descendants. Authentication checks each ancestor’s live
+session and device state; issuance stores an expiry no later than its parent. The migration
+revokes pre-existing API/static tokens once because their ancestry cannot be recovered. Its
+`schema_migrations` entry prevents a repeated schema application from revoking new tokens.
+
+The deployment guard is `token_attenuation_guard`. The operator must vendor this updated schema
+byte-for-byte, select that guard, and apply it before deploying the containing binary. The operator
+copy is a separate repository change; this issue’s worktree contains only Lake. Verify with the
+full PostgreSQL-backed static and shared suites and the token derivation tests described in
+[`../api/identity.md`](../api/identity.md). When changing ancestry storage, keep both stores,
+`Session`/`Principal`, and the common authenticated request context aligned.
