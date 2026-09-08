@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <array>
+#include <barrier>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 
 #include <unistd.h>
@@ -19,7 +21,10 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/handles.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "personal_customer_test_support.hpp"
 #include "temporary_directory.hpp"
 #include "webauthn_test_support.hpp"
 
@@ -66,6 +71,193 @@ std::string signed_identity_document(std::string_view label) {
     }
     std::filesystem::remove_all(home, error);
     return base64url(document);
+}
+
+class PostgresProvisioning : public testing::Test {
+protected:
+    void SetUp() override {
+        const char* configured_uri = std::getenv("LAKE_TEST_DB_URI");
+        if (configured_uri == nullptr || *configured_uri == '\0') {
+            GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+        }
+        uri = configured_uri;
+        store = lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+        input = {"lake",
+                 "provisioning-" + lake::control::new_uuid_v4() + "@example.test",
+                 "correct horse battery staple",
+                 "Personal customer",
+                 "browser",
+                 signed_identity_document(lake::control::new_uuid_v4())};
+    }
+
+    std::string uri;
+    std::unique_ptr<lake::control::Store> store;
+    lake::control::NewPasswordUser input;
+};
+
+TEST_F(PostgresProvisioning, OwnsOneCustomerAndCanCreateFirstRepository) {
+    const auto signed_up = store->sign_up_password(input);
+    ASSERT_TRUE(signed_up) << signed_up.error().message;
+    const auto principal = store->context_for(signed_up->secret);
+    ASSERT_TRUE(principal) << principal.error().message;
+    const auto customer = lake::test::personal_customer(*store, principal->user_id);
+    ASSERT_TRUE(customer) << customer.error().message;
+    EXPECT_TRUE(lake::control::valid_handle(customer->name));
+    EXPECT_EQ(customer->customer_type, "individual");
+    const auto quota = store->storage_quota(customer->id);
+    ASSERT_TRUE(quota);
+    EXPECT_FALSE(quota->has_value());
+    const auto object = store->find_policy_object("customer", customer->id);
+    ASSERT_TRUE(object);
+    const auto grants = store->list_grants({object->id}, principal->taap_id, 10);
+    ASSERT_TRUE(grants);
+    ASSERT_EQ(grants->size(), 1U);
+    EXPECT_EQ(grants->front().role, "admin");
+    EXPECT_TRUE(grants->front().attestation_digest.starts_with("sign_up_password/"));
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.authorized = true;
+    context.session_credential = true;
+    context.acting_user_id = principal->user_id;
+    context.acting_identity = principal->taap_id;
+    context.scopes = principal->scopes;
+    context.instance_kek = std::string(test_instance_kek);
+    const auto customers = registry.call("list_customers", {{"limit", 1000}}, context);
+    ASSERT_TRUE(customers.ok) << customers.error.message;
+    ASSERT_EQ(customers.value.at("items").size(), 1U);
+    const auto repository =
+        registry.call("create_repository",
+                      {{"customer_id", customer->id}, {"name", "first-repository"}},
+                      context);
+    ASSERT_TRUE(repository.ok) << repository.error.message;
+    EXPECT_TRUE(registry.call("get_repository", {{"id", repository.value.at("id")}}, context).ok);
+    EXPECT_FALSE(registry
+                     .call("create_customer",
+                           {{"customer_type", "individual"}, {"user_id", principal->user_id}},
+                           context)
+                     .ok);
+    const auto retry = store->sign_up_password(input);
+    ASSERT_FALSE(retry);
+    EXPECT_EQ(retry.error().code, "conflict");
+    EXPECT_TRUE(store->sign_in_password({"lake", input.email, input.password, "", "browser"}));
+    EXPECT_EQ(lake::test::personal_customer(*store, principal->user_id)->id, customer->id);
+    input.email = "another-" + input.email;
+    EXPECT_FALSE(store->sign_up_password(input));
+    input.identity_document = signed_identity_document(lake::control::new_uuid_v4());
+    const auto other = store->sign_up_password(input);
+    ASSERT_TRUE(other);
+    const auto other_customer = lake::test::personal_customer(*store, other->session.user_id);
+    ASSERT_TRUE(other_customer);
+    EXPECT_FALSE(registry
+                     .call("create_repository",
+                           {{"customer_id", other_customer->id}, {"name", "forbidden"}},
+                           context)
+                     .ok);
+}
+
+TEST_F(PostgresProvisioning, ConcurrentRetriesCreateOneCustomer) {
+    auto other_store = lake::control::make_postgres_store(uri, std::string(test_instance_kek));
+    std::barrier start(2);
+    auto attempt = std::async(std::launch::async, [&] {
+        start.arrive_and_wait();
+        return other_store->sign_up_password(input);
+    });
+    start.arrive_and_wait();
+    const auto first = store->sign_up_password(input);
+    const auto second = attempt.get();
+    ASSERT_NE(first.has_value(), second.has_value());
+    EXPECT_EQ((first ? second.error() : first.error()).code, "conflict");
+    const auto& issued = first ? *first : *second;
+    pqxx::connection connection(uri);
+    pqxx::read_transaction tx(connection);
+    EXPECT_EQ(
+        tx.exec_params("SELECT count(*) FROM users WHERE email = $1", input.email)[0][0].as<int>(),
+        1);
+    EXPECT_EQ(tx.exec_params("SELECT count(*) FROM customers WHERE user_id = $1::uuid",
+                             issued.session.user_id)[0][0]
+                  .as<int>(),
+              1);
+    EXPECT_EQ(tx.exec_params("SELECT count(*) FROM sessions WHERE user_id = $1::uuid",
+                             issued.session.user_id)[0][0]
+                  .as<int>(),
+              1);
+}
+
+TEST_F(PostgresProvisioning, SessionFailureRollsBackUserCustomerAndGrantThenRetrySucceeds) {
+    pqxx::connection connection(uri);
+    std::vector<long long> counts_before;
+    const auto counts = [&] {
+        pqxx::read_transaction tx(connection);
+        std::vector<long long> result;
+        for (const std::string table : {"users",
+                                        "customers",
+                                        "objects",
+                                        "grants",
+                                        "identity_documents",
+                                        "credentials",
+                                        "devices",
+                                        "sessions"}) {
+            result.push_back(tx.exec("SELECT count(*) FROM " + table)[0][0].as<long long>());
+        }
+        return result;
+    };
+    counts_before = counts();
+    {
+        pqxx::work tx(connection);
+        tx.exec("CREATE FUNCTION issue_119_refuse_session() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                "BEGIN RAISE EXCEPTION 'injected sign-up session failure'; END $$");
+        tx.exec("CREATE TRIGGER issue_119_refuse_session BEFORE INSERT ON sessions "
+                "FOR EACH ROW EXECUTE FUNCTION issue_119_refuse_session()");
+        tx.commit();
+    }
+    const auto failed = store->sign_up_password(input);
+    {
+        pqxx::work tx(connection);
+        tx.exec("DROP TRIGGER issue_119_refuse_session ON sessions");
+        tx.exec("DROP FUNCTION issue_119_refuse_session()");
+        tx.commit();
+    }
+    EXPECT_EQ(counts(), counts_before);
+    ASSERT_FALSE(failed);
+    EXPECT_NE(failed.error().message.find("injected sign-up session failure"), std::string::npos);
+    {
+        pqxx::read_transaction tx(connection);
+        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM users WHERE email = $1", input.email)[0][0]
+                      .as<int>(),
+                  0);
+        EXPECT_EQ(
+            tx.exec_params("SELECT count(*) FROM credentials WHERE subject = $1", input.email)[0][0]
+                .as<int>(),
+            0);
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM objects o LEFT JOIN customers c ON c.id::text = "
+                          "o.external_id "
+                          "WHERE o.object_type = 'customer' AND c.id IS NULL")[0][0]
+                      .as<int>(),
+                  0);
+    }
+    const auto retry = store->sign_up_password(input);
+    ASSERT_TRUE(retry) << retry.error().message;
+    EXPECT_TRUE(lake::test::personal_customer(*store, retry->session.user_id));
+}
+
+TEST_F(PostgresProvisioning, MalformedDocumentExplainsRecoveryWithoutCreatingUser) {
+    const std::string valid = input.identity_document;
+    for (const auto& document : {std::string("{}"), std::string("="), valid.substr(0, 40)}) {
+        input.identity_document = document;
+        const auto result = store->sign_up_password(input);
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error().code, "invalid_input");
+        EXPECT_NE(result.error().message.find("liquid identity show --document"),
+                  std::string::npos);
+    }
+    pqxx::connection connection(uri);
+    pqxx::read_transaction tx(connection);
+    EXPECT_EQ(
+        tx.exec_params("SELECT count(*) FROM users WHERE email = $1", input.email)[0][0].as<int>(),
+        0);
 }
 
 TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks) {
@@ -510,8 +702,7 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     operator_context.operator_credential = true;
     operator_context.acting_identity = "admin";
 
-    const auto customer =
-        store->create_customer({"individual", target_principal->user_id, "", "offline-" + suffix});
+    const auto customer = lake::test::personal_customer(*store, target_principal->user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
         store->create_repository({customer->id, "encrypted-" + suffix, "", "private"});

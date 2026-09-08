@@ -19,3 +19,7 @@ It opens the share without a session, traverses a child folder, previews support
 unsupported-format fallback, compares text/binary/empty downloads, verifies REST byte delivery,
 and refuses broad drive access. It covers both link roles, guessed sibling/parent and malformed
 paths, a descendant with inheritance disabled, expired links, and revocation after listing.
+
+The drive scenario resolves the personal customer created by sign-up. Customer creation no longer
+requires a separate operator bootstrap; its existing synchronization and sharing assertions remain.
+See [`../../docs/api/provisioning.md`](../../docs/api/provisioning.md).

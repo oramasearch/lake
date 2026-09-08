@@ -6,3 +6,6 @@ revocation are part of the identity status and contract in [../api/identity.md](
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
+
+Personal customer ownership on sign-up is specified in [../api/provisioning.md](../api/provisioning.md)
+and reflected in [status.md](status.md).

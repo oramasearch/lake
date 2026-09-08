@@ -996,10 +996,26 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
         return std::unexpected(StoreError{"store_error", "could not create identity"});
     const std::string identity = "taap:1:ed25519:" + identity_secret;
     const std::string now = now_iso8601();
-    users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
+    const User user{new_uuid_v4(), identity, input.email, input.display_name, now, now};
     const std::string password_hash = identity_crypto::hash_secret(input.password);
     if (password_hash.empty())
         return std::unexpected(StoreError{"store_error", "could not protect password"});
+    std::vector<Device> devices;
+    std::vector<Session> sessions;
+    const Device& device = add_device(devices, user.id, input.device_name);
+    IssuedSession issued =
+        add_session(sessions, user.id, pool, device.id, "browser", "", {"*"}, "", 86400);
+    if (issued.secret.empty()) {
+        return std::unexpected(StoreError{"store_error", "could not issue session"});
+    }
+    std::string handle;
+    if (pool == "lake") {
+        do {
+            handle = generate_handle();
+        } while (std::ranges::any_of(
+            customers_, [&](const Customer& customer) { return customer.name == handle; }));
+    }
+    users_.push_back(user);
     passwords_.push_back(
         PasswordCredential{users_.back().id, pool, input.email, password_hash, ""});
     if (application != applications_.end()) {
@@ -1012,11 +1028,21 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
                                                      now,
                                                      now});
     }
-    Device& device = add_device(devices_, users_.back().id, input.device_name);
-    IssuedSession issued =
-        add_session(sessions_, users_.back().id, pool, device.id, "browser", "", {"*"}, "", 86400);
-    if (issued.secret.empty())
-        return std::unexpected(StoreError{"store_error", "could not issue session"});
+    if (pool == "lake") {
+        customers_.push_back(Customer{new_uuid_v4(), "individual", user.id, "", handle, now, now});
+        policy_objects_.push_back(
+            PolicyObject{new_uuid_v4(), "customer", customers_.back().id, "", now, now, true});
+        grants_.push_back(Grant{new_uuid_v4(),
+                                identity,
+                                policy_objects_.back().id,
+                                "admin",
+                                "sign_up_password/" + user.id,
+                                identity,
+                                now,
+                                now});
+    }
+    devices_.push_back(devices.front());
+    sessions_.push_back(sessions.front());
     issued.session.reason.clear();
     return issued;
 }

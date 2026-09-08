@@ -12,3 +12,5 @@ contract in `docs/api/identity.md` updated with changes to token derivation.
 REST and MCP use those definitions; recursive input validation rejects malformed array items
 before capability handlers run. The contract and HTTP conformance proof are in
 [`docs/api/README.md`](../../docs/api/README.md).
+The sign-up registry contract includes personal customer provisioning, with atomic ownership and
+retry semantics shared by all transports. See `docs/api/provisioning.md`.

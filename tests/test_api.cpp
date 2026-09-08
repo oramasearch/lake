@@ -1,3 +1,5 @@
+#include "personal_customer_test_support.hpp"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -2035,8 +2037,7 @@ TEST(SyncRegistry, RevokedOfflineGrantRefusesPublicationWithChangeAndReason) {
     ASSERT_TRUE(issued) << issued.error().message;
     const auto principal = surface.store.context_for(issued->secret);
     ASSERT_TRUE(principal) << principal.error().message;
-    const auto customer =
-        surface.store.create_customer({"individual", principal->user_id, "", "offline-writer"});
+    const auto customer = lake::test::personal_customer(surface.store, principal->user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
         surface.store.create_repository({customer->id, "offline-sync", "", "private"});

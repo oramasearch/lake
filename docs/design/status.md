@@ -216,3 +216,7 @@ and adopted without rollback. The consistency model is
 When an area lands, add or amend its paragraph here in the same change, name its migration and
 its contract page, and move it out of *source tree* once the production Lake runs it. `CLAUDE.md`
 carries the same status in the form the agents read first.
+
+Password sign-up in the Lake pool provisions one personal customer with inherited ownership in
+the account transaction. Default quotas and zero-byte metering are specified in
+[`../api/provisioning.md`](../api/provisioning.md).

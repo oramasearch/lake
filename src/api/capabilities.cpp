@@ -1713,7 +1713,10 @@ void register_identity_capabilities(Registry& registry) {
         .name = "sign_up_password",
         .title = "Sign up with password",
         .description = "Create a pool-scoped user with an Argon2id password "
-                       "credential and issue a browser session.",
+                       "credential and issue a browser session. In the lake pool, atomically "
+                       "provision one personal customer with an inherited admin ownership grant, "
+                       "a generated immutable handle, and the configured default storage quota. "
+                       "Duplicate email or identity returns conflict; sign in to resume.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},

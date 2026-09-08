@@ -1,3 +1,5 @@
+#include "personal_customer_test_support.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -68,8 +70,7 @@ TEST(OfflineGrant, CachedReadSurvivesRevocationUntilExplicitExpiry) {
     Registry registry;
     lake::api::register_core_capabilities(registry, "test");
     const Account account = create_account(store, "offline-reader");
-    const auto customer =
-        store.create_customer({"individual", account.principal.user_id, "", "offline-reader"});
+    const auto customer = lake::test::personal_customer(store, account.principal.user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
         store.create_repository({customer->id, "offline-project", "", "private"});
@@ -220,8 +221,7 @@ TEST(RepositoryRecovery, MissingContactIsPlainAndWrappedKeyIsContactOnly) {
     lake::api::register_core_capabilities(registry, "test");
     const Account owner = create_account(store, "repository-owner");
     const Account contact = create_account(store, "repository-contact");
-    const auto customer =
-        store.create_customer({"individual", owner.principal.user_id, "", "repository-owner"});
+    const auto customer = lake::test::personal_customer(store, owner.principal.user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
         store.create_repository({customer->id, "encrypted-project", "", "private"});

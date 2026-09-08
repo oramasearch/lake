@@ -1,3 +1,5 @@
+#include "personal_customer_test_support.hpp"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -438,10 +440,8 @@ TEST_P(TokenAttenuation, InvalidLifetimesAndExpiredAncestors) {
 }
 
 TEST_P(TokenAttenuation, ApplicationPoolsReturnOnlyDerivedSessionBearer) {
-    const auto customer = store_->create_customer({"individual",
-                                                   browser_.at("session").at("user_id"),
-                                                   "",
-                                                   "atten-" + lake::control::new_uuid_v4()});
+    const auto customer =
+        lake::test::personal_customer(*store_, browser_.at("session").at("user_id"));
     ASSERT_TRUE(customer);
     const auto application = call("register_application",
                                   {{"customer_id", customer->id},
