@@ -99,3 +99,9 @@ static and lifetime amplification, permitted descendants, recursive session/devi
 expired PostgreSQL ancestors, application-pool issuance without an additional JWT, and one signed audit event per call without bearer values. Each
 PostgreSQL case owns an isolated schema in `LAKE_TEST_DB_URI` and removes it afterward. Run the
 full static and shared CTest suites with PostgreSQL configured; see `docs/api/identity.md`.
+
+`test_schema_conformance.cpp` records real MCP and REST responses from the production HTTP server
+with an isolated in-memory control store and real Liquid data. `validate_api_schema.py` validates those payloads with Python
+`jsonschema`, checks every advertised tool was called, and requires success coverage for every
+value schema with required fields. Set `LAKE_SCHEMA_EVIDENCE` to retain the captured JSON outside
+the process fixture directory. The full contract is in [`../docs/api/README.md`](../docs/api/README.md).

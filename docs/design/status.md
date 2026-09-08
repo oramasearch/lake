@@ -27,6 +27,14 @@ administration and policy live in the Postgres control plane
 row-resolved user credential; probes and the documented identity and transparency-monitoring
 reads are unauthenticated ([`../api/auth.md`](../api/auth.md)).
 
+## API schema conformance (source tree)
+
+The registry owns response envelopes and their schemas. OpenAPI JSON successes and MCP
+`structuredContent` advertise the same envelope with the capability value nested under `value`.
+Recursive input validation rejects malformed upload array items with precise JSON pointers before
+handler execution. The isolated HTTP conformance fixture uses an independent JSON Schema
+validator; its coverage and the shared decision are in [`../api/README.md`](../api/README.md).
+
 ## Identity (source tree)
 
 HTTP response construction clears previous headers before CORS and routing, preventing a pooled

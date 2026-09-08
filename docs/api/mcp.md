@@ -11,6 +11,10 @@ serves. Methods:
 | `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` |
 | `tools/call` | `params: {name, arguments}` → `Registry::call` with the request's bearer; result `{content: [{type: text, text}], structuredContent: <envelope>, isError}` |
 
+The [shared envelope decision](README.md) defines both transports: `outputSchema` describes the
+complete successful `structuredContent`, including `ok`, `value`, and `duration_ms`. Capability
+errors carry the shared error envelope with `isError: true` over HTTP 200.
+
 Unknown methods answer `-32601`; a body that is not JSON answers `400` with `-32700`; a request
 without `"jsonrpc": "2.0"` answers `-32600`.
 
@@ -23,8 +27,8 @@ remain documented in OpenAPI and [`sync.md`](sync.md).
 Conflict tools use the same current Liquid model as REST. `list_conflicts` returns the conflict
 kind, exact byte or node region, explanation, reasons, base/left/right values, and optional reviewed
 proposal. `resolve_conflict` accepts `left`, `right`, `accept_proposal`, or `blob` with base64 bytes
-and returns the conflict digest, selected value digest, and change digest. Both schemas come from
-the registry and therefore appear unchanged in `tools/list`.
+and returns the conflict digest, selected value digest, and change digest. Both value schemas come from
+the registry and appear under `outputSchema.properties.value` in `tools/list`.
 
 ```sh
 curl -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' https://lake.oramadev.net/mcp

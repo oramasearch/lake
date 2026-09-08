@@ -13,12 +13,27 @@ Binary liquid-sync capabilities use the same registry for validation, policy, ex
 audit, while the one HTTP adapter streams their bodies on repository-scoped routes. OpenAPI renders
 those routes and media types. MCP omits them because its tool arguments are JSON.
 
-**Envelope.** Every response is `{ ok, value | error{code, message, path}, duration_ms }`.
-Status by error code: `invalid_input` 400, `unauthorized` / `mfa_required` 403, `not_found` /
-`unknown_capability` 404, `conflict` / `unrecoverable` 409, `store_unavailable` 503, anything else
-500. MCP
-`tools/call` returns the same
-envelope as `structuredContent` (and as text), with `isError` set.
+**Envelope decision (REST and MCP).** The advertised success schema describes the complete
+JSON response: `{ "ok": true, "value": <capability value>, "duration_ms": <number> }`.
+The registry owns both `ApiResult::envelope()` and `success_envelope_schema()`. Each capability
+continues to declare its value schema once; the registry nests that schema under `value`, with
+`ok`, `value`, and `duration_ms` required. OpenAPI's JSON `200` response schema and MCP's
+`outputSchema` use this same generated schema. MCP returns that complete envelope as
+`structuredContent` and as its text content, without changing the value's shape.
+
+Failures use `{ "ok": false, "error": { "code", "message", "path" }, "duration_ms" }`,
+also serialized and described by the registry. REST status by error code: `invalid_input` 400,
+`unauthorized` / `mfa_required` 403, `not_found` / `unknown_capability` 404,
+`conflict` / `unrecoverable` 409, `store_unavailable` 503, anything else 500. MCP capability
+failures are successful JSON-RPC exchanges over HTTP 200 with `isError: true` and the same
+error envelope; the advertised success `outputSchema` applies when `isError: false`.
+
+Registry input validation descends through declared object properties and array `items`, checking
+types, required fields, and `additionalProperties: false` before authorization-object resolution
+or handler execution. Invalid nested input reports `invalid_input` and a JSON pointer such as
+`/files/0/content`; pointer tokens escape `~` and `/`. Top-level input still rejects undeclared fields, and existing optional top-level null values
+retain their absent-value interpretation. File encoding validation remains with the capability's
+byte decoder; `contentEncoding` documents the encoding in the schema.
 
 **Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
 the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
@@ -189,7 +204,7 @@ and audit recording remain inside the registry path.
 1. A thin handler over the `Store` (`include/lake/control/store.hpp`): no business logic in the
    HTTP layer, no HTTP type outside `src/api/http_server.cpp`.
 2. `snake_case` name, verb-first for actions, noun-first for reads; input schema with
-   `properties`, `required`, `additionalProperties: false`; an output schema for the value.
+   `properties`, `required`, `additionalProperties: false`; an output schema for the value. The registry generates the advertised success envelope.
 3. Name the authorization object and action and provide the resolver that maps validated input to
    the object id. `Registry::call` rejects protected capabilities missing this metadata.
    A candidate-returning capability may instead declare its batched authorization and invoke
@@ -203,3 +218,22 @@ and audit recording remain inside the registry path.
 **Verify.** `ctest --test-dir build`, then
 `./build/lake --listen 127.0.0.1:4901 --memory-store --admin-token t` and `curl` the routes
 (see [`../deployment/aks.md`](../deployment/aks.md) for the production checks).
+
+## Schema conformance proof
+
+`SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` starts the production HTTP server
+with an isolated in-memory control store and a real Liquid repository. It enumerates `tools/list`, calls every advertised tool
+over `/mcp`, and captures the actual responses. An independent Python `jsonschema` validator checks
+every successful `structuredContent` against that tool's HTTP-advertised `outputSchema`; failure
+results validate against the registry's error envelope from HTTP-fetched OpenAPI. The fixture
+requires successful calls for every tool with required value fields, including metering, conflict
+resolution, shared-file reads, and transparency proofs. Adding required output fields without a
+successful fixture fails the coverage check. The discovery pass also exercises no-argument calls;
+stateful tools without fixtures can return their normal validation or authorization errors.
+
+The same proof validates actual REST successes and malformed upload errors, rejects an unwrapped
+metering value and a value missing `currency`, and checks nested upload paths over both transports.
+It reports the tool count, successful tool count, required-output coverage, and schema errors.
+Run it through the full native Postgres-backed CTest suite; see
+[`../build/testing.md`](../build/testing.md). To change an output, update its registry value schema
+and success fixture together, retaining the shared envelope construction.

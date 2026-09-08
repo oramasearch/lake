@@ -7,3 +7,8 @@ sign-in results may include a JWT; API-token issuance retains only its derived s
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
+
+`registry.cpp` owns `ApiResult::envelope()` and the advertised success/error envelope schemas.
+REST and MCP use those definitions; recursive input validation rejects malformed array items
+before capability handlers run. The contract and HTTP conformance proof are in
+[`docs/api/README.md`](../../docs/api/README.md).
