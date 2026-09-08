@@ -1592,7 +1592,8 @@ constexpr const char* forge_record_columns =
     "id::text, repository_id::text, kind, value::text, created_at::text, updated_at::text";
 constexpr const char* drive_share_link_columns =
     "id::text, repository_id::text, object_id::text, node_id, path, role, token_hash, "
-    "expires_at::text, coalesce(revoked_at::text,''), created_by_taap_id, created_at::text";
+    "to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
+    "coalesce(revoked_at::text,''), created_by_taap_id, created_at::text";
 constexpr const char* application_columns =
     "id::text, customer_id::text, pool_id, name, allowed_origins::text, redirect_uris::text, "
     "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text";

@@ -84,6 +84,10 @@ coroutine HTTP client, selector request, secret bearer, line conversion, and cur
 Postgres suite round-trips the same environment binding and JSON mirror through the production
 store.
 
+Share-link delivery tests cover signed-out folder traversal, registered previews, exact downloads,
+policy-restricted descendants, stable-node moves, and sibling/parent, expiry, and revocation
+refusals. The registry checks include OpenAPI/MCP discovery and MCP byte delivery; the Postgres
+scenario uses a regular user's private repository and text, binary, and empty files.
 `test_token_attenuation.cpp` drives REST and MCP against both stores. It proves refused scope,
 static and lifetime amplification, permitted descendants, recursive session/device revocation,
 expired PostgreSQL ancestors, application-pool issuance without an additional JWT, and one signed audit event per call without bearer values. Each

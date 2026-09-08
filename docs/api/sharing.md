@@ -1,6 +1,6 @@
 # Drive sharing
 
-**Status: implemented for lake #8 and #44.** A folder can be delivered as a live grant, a scoped
+**Status: implemented for lake #8, #44, and #122.** A folder can be delivered as a live grant, a scoped
 link, or an independent copy. Lake implements live grants and revocable links. The sharing pages
 show effective access before creation, link expiry and state, the exact revocation consequence,
 and folders shared directly with the signed-in identity. A copy is independent bytes which cannot
@@ -24,10 +24,41 @@ Lake returns the bearer token once and persists only its HMAC-SHA-256 digest. Th
 expiry, creator, and revocation. A synthetic `share-link:<id>` grant makes the policy engine the
 authority for link scope and role.
 
-`resolve_drive_share_link` is the public entry capability. It rejects expired or revoked rows,
-calls `authorize` for the synthetic principal, and returns only that folder's immediate children.
-`revoke_drive_share_link` takes effect on the next open. The browser route is `GET /share/:token`;
-create and revoke remain POSTs under `/drive/share/`.
+All recipient reads are public registry capabilities. They accept the bearer `token` and a `ref`;
+they require no session and create no repository or personal grant. An existing signed-in or
+operator session cannot add authority to a link.
+
+| Capability | Additional input | Result |
+|---|---|---|
+| `resolve_drive_share_link` | Optional repository-relative `path`; omit it to open the shared root | Immediate children of the selected folder, its current `path`, and `root_path` |
+| `preview_drive_share_link` | Required repository-relative file `path` | `path`, `root_path`, `blob`, `size`, `format`, `media_type`, and format-registry `html`; unsupported formats show a download fallback |
+| `download_drive_share_link` | Required repository-relative file `path` | `path`, `root_path`, `blob`, `size`, `media_type`, and exact stored bytes in standard padded `content_base64` |
+
+The REST reads are `GET /v1/<capability>` with query parameters. OpenAPI describes the same inputs
+and outputs, including `contentEncoding: base64`, and MCP lists and calls the same capabilities.
+Decoding the download's base64 produces byte-identical content, including empty files, NUL bytes,
+and non-UTF-8 bytes. Browser routes render these results and offer an attachment download; they
+never obtain an independent repository credential.
+
+Drive-link rows render expiry in canonical UTC with microseconds, independent of the Postgres
+server timezone; active-link comparisons normalize optional fractions to the same precision.
+Every read looks up the durable link, checks expiry and revocation, requires a `read` or `write`
+link role, and authorizes the synthetic principal with the policy engine. It resolves the shared
+root from its stable node at the requested ref, then requires the requested path to be that root
+or a descendant separated by `/`. It authorizes the nearest path policy object within the shared
+root; an explicitly restricted descendant remains restricted and is hidden from the parent list.
+A folder move follows the same stable node. Old locations, guessed siblings (including names
+starting with the shared folder name), parents, absolute paths, empty explicit paths, dot
+components, doubled separators, backslashes, and NUL bytes are refused. The omitted root path is
+different from an explicit empty path. Folder listings require folders; byte reads require blobs.
+File bytes come from the digest selected by the authorized tree, so a ref changing during the call
+cannot substitute content from a different path.
+
+`revoke_drive_share_link` stops the next list, preview, or download, including a download clicked
+from a page opened before revocation. Expiry has the same effect. Browser responses use `no-store`.
+These controls cannot recall a copy already delivered. The recipient routes are
+`GET /share/:token[?ref=main&path=...]`, `/share/:token/preview`, and `/share/:token/download`;
+preview and download require `path`. Create and revoke remain POSTs under `/drive/share/`.
 
 `drive_shared_with_me` is an authenticated read capability. It lists only `path` objects with a
 direct grant to the caller's TAAP identity, resolves their current `main` path by stable node id,
@@ -44,5 +75,17 @@ use `drive.folder.shared`, `drive.share_link.created`, and `drive.share_link.rev
 
 `Drive.FolderSharingMatchesAuthorizeAndLinksExpire` proves recipient visibility, outsider denial,
 effective-access agreement with `authorize`, a recipient's shared-with-me result, active-link
-resolution, revocation, and expiry.
-`PostgresCapabilities.DriveShareLinksRoundTrip` covers durable create, lookup, list, and revoke.
+resolution after a stable-node move, registry previews/downloads, OpenAPI/MCP discovery, MCP byte
+delivery, scope refusals even with an operator context, revocation, and expiry.
+`Drive.ShareDownloadsEncodeAcrossBlockBoundaries` checks binary bytes and padding across the
+base64 encoder block boundary. `PostgresCapabilities.DriveShareLinksRoundTrip` covers durable
+create, UTC expiry, lookup, list, and revoke.
+
+`SharedLinkScenario.*` runs the real Postgres-backed customer path: a regular user's private
+repository, signed-out descendant traversal and preview, exact text/binary/empty downloads,
+read and write link roles, sibling/parent refusal, restricted descendant policy, expiry, and
+revocation between listing and download. Run the full native suite with `LAKE_TEST_DB_URI` and
+`LAKE_INSTANCE_KEK` as described in [the local build guide](../build/local.md).
+
+When changing recipient delivery, keep all three operations on `shared_drive_target` and their
+registry schemas; extend the scope/refusal scenario alongside any new path or delivery behavior.

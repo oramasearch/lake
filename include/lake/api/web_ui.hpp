@@ -274,7 +274,14 @@ std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
                                   std::string_view error);
 std::string web_ui_drive_link(std::string_view path,
                               const std::vector<RepositoryTreeEntry>& entries,
-                              std::string_view error);
+                              std::string_view error,
+                              std::string_view token = {},
+                              std::string_view ref = "main",
+                              std::string_view root_path = {});
+std::string web_ui_drive_link_preview(std::string_view token,
+                                      std::string_view ref,
+                                      const RepositoryFile& file,
+                                      const DrivePreview& preview);
 std::string web_ui_model(const nlohmann::json& model, bool signed_in);
 
 } // namespace lake::api

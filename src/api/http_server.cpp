@@ -8234,20 +8234,33 @@ struct ApiServer::Impl {
                                         "&path=" + oauth_url_encode(path_parent(path)));
     }
 
+    nlohmann::json drive_share_input(const boost::http::route_params& route) {
+        nlohmann::json input{
+            {"token", route_value(route, "token")},
+            {"ref", query_value(route, "ref").empty() ? "main" : query_value(route, "ref")}};
+        for (const auto& parameter : route.url.params()) {
+            if (parameter.key == "path") {
+                input["path"] = std::string(parameter.value);
+            }
+        }
+        return input;
+    }
+
+    boost::http::route_task serve_drive_share_error(boost::http::route_params& route,
+                                                    const ApiResult& result) {
+        return send_text(route,
+                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+                         web_ui_drive_link("Shared folder", {}, result.error.message),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
     boost::http::route_task serve_drive_share_link(boost::http::route_params& route) {
         ApiContext context = context_for(route);
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const ApiResult result =
-            registry.call("resolve_drive_share_link",
-                          {{"token", route_value(route, "token")}, {"ref", ref}},
-                          context);
+        const auto input = drive_share_input(route);
+        const ApiResult result = registry.call("resolve_drive_share_link", input, context);
         if (!result.ok) {
-            return send_text(route,
-                             boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
-                             web_ui_drive_link("Shared folder", {}, result.error.message),
-                             "text/html; charset=utf-8",
-                             "no-store");
+            return serve_drive_share_error(route, result);
         }
         std::vector<RepositoryTreeEntry> entries;
         for (const nlohmann::json& value : result.value.at("items")) {
@@ -8255,9 +8268,57 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_drive_link(json_string(result.value, "path"), entries, ""),
+                         web_ui_drive_link(json_string(result.value, "path"),
+                                           entries,
+                                           "",
+                                           input.at("token").get<std::string>(),
+                                           input.at("ref").get<std::string>(),
+                                           json_string(result.value, "root_path")),
                          "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    boost::http::route_task serve_drive_share_preview(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const auto input = drive_share_input(route);
+        const ApiResult result = registry.call("preview_drive_share_link", input, context);
+        if (!result.ok) {
+            return serve_drive_share_error(route, result);
+        }
+        const RepositoryFile file{json_string(result.value, "path"),
+                                  json_string(result.value, "blob"),
+                                  "",
+                                  result.value.at("size").get<std::uint64_t>()};
+        const DrivePreview preview{json_string(result.value, "format"),
+                                   json_string(result.value, "media_type"),
+                                   json_string(result.value, "html")};
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_drive_link_preview(input.at("token").get<std::string>(),
+                                                   input.at("ref").get<std::string>(),
+                                                   file,
+                                                   preview),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    boost::http::route_task serve_drive_share_download(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const ApiResult result =
+            registry.call("download_drive_share_link", drive_share_input(route), context);
+        if (!result.ok) {
+            co_return co_await serve_drive_share_error(route, result);
+        }
+        std::string filename = path_filename(json_string(result.value, "path"));
+        std::ranges::replace(filename, '"', '_');
+        std::ranges::replace(filename, '\\', '_');
+        std::ranges::replace(filename, '\r', '_');
+        std::ranges::replace(filename, '\n', '_');
+        route.res.set("content-disposition", "attachment; filename=\"" + filename + "\"");
+        co_return co_await send_bytes(route,
+                                      boost::http::status::ok,
+                                      json_string(result.value, "media_type"),
+                                      context.sync_response);
     }
 
     control::Result<control::Repository> hub_repository(std::string_view hub_id) {
@@ -10324,6 +10385,14 @@ bool ApiServer::start() {
         http::method::get, "/share/:token", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/share/:token", impl.serve_drive_share_link(route));
         });
+    router.add(http::method::get, "/share/:token/preview", [&impl](http::route_params& route) {
+        return impl.observe_request(
+            route, "/share/:token/preview", impl.serve_drive_share_preview(route));
+    });
+    router.add(http::method::get, "/share/:token/download", [&impl](http::route_params& route) {
+        return impl.observe_request(
+            route, "/share/:token/download", impl.serve_drive_share_download(route));
+    });
     router.add(http::method::post,
                "/api/repos/create",
                [&impl](http::route_params& route) -> http::route_task {

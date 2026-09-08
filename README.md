@@ -87,7 +87,8 @@ in the project are in [`docs/design/overview.md`](docs/design/overview.md).
 > quorum, expiry, completion, and one-way share evidence. OIDC/JWT claim policy comes from the
 > shared federation issuer store. All remain on the signed audit path.
 > Drive presents the same repositories as folders with stable-node ACLs, server-rendered previews,
-> effective-access sharing before creation, expiring links with stated revocation consequences, a
+> effective-access sharing before creation, expiring links with scoped descendant traversal,
+> preview and exact-byte download, with expiry and revocation checked on every read, a
 > shared-with-me view, path history, restore-as-a-new-change, and explained conflict values with
 > audited resolution. The
 > pinned Liquid drive client now has a Postgres-backed end-to-end scenario covering regular-user

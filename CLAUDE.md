@@ -114,6 +114,8 @@ expiring and revocable links, list/grid browse and repository mutations, browser
 server-rendered format-registry previews, version comparison, explained conflict presentation and
 resolution, per-path
 history and restore, effective access before sharing, link management, and shared-with-me pages.
+Bearer-link recipients can traverse descendants, preview files and download exact bytes through
+public registry capabilities that check link scope, role, expiry and revocation on every call.
 The pinned Liquid drive client is covered end to end against an in-process Lake and Postgres:
 regular-user sign-up, synchronization, sharing, rendered history, disconnected conflict
 preservation, repository pull and materialization, and a native project build.
