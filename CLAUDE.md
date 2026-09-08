@@ -192,6 +192,9 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `router.add(...)` list, then a **trailing `router.use` 404 handler**. The router falls
   through (`route_next`) past the last route and nothing answers otherwise — without the
   trailing handler an unmatched request hangs. Keep it last.
+- The first router middleware clears the entire pooled response before CORS, then restores the
+  current request's HTTP version and keep-alive policy. Every route starts without another
+  request's headers; never move this reset into a send helper after handlers have added fields.
 - Lifecycle is Zetta's: construct `beast2::http_server(io_context, workers, router,
   parser_cfg, serializer_cfg)` → `bind` → `local_endpoint().port()` → `start()` →
   `io_thread` runs `io_context.run()`; `stop()` = `server->stop()`, `io_context.stop()`,
