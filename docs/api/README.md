@@ -237,5 +237,6 @@ It reports the tool count, successful tool count, required-output coverage, and 
 Run it through the full native Postgres-backed CTest suite; see
 [`../build/testing.md`](../build/testing.md). To change an output, update its registry value schema
 and success fixture together, retaining the shared envelope construction.
+
 Personal-customer sign-up behavior, naming, quotas, metering, and atomic retry semantics are in
 [provisioning.md](provisioning.md). All transports use the existing `sign_up_password` entry.

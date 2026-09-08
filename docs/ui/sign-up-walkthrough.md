@@ -51,10 +51,10 @@ repository was created.
 
 | Width | Theme | Personal customer | Initial stored bytes | Initial cost (micro-units) |
 |---|---|---|---:|---:|
-| 1280 | light | `silver-fjord-234` | 0 | 0 |
-| 1280 | dark | `coral-anchor-913` | 0 | 0 |
-| 640 | light | `zesty-marble-162` | 0 | 0 |
-| 640 | dark | `coral-summit-899` | 0 | 0 |
+| 1280 | light | `royal-pebble-413` | 0 | 0 |
+| 1280 | dark | `ready-lynx-184` | 0 | 0 |
+| 640 | light | `olive-vista-171` | 0 | 0 |
+| 640 | dark | `rare-geyser-529` | 0 | 0 |
 
 ```sql
 SELECT count(*) FROM customers;
@@ -82,21 +82,57 @@ Run the full suite with `LAKE_TEST_DB_URI` pointing at a fresh schema-loaded dat
 instance identity and must not share that database with a server using another key.
 
 ```sh
+DB=lake_test_119
+createdb -h 127.0.0.1 -U stevesperandeo "$DB"
+psql -h 127.0.0.1 -U stevesperandeo -d "$DB" -f db/schema.sql
+export LAKE_TEST_DB_URI="postgresql://stevesperandeo@127.0.0.1:5432/$DB"
+export LAKE_INSTANCE_KEK=$(openssl rand -hex 32)
+mkdir -p .cache/issue-119/tmp
+export TMPDIR="$PWD/.cache/issue-119/tmp"
+python3 -m venv .cache/test-python
+.cache/test-python/bin/python -m pip install jsonschema
 cmake -S . -B build -G Ninja \
+  -DPython3_EXECUTABLE="$PWD/.cache/test-python/bin/python" \
   -DLAKE_ZETTA_SOURCE_DIR=/Users/stevesperandeo/dev/homer6/orama-work/modules/zetta-bridge/modules/zetta
 cmake --build build -j 6
 ctest --test-dir build --output-on-failure
 cmake -S . -B build-shared -G Ninja -DBUILD_SHARED_LIBS=ON \
+  -DPython3_EXECUTABLE="$PWD/.cache/test-python/bin/python" \
   -DLAKE_ZETTA_SOURCE_DIR=/Users/stevesperandeo/dev/homer6/orama-work/modules/zetta-bridge/modules/zetta
 cmake --build build-shared -j 6
+DB=lake_test_119_shared
+createdb -h 127.0.0.1 -U stevesperandeo "$DB"
+psql -h 127.0.0.1 -U stevesperandeo -d "$DB" -f db/schema.sql
+export LAKE_TEST_DB_URI="postgresql://stevesperandeo@127.0.0.1:5432/$DB"
 ctest --test-dir build-shared --output-on-failure
 ```
 
-Final suite summaries are recorded after the branch is rebased and reverified.
+The branch was rebased onto `78bdf57` (registry schema conformance). Because that change touched
+a public header and a CMake list, both build directories were removed and configured from
+scratch, submodules were refreshed, and both full suites were rerun. Final summaries follow.
+
+```text
+$ ctest --test-dir build --output-on-failure
+100% tests passed, 0 tests failed out of 225
+
+Total Test time (real) = 397.07 sec
+
+$ ctest --test-dir build-shared --output-on-failure
+100% tests passed, 0 tests failed out of 225
+
+Total Test time (real) = 373.51 sec
+```
+
+Both runs skipped `HuggingFaceClient.CommonFlowsRunWhenPythonClientIsInstalled` because the
+optional Python client is absent, and retained the disabled
+`SearchBenchmark.BuildAndQueryTenThousandFiles` benchmark. No PostgreSQL-backed test was
+skipped. All registered schema-conformance, UI-token, and contrast checks passed.
+
 Linux proof deferred: the designated `tools/linux-proof.sh` helper is absent on this host.
 No image build was attempted; no Docker on this host.
 
 Browser validation also accepted `my-first-repository` and `a`, and refused `Bad Name`,
 `-bad`, and `bad-` with the same handle rules enforced by the registry.
 
-The homepage and navigation work remain #135; MCP schema conformance remains #124.
+The homepage and navigation work remain #135. MCP schema conformance landed separately in #136
+and is included in the final suites.
