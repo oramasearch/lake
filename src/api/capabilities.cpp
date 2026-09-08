@@ -6,6 +6,7 @@
 #include <ctime>
 #include <expected>
 #include <format>
+#include <limits>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -1056,6 +1057,7 @@ json session_schema() {
               {"user_id", {{"type", {"string", "null"}}}},
               {"device_id", {{"type", {"string", "null"}}}},
               {"pool_id", {{"type", "string"}}},
+              {"parent_session_id", {{"type", {"string", "null"}}}},
               {"kind", {{"type", "string"}}},
               {"name", {{"type", "string"}}},
               {"scopes", {{"type", "array"}}},
@@ -1383,6 +1385,72 @@ template <class T> ApiResult one_result(control::Result<T> row) {
     if (!row)
         return from_store_error(row.error());
     return ApiResult::success(control::to_json(*row));
+}
+
+std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
+                                                            const ApiContext& context) {
+    const bool is_static = input.value("static", false);
+    if (!std::ranges::all_of(input.at("scopes"),
+                             [](const json& scope) {
+                                 return scope.is_string() &&
+                                        !scope.get_ref<const std::string&>().empty();
+                             }) ||
+        (input.contains("expires_in_seconds") &&
+         input.at("expires_in_seconds").is_number_unsigned() &&
+         input.at("expires_in_seconds").get<std::uint64_t>() >
+             static_cast<std::uint64_t>(std::numeric_limits<int>::max()))) {
+        return std::unexpected(ApiError{"invalid_input", "invalid token scopes or lifetime"});
+    }
+    const auto scopes = input.at("scopes").get<std::vector<std::string>>();
+    const auto requested = input.value("expires_in_seconds", std::int64_t{60 * 60 * 24 * 30});
+    if (scopes.empty() || input.at("name").get<std::string>().empty() ||
+        (is_static && input.value("reason", "").empty()) ||
+        (!is_static && (requested <= 0 || requested > std::numeric_limits<int>::max()))) {
+        return std::unexpected(ApiError{
+            "invalid_input",
+            "a token requires a name, scopes, a positive lifetime, and a reason when static"});
+    }
+    control::NewToken token{context.acting_user_id,
+                            context.pool_id,
+                            input.at("name"),
+                            input.value("reason", ""),
+                            scopes,
+                            is_static ? 0 : static_cast<int>(requested),
+                            is_static};
+    if (context.operator_credential) {
+        return token;
+    }
+    if (!context.session_credential || context.credential_session_id.empty()) {
+        return std::unexpected(
+            ApiError{"unauthorized", "token issuance requires an issuing session"});
+    }
+    const bool wildcard = std::ranges::find(context.scopes, "*") != context.scopes.end();
+    for (const auto& scope : scopes) {
+        if (!wildcard && std::ranges::find(context.scopes, scope) == context.scopes.end()) {
+            return std::unexpected(
+                ApiError{"unauthorized", "requested scopes exceed issuing credential"});
+        }
+    }
+    if (is_static && (context.credential_kind != "static" || context.credential_expires_at_unix)) {
+        return std::unexpected(
+            ApiError{"unauthorized", "issuing credential cannot derive a static token"});
+    }
+    if (context.credential_expires_at_unix) {
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        const auto remaining = *context.credential_expires_at_unix - now;
+        if (remaining <= 0 || (input.contains("expires_in_seconds") && requested > remaining)) {
+            return std::unexpected(
+                ApiError{"unauthorized", "requested lifetime exceeds issuing credential"});
+        }
+        token.expires_in_seconds = static_cast<int>(std::min(requested, remaining));
+    } else if (context.credential_kind != "static") {
+        return std::unexpected(
+            ApiError{"unauthorized", "issuing credential has no lifetime authority"});
+    }
+    token.parent_session_id = context.credential_session_id;
+    return token;
 }
 
 ApiResult issued_result(control::Result<control::IssuedSession> issued,
@@ -2177,12 +2245,14 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_token",
         .title = "Create API token",
-        .description = "Issue a named, scoped API-token session. Static tokens "
-                       "require a reason and are audited.",
+        .description = "Issue a named token within the issuer scopes and lifetime. "
+                       "Static derivation requires a static issuer and reason. "
+                       "Revocation of any ancestor invalidates its descendants.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"name", {{"type", "string"}}},
-                           {"scopes", {{"type", "array"}}},
+                           {"scopes",
+                            {{"type", "array"}, {"items", {{"type", "string"}}}, {"minItems", 1}}},
                            {"expires_in_seconds", {{"type", "integer"}}},
                            {"static", {{"type", "boolean"}}},
                            {"reason", {{"type", "string"}}}}},
@@ -2194,20 +2264,14 @@ void register_identity_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = self_object,
         .handler = [](const json& input, ApiContext& context) {
-            const bool is_static = input.value("static", false);
-            const int expires_in_seconds =
-                input.value("expires_in_seconds", is_static ? 0 : 60 * 60 * 24 * 30);
-            return context.store
-                       ? issued_result(context.store->create_token(
-                                           {context.acting_user_id,
-                                            context.pool_id,
-                                            input.value("name", ""),
-                                            input.value("reason", ""),
-                                            input.value("scopes", std::vector<std::string>{}),
-                                            expires_in_seconds,
-                                            is_static}),
-                                       context)
-                       : no_store();
+            if (!context.store) {
+                return no_store();
+            }
+            const auto token = attenuated_token(input, context);
+            if (!token) {
+                return ApiResult::failure(token.error().code, token.error().message);
+            }
+            return issued_result(context.store->create_token(*token), context);
         }});
     registry.add(Capability{.name = "list_sessions",
                             .title = "List sessions",

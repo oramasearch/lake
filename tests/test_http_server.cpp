@@ -4,11 +4,18 @@
 #include <cctype>
 #include <charconv>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <memory>
 #include <ranges>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
+
+#include <liquid/identity.hpp>
+#include <openssl/evp.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -17,6 +24,9 @@
 #include <unistd.h>
 
 #include "lake/api/server.hpp"
+#include "lake/control/memory_store.hpp"
+#include "lake/control/postgres_store.hpp"
+#include "temporary_directory.hpp"
 
 namespace {
 
@@ -143,6 +153,9 @@ std::string read_response(int socket_fd, bool wait_for_close) {
         if (header_end == std::string::npos) {
             continue;
         }
+        if (response.starts_with("HTTP/1.0 204") || response.starts_with("HTTP/1.1 204")) {
+            return response.substr(0, header_end + 4);
+        }
         std::string headers = response.substr(0, header_end);
         std::ranges::transform(headers, headers.begin(), [](unsigned char value) {
             return static_cast<char>(std::tolower(value));
@@ -152,9 +165,9 @@ std::string read_response(int socket_fd, bool wait_for_close) {
         if (length_start == std::string::npos) {
             return {};
         }
-        const std::size_t length_end = headers.find("\r\n", length_start + prefix.size());
+        std::size_t length_end = headers.find("\r\n", length_start + prefix.size());
         if (length_end == std::string::npos) {
-            return {};
+            length_end = headers.size();
         }
         const char* first = headers.data() + length_start + prefix.size();
         const char* last = headers.data() + length_end;
@@ -172,7 +185,215 @@ std::string read_response(int socket_fd, bool wait_for_close) {
     return wait_for_close ? response : std::string{};
 }
 
+std::string response_header(const std::string& response, std::string_view name) {
+    const auto header_end = response.find("\r\n\r\n");
+    std::string headers = response.substr(0, header_end);
+    std::ranges::transform(headers, headers.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    const std::string prefix = "\r\n" + std::string(name) + ": ";
+    const auto start = headers.find(prefix);
+    if (start == std::string::npos) {
+        return {};
+    }
+    const auto value_start = start + prefix.size();
+    const auto end = headers.find("\r\n", value_start);
+    return response.substr(value_start,
+                           end == std::string::npos ? header_end - value_start : end - value_start);
+}
+
+class HttpConnection {
+public:
+    explicit HttpConnection(unsigned short port) : descriptor_(connect_loopback(port)) {}
+
+    ~HttpConnection() {
+        if (descriptor_ >= 0) {
+            ::close(descriptor_);
+        }
+    }
+
+    HttpConnection(const HttpConnection&) = delete;
+    HttpConnection& operator=(const HttpConnection&) = delete;
+
+    std::string request(std::string_view method,
+                        std::string_view path,
+                        std::string_view body = {},
+                        std::string_view cookie = {},
+                        std::string_view version = "HTTP/1.1") {
+        std::string wire = std::string(method) + " " + std::string(path) + " " +
+                           std::string(version) + "\r\nHost: localhost\r\n";
+        wire += "Connection: keep-alive\r\nContent-Type: application/x-www-form-urlencoded\r\n";
+        wire += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+        if (!cookie.empty()) {
+            wire += "Cookie: " + std::string(cookie) + "\r\n";
+        }
+        wire += "\r\n";
+        wire += body;
+        if (descriptor_ < 0 || !send_all(descriptor_, wire)) {
+            return {};
+        }
+        return read_response(descriptor_, false);
+    }
+
+private:
+    int descriptor_;
+};
+
+// Parameters select the production Postgres store and a fresh client connection.
+class HttpResponseIsolation : public testing::TestWithParam<std::tuple<bool, bool>> {
+protected:
+    void SetUp() override {
+        if (std::get<0>(GetParam())) {
+            const char* uri = std::getenv("LAKE_TEST_DB_URI");
+            if (uri == nullptr || *uri == '\0') {
+                GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+            }
+            store_ = lake::control::make_postgres_store(uri, instance_kek_);
+            create_identity_document();
+            ASSERT_FALSE(identity_document_.empty());
+        } else {
+            store_ = std::make_shared<lake::control::InMemoryStore>();
+            identity_document_ = "{}";
+        }
+        email_ = "response-isolation-" + lake::control::new_uuid_v4() + "@example.test";
+        const auto account = store_->sign_up_password(
+            {"lake", email_, password_, "Isolation test", "fixture", identity_document_});
+        ASSERT_TRUE(account.has_value());
+        lake::api::ServerOptions options;
+        options.port = 0;
+        // One worker deterministically reuses its response even after a socket closes.
+        options.worker_coroutines = 1;
+        options.store = store_;
+        options.instance_kek = instance_kek_;
+        server_ = std::make_unique<lake::api::ApiServer>(options);
+        ASSERT_TRUE(server_->start()) << server_->reason();
+    }
+
+    void create_identity_document() {
+        const auto home =
+            lake::test::fixture_path("response-identity-" + lake::control::new_uuid_v4());
+        const char* previous = std::getenv("LIQUID_HOME");
+        const bool had_previous_home = previous != nullptr;
+        const std::string previous_home = previous == nullptr ? "" : previous;
+        ASSERT_EQ(setenv("LIQUID_HOME", home.c_str(), 1), 0);
+        auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
+        if (!had_previous_home) {
+            unsetenv("LIQUID_HOME");
+        } else {
+            setenv("LIQUID_HOME", previous_home.c_str(), 1);
+        }
+        ASSERT_TRUE(signer.has_value());
+        const auto path = home / "identity" / (signer->identity().fingerprint + ".identity.cbor");
+        std::ifstream input(path, std::ios::binary);
+        ASSERT_TRUE(input);
+        const std::string bytes((std::istreambuf_iterator<char>(input)),
+                                std::istreambuf_iterator<char>());
+        identity_document_.resize(((bytes.size() + 2) / 3) * 4);
+        const int encoded_size =
+            EVP_EncodeBlock(reinterpret_cast<unsigned char*>(identity_document_.data()),
+                            reinterpret_cast<const unsigned char*>(bytes.data()),
+                            static_cast<int>(bytes.size()));
+        ASSERT_EQ(encoded_size, identity_document_.size());
+        while (identity_document_.ends_with('=')) {
+            identity_document_.pop_back();
+        }
+        std::replace(identity_document_.begin(), identity_document_.end(), '+', '-');
+        std::replace(identity_document_.begin(), identity_document_.end(), '/', '_');
+    }
+
+    std::unique_ptr<HttpConnection> connect() {
+        return std::make_unique<HttpConnection>(server_->port());
+    }
+
+    std::shared_ptr<lake::control::Store> store_;
+    std::unique_ptr<lake::api::ApiServer> server_;
+    std::string email_;
+    std::string identity_document_;
+    const std::string password_ = "correct horse battery staple";
+    const std::string instance_kek_ =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+};
+
+TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {
+    for (const std::string_view path :
+         {"/", "/sign-up", "/sign-in", "/v1/server_info", "/v1/openapi.json"}) {
+        SCOPED_TRACE(path);
+        auto connection = connect();
+        const std::string sign_in = connection->request(
+            "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+        ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+        ASSERT_EQ(response_header(sign_in, "location"), "/sessions");
+        const std::string issued = response_header(sign_in, "set-cookie");
+        ASSERT_TRUE(issued.starts_with("lake_session="));
+        ASSERT_TRUE(issued.contains("HttpOnly"));
+        const std::string client_a_cookie = issued.substr(0, issued.find(';'));
+        if (std::get<1>(GetParam())) {
+            connection.reset();
+            connection = connect();
+        }
+
+        // Client B sends no credentials and adopts only cookies it actually receives.
+        const std::string public_page = connection->request("GET", path);
+        ASSERT_TRUE(public_page.starts_with("HTTP/1.1 200"));
+        EXPECT_TRUE(response_header(public_page, "location").empty());
+        const std::string received = response_header(public_page, "set-cookie");
+        EXPECT_TRUE(received.empty()) << "Anonymous response received a cookie [REDACTED]";
+        const std::string client_b_cookie = received.substr(0, received.find(';'));
+        const std::string denied = connection->request("GET", "/sessions", {}, client_b_cookie);
+        EXPECT_TRUE(denied.starts_with("HTTP/1.1 302"));
+        EXPECT_EQ(response_header(denied, "location"), "/sign-in");
+        EXPECT_TRUE(response_header(denied, "set-cookie").empty());
+
+        // A still owns its valid session; B cannot acquire it from A's next response either.
+        const std::string allowed = connection->request("GET", "/sessions", {}, client_a_cookie);
+        EXPECT_TRUE(allowed.starts_with("HTTP/1.1 200"));
+        EXPECT_TRUE(response_header(allowed, "location").empty());
+        EXPECT_TRUE(response_header(allowed, "set-cookie").empty());
+        const std::string anonymous = connection->request("GET", path, {}, client_b_cookie);
+        EXPECT_TRUE(anonymous.starts_with("HTTP/1.1 200"));
+        EXPECT_TRUE(response_header(anonymous, "location").empty());
+        EXPECT_TRUE(response_header(anonymous, "set-cookie").empty());
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(HttpServer,
+                         HttpResponseIsolation,
+                         testing::Combine(testing::Bool(), testing::Bool()),
+                         [](const testing::TestParamInfo<HttpResponseIsolation::ParamType>& info) {
+                             return std::string(std::get<0>(info.param) ? "Postgres" : "Memory") +
+                                    (std::get<1>(info.param) ? "FreshConnection"
+                                                             : "ReusedConnection");
+                         });
+
 } // namespace
+
+TEST(HttpServer, ResponseResetPreservesCurrentProtocolAndCors) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.instance_kek = "response-reset-test-kek";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    HttpConnection connection(server.port());
+    const std::string preflight = connection.request("OPTIONS", "/sign-in", {}, {}, "HTTP/1.0");
+    ASSERT_TRUE(preflight.starts_with("HTTP/1.0 204"));
+    EXPECT_EQ(response_header(preflight, "connection"), "keep-alive");
+    EXPECT_EQ(response_header(preflight, "access-control-allow-origin"), "*");
+    EXPECT_FALSE(response_header(preflight, "access-control-allow-methods").empty());
+
+    const std::string missing = connection.request("GET", "/missing-response-reset-route");
+    ASSERT_TRUE(missing.starts_with("HTTP/1.1 404"));
+    EXPECT_EQ(response_header(missing, "access-control-allow-origin"), "*");
+    EXPECT_TRUE(response_header(missing, "access-control-allow-methods").empty());
+    EXPECT_TRUE(response_header(missing, "connection").empty());
+
+    const std::string healthy = connection.request("GET", "/healthz", {}, {}, "HTTP/1.0");
+    ASSERT_TRUE(healthy.starts_with("HTTP/1.0 200"));
+    EXPECT_EQ(response_header(healthy, "connection"), "keep-alive");
+    EXPECT_EQ(response_header(healthy, "access-control-allow-origin"), "*");
+    EXPECT_TRUE(response_header(healthy, "access-control-allow-methods").empty());
+}
 
 TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {
     StderrPipe captured_stderr;

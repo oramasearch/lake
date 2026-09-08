@@ -459,7 +459,21 @@ std::string new_link_token() {
 }
 
 bool link_is_active(const control::DriveShareLink& link) {
-    return link.revoked_at.empty() && link.expires_at > control::now_iso8601();
+    if (!link.revoked_at.empty()) {
+        return false;
+    }
+    // Postgres emits UTC with microseconds; in-memory links may omit the fraction.
+    std::string expiry = link.expires_at;
+    if (expiry.size() == 20 && expiry.back() == 'Z') {
+        expiry.insert(19, ".000000");
+    } else if (expiry.size() > 21 && expiry[19] == '.' && expiry.back() == 'Z') {
+        std::string fraction = expiry.substr(20, expiry.size() - 21);
+        fraction.resize(6, '0');
+        expiry = expiry.substr(0, 20) + fraction + "Z";
+    }
+    const auto now =
+        std::chrono::floor<std::chrono::microseconds>(std::chrono::system_clock::now());
+    return expiry > std::format("{:%FT%T}Z", now);
 }
 
 ApiResult browse_result(const DriveLocation& location,
@@ -498,6 +512,216 @@ ApiResult browse_result(const DriveLocation& location,
                                {"object", control::to_json(location.object)},
                                {"path", location.path},
                                {"items", std::move(items)}});
+}
+
+struct SharedDriveTarget {
+    DriveLocation location;
+    std::string root_path;
+    RepositoryTreeEntry target;
+    std::vector<RepositoryTreeEntry> entries;
+};
+
+std::expected<control::DriveShareLink, ApiError> active_share_link(const json& input,
+                                                                   ApiContext& context) {
+    context.sync_response.clear();
+    if (!context.store || !context.sync_store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "drive stores are not configured", {}});
+    }
+    const auto link = context.store->get_drive_share_link_by_token_hash(
+        token_hash(input.at("token").get<std::string>()));
+    if (!link) {
+        return std::unexpected(ApiError{link.error().code, link.error().message, "/token"});
+    }
+    context.acting_identity = "share-link:" + link->id;
+    context.audit_details = {{"link_id", link->id}};
+    if (!link_is_active(*link)) {
+        return std::unexpected(ApiError{"unauthorized", "share link is expired or revoked", {}});
+    }
+    if (link->role != "read" && link->role != "write") {
+        return std::unexpected(ApiError{"unauthorized", "share link does not allow reads", {}});
+    }
+    // A reused caller context must not retain policy from a previous link operation.
+    context.authorization_cache = {};
+    const auto decision = control::authorize(*context.store,
+                                             context.acting_identity,
+                                             link->object_id,
+                                             "read",
+                                             context.authorization_cache);
+    if (!decision) {
+        return std::unexpected(ApiError{decision.error().code, decision.error().message, {}});
+    }
+    if (!decision->allowed) {
+        return std::unexpected(ApiError{"unauthorized", "share link does not allow reads", {}});
+    }
+    return *link;
+}
+
+std::expected<control::PolicyObject, ApiError>
+shared_path_object(const control::DriveShareLink& link,
+                   const std::vector<RepositoryTreeEntry>& entries,
+                   std::string path,
+                   std::string_view root_path,
+                   ApiContext& context) {
+    while (path_touches(path, root_path)) {
+        const auto* entry = find_entry(entries, path);
+        if (entry && !entry->node_id.empty()) {
+            const auto object = context.store->find_policy_object(
+                "path", path_external_id(link.repository_id, entry->node_id));
+            if (object) {
+                const auto decision = control::authorize(*context.store,
+                                                         context.acting_identity,
+                                                         object->id,
+                                                         "read",
+                                                         context.authorization_cache);
+                if (!decision) {
+                    return std::unexpected(
+                        ApiError{decision.error().code, decision.error().message, {}});
+                }
+                if (!decision->allowed) {
+                    return std::unexpected(
+                        ApiError{"unauthorized", "share link does not allow this path", "/path"});
+                }
+                return *object;
+            }
+            if (object.error().code != "not_found") {
+                return std::unexpected(ApiError{object.error().code, object.error().message, {}});
+            }
+        }
+        if (path == root_path) {
+            break;
+        }
+        path = parent_path(path);
+    }
+    return std::unexpected(ApiError{"unauthorized", "share link scope is unavailable", "/path"});
+}
+
+std::expected<SharedDriveTarget, ApiError> shared_drive_target(const json& input,
+                                                               ApiContext& context) {
+    const auto link = active_share_link(input, context);
+    if (!link) {
+        return std::unexpected(link.error());
+    }
+    control::Repository repository;
+    auto entries = repository_tree(
+        {{"repository_id", link->repository_id}, {"ref", input.at("ref")}}, context, repository);
+    if (!entries) {
+        return std::unexpected(entries.error());
+    }
+    const auto root = std::ranges::find(*entries, link->node_id, &RepositoryTreeEntry::node_id);
+    if (root == entries->end() || root->kind != "tree") {
+        return std::unexpected(
+            ApiError{"not_found", "shared folder is not present at this ref", {}});
+    }
+    const std::string root_path = root->path;
+    const std::string path = input.value("path", root_path);
+    if (!valid_drive_path(path) || path.find('\0') != std::string::npos ||
+        !path_touches(path, root_path)) {
+        return std::unexpected(
+            ApiError{"unauthorized", "path is outside the shared folder", "/path"});
+    }
+    const auto* entry = find_entry(*entries, path);
+    if (!entry) {
+        return std::unexpected(ApiError{"not_found", "no shared drive path " + path, "/path"});
+    }
+    const auto object = shared_path_object(*link, *entries, path, root_path, context);
+    if (!object) {
+        return std::unexpected(object.error());
+    }
+    return SharedDriveTarget{
+        {repository, *object, entry->node_id, path}, root_path, *entry, std::move(*entries)};
+}
+
+ApiResult shared_file_result(const json& input, ApiContext& context, bool download) {
+    const auto shared = shared_drive_target(input, context);
+    if (!shared) {
+        return ApiResult::failure(shared.error().code, shared.error().message, shared.error().path);
+    }
+    if (shared->target.kind != "blob") {
+        return ApiResult::failure("invalid_input", "path must name a file", "/path");
+    }
+    const auto& repository = shared->location.repository;
+    // Read the blob selected by the authorized tree, even if the live ref moves meanwhile.
+    const auto file = context.sync_store->repository_blob(
+        repository.customer_id, repository.id, shared->target.path, shared->target.blob);
+    if (!file) {
+        return sync_error(file.error());
+    }
+    context.audit_customer_id = repository.customer_id;
+    context.audit_object = "repository/" + repository.id + "/path/" + file->path;
+    context.audit_details["path"] = file->path;
+    context.audit_details["blob"] = file->blob;
+    json value{{"path", file->path},
+               {"root_path", shared->root_path},
+               {"blob", file->blob},
+               {"size", file->size}};
+    if (!download) {
+        const auto preview = DriveFormatRegistry::defaults().preview(*file);
+        if (!preview) {
+            return ApiResult::failure("invalid_input", preview.error(), "/path");
+        }
+        context.audit_kind = "drive.preview.read";
+        value["format"] = preview->format;
+        value["media_type"] = preview->media_type;
+        value["html"] = preview->html;
+    } else {
+        context.audit_kind = "drive.file.downloaded";
+        context.sync_response = file->raw_contents;
+        if (context.sync_response.empty() && !file->contents.empty()) {
+            std::ranges::transform(file->contents,
+                                   std::back_inserter(context.sync_response),
+                                   [](char byte) { return static_cast<std::byte>(byte); });
+        }
+        std::string encoded((context.sync_response.size() + 2) / 3 * 4, '\0');
+        // Keep each OpenSSL length within int, with padding only in the final block.
+        constexpr std::size_t block_size = 3 * 1024 * 1024;
+        for (std::size_t offset = 0; offset < context.sync_response.size(); offset += block_size) {
+            const std::size_t length = std::min(block_size, context.sync_response.size() - offset);
+            EVP_EncodeBlock(
+                reinterpret_cast<unsigned char*>(encoded.data() + offset / 3 * 4),
+                reinterpret_cast<const unsigned char*>(context.sync_response.data() + offset),
+                static_cast<int>(length));
+        }
+        value["content_base64"] = std::move(encoded);
+        value["media_type"] = "application/octet-stream";
+    }
+    return ApiResult::success(std::move(value));
+}
+
+json share_read_input_schema(bool path_required) {
+    json required = json::array({"token", "ref"});
+    if (path_required) {
+        required.push_back("path");
+    }
+    return {{"type", "object"},
+            {"properties",
+             {{"token", {{"type", "string"}}},
+              {"ref", {{"type", "string"}}},
+              {"path", {{"type", "string"}}}}},
+            {"required", std::move(required)},
+            {"additionalProperties", false}};
+}
+
+json shared_file_output_schema(bool download) {
+    json properties{{"path", {{"type", "string"}}},
+                    {"root_path", {{"type", "string"}}},
+                    {"blob", {{"type", "string"}}},
+                    {"size", {{"type", "integer"}}},
+                    {"media_type", {{"type", "string"}}}};
+    if (download) {
+        properties["content_base64"] = {{"type", "string"}, {"contentEncoding", "base64"}};
+    } else {
+        properties["format"] = {{"type", "string"}};
+        properties["html"] = {{"type", "string"}};
+    }
+    json required = json::array();
+    for (const auto& [name, property] : properties.items()) {
+        required.push_back(name);
+    }
+    return {{"type", "object"},
+            {"properties", std::move(properties)},
+            {"required", std::move(required)},
+            {"additionalProperties", false}};
 }
 
 json drive_input_schema(bool path_required) {
@@ -1368,11 +1592,7 @@ void register_drive_capabilities(Registry& registry) {
         .name = "resolve_drive_share_link",
         .title = "Open drive share link",
         .description = "Resolve an active link and browse its scoped live folder.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"token", {{"type", "string"}}}, {"ref", {{"type", "string"}}}}},
-                         {"required", json::array({"token", "ref"})},
-                         {"additionalProperties", false}},
+        .input_schema = share_read_input_schema(false),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         .requires_auth = false,
@@ -1380,49 +1600,51 @@ void register_drive_capabilities(Registry& registry) {
         .action = "read",
         .resolve_object = share_token_object,
         .handler = [](const json& input, ApiContext& context) {
-            if (!context.store || !context.sync_store) {
-                return ApiResult::failure("store_unavailable", "drive stores are not configured");
+            const auto shared = shared_drive_target(input, context);
+            if (!shared) {
+                return ApiResult::failure(
+                    shared.error().code, shared.error().message, shared.error().path);
             }
-            const auto link = context.store->get_drive_share_link_by_token_hash(
-                token_hash(input.at("token").get<std::string>()));
-            if (!link) {
-                return store_error(link.error());
+            if (shared->target.kind != "tree") {
+                return ApiResult::failure("invalid_input", "path must name a folder", "/path");
             }
-            if (!link_is_active(*link)) {
-                return ApiResult::failure("unauthorized", "share link is expired or revoked");
+            auto result =
+                browse_result(shared->location, shared->entries, context, context.acting_identity);
+            if (result.ok) {
+                result.value["root_path"] = shared->root_path;
             }
-            const auto decision = control::authorize(*context.store,
-                                                     "share-link:" + link->id,
-                                                     link->object_id,
-                                                     "read",
-                                                     context.authorization_cache);
-            if (!decision) {
-                return store_error(decision.error());
-            }
-            if (!decision->allowed) {
-                return ApiResult::failure("unauthorized", "share link does not allow reads");
-            }
-            const auto repository = context.store->get_repository(link->repository_id);
-            if (!repository) {
-                return store_error(repository.error());
-            }
-            const auto entries = context.sync_store->repository_tree(
-                repository->customer_id, repository->id, input.at("ref"));
-            if (!entries) {
-                return sync_error(entries.error());
-            }
-            const auto current =
-                std::ranges::find(*entries, link->node_id, &RepositoryTreeEntry::node_id);
-            if (current == entries->end() || current->kind != "tree") {
-                return ApiResult::failure("not_found", "shared folder is not present at this ref");
-            }
-            const auto object = context.store->get_policy_object(link->object_id);
-            if (!object) {
-                return store_error(object.error());
-            }
-            DriveLocation location{*repository, *object, link->node_id, current->path};
-            context.acting_identity = "share-link:" + link->id;
-            return browse_result(location, *entries, context, context.acting_identity);
+            return result;
+        }});
+
+    registry.add(Capability{.name = "preview_drive_share_link",
+                            .title = "Preview shared drive file",
+                            .description =
+                                "Preview a file using only an active link's scoped read authority.",
+                            .input_schema = share_read_input_schema(true),
+                            .output_schema = shared_file_output_schema(false),
+                            .kind = CapabilityKind::Read,
+                            .requires_auth = false,
+                            .object = "drive share link",
+                            .action = "read",
+                            .resolve_object = share_token_object,
+                            .handler = [](const json& input, ApiContext& context) {
+                                return shared_file_result(input, context, false);
+                            }});
+
+    registry.add(Capability{
+        .name = "download_drive_share_link",
+        .title = "Download shared drive file",
+        .description =
+            "Read exact file bytes as base64 using only an active link's scoped authority.",
+        .input_schema = share_read_input_schema(true),
+        .output_schema = shared_file_output_schema(true),
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "drive share link",
+        .action = "read",
+        .resolve_object = share_token_object,
+        .handler = [](const json& input, ApiContext& context) {
+            return shared_file_result(input, context, true);
         }});
 
     registry.add(Capability{

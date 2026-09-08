@@ -82,6 +82,7 @@ struct RepositoryFixtureStore final : SyncStore {
     std::uint64_t unique_bytes = 123;
     bool restored = false;
     bool shared_folder_moved = false;
+    std::optional<std::string> blob_contents;
     std::string commit_message;
     std::vector<RepositoryWriteOperation> committed_operations;
     std::string resolved_conflict;
@@ -145,7 +146,8 @@ struct RepositoryFixtureStore final : SyncStore {
                                                     const std::string&,
                                                     const std::string& path,
                                                     const std::string& blob) override {
-        const std::string contents = blob == "blob-1" ? "old\nshared\n" : "new\nshared\n";
+        const std::string contents =
+            blob_contents.value_or(blob == "blob-1" ? "old\nshared\n" : "new\nshared\n");
         return RepositoryFile{path, blob, contents, contents.size(), bytes(contents)};
     }
 
@@ -2617,6 +2619,64 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     ASSERT_TRUE(moved_link.ok) << moved_link.error.message;
     EXPECT_EQ(moved_link.value["path"], "renamed");
     EXPECT_EQ(moved_link.value["items"][0]["path"], "renamed/readme.md");
+    const json file_input{
+        {"token", active_link.value["token"]}, {"ref", "main"}, {"path", "renamed/readme.md"}};
+    const ApiResult preview = surface.call("preview_drive_share_link", file_input);
+    ASSERT_TRUE(preview.ok) << preview.error.message;
+    EXPECT_NE(preview.value["html"].get<std::string>().find("new"), std::string::npos);
+    const ApiResult downloaded = surface.call("download_drive_share_link", file_input);
+    ASSERT_TRUE(downloaded.ok) << downloaded.error.message;
+    EXPECT_EQ(downloaded.value["content_base64"], base64_bytes(bytes("new\nshared\n")));
+    EXPECT_EQ(surface.ctx.sync_response, bytes("new\nshared\n"));
+    for (const std::string name :
+         {"resolve_drive_share_link", "preview_drive_share_link", "download_drive_share_link"}) {
+        for (const std::string path : {"",
+                                       "readme.md",
+                                       "shared/readme.md",
+                                       "renamed-other/file",
+                                       "renamed/../readme.md",
+                                       "renamed//readme.md",
+                                       "renamed/./readme.md",
+                                       "/renamed/readme.md",
+                                       "renamed/..",
+                                       "renamed/.lake-folder"}) {
+            // An operator session must not add authority to a bearer link either.
+            surface.ctx.acting_identity = "admin";
+            surface.ctx.authorized = true;
+            const ApiResult denied = surface.call(
+                name, {{"token", active_link.value["token"]}, {"ref", "main"}, {"path", path}});
+            EXPECT_EQ(denied.error.code, "unauthorized") << name << " " << path;
+            EXPECT_TRUE(surface.ctx.sync_response.empty());
+        }
+    }
+    const json document = openapi_document(surface.registry, "0.0.1");
+    const auto tools = mcp_dispatch(surface.registry,
+                                    {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}},
+                                    surface.ctx,
+                                    "0.0.1");
+    ASSERT_TRUE(tools);
+    const json listed = json::parse(*tools)["result"]["tools"];
+    for (const std::string name : {"preview_drive_share_link", "download_drive_share_link"}) {
+        EXPECT_TRUE(document["paths"].contains("/v1/" + name));
+        const auto tool =
+            std::ranges::find_if(listed, [&](const json& entry) { return entry["name"] == name; });
+        ASSERT_NE(tool, listed.end());
+        EXPECT_EQ(tool->at("inputSchema"), surface.registry.find(name)->input_schema);
+        EXPECT_EQ(tool->at("outputSchema"), surface.registry.find(name)->output_schema);
+    }
+    surface.ctx.authorized = false;
+    surface.ctx.acting_identity.clear();
+    const auto mcp_download = mcp_dispatch(
+        surface.registry,
+        {{"jsonrpc", "2.0"},
+         {"id", 2},
+         {"method", "tools/call"},
+         {"params", {{"name", "download_drive_share_link"}, {"arguments", file_input}}}},
+        surface.ctx,
+        "0.0.1");
+    ASSERT_TRUE(mcp_download);
+    EXPECT_EQ(json::parse(*mcp_download)["result"]["structuredContent"]["value"]["content_base64"],
+              downloaded.value["content_base64"]);
     surface.ctx.authorized = true;
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
     const ApiResult revoked =
@@ -2629,6 +2689,11 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
                         {{"token", active_link.value["token"]}, {"ref", "main"}})
                   .error.code,
               "unauthorized");
+
+    for (const std::string name : {"preview_drive_share_link", "download_drive_share_link"}) {
+        EXPECT_EQ(surface.call(name, file_input).error.code, "unauthorized");
+        EXPECT_TRUE(surface.ctx.sync_response.empty());
+    }
 
     const std::string expired_token = "expired-token";
     ASSERT_TRUE(surface.store.create_drive_share_link({repository.value["id"],
@@ -2643,6 +2708,49 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     const ApiResult expired =
         surface.call("resolve_drive_share_link", {{"token", expired_token}, {"ref", "main"}});
     EXPECT_EQ(expired.error.code, "unauthorized");
+    for (const std::string name : {"preview_drive_share_link", "download_drive_share_link"}) {
+        EXPECT_EQ(
+            surface
+                .call(name,
+                      {{"token", expired_token}, {"ref", "main"}, {"path", "renamed/readme.md"}})
+                .error.code,
+            "unauthorized");
+        EXPECT_TRUE(surface.ctx.sync_response.empty());
+    }
+}
+
+TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    const ApiResult owner = surface.call("create_user", {{"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "share-bytes"}});
+    ASSERT_TRUE(customer.ok);
+    const ApiResult repository = surface.call(
+        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "drive"}});
+    ASSERT_TRUE(repository.ok);
+    const ApiResult link = surface.call("create_drive_share_link",
+                                        {{"repository_id", repository.value["id"]},
+                                         {"ref", "main"},
+                                         {"path", "shared"},
+                                         {"role", "read"},
+                                         {"expires_at", "2999-01-01T00:00:00Z"}});
+    ASSERT_TRUE(link.ok) << link.error.message;
+    std::string content(3 * 1024 * 1024 + 1, '\xff');
+    content[3 * 1024 * 1024] = '\0';
+    repository_store.blob_contents = content;
+    surface.ctx.authorized = false;
+    surface.ctx.acting_identity.clear();
+    const ApiResult downloaded = surface.call(
+        "download_drive_share_link",
+        {{"token", link.value["token"]}, {"ref", "main"}, {"path", "shared/readme.md"}});
+    ASSERT_TRUE(downloaded.ok) << downloaded.error.message;
+    EXPECT_EQ(downloaded.value["size"], content.size());
+    EXPECT_EQ(downloaded.value["content_base64"], base64_bytes(bytes(content)));
+    EXPECT_EQ(surface.ctx.sync_response, bytes(content));
 }
 
 TEST(Drive, PathHistoryRestoresAsANewChange) {
@@ -4295,6 +4403,9 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     user_context.instance_kek = s.ctx.instance_kek;
     user_context.session_credential = true;
     user_context.scopes = principal->scopes;
+    user_context.credential_session_id = principal->session_id;
+    user_context.credential_kind = principal->kind;
+    user_context.credential_expires_at_unix = principal->expires_at_unix;
 
     const ApiResult enrollment = s.registry.call("enroll_mfa", json::object(), user_context);
     ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
@@ -4366,8 +4477,9 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
                                                     {"static", true},
                                                     {"reason", "migration"}},
                                                    user_context);
-    ASSERT_TRUE(static_token.ok) << static_token.error.message;
-    EXPECT_TRUE(static_token.value["session"]["expires_at"].is_null());
+    EXPECT_FALSE(static_token.ok);
+    EXPECT_EQ(static_token.error.code, "unauthorized");
+    EXPECT_FALSE(s.store.context_for(token.value["secret"]));
     auto audit_events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
     ASSERT_TRUE(audit_events);
     EXPECT_TRUE(std::ranges::any_of(*audit_events, [](const lake::audit::Event& event) {

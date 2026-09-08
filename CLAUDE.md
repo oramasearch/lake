@@ -58,6 +58,9 @@ discussion, and workflow documents with a durable fidelity report. Identity core
 adds migrations `0007_identity_core` and `0008_mfa_recovery`, verified TAAP documents, password
 plus TOTP with one-use recovery codes, persisted WebAuthn, OAuth, row-resolved sessions, scoped
 tokens, device revocation, lake-signed passkey-to-TAAP bindings, and the hosted identity pages.
+Migration `0021_token_attenuation` bounds issued tokens by issuer scopes and expiry, restricts
+static derivation to existing static authority, and invalidates descendants after ancestor or
+device revocation. It revokes pre-migration API/static tokens once because ancestry is unavailable.
 Identity documents are verified through libliquid's public canonical-CBOR codec.
 Migration `0020_identity_exit` adds fresh, replay-resistant libliquid TAAP-key sign-in and a
 one-use application authorization-code flow with exact redirects, PKCE S256, nonce-bound ID
@@ -111,6 +114,8 @@ expiring and revocable links, list/grid browse and repository mutations, browser
 server-rendered format-registry previews, version comparison, explained conflict presentation and
 resolution, per-path
 history and restore, effective access before sharing, link management, and shared-with-me pages.
+Bearer-link recipients can traverse descendants, preview files and download exact bytes through
+public registry capabilities that check link scope, role, expiry and revocation on every call.
 The pinned Liquid drive client is covered end to end against an in-process Lake and Postgres:
 regular-user sign-up, synchronization, sharing, rendered history, disconnected conflict
 preservation, repository pull and materialization, and a native project build.
@@ -190,6 +195,9 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `router.add(...)` list, then a **trailing `router.use` 404 handler**. The router falls
   through (`route_next`) past the last route and nothing answers otherwise — without the
   trailing handler an unmatched request hangs. Keep it last.
+- The first router middleware clears the entire pooled response before CORS, then restores the
+  current request's HTTP version and keep-alive policy. Every route starts without another
+  request's headers; never move this reset into a send helper after handlers have added fields.
 - Lifecycle is Zetta's: construct `beast2::http_server(io_context, workers, router,
   parser_cfg, serializer_cfg)` → `bind` → `local_endpoint().port()` → `start()` →
   `io_thread` runs `io_context.run()`; `stop()` = `server->stop()`, `io_context.stop()`,
@@ -232,7 +240,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `agent_guard` today, versioned by content hash).
+  `token_attenuation_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
