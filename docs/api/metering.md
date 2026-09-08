@@ -71,3 +71,10 @@ capability audit event.
 `PostgresMetering.*` exercises the production aggregate and build ledger. `SyncHttp.StorageQuota*`
 pushes existing content, enables a quota, proves a new write returns `busy`, and then pulls the
 original bytes unchanged. `WebUi.Metering*` covers the renderer.
+
+## Empty personal customers
+
+Sign-up creates a counted customer row without writing customer repository bytes or a quota
+override. The first usage read records zero stored bytes and costs zero even with nonzero prices;
+there is no per-tenant minimum. `LAKE_STORAGE_QUOTA_BYTES` applies until explicitly overridden.
+The production HTTP proof and transaction contract are in [provisioning.md](provisioning.md).

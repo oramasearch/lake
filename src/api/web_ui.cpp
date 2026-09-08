@@ -1025,8 +1025,8 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
                           "repository, newest first, addressed as "
                           "&lt;customer&gt;/&lt;name&gt;.</p>";
     if (repositories.empty()) {
-        content += "<div class=\"panel empty\">No repositories yet. <code>POST "
-                   "/v1/create_repository</code> creates one.</div>";
+        content += "<div class=\"panel empty\">No repositories yet. Create your first repository "
+                   "to store files and review changes.</div>";
     } else {
         content += "<table><thead><tr><th>Repository</th><th>Owner</th><th>Visibility</"
                    "th><th>Description</th><th>Created</th></tr></thead><tbody>";
@@ -1044,6 +1044,26 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
                             web_ui_escape(r.created_at));
         }
         content += "</tbody></table>";
+    }
+    if (signed_in && !owners.empty()) {
+        content +=
+            "<section class=\"panel\"><h2>Create a repository</h2>"
+            "<p>Your personal customer owns your repositories. Its generated handle is permanent. "
+            "An empty customer has no storage charge.</p>"
+            "<form class=\"stack\" method=\"post\" action=\"/repository/create\">"
+            "<label>Customer<select name=\"customer_id\" required>";
+        for (const auto& [id, owner] : owners) {
+            content += "<option value=\"" + web_ui_escape(id) + "\">" + web_ui_escape(owner.name) +
+                       "</option>";
+        }
+        content +=
+            "</select></label><label>Repository name<input name=\"name\" required "
+            "pattern=\"[a-z0-9]([a-z0-9\\-]{0,254}[a-z0-9])?\" "
+            "placeholder=\"my-first-repository\"></label>"
+            "<p class=\"muted\">Use lowercase letters, numbers, and inner hyphens.</p>"
+            "<label>Description<input name=\"description\"></label>"
+            "<p>New repositories are private.</p>"
+            "<button class=\"primary\" type=\"submit\">Create repository</button></form></section>";
     }
     return web_ui_shell("lake — repositories",
                         std::format("{} repositories", repositories.size()),
@@ -3147,10 +3167,23 @@ std::string web_ui_encryption_keys(const control::SecretMount& mount,
 }
 
 std::string web_ui_sign_up(std::string_view error) {
-    std::string content = "<p class=\"eyebrow\">identity</p><h1>Create an account</h1>"
-                          "<p class=\"sub\">Bind a password credential to your client-held TAAP "
-                          "identity.</p>";
+    std::string content =
+        "<p class=\"eyebrow\">identity</p><h1>Create an account</h1>"
+        "<p class=\"sub\">Get a personal customer you own, then create your first "
+        "repository.</p>";
     content += error_markup(error);
+    content += R"html(<section class="panel"><h2>Get your public identity document</h2>
+<ol><li><a href="https://github.com/oramasearch/liquid/blob/main/docs/build/local.md">Install liquid</a> using the supported build instructions. You need access to the liquid repository.
+<details><summary>Installation commands</summary><pre><code>git clone --recurse-submodules git@github.com:oramasearch/liquid.git
+cd liquid
+cmake -S . -B build -G Ninja -DLIQUID_BUILD_TESTS=OFF
+cmake --build build -j 6
+cmake --install build --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"</code></pre></details></li>
+<li>Run <code>liquid identity show --document</code>. Liquid creates your identity on first use, or exports your existing identity's public document.
+<a href="https://github.com/oramasearch/liquid/blob/main/docs/reference/cli/identity.md">Identity command reference</a>.</li>
+<li>Copy the complete output into the identity field below, without quotes. It is one base64url string containing the public TAAP/1 document, not JSON.</li></ol>
+<p>Your private signing key stays on your machine. Keep it safe; never paste it here.</p></section>)html";
     content +=
         R"html(<form class="stack" method="post" action="/identity/sign-up">
 <label>Email<input type="email" name="email" autocomplete="email" required></label>

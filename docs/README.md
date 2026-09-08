@@ -29,3 +29,6 @@ root is the front door and `CLAUDE.md` the agent instructions; both point here.
 
 The product specification is in `oramasearch/liquid` `docs/features/18-lake-service.md`; the
 cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
+
+[api/provisioning.md](api/provisioning.md) specifies personal customer sign-up;
+[ui/sign-up-walkthrough.md](ui/sign-up-walkthrough.md) records the first-repository proof.

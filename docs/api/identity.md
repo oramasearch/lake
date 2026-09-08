@@ -204,3 +204,11 @@ exception because the provider invokes it as a browser redirect.
 OAuth registration, PKCE callback processing, JWKS verification and WebAuthn ceremonies use the
 `0007_identity_core` tables. Keep the passkey browser adapter limited to the one documented inline
 script that calls `navigator.credentials`.
+
+## Personal customer on sign-up
+
+Lake-pool password sign-up atomically provisions the user-owned customer, policy object, and
+`admin` grant before issuing its session. Application pools remain isolated. Naming, default
+quotas, zero-byte metering, transaction failure, and retry behavior are specified in
+[provisioning.md](provisioning.md). The public identity export command is
+`liquid identity show --document`; the private signing key stays with the client.

@@ -105,3 +105,9 @@ with an isolated in-memory control store and real Liquid data. `validate_api_sch
 `jsonschema`, checks every advertised tool was called, and requires success coverage for every
 value schema with required fields. Set `LAKE_SCHEMA_EVIDENCE` to retain the captured JSON outside
 the process fixture directory. The full contract is in [`../docs/api/README.md`](../docs/api/README.md).
+`PostgresProvisioning.*` proves personal ownership, retry/concurrency uniqueness, malformed
+document recovery, and transaction rollback after session failure. The HTTP provisioning cases
+check configured quota inheritance, zero initial storage and cost with nonzero prices, and a first
+repository in both stores. `personal_customer_test_support.hpp` resolves the tenant already
+created by sign-up; fixtures must not create a second one. See
+[`../docs/api/provisioning.md`](../docs/api/provisioning.md).

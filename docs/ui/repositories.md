@@ -79,3 +79,12 @@ attestations, including reproducibility, use the registered TAAP profile verifie
 keeps libliquid's verification result. The page finds the retained build trace containing the
 result and summarizes wall time, action/dependency counts, and cache hits/misses. Missing trace or
 attestation data is an explicit empty state.
+
+## First repository
+
+Signed-in visitors with visible customers get the `POST /repository/create` form on
+`/repositories`. It collects the customer, repository name, and description; new repositories
+are private. The adapter calls `create_repository` through the registry and redirects to the
+repository home. Authorization checks the submitted customer even when a request bypasses the
+form. Password sign-up supplies the personal customer and inherited ownership before this page.
+See [sign-up-walkthrough.md](sign-up-walkthrough.md).

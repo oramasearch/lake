@@ -1147,7 +1147,10 @@ std::optional<std::vector<unsigned char>> decode_hex(std::string_view value) {
 }
 
 std::optional<std::vector<std::byte>> decode_base64url(std::string_view value) {
-    if (value.empty()) {
+    if (value.empty() || value.size() % 4 == 1 ||
+        value.find_first_not_of(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") !=
+            std::string_view::npos) {
         return std::nullopt;
     }
     std::string padded(value);
@@ -3915,6 +3918,12 @@ public:
                                "($1::uuid, $2::uuid)",
                                application_id,
                                user_id);
+            }
+            if (in.pool_id == "lake") {
+                const auto customer = provision_personal_customer(tx, user_id, *identity);
+                if (!customer) {
+                    return std::unexpected(customer.error());
+                }
             }
             return issue_session(tx,
                                  user_id,
@@ -7179,16 +7188,55 @@ private:
         });
     }
 
+    Result<std::string> provision_personal_customer(pqxx::work& tx,
+                                                    const std::string& user_id,
+                                                    const VerifiedIdentityDocument& identity) {
+        for (int attempt = 0; attempt < 32; ++attempt) {
+            const std::string name = generate_handle();
+            if (!tx.exec_params("SELECT 1 FROM customers WHERE name = $1", name).empty()) {
+                continue;
+            }
+            const auto customers =
+                tx.exec_params("INSERT INTO customers (customer_type, user_id, name) "
+                               "VALUES ('individual', $1::uuid, $2) ON CONFLICT (name) DO NOTHING "
+                               "RETURNING id::text",
+                               user_id,
+                               name);
+            if (customers.empty()) {
+                continue;
+            }
+            const std::string customer_id = customers[0][0].as<std::string>();
+            const auto objects = tx.exec_params(
+                "INSERT INTO objects (object_type, external_id) VALUES ('customer', $1) "
+                "RETURNING id::text",
+                customer_id);
+            tx.exec_params(
+                "INSERT INTO grants (principal_taap_id, object_id, role, attestation_digest, "
+                "granted_by_taap_id) VALUES ($1, $2::uuid, 'admin', $3, $1)",
+                identity.identifier,
+                objects[0][0].as<std::string>(),
+                "sign_up_password/" + identity.hash);
+            return customer_id;
+        }
+        return std::unexpected(
+            StoreError{"conflict", "could not allocate a personal customer handle; retry sign-up"});
+    }
+
     Result<VerifiedIdentityDocument> verify_identity_document(std::string_view serialized) const {
         const auto encoded = decode_base64url(serialized);
         if (!encoded) {
             return std::unexpected(
-                StoreError{"invalid_input", "TAAP identity document must be base64url CBOR"});
+                StoreError{"invalid_input",
+                           "TAAP identity document is not base64url. Run liquid identity show "
+                           "--document and paste the complete output, without quotes."});
         }
         const auto document = liquid::decode_identity_document(*encoded);
         if (!document) {
-            return std::unexpected(
-                StoreError{"invalid_input", "TAAP identity document is invalid canonical CBOR"});
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "TAAP identity document is incomplete or invalid canonical CBOR: " +
+                    document.error().message +
+                    ". Run liquid identity show --document and paste the complete output."});
         }
         const auto verified = liquid::verify_document(*document);
         if (!verified || !*verified) {

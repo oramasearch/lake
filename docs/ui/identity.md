@@ -81,3 +81,12 @@ Add behavior to the registry first. Keep HTML generation in the pure `web_ui` re
 the HTTP form adapter call that capability. Add its route to request metrics, renderer tests, this
 table, and the route tables in `README.md` and `docs/serving/http.md`. Theme behavior belongs in
 the shared shell; credential behavior belongs only on documented passkey pages.
+
+## First account
+
+`/sign-up` links Liquid installation and `liquid identity show --document`, describes the public
+base64url document, and states that the private key stays on the client. Invalid encoding and
+truncated CBOR get specific recovery instructions. Success redirects to `/repositories`, where
+the new customer owner can create a private repository through the registry-backed form. See
+[sign-up-walkthrough.md](sign-up-walkthrough.md) and
+[../api/provisioning.md](../api/provisioning.md).

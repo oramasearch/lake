@@ -1,3 +1,5 @@
+#include "personal_customer_test_support.hpp"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -219,21 +221,17 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
 
     const auto principal = store->context_for(signed_in.value.at("secret"));
     ASSERT_TRUE(principal) << principal.error().message;
-    const auto customer =
-        store->create_customer({"individual", principal->user_id, "", "identity-exit-" + suffix});
+    const auto customer = lake::test::personal_customer(*store, principal->user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto organization = store->create_organization(
         {"taap:1:ed25519:identity-exit-org-" + suffix, "Identity exit", customer->id});
     ASSERT_TRUE(organization) << organization.error().message;
     const auto customer_object = store->find_policy_object("customer", customer->id);
     ASSERT_TRUE(customer_object) << customer_object.error().message;
-    const auto grant = store->create_grant({principal->taap_id,
-                                            customer_object->id,
-                                            "admin",
-                                            "identity-exit-attestation",
-                                            "admin",
-                                            lake::control::new_uuid_v4()});
-    ASSERT_TRUE(grant) << grant.error().message;
+    const auto grants = store->list_grants({customer_object->id}, principal->taap_id, 10);
+    ASSERT_TRUE(grants) << grants.error().message;
+    ASSERT_EQ(grants->size(), 1U);
+    EXPECT_EQ(grants->front().role, "admin");
     context.authorized = true;
     context.session_credential = true;
     context.acting_user_id = principal->user_id;

@@ -27,6 +27,7 @@ out) and are the unit-tested surface.
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
+| `POST /repository/create` | authenticated form adapter for `create_repository`; creates a private repository and redirects to its home |
 | `POST /identity/*` | form adapters that call the corresponding registry capability; see [`../ui/identity.md`](../ui/identity.md) |
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |

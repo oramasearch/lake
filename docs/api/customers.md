@@ -45,3 +45,10 @@ that names libpqxx). The Postgres store maps SQL errors to the same codes: uniqu
 `conflict`, check / foreign-key / data errors → `invalid_input`, a broken connection →
 `store_unavailable`. Calls run inline on the server's io thread, one statement each; a pool or
 offload is the follow-up if latency shows.
+
+## Self-service ownership
+
+An ordinary Lake password sign-up now creates its individual customer and a customer-level
+`admin` grant atomically. It uses a generated permanent handle and the configured storage quota.
+`create_customer` remains operator-only; the public sign-up capability performs the bootstrap
+inside the account transaction. See [provisioning.md](provisioning.md).

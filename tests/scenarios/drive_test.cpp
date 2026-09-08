@@ -1,3 +1,5 @@
+#include "../personal_customer_test_support.hpp"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -254,8 +256,7 @@ protected:
     ProvisionedRepository provision(std::string_view label) {
         SignedUpUser owner = sign_up(label);
         const std::string suffix = lake::control::new_uuid_v4();
-        const auto customer =
-            store_->create_customer({"individual", owner.id, "", "drive-" + suffix.substr(0, 8)});
+        const auto customer = lake::test::personal_customer(*store_, owner.id);
         EXPECT_TRUE(customer) << customer.error().message;
         if (!customer) {
             return {};

@@ -6345,7 +6345,9 @@ struct ApiServer::Impl {
                                          "no-store");
         }
         co_return co_await redirect(
-            route, "/sessions", browser_session_cookie(route, result.value.value("secret", "")));
+            route,
+            "/repositories",
+            browser_session_cookie(route, result.value.value("secret", "")));
     }
 
     boost::http::route_task serve_identity_sign_in(boost::http::route_params& route) {
@@ -6785,6 +6787,25 @@ struct ApiServer::Impl {
             web_ui_effective_access(object_from_json(access_result.value.at("object")), entries),
             "text/html; charset=utf-8",
             "no-store");
+    }
+
+    boost::http::route_task serve_repository_create(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call("create_repository",
+                                               {{"customer_id", form_field(body, "customer_id")},
+                                                {"name", form_field(body, "name")},
+                                                {"description", form_field(body, "description")},
+                                                {"visibility", "private"}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_page_error(route, result);
+        }
+        co_return co_await redirect(route,
+                                    "/repository?id=" + result.value.at("id").get<std::string>());
     }
 
     boost::http::route_task serve_repositories_page(boost::http::route_params& route) {
@@ -10140,6 +10161,12 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/token/create", impl.serve_identity_token_create(route));
+               });
+    router.add(http::method::post,
+               "/repository/create",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/repository/create", impl.serve_repository_create(route));
                });
     router.add(
         http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task {

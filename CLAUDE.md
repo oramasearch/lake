@@ -61,7 +61,10 @@ tokens, device revocation, lake-signed passkey-to-TAAP bindings, and the hosted 
 Migration `0021_token_attenuation` bounds issued tokens by issuer scopes and expiry, restricts
 static derivation to existing static authority, and invalidates descendants after ancestor or
 device revocation. It revokes pre-migration API/static tokens once because ancestry is unavailable.
-Identity documents are verified through libliquid's public canonical-CBOR codec.
+Identity documents are verified through libliquid's public canonical-CBOR codec. Lake-pool password
+sign-up atomically provisions a personal customer and its inherited ownership grant, then directs
+the user to a first-repository form. Generated handles, default quotas, and zero-byte metering are
+documented in `docs/api/provisioning.md`.
 Migration `0020_identity_exit` adds fresh, replay-resistant libliquid TAAP-key sign-in and a
 one-use application authorization-code flow with exact redirects, PKCE S256, nonce-bound ID
 tokens, and the existing Ed25519 application JWKS.
