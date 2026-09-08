@@ -69,6 +69,7 @@ Checkpoints are immutable objects beside TUF metadata:
 LAKE_STORE_ROOT/<instance>/log/checkpoints/<sequence>.checkpoint.json
 LAKE_STORE_ROOT/<instance>/log/checkpoints/<sequence>.ots.json       # anchored only
 LAKE_STORE_ROOT/<instance>/log/checkpoints/current.json
+LAKE_STORE_ROOT/<instance>/log/checkpoints/publish.lock
 ```
 
 `current.json` is atomically replaced only after its configured requirements succeed. A checkpoint
@@ -77,6 +78,37 @@ contains the exact current root and timestamp metadata, the attestation `tree_si
 signature, and valid witness signatures.
 An anchored checkpoint also records the aggregation endpoint and its opaque proof; the same proof
 is retained in the adjacent `.ots.json` object.
+
+### Authenticated signing time
+
+Every newly signed `lake_checkpoint/1` body contains `issued_at`, a non-negative integer counting
+seconds since the Unix epoch in UTC. Lake samples its system clock immediately before invoking
+the existing checkpoint signer; callers cannot supply or override the value. Lake's existing
+TAAP/1 Ed25519 signature covers the complete body, including `issued_at`: the signing input is
+`TAAP/1 lake_checkpoint/1`, a zero byte, and the body's existing CBOR encoding. The checkpoint
+SHA-256 and witness signatures also cover the body containing the field. The signature format,
+identity, and Liquid signature-verification path are unchanged.
+
+Publication holds `publish.lock` across reading the last immutable checkpoint, sampling the clock,
+signing, witness/anchor verification, and updating `current.json`. This serializes separate Lake
+processes sharing the instance directory. Times may be equal within one second. If the clock is
+behind the last persisted `issued_at`, publication fails with `conflict` before signing and retains
+the current checkpoint. Lake does not clamp or invent a later time. The check survives restart and
+an interrupted publication that wrote an immutable record before replacing `current.json`.
+Replication preserves the source's signed bytes, rejects malformed issuance times, and refuses a
+successor whose time moves backwards or disappears after an authenticated time was recorded.
+
+**The log attests its own time.** This allows a consumer to reject a stale or replayed checkpoint;
+it does not defend against a log that lies about when it signed. This deliberate limit is
+[decision 37](https://github.com/oramasearch/liquid-bridge/blob/main/docs/decisions.md#37-authenticated-time-on-a-transparency-checkpoint--decided-steve-2026-09-07-a-signed-issued_at-in-the-checkpoint-body).
+No second key, signature, credential, or timestamp authority is added. RFC 3161 binding remains
+available for a later stronger freshness policy; air-gapped publication requires no authority.
+
+Historical checkpoints remain byte-for-byte readable and replicable. They have no `issued_at`
+and cannot satisfy a finite `max_checkpoint_age_seconds`. Liquid admission enforcement is owned
+by [liquid#290](https://github.com/oramasearch/liquid/issues/290): an absent bound disables freshness;
+a positive bound rejects missing or over-age time; zero is invalid policy; times over 60 seconds
+in the future are refused. The Lake change supplies authenticated time, not admission policy.
 
 The API returns both the parsed `metadata` object and `encoded`, the exact compact JSON bytes that
 were signed, hashed, and stored. Clients use `encoded` for length and digest checks rather than
@@ -319,6 +351,8 @@ The deterministic conformance vector is
 It contains one signed, witnessed checkpoint, every tile for seven entries, inclusion proofs for
 all leaves, and a size-3 to size-7 consistency proof. Run
 `./tests/fixtures/transparency/regenerate.py --check` to prove the checked-in bytes are current.
+That fixed vector remains a legacy checkpoint without `issued_at`; newly published, timed
+checkpoints are covered by the clock and live HTTP tests below.
 
 ### Measured monitoring cost
 
@@ -343,6 +377,31 @@ Endpoints must use HTTPS; loopback HTTP is accepted only for local integration t
 mode, an insufficient witness set, duplicate endpoint or key, or anchored mode without an
 aggregator makes startup fail with the exact configuration error. Air-gapped mode accepts no
 witness or aggregator configuration and never makes an outbound request.
+
+### Publish on a running instance
+
+Starting the server does not publish a checkpoint. Provision a persistent store and control-store
+identity, initialize TUF with operator-signed root metadata through `initialize_tuf`, and publish
+operator-signed targets, snapshot, and timestamp metadata through `publish_tuf_metadata`. Append
+canonical attestations through `append_transparency_entries`, then call the existing registry action:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $LAKE_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{}' \
+  "${LAKE_URL}/v1/publish_transparency_checkpoint"
+curl --fail-with-body "${LAKE_URL}/v1/transparency_checkpoint"
+```
+
+The POST must succeed and both responses must contain the signed body at `value.checkpoint`,
+including `issued_at`. `not_found` means the instance has no checkpoint or is missing its TUF
+metadata; witness/anchor failures retain the previously current checkpoint. Lake does not generate
+TUF keys or bypass configured requirements. Provisioning only a server and a log directory is
+insufficient. The Postgres-backed HTTP proof below exercises publication and fetch on a running
+instance.
+
+Freshness concerns the time of explicit publication. An unchanged checkpoint can age beyond a
+consumer's bound. Automatic refresh is not introduced: re-signing an unchanged tree at a later
+time changes its checkpoint hash, which retained Liquid trust compares at equal tree sizes.
 
 For each checkpoint Lake POSTs this JSON to every configured witness:
 
@@ -431,9 +490,23 @@ accepted, removed targets keys are refused, and replacement targets keys publish
 ## How to verify
 
 ```sh
-cmake --build build
+cmake --build build -j 6
 ./build/tests/lake-tests --gtest_filter='Transparency*'
 ```
+
+`TransparencyCheckpoint.IssuedAtUsesSigningClockAndRefusesRollbackAfterRestart` proves that the
+signer receives the server's sampled time, equal seconds are allowed, and rollback refuses signing
+without changing the current checkpoint. The concurrent-publisher test verifies sequence/time
+ordering across two service instances sharing a directory. The replication test preserves legacy
+records and rejects backwards or removed issuance time after an authenticated checkpoint.
+`PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts real loopback HTTP
+servers backed by Postgres, publishes over HTTP after two successive appends, fetches both
+through Liquid's unchanged HTTP client and signature verifier, and prints the complete records.
+It checks that each issuance time lies between the before/after system-clock samples, that the
+second is non-decreasing, and that changing only the time (even with a recomputed body hash) fails
+signature verification. Run it with the database configured as in
+[`../build/local.md`](../build/local.md); the complete static and shared CTest suites remain the
+acceptance proof. Fresh/expired admission enforcement tests belong to liquid#290.
 
 `TransparencyTuf.AppendsThresholdSignedMetadataAndRejectsRepositoryAttacks` covers append, exact
 fetch, unique-key thresholds, expired timestamps, rollback, and mixed metadata.

@@ -65,6 +65,24 @@ json checkpoint_output_schema() {
     return {{"type", "object"}};
 }
 
+json signed_checkpoint_output_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"checkpoint",
+               {{"type", "object"},
+                {"properties",
+                 {{"issued_at",
+                   {{"type", "integer"},
+                    {"minimum", 0},
+                    {"description",
+                     "Log-attested signing time in Unix seconds, UTC; covered by "
+                     "the checkpoint signature. Absent only on legacy records."}}}}}}},
+              {"sequence", {{"type", "integer"}}},
+              {"checkpoint_hash_sha256", {{"type", "string"}}},
+              {"signature", {{"type", "object"}}},
+              {"witness_signatures", {{"type", "array"}, {"items", {{"type", "object"}}}}}}}};
+}
+
 json inclusion_proof_output_schema();
 
 json proof_bundle_output_schema() {
@@ -745,7 +763,7 @@ void register_transparency_capabilities(Registry& registry) {
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
-        .output_schema = checkpoint_output_schema(),
+        .output_schema = signed_checkpoint_output_schema(),
         .kind = CapabilityKind::Action,
         .object = "transparency log",
         .action = "admin",
@@ -803,7 +821,7 @@ void register_transparency_capabilities(Registry& registry) {
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},
-        .output_schema = checkpoint_output_schema(),
+        .output_schema = signed_checkpoint_output_schema(),
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "transparency log",

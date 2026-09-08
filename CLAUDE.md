@@ -130,7 +130,8 @@ TUF repository metadata adds immutable root, targets, snapshot, and timestamp ob
 `LAKE_STORE_ROOT/<instance>/log/tuf/`, distinct-key threshold verification, version/expiry and
 cross-role binding checks, dual-threshold root rotation, and a rehearsed compromised-key
 replacement. Its four capabilities use policy metadata and the signed registry audit stream.
-Transparency checkpoints read `LAKE_LOG_MODE`, witness endpoints and public keys, quorum, and an
+Transparency checkpoints carry signed UTC Unix-second `issued_at` values and refuse clock rollback
+across publishers and restarts. Checkpoints read `LAKE_LOG_MODE`, witness endpoints and public keys, quorum, and an
 optional aggregation endpoint at startup. Air-gapped checkpoints make no outbound call; witnessed
 and anchored checkpoints require the configured distinct witness quorum before they become current;
 anchored checkpoints retain an aggregation proof. The effective configuration is a read capability

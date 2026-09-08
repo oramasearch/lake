@@ -84,6 +84,12 @@ coroutine HTTP client, selector request, secret bearer, line conversion, and cur
 Postgres suite round-trips the same environment binding and JSON mirror through the production
 store.
 
+Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
+time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts
+loopback HTTP servers, publishes through the HTTP capability, and prints two checkpoints accepted by
+Liquid's existing signature verifier with non-decreasing `issued_at` values. Changing the time
+without re-signing is refused even after recomputing the checkpoint hash. The contract and full
+verification commands are in [`../docs/api/transparency.md`](../docs/api/transparency.md).
 Share-link delivery tests cover signed-out folder traversal, registered previews, exact downloads,
 policy-restricted descendants, stable-node moves, and sibling/parent, expiry, and revocation
 refusals. The registry checks include OpenAPI/MCP discovery and MCP byte delivery; the Postgres

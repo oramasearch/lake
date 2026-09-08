@@ -108,7 +108,7 @@ routes and their exact-byte integration coverage.
 | `rotate_tuf_root` | action | next root signed by old and new thresholds | immutable successor root | [transparency.md](transparency.md) |
 | `tuf_metadata` | read | role and optional version | exact encoded and parsed role metadata | [transparency.md](transparency.md) |
 | `transparency_log_configuration` | read | — | effective mode, witnesses, quorum, and aggregator | [transparency.md](transparency.md) |
-| `publish_transparency_checkpoint` | action | — | signed current checkpoint after mode requirements | [transparency.md](transparency.md) |
+| `publish_transparency_checkpoint` | action | — | signed current checkpoint including UTC Unix-second `issued_at`, after mode requirements | [transparency.md](transparency.md) |
 | `transparency_checkpoint` | read | — | current signed checkpoint | [transparency.md](transparency.md) |
 | `append_transparency_entries` | action | canonical TAAP attestations | appended indexes, tree size, and root | [transparency.md](transparency.md) |
 | `transparency_tile` | public read | level, tile index, and exact width | immutable base64url entry or interior-hash tile | [transparency.md](transparency.md) |

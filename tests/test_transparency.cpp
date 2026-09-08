@@ -24,6 +24,7 @@
 #include <liquid/runtime.hpp>
 #include <liquid/transparency.hpp>
 
+#include "http1/client.hpp"
 #include "objects/records.hpp"
 
 #include "lake/api/capabilities.hpp"
@@ -1012,6 +1013,114 @@ TEST(TransparencyCheckpoint, AirGappedSignsAndServesWithoutOutboundCalls) {
     EXPECT_FALSE(std::filesystem::exists(service.directory() / "1.ots.json"));
 }
 
+TEST(TransparencyCheckpoint, IssuedAtUsesSigningClockAndRefusesRollbackAfterRestart) {
+    TemporaryRoot temporary;
+    auto now = std::chrono::system_clock::time_point{std::chrono::seconds{1800000000}};
+    const auto clock = [&now] { return now; };
+    lake::transparency::CheckpointService service(
+        temporary.path(), "clock", air_gapped_configuration(), clock);
+    json signed_body;
+    std::size_t calls = 0;
+    const auto signer = [&](const json& body) -> lake::transparency::Result<json> {
+        signed_body = body;
+        ++calls;
+        return checkpoint_signer()(body);
+    };
+    json supplied_body = checkpoint_body();
+    supplied_body["issued_at"] = 1;
+    const auto first = service.publish(supplied_body, signer, {});
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ(signed_body.at("issued_at"), 1800000000U);
+    EXPECT_EQ(first->at("checkpoint"), signed_body);
+    EXPECT_EQ(first->at("checkpoint_hash_sha256"), sha256(signed_body.dump()));
+
+    const auto equal = service.publish(checkpoint_body(), signer, {});
+    ASSERT_TRUE(equal) << equal.error().message;
+    EXPECT_EQ(equal->at("checkpoint").at("issued_at"), signed_body.at("issued_at"));
+    now -= std::chrono::seconds{1};
+    lake::transparency::CheckpointService reopened(
+        temporary.path(), "clock", air_gapped_configuration(), clock);
+    const auto refused = reopened.publish(checkpoint_body(), signer, {});
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "conflict");
+    EXPECT_EQ(refused.error().message, "checkpoint issued_at would move backwards");
+    EXPECT_EQ(calls, 2U);
+    ASSERT_TRUE(reopened.current());
+    EXPECT_EQ(*reopened.current(), *equal);
+    now += std::chrono::seconds{2};
+    const auto later = reopened.publish(checkpoint_body(), signer, {});
+    ASSERT_TRUE(later) << later.error().message;
+    EXPECT_EQ(later->at("sequence"), 3);
+    EXPECT_EQ(later->at("checkpoint").at("issued_at"), 1800000001U);
+}
+
+TEST(TransparencyCheckpoint, ConcurrentPublishersSerializeSequenceAndSigningTime) {
+    TemporaryRoot temporary;
+    std::atomic<std::uint64_t> seconds{1800000000};
+    const auto clock = [&seconds] {
+        return std::chrono::system_clock::time_point{std::chrono::seconds{seconds.fetch_add(1)}};
+    };
+    lake::transparency::CheckpointService first(
+        temporary.path(), "concurrent", air_gapped_configuration(), clock);
+    lake::transparency::CheckpointService second(
+        temporary.path(), "concurrent", air_gapped_configuration(), clock);
+    struct Publication {
+        lake::transparency::Result<json> result;
+    };
+    std::vector<std::future<Publication>> publications;
+    for (std::size_t index = 0; index < 16; ++index) {
+        auto* service = index % 2 == 0 ? &first : &second;
+        publications.push_back(std::async(std::launch::async, [service] {
+            return Publication{service->publish(checkpoint_body(), checkpoint_signer(), {})};
+        }));
+    }
+    for (std::size_t index = 0; index < publications.size(); ++index) {
+        const auto result = publications[index].get().result;
+        ASSERT_TRUE(result) << result.error().message;
+        EXPECT_EQ(result->at("checkpoint").at("issued_at").get<std::uint64_t>(),
+                  1799999999U + result->at("sequence").get<std::uint64_t>());
+    }
+    const auto current = first.current();
+    ASSERT_TRUE(current) << current.error().message;
+    EXPECT_EQ(current->at("sequence"), 16U);
+}
+
+TEST(TransparencyCheckpoint, ReplicationRejectsTimeRollbackAndPreservesLegacyRecords) {
+    TemporaryRoot temporary;
+    lake::transparency::CheckpointService source(
+        temporary.path(), "source", air_gapped_configuration());
+    lake::transparency::CheckpointService replica(
+        temporary.path(), "replica", air_gapped_configuration());
+    const auto first = source.publish(checkpoint_body(), checkpoint_signer(), {});
+    ASSERT_TRUE(first) << first.error().message;
+    auto malformed = *first;
+    malformed["checkpoint"]["issued_at"] = "1800000000";
+    malformed["checkpoint_hash_sha256"] = sha256(malformed.at("checkpoint").dump());
+    const auto invalid = replica.adopt(malformed);
+    ASSERT_FALSE(invalid);
+    EXPECT_EQ(invalid.error().code, "invalid_input");
+    auto legacy = *first;
+    legacy["checkpoint"].erase("issued_at");
+    legacy["checkpoint_hash_sha256"] = sha256(legacy.at("checkpoint").dump());
+    ASSERT_TRUE(replica.adopt(legacy));
+    const auto second = source.publish(checkpoint_body(), checkpoint_signer(), {});
+    ASSERT_TRUE(second) << second.error().message;
+    ASSERT_TRUE(replica.adopt(*second));
+    auto backwards = *second;
+    backwards["sequence"] = 3U;
+    backwards["checkpoint"]["issued_at"] =
+        second->at("checkpoint").at("issued_at").get<std::uint64_t>() - 1;
+    backwards["checkpoint_hash_sha256"] = sha256(backwards.at("checkpoint").dump());
+    const auto refused = replica.adopt(backwards);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "conflict");
+    backwards["checkpoint"].erase("issued_at");
+    backwards["checkpoint_hash_sha256"] = sha256(backwards.at("checkpoint").dump());
+    EXPECT_FALSE(replica.adopt(backwards));
+    ASSERT_TRUE(replica.current());
+    EXPECT_EQ(*replica.current(), *second);
+}
+
 TEST(TransparencyCheckpoint, WitnessedRequiresThresholdAndAnchoredStoresAggregationProof) {
     TemporaryRoot temporary;
     TestKey first{7};
@@ -1079,6 +1188,7 @@ TEST(TransparencyCheckpoint, WitnessedRequiresThresholdAndAnchoredStoresAggregat
         });
     ASSERT_TRUE(anchored_checkpoint) << anchored_checkpoint.error().message;
     EXPECT_TRUE(anchored_checkpoint->contains("anchor"));
+    EXPECT_TRUE(anchored_checkpoint->at("checkpoint").contains("issued_at"));
     EXPECT_TRUE(std::filesystem::exists(anchored_service.directory() / "1.ots.json"));
 }
 
@@ -1561,6 +1671,101 @@ TEST(TransparencyScenario, ExportedBundleVerifiesOfflineAndSplitViewIsDetected) 
                                                liquid::transparency::bootstrap_policy::pinned));
     ASSERT_FALSE(detected_split);
     EXPECT_EQ(detected_split.error().code, liquid::errc::conflict);
+}
+
+TEST(PostgresTransparency, LiveCheckpointCarriesAuthenticatedMonotonicTime) {
+    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    if (database_uri == nullptr || *database_uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TemporaryRoot temporary;
+    Keys keys;
+    lake::transparency::Service metadata(temporary.path(), "issued-at-live");
+    const auto initialized = metadata.initialize(root_document(
+        1, keys.roots(), keys.targets(), keys.snapshot, keys.timestamp, keys.root_threshold()));
+    ASSERT_TRUE(initialized) << initialized.error().message;
+    const Bundle tuf = bundle(1, keys.targets(), keys.snapshot, keys.timestamp);
+    const auto provisioned = metadata.publish(tuf.targets, tuf.snapshot, tuf.timestamp);
+    ASSERT_TRUE(provisioned) << provisioned.error().message;
+    lake::transparency::TiledLog log(temporary.path(), "issued-at-live");
+    lake::transparency::CheckpointService checkpoints(
+        temporary.path(), "issued-at-live", air_gapped_configuration());
+    const std::string kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    std::shared_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(database_uri, kek);
+    const auto ready = store->ping();
+    ASSERT_TRUE(ready) << ready.error().message;
+    std::uint64_t previous_time = 0;
+    for (std::uint64_t sequence = 1; sequence <= 2; ++sequence) {
+        const auto appended = log.append({signed_attestation("taap:1:ed25519:live", sequence)});
+        ASSERT_TRUE(appended) << appended.error().message;
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.admin_token = "issued-at-test-token";
+        options.store = store;
+        options.store_root = temporary.path();
+        options.node_name = "issued-at-live";
+        options.instance_kek = kek;
+        options.log_configuration = air_gapped_configuration();
+        lake::api::ApiServer server(std::move(options));
+        ASSERT_TRUE(server.start()) << server.reason();
+        const auto before =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now())
+                .time_since_epoch()
+                .count();
+        const auto published_http = liquid::runtime::block_on(
+            liquid::http1::request({.url = "http://127.0.0.1:" + std::to_string(server.port()),
+                                    .method = "POST",
+                                    .suffix = "/v1/publish_transparency_checkpoint",
+                                    .headers = {{"Authorization", "Bearer issued-at-test-token"},
+                                                {"Content-Type", "application/json"}},
+                                    .body = {std::byte{'{'}, std::byte{'}'}}}));
+        ASSERT_TRUE(published_http) << published_http.error().message;
+        ASSERT_EQ(published_http->status, 200U);
+        const auto after =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now())
+                .time_since_epoch()
+                .count();
+        liquid::transparency::http_log_source source("http://127.0.0.1:" +
+                                                     std::to_string(server.port()));
+        const auto identity = liquid::runtime::block_on(source.identity());
+        ASSERT_TRUE(identity) << identity.error().message;
+        const auto configuration = liquid::runtime::block_on(source.configuration());
+        ASSERT_TRUE(configuration) << configuration.error().message;
+        const liquid::transparency::log_trust trust{*identity, *configuration};
+        liquid::transparency::log_client client(source);
+        const auto verified = liquid::runtime::block_on(client.current_checkpoint(trust));
+        ASSERT_TRUE(verified) << verified.error().message;
+        const auto body =
+            json::parse(reinterpret_cast<const char*>(verified->canonical_body.data()),
+                        reinterpret_cast<const char*>(verified->canonical_body.data() +
+                                                      verified->canonical_body.size()));
+        ASSERT_TRUE(body.at("issued_at").is_number_unsigned());
+        const auto issued_at = body.at("issued_at").get<std::uint64_t>();
+        EXPECT_GE(issued_at, before);
+        EXPECT_LE(issued_at, after);
+        EXPECT_GE(issued_at, previous_time);
+        EXPECT_EQ(verified->sequence, sequence);
+        previous_time = issued_at;
+
+        auto tampered = *verified;
+        auto altered_body = body;
+        altered_body["issued_at"] = issued_at + 1;
+        const std::string encoded = altered_body.dump();
+        tampered.canonical_body.assign(
+            reinterpret_cast<const std::byte*>(encoded.data()),
+            reinterpret_cast<const std::byte*>(encoded.data() + encoded.size()));
+        tampered.checkpoint_hash = decode_hash(sha256(encoded));
+        const auto rejected = tampered.verify(trust);
+        ASSERT_FALSE(rejected);
+        EXPECT_EQ(rejected.error().code, liquid::errc::unauthorized);
+        const auto published = checkpoints.current();
+        ASSERT_TRUE(published) << published.error().message;
+        std::cout << "Published checkpoint: " << published->dump() << '\n';
+        std::cout << "Existing Liquid signature verification: accepted; issued_at=" << issued_at
+                  << "; sequence=" << sequence << "; tampered issued_at: refused\n";
+        server.stop();
+    }
 }
 
 TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
