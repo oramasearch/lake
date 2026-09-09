@@ -32,3 +32,6 @@ verification are in [front-door.md](../../docs/ui/front-door.md).
 
 Audit query and export schemas accept exact `request_id` and append-order `after_id` filters.
 Their contract and regression coverage are in [audit.md](../../docs/api/audit.md).
+
+The common request context compares operator bearers in constant time before any session lookup.
+User bearers and cookies use the same indexed PostgreSQL resolver; see `docs/api/auth.md`.

@@ -244,3 +244,6 @@ and success fixture together, retaining the shared envelope construction.
 
 Personal-customer sign-up behavior, naming, quotas, metering, and atomic retry semantics are in
 [provisioning.md](provisioning.md). All transports use the existing `sign_up_password` entry.
+
+[auth.md](auth.md) specifies indexed PostgreSQL session authentication, operator precedence and
+the `0022_session_lookup` rollout. Password hashing and live revocation guarantees are preserved.

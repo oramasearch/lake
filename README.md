@@ -118,6 +118,8 @@ implemented, exercised locally, deployed, and exercised in deployment.
 [`docs/design/overview.md`](docs/design/overview.md) for the service model,
 [`docs/api/README.md`](docs/api/README.md) for the API, and
 [`docs/ui/front-door.md`](docs/ui/front-door.md) for the customer journey.
+[`docs/api/auth.md`](docs/api/auth.md) describes bearer credentials and the session migration;
+its [measurement proof](docs/build/session-authentication.md) records the regression coverage.
 
 ## Repository rules
 

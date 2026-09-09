@@ -132,3 +132,8 @@ proof is in [front-door.md](../docs/ui/front-door.md). `PostgresCapabilities.Org
 filters its deletion audit assertion by the exact request ID and `repository/<id>` object.
 `Stores/AuditIsolation.*` proves lookup after 1,105 same-object events and complete cursor traversal
 against memory and PostgreSQL stores. Personal-customer lookup filters by user before limiting.
+
+`PostgresSessionAuthentication.*` in `test_token_attenuation.cpp` compares 7/17 real sessions,
+measures 7,000 rows, checks actual tuple counts, password policy, stored-digest refusal, operator
+precedence, migration idempotence, scopes, expiry and next-request bearer/cookie revocation.
+See [session authentication proof](../docs/build/session-authentication.md).

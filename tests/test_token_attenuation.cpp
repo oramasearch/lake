@@ -6,11 +6,15 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -25,6 +29,7 @@
 
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "temporary_directory.hpp"
@@ -62,7 +67,8 @@ std::string request(unsigned short port,
                     const json& input,
                     const std::string& secret,
                     const std::string& request_id,
-                    const std::string& method) {
+                    const std::string& method,
+                    bool cookie = false) {
     const int socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0) {
         return {};
@@ -83,7 +89,7 @@ std::string request(unsigned short port,
     wire += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size());
     wire += "\r\nX-Request-ID: " + request_id + "\r\n";
     if (!secret.empty()) {
-        wire += "Authorization: Bearer " + secret + "\r\n";
+        wire += (cookie ? "Cookie: lake_session=" : "Authorization: Bearer ") + secret + "\r\n";
     }
     wire += "\r\n" + body;
     std::size_t sent = 0;
@@ -479,6 +485,289 @@ TEST_P(TokenAttenuation, ApplicationPoolsReturnOnlyDerivedSessionBearer) {
     EXPECT_EQ(std::ranges::count_if(
                   *events, [](const auto& event) { return event.event == "session.started"; }),
               3);
+}
+
+class PostgresSessionAuthentication : public testing::Test {
+protected:
+    void SetUp() override {
+        const char* uri = lake::test::postgres_uri();
+        if (!uri) {
+            GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+        }
+        database_uri_ = uri;
+        store_ = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
+        const auto account = store_->sign_up_password({"lake",
+                                                       "lookup@example.test",
+                                                       "correct horse battery staple",
+                                                       "Lookup test",
+                                                       "lookup device",
+                                                       identity_document("lookup")});
+        ASSERT_TRUE(account) << account.error().message;
+        browser_ = *account;
+        lake::api::ServerOptions options;
+        options.port = 0;
+        options.admin_token = operator_secret_;
+        options.worker_coroutines = 1;
+        options.instance_kek = instance_kek;
+        options.store = store_;
+        server_ = std::make_unique<lake::api::ApiServer>(std::move(options));
+        ASSERT_TRUE(server_->start()) << server_->reason();
+    }
+
+    void TearDown() override {
+        if (server_) {
+            server_->stop();
+        }
+    }
+
+    json read(const std::string& path, const std::string& secret, bool cookie = false) {
+        const auto wire = request(server_->port(), path, {}, secret, "", "GET", cookie);
+        const auto body = wire.find("\r\n\r\n");
+        EXPECT_NE(body, std::string::npos);
+        if (body == std::string::npos) {
+            return {{"ok", false}};
+        }
+        return json::parse(wire.substr(body + 4));
+    }
+
+    std::array<double, 3>
+    samples(int population, const std::string& label, const std::string& secret) {
+        std::array<double, 3> elapsed{};
+        for (auto& seconds : elapsed) {
+            const auto start = std::chrono::steady_clock::now();
+            const auto response = read("/v1/server_info", secret);
+            seconds =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            EXPECT_TRUE(response.at("ok"));
+        }
+        std::cout << "sessions=" << population << " bearer=" << label << " seconds=";
+        for (const auto seconds : elapsed) {
+            std::cout << ' ' << std::fixed << std::setprecision(6) << seconds;
+        }
+        std::cout << '\n';
+        std::ranges::sort(elapsed);
+        return elapsed;
+    }
+
+    lake::control::Result<lake::control::IssuedSession> token() {
+        return store_->create_token({browser_.session.user_id,
+                                     "lake",
+                                     "population",
+                                     "",
+                                     {"list_sessions"},
+                                     3600,
+                                     false,
+                                     browser_.session.id});
+    }
+
+    std::string database_uri_;
+    const std::string operator_secret_ = "lookup-test-operator";
+    std::shared_ptr<lake::control::Store> store_;
+    std::unique_ptr<lake::api::ApiServer> server_;
+    lake::control::IssuedSession browser_;
+};
+
+TEST_F(PostgresSessionAuthentication, PopulationDoesNotIncreaseRequestCost) {
+    std::string session_secret;
+    for (int index = 0; index < 6; ++index) {
+        const auto issued = token();
+        ASSERT_TRUE(issued) << issued.error().message;
+        session_secret = issued->secret;
+    }
+    const auto small_operator = samples(7, "operator", operator_secret_);
+    const auto small_session = samples(7, "session", session_secret);
+    for (int index = 0; index < 10; ++index) {
+        const auto issued = token();
+        ASSERT_TRUE(issued) << issued.error().message;
+        session_secret = issued->secret;
+    }
+    const auto large_operator = samples(17, "operator", operator_secret_);
+    const auto large_session = samples(17, "session", session_secret);
+    samples(17, "anonymous", "");
+    EXPECT_LE(large_operator[1], small_operator[1] * 1.5 + 0.020);
+    EXPECT_LE(large_session[1], small_session[1] * 1.5 + 0.020);
+}
+
+TEST_F(PostgresSessionAuthentication, OnlyTheRandomSecretAuthenticates) {
+    const auto issued = token();
+    ASSERT_TRUE(issued);
+    pqxx::connection connection(database_uri_);
+    std::string lookup;
+    std::string digest;
+    {
+        pqxx::read_transaction tx(connection);
+        const auto rows =
+            tx.exec("SELECT lookup_id::text, secret_hash FROM sessions WHERE id=$1::uuid",
+                    pqxx::params{issued->session.id});
+        ASSERT_EQ(rows.size(), 1);
+        const auto row = rows.front();
+        lookup = row[0].as<std::string>();
+        digest = row[1].as<std::string>();
+        EXPECT_EQ(digest, lake::control::identity_crypto::sha256_hex(issued->secret));
+        const auto passwords = tx.exec("SELECT secret_hash FROM credentials WHERE kind='password'");
+        ASSERT_EQ(passwords.size(), 1);
+        EXPECT_TRUE(passwords.front()[0].as<std::string>().starts_with("argon2id$65536$3$1$"));
+    }
+    ASSERT_EQ(issued->secret.size(), 105);
+    EXPECT_TRUE(issued->secret.starts_with("ls1." + lookup + "."));
+    EXPECT_TRUE(store_->context_for(issued->secret));
+    EXPECT_FALSE(store_->context_for(digest));
+    EXPECT_FALSE(store_->context_for(lookup));
+    EXPECT_FALSE(store_->context_for("ls1." + lookup + "." + digest));
+    EXPECT_FALSE(store_->context_for("ls1." + lookup + "." + browser_.secret.substr(41)));
+    for (const auto& malformed : {std::string(),
+                                  issued->secret.substr(1),
+                                  issued->secret + "a",
+                                  "ls2." + issued->secret.substr(4),
+                                  "ls1.x" + issued->secret.substr(5)}) {
+        EXPECT_FALSE(store_->context_for(malformed));
+    }
+    EXPECT_TRUE(store_->sign_in_password(
+        {"lake", "lookup@example.test", "correct horse battery staple", "", "new device"}));
+    EXPECT_FALSE(store_->sign_in_password(
+        {"lake", "lookup@example.test", "wrong password", "", "new device"}));
+}
+
+TEST_F(PostgresSessionAuthentication, ScopeExpiryAndRevocationApplyOnNextRequest) {
+    const auto issued = token();
+    ASSERT_TRUE(issued);
+    EXPECT_TRUE(read("/v1/list_sessions", issued->secret).at("ok"));
+    EXPECT_FALSE(read("/v1/list_devices", issued->secret).at("ok"));
+    EXPECT_TRUE(read("/v1/list_sessions", issued->secret, true).at("ok"));
+    ASSERT_TRUE(store_->revoke_session(browser_.session.user_id, issued->session.id));
+    EXPECT_FALSE(read("/v1/list_sessions", issued->secret).at("ok"));
+    EXPECT_FALSE(read("/v1/list_sessions", issued->secret, true).at("ok"));
+
+    const auto expiring = token();
+    ASSERT_TRUE(expiring);
+    EXPECT_TRUE(read("/v1/list_sessions", expiring->secret).at("ok"));
+    {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec("UPDATE sessions SET expires_at=now()-interval '1 second' WHERE id=$1::uuid",
+                pqxx::params{expiring->session.id});
+        tx.commit();
+    }
+    EXPECT_FALSE(read("/v1/list_sessions", expiring->secret).at("ok"));
+    EXPECT_FALSE(read("/v1/list_sessions", expiring->secret, true).at("ok"));
+    const auto child = token();
+    ASSERT_TRUE(child);
+    EXPECT_TRUE(read("/v1/list_sessions", child->secret).at("ok"));
+    ASSERT_TRUE(store_->revoke_device(browser_.session.user_id, browser_.session.device_id));
+    EXPECT_FALSE(read("/v1/list_sessions", child->secret).at("ok"));
+    EXPECT_FALSE(read("/v1/list_sessions", browser_.secret).at("ok"));
+}
+
+TEST_F(PostgresSessionAuthentication, OperatorPrecedesEvenAMatchingSession) {
+    server_->stop();
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.admin_token = browser_.secret;
+    options.store = store_;
+    options.instance_kek = instance_kek;
+    server_ = std::make_unique<lake::api::ApiServer>(std::move(options));
+    ASSERT_TRUE(server_->start());
+    EXPECT_TRUE(read("/v1/list_users", browser_.secret).at("ok"));
+    EXPECT_TRUE(read("/v1/list_users", browser_.secret, true).at("ok"));
+    pqxx::connection connection(database_uri_);
+    pqxx::read_transaction tx(connection);
+    const auto rows = tx.exec("SELECT last_used_at FROM sessions WHERE id=$1::uuid",
+                              pqxx::params{browser_.session.id});
+    ASSERT_EQ(rows.size(), 1);
+    EXPECT_TRUE(rows.front()[0].is_null()) << "operator authentication must not touch sessions";
+}
+
+TEST_F(PostgresSessionAuthentication, MigrationRevokesLegacySessionsAndIsRepeatable) {
+    const std::string legacy_secret = lake::control::identity_crypto::random_secret();
+    const auto legacy_hash = lake::control::identity_crypto::hash_secret(legacy_secret);
+    ASSERT_FALSE(legacy_hash.empty());
+    std::ifstream schema_file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "db/schema.sql");
+    const std::string schema_sql((std::istreambuf_iterator<char>(schema_file)), {});
+    ASSERT_FALSE(schema_sql.empty());
+    pqxx::connection connection(database_uri_);
+    {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE sessions DROP COLUMN lookup_id");
+        tx.exec("DROP TABLE session_lookup_guard");
+        tx.exec("DELETE FROM schema_migrations WHERE version='0022_session_lookup'");
+        tx.exec("UPDATE sessions SET secret_hash=$1 WHERE id=$2::uuid",
+                pqxx::params{legacy_hash, browser_.session.id});
+        tx.exec(schema_sql);
+        const auto rows = tx.exec("SELECT revoked_at, lookup_id FROM sessions WHERE id=$1::uuid",
+                                  pqxx::params{browser_.session.id});
+        EXPECT_FALSE(rows.front()[0].is_null());
+        EXPECT_TRUE(rows.front()[1].is_null());
+        tx.commit();
+    }
+    EXPECT_FALSE(store_->context_for(legacy_secret));
+    EXPECT_FALSE(store_->context_for(browser_.secret));
+    const auto replacement = store_->sign_in_password(
+        {"lake", "lookup@example.test", "correct horse battery staple", "", "replacement"});
+    ASSERT_TRUE(replacement) << replacement.error().message;
+    {
+        pqxx::work tx(connection);
+        tx.exec(schema_sql);
+        tx.exec(schema_sql);
+        tx.commit();
+    }
+    auto reopened = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
+    EXPECT_TRUE(reopened->context_for(replacement->secret));
+    EXPECT_FALSE(reopened->context_for(legacy_secret));
+}
+
+std::array<long long, 2> session_read_counts(const std::string& uri) {
+    pqxx::connection connection(uri);
+    // Closing a measured store flushes its counters. Wait for that backend to exit before reading.
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        pqxx::read_transaction tx(connection);
+        const auto active = tx.exec("SELECT count(*) FROM pg_stat_activity WHERE datname="
+                                    "current_database() AND pid<>pg_backend_pid()");
+        if (active.front()[0].as<int>() == 0) {
+            const auto rows = tx.exec("SELECT seq_tup_read, idx_tup_fetch FROM pg_stat_user_tables "
+                                      "WHERE relname='sessions'");
+            return {rows.front()[0].as<long long>(), rows.front()[1].as<long long>()};
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ADD_FAILURE() << "measured PostgreSQL connection did not close";
+    return {};
+}
+
+TEST_F(PostgresSessionAuthentication, IndexedReadsStayBoundedAtSevenThousandSessions) {
+    {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec("INSERT INTO sessions (user_id, kind, secret_hash, lookup_id, scopes, expires_at) "
+                "SELECT $1::uuid, 'api_token', md5('unrelated-' || n)::text, gen_random_uuid(), "
+                "ARRAY['list_sessions'], now()+interval '1 hour' FROM generate_series(1,6999) n",
+                pqxx::params{browser_.session.user_id});
+        tx.exec("ANALYZE sessions");
+        tx.commit();
+    }
+    samples(7000, "operator", operator_secret_);
+    samples(7000, "session", browser_.secret);
+    server_->stop();
+    server_.reset();
+    store_.reset();
+    const auto before = session_read_counts(database_uri_);
+    {
+        auto measured =
+            lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
+        std::string wrong = browser_.secret;
+        wrong.back() = wrong.back() == 'a' ? 'b' : 'a';
+        const auto unknown = "ls1." + lake::control::new_uuid_v4() + "." + wrong.substr(41);
+        for (int count = 0; count < 3; ++count) {
+            ASSERT_TRUE(measured->context_for(browser_.secret));
+            EXPECT_FALSE(measured->context_for(wrong));
+            EXPECT_FALSE(measured->context_for(unknown));
+        }
+    }
+    const auto after = session_read_counts(database_uri_);
+    EXPECT_EQ(after[0] - before[0], 0) << "authentication scanned unrelated session rows";
+    EXPECT_GT(after[1] - before[1], 0);
+    EXPECT_LE(after[1] - before[1], 24) << "authentication fetched unrelated indexed rows";
+    std::cout << "sessions=7000 auth_calls=9 sequential_rows=" << after[0] - before[0]
+              << " indexed_rows=" << after[1] - before[1] << '\n';
 }
 
 INSTANTIATE_TEST_SUITE_P(Transports,

@@ -4727,7 +4727,12 @@ struct ApiServer::Impl {
                 ctx.authentication_method = "session";
             }
         }
-        if (!bearer.empty() && options.store) {
+        if (!options.admin_token.empty() && !bearer.empty() &&
+            constant_time_equal(bearer, options.admin_token)) {
+            ctx.authorized = true;
+            ctx.acting_identity = "admin";
+            ctx.operator_credential = true;
+        } else if (!bearer.empty() && options.store) {
             if (auto principal = options.store->context_for(bearer)) {
                 ctx.authorized = true;
                 ctx.session_credential = true;
@@ -4740,12 +4745,6 @@ struct ApiServer::Impl {
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;
             }
-        }
-        if (!options.admin_token.empty() && !bearer.empty() &&
-            constant_time_equal(bearer, options.admin_token)) {
-            ctx.authorized = true;
-            ctx.acting_identity = "admin";
-            ctx.operator_credential = true;
         }
         if (route.req.count("x-request-id") != 0) {
             ctx.request_id = std::string(route.req.at("x-request-id"));
