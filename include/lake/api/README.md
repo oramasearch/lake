@@ -1,8 +1,9 @@
 # Public API types
 
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
-instructions. The HTTP adapter validates it and supplies it to `RepositoryHomeData`; an empty
-value omits commands. It is independent of identity/platform `public_host`. See
+instructions. The HTTP adapter validates it and supplies it to `RepositoryHomeData`. It takes
+precedence over `https://` plus the trusted identity/platform `public_host`; with neither value,
+commands are omitted. See
 [configuration.md](../../../docs/serving/configuration.md) and
 [forge.md](../../../docs/ui/forge.md).
 

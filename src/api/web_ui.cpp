@@ -1215,8 +1215,8 @@ std::string web_ui_repository(const control::Repository& repository,
                "details\"><section class=\"panel\"><h2>Clone and push</h2>";
     if (data.external_origin.empty()) {
         content += "<p class=\"muted\">An administrator must set "
-                   "<code>LAKE_EXTERNAL_ORIGIN</code> before clone and push commands are "
-                   "available.</p>";
+                   "<code>LAKE_EXTERNAL_ORIGIN</code> or <code>LAKE_PUBLIC_HOST</code> before "
+                   "clone and push commands are available.</p>";
     } else {
         const std::string url =
             shell_argument(data.external_origin + "/v1/repositories/" + repository.id);

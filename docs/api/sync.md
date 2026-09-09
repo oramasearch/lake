@@ -42,7 +42,8 @@ objects the receiver reports absent.
 
 An optional `Authorization: Bearer <token>` header carries lake authentication. The CLI reads the
 token from `LIQUID_TOKEN`; credentials never appear in the URL or output.
-The repository page uses the full `LAKE_EXTERNAL_ORIGIN` configuration for its examples; see
+The repository page uses `LAKE_EXTERNAL_ORIGIN`, or `https://` plus `LAKE_PUBLIC_HOST` when the
+explicit origin is unset, for its examples; see
 [`../serving/configuration.md`](../serving/configuration.md). Obtain a token from that same instance.
 Use `liquid clone <url> ./checkout` for an initial materialized checkout, then `cd ./checkout`.
 `liquid pull` and `liquid push` require an existing local Liquid repository in the current

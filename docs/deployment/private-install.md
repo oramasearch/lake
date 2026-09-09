@@ -1,8 +1,9 @@
 # Private instance clone and push
 
 Configure the external origin customers see in their browser. It includes the scheme and any
-non-default port. `LAKE_PUBLIC_HOST` has a separate identity/platform purpose and is not a
-substitute. Clone and push use the existing capability-backed repository sync protocol.
+non-default port. If `LAKE_EXTERNAL_ORIGIN` is unset, Lake uses `https://` plus
+`LAKE_PUBLIC_HOST`, the same hostname used for OAuth callbacks. Set the explicit origin for HTTP or
+a non-default port. Clone and push use the existing capability-backed repository sync protocol.
 
 ## Native local instance
 

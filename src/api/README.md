@@ -1,10 +1,11 @@
 # API implementation
 
-Repository terminal instructions receive only the validated `ServerOptions::external_origin`.
-Request and proxy headers cannot select their URL. `web_ui.cpp` quotes each shell argument and
-escapes the resulting commands for HTML; missing configuration suppresses commands. Existing
-registry sync operations implement clone and push. See [forge.md](../../docs/ui/forge.md) and
-the native [private-install proof](../../docs/deployment/private-install.md).
+Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
+the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select
+their URL. `web_ui.cpp` quotes each shell argument and escapes the resulting commands for HTML;
+missing configuration suppresses commands. Existing registry sync operations implement clone and
+push. See [forge.md](../../docs/ui/forge.md) and the native
+[private-install proof](../../docs/deployment/private-install.md).
 
 The single capability registry defines REST, OpenAPI and MCP behavior. `create_token` validates
 issuer scopes, lifetime and static authority in `capabilities.cpp`. The common HTTP context

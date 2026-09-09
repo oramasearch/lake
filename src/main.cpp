@@ -44,7 +44,7 @@ std::uint64_t env_u64(const char* name, std::uint64_t fallback = 0) {
 int usage() {
     std::println("lake {}", lake::version_string());
     std::println("  lake [--listen HOST:PORT] [--node NAME] [--control-db URI] "
-                 "[--store-root PATH]");
+                 "[--store-root PATH] [--external-origin ORIGIN]");
     std::println("       [--admin-token TOKEN] [--identity-seed BASE64] "
                  "[--instance-kek VALUE] [--tsa-url URL] [--memory-store]");
     std::println("  lake version");
@@ -53,7 +53,7 @@ int usage() {
                  "$LAKE_CONTROL_DB_URI)");
     std::println("  --store-root   customer and instance data root (default $LAKE_STORE_ROOT)");
     std::println("  --external-origin HTTP(S) origin for repository commands "
-                 "(default $LAKE_EXTERNAL_ORIGIN; unset hides commands)");
+                 "(default $LAKE_EXTERNAL_ORIGIN, then https://$LAKE_PUBLIC_HOST)");
     std::println("  --admin-token  bearer for /v1 capabilities and MCP tools "
                  "(default $LAKE_ADMIN_TOKEN)");
     std::println("  LAKE_REPLICATION_TOKEN bearer presented to peer lake instances "

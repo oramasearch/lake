@@ -31,9 +31,10 @@ attributes. Pages use the complete value for links and capability calls.
 The tree uses native `details` and `summary` elements for expansion, so the structure remains
 available without JavaScript. Clone and push examples use the repository sync URL documented in
 [`../api/sync.md`](../api/sync.md) and keep credentials in `LIQUID_TOKEN`, never in the URL.
-The URL comes only from `LAKE_EXTERNAL_ORIGIN` (or `--external-origin`), including its scheme and
-non-default port. Request and proxy headers cannot replace it. With no configured origin the panel
-explains the missing setting and omits commands. See
+The URL comes first from `LAKE_EXTERNAL_ORIGIN` (or `--external-origin`), including its scheme and
+non-default port. When that is unset, Lake uses `https://` plus `LAKE_PUBLIC_HOST`, the hostname
+already used for OAuth callbacks. Request and proxy headers cannot replace either value. With
+neither configured the panel explains the missing setting and omits commands. See
 [`../serving/configuration.md`](../serving/configuration.md) for validation and proxy configuration.
 
 The first block runs `liquid clone` into a new directory and then enters that directory. The

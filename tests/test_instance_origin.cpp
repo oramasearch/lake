@@ -95,11 +95,43 @@ TEST(InstanceOrigin, MissingConfigurationOmitsTerminalCommands) {
     lake::control::Repository repository;
     repository.id = "repository-id";
     repository.name = "example";
+    lake::api::ServerOptions options;
     const auto page = lake::api::web_ui_repository(repository, nullptr);
+    EXPECT_TRUE(lake::api::repository_external_origin(options).empty());
     EXPECT_NE(page.find("LAKE_EXTERNAL_ORIGIN"), std::string::npos);
     EXPECT_EQ(page.find("liquid clone "), std::string::npos);
     EXPECT_EQ(page.find("liquid push "), std::string::npos);
     EXPECT_EQ(page.find("lake.live"), std::string::npos);
+}
+
+TEST(InstanceOrigin, PublicHostSuppliesHttpsFallbackAndExplicitOriginWins) {
+    lake::control::Repository repository;
+    repository.id = "repository-id";
+    repository.name = "example";
+
+    lake::api::ServerOptions options;
+    options.public_host = "lake.example.internal";
+    lake::api::RepositoryHomeData data;
+    data.external_origin = lake::api::repository_external_origin(options);
+    EXPECT_EQ(data.external_origin, "https://lake.example.internal");
+    const auto fallback_page = lake::api::web_ui_repository(repository, nullptr, data);
+    EXPECT_NE(fallback_page.find("https://lake.example.internal/v1/repositories/repository-id"),
+              std::string::npos);
+
+    options.external_origin = "http://127.0.0.1:49127";
+    data.external_origin = lake::api::repository_external_origin(options);
+    EXPECT_EQ(data.external_origin, "http://127.0.0.1:49127");
+    const auto explicit_page = lake::api::web_ui_repository(repository, nullptr, data);
+    EXPECT_NE(explicit_page.find("http://127.0.0.1:49127/v1/repositories/repository-id"),
+              std::string::npos);
+    EXPECT_EQ(explicit_page.find("lake.example.internal"), std::string::npos);
+
+    options.external_origin.clear();
+    options.port = 0;
+    options.worker_coroutines = 1;
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    server.stop();
 }
 
 TEST(InstanceOrigin, CommandsPreserveOriginAndQuoteShellArguments) {

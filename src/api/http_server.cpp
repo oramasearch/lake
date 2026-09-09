@@ -9814,6 +9814,7 @@ bool ApiServer::start() {
         return false;
     }
 
+    impl.options.external_origin = repository_external_origin(impl.options);
     if (!impl.options.external_origin.empty()) {
         const auto origin = boost::urls::parse_uri(impl.options.external_origin);
         if (!origin ||
@@ -9824,8 +9825,9 @@ bool ApiServer::start() {
             (!origin->encoded_path().empty() && origin->encoded_path() != "/") ||
             (origin->has_port() && origin->port_number() == 0)) {
             impl.failure_reason =
-                "LAKE_EXTERNAL_ORIGIN must be an HTTP(S) origin with a host and optional "
-                "port (1-65535), without credentials, path, query or fragment";
+                "LAKE_EXTERNAL_ORIGIN or LAKE_PUBLIC_HOST must resolve to an HTTP(S) origin "
+                "with a host and optional port (1-65535), without credentials, path, query "
+                "or fragment";
             return false;
         }
         const std::string scheme =

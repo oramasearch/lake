@@ -13,7 +13,7 @@ same list. Every value below is read once at startup; SIGINT and SIGTERM stop th
 | `--control-db URI` | Postgres URI of the control plane (default `$LAKE_CONTROL_DB_URI`) |
 | `--memory-store` | an in-memory control plane for local demos and tests |
 | `--store-root PATH` | customer and instance data root (default `$LAKE_STORE_ROOT`) |
-| `--external-origin ORIGIN` | external HTTP(S) origin for repository terminal commands (default `$LAKE_EXTERNAL_ORIGIN`; unset hides commands) |
+| `--external-origin ORIGIN` | external HTTP(S) origin for repository terminal commands (default `$LAKE_EXTERNAL_ORIGIN`; otherwise derived from `$LAKE_PUBLIC_HOST`; hidden only when both are unset) |
 | `--admin-token TOKEN` | bearer for `/v1` capabilities and MCP tools (default `$LAKE_ADMIN_TOKEN`) |
 | `--identity-seed BASE64` | base64 Ed25519 seed for lake's TAAP identity (default `$LAKE_IDENTITY_SEED`) |
 | `--instance-kek VALUE` | key-encryption key for a generated identity and wrapped keys (default `$LAKE_INSTANCE_KEK`) |
@@ -52,14 +52,20 @@ case exits with status 2 and one line on stderr. The startup JSON event records 
 and `replication_token_set` as `yes` or `no`, never a token value
 ([`telemetry.md`](telemetry.md)).
 
-`LAKE_EXTERNAL_ORIGIN` is independent of `LAKE_PUBLIC_HOST` and the bind address. Set it to the
-origin customers use, for example `https://code.example.internal:8443` behind a TLS proxy or
-`http://127.0.0.1:49127` for a local instance. The scheme is lowercased and a trailing slash is
-accepted and removed. Startup rejects values with credentials, paths, queries, fragments, missing
-hosts, invalid ports, or a scheme other than HTTP(S). When it is unset, repository pages explain that an administrator must
-configure it and show no terminal commands. `Host`, `Forwarded`, and `X-Forwarded-*` headers never
-select the destination for a credential-bearing sync command. Changing this value requires a
-restart. No new API capability is introduced; clone and push use the existing sync registry.
+`LAKE_EXTERNAL_ORIGIN` is independent of the bind address. Set it to the origin customers use, for
+example `https://code.example.internal:8443` behind a TLS proxy or `http://127.0.0.1:49127` for a
+local instance. The scheme is lowercased and a trailing slash is accepted and removed. Startup
+rejects values with credentials, paths, queries, fragments, missing hosts, invalid ports, or a
+scheme other than HTTP(S).
+
+Repository terminal commands select their destination in this order: an explicit
+`--external-origin` or `LAKE_EXTERNAL_ORIGIN`; then `https://` plus `LAKE_PUBLIC_HOST`; then no
+destination. The fallback uses the same browser-facing hostname that OAuth callbacks use. It cannot
+express a non-default port or HTTP, so configure `LAKE_EXTERNAL_ORIGIN` for either. When both values
+are unset, repository pages explain the missing configuration and show no terminal commands.
+`Host`, `Forwarded`, and `X-Forwarded-*` headers never select the destination for a
+credential-bearing sync command. Changing either value requires a restart. No new API capability is
+introduced; clone and push use the existing sync registry.
 
 ## Build and test variables
 
