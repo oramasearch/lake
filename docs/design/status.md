@@ -18,7 +18,8 @@ capability behind that route. Contracts below remain the authoritative behavior 
 
 ## Observed deployment
 
-`Lake/prod` runs `oramasearch/lake:20260908b` with Postgres and a bound repository-store volume.
+`Lake/prod` runs `oramasearch/lake:20260908c` with Postgres and a bound repository-store volume;
+the service reports its own source revision at `GET /v1/server_info`.
 The schema ledger is applied through `0021_token_attenuation`; it contains no `0003` because no
 such migration was created. The `server_info`, OpenAPI, and transparency-configuration reads are
 exercised in deployment. See the [deployment record](../deployment/production-2026-09-08.md) for
