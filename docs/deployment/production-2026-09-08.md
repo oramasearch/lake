@@ -8,10 +8,10 @@ not claim that every advertised capability has completed an end-to-end deploymen
 | Field | Value |
 |---|---|
 | Lake | `prod` in namespace `lake` |
-| Artifact | `oramasearch/lake:20260908b` |
-| Image digest | `sha256:dfcff7dc6fffcfa41fa54876f3d20af6339d7413d9766537d81180b3623bd8b0` |
-| Source revision | `4e8216b60f3ac2a154c8e1438a5298f4f4c224d6` (`Present Lake's customer repository journey (#139)`) |
-| Source record | Maintained by the person who ran this build. This image predates image and API revision stamping, so the artifact cannot confirm the source revision. |
+| Artifact | `oramasearch/lake:20260908c` |
+| Image digest | `sha256:bcbef30ac66ec89cd28dd9bc68d87553cb4e605e068633fd0efd3db053b3a06f` |
+| Source revision | `9403194f4d7db225e9f909c94fcbd5d2aad64380` (`Record deployed Lake status and source provenance (#141)`) |
+| Source record | **Self-reported by the running service.** `GET /v1/server_info` returns `"revision":"9403194f4d7db225e9f909c94fcbd5d2aad64380"`, and the image carries `org.opencontainers.image.revision`. The predecessor `20260908b` (`4e8216b`) predated stamping and its source was recorded by hand; from `20260908c` onward the artifact answers for itself. |
 | Schema asset | `sha256:9aec095673cf`, status `Applied`, guard `token_attenuation_guard` |
 
 The deployment has one ready Lake replica and a bound `lake-prod-store` volume mounted at
@@ -64,17 +64,24 @@ curl -sS --fail-with-body "$base/v1/transparency_log_configuration" \
   | jq '{ok, value: {mode: .value.mode, witness_threshold: .value.witness_threshold, witnesses: .value.witnesses}}'
 ```
 
-On `20260908b`, the first response has no `revision` field because it predates revision stamping;
-compare its image with this record and treat the listed source revision as the maintained build
-record. Images built by the updated workflow include the full revision in both the OCI label
-`org.opencontainers.image.revision` and `server_info`, so one `server_info` response can be
-compared directly with a deployment record. `org.opencontainers.image.created` records build time.
+From `20260908c` onward the first response carries a `revision` field, so one `server_info`
+request answers "which source is running" without consulting this file:
+
+```json
+{"api":"v1","name":"lake","node":"prod","revision":"9403194f4d7db225e9f909c94fcbd5d2aad64380",
+ "store":"postgres","version":"0.0.1"}
+```
+
+The same revision is on the image as `org.opencontainers.image.revision`, and
+`org.opencontainers.image.created` records build time. The predecessor `20260908b` predates
+stamping: its response has no `revision` field, and its source (`4e8216b`) is a maintained build
+record rather than something the artifact can confirm.
 
 ## Evidence commands
 
 ```text
 $ kubectl -n lake get deploy lake-prod -o jsonpath='{.spec.template.spec.containers[0].image}{"\\n"}'
-oramasearch/lake:20260908b
+oramasearch/lake:20260908c
 
 $ kubectl -n lake exec lake-prod-controldb-1 -c postgres -- psql -U postgres -d lake -Atc 'SELECT version FROM schema_migrations ORDER BY version'
 0001_identity_and_customers
