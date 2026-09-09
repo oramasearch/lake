@@ -66,7 +66,7 @@ routes and their exact-byte integration coverage.
 
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
-| `server_info` | read, **no auth** | — | `{name, node, version, api, store}` | — |
+| `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store}`; `revision` is the embedded full source commit or `unknown` | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
 | `list_users` | read | `limit` (≤1000, default 100) | `{items: [user]}` | [customers.md](customers.md) |
 | `get_user` | read | `id` | user | [customers.md](customers.md) |
 | `create_user` | action | `taap_id?`, `email?`, `display_name?` | user | [customers.md](customers.md) |

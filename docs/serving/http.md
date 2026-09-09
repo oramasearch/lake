@@ -24,7 +24,7 @@ out) and are the unit-tested surface.
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes; see [`telemetry.md`](telemetry.md) |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
-| `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
+| `GET /v1/server_info` | `{ok, value: {name, node, version, revision, api, store}}`, no auth; `revision` is the full source commit embedded at image build time, or `unknown` for a build that did not supply it |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
 | `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
 | `POST /repository/create` | authenticated form adapter for `create_repository`; creates a private repository and redirects to its home |

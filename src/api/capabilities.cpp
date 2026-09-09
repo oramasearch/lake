@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/version.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1505,6 +1506,7 @@ void register_server_info(Registry& registry, std::string_view version) {
                            {{"name", {{"type", "string"}}},
                             {"node", {{"type", "string"}}},
                             {"version", {{"type", "string"}}},
+                            {"revision", {{"type", "string"}}},
                             {"api", {{"type", "string"}}},
                             {"store", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Read,
@@ -1516,6 +1518,7 @@ void register_server_info(Registry& registry, std::string_view version) {
             return ApiResult::success({{"name", "lake"},
                                        {"node", ctx.node_name},
                                        {"version", version_string},
+                                       {"revision", build_revision_string()},
                                        {"api", "v1"},
                                        {"store", ctx.store ? ctx.store->kind() : "none"}});
         }});

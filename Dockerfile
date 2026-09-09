@@ -60,10 +60,12 @@ COPY --from=zetta-source . /opt/zetta
 # Tests off (skips the GoogleTest fetch and the test targets). FetchContent pulls Boost 1.91 into
 # build/_deps at configure time (needs network). Build uses all cores.
 ARG LAKE_ZETTA_SOURCE_DIR=/opt/zetta
+ARG LAKE_BUILD_REVISION=unknown
 RUN cmake -S . -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DLAKE_BUILD_TESTS=OFF \
       -DLAKE_ZETTA_SOURCE_DIR="${LAKE_ZETTA_SOURCE_DIR}" \
+      -DLAKE_BUILD_REVISION="${LAKE_BUILD_REVISION}" \
       -DCMAKE_C_COMPILER=clang-19 \
       -DCMAKE_CXX_COMPILER=clang++-19 \
       -DOPENSSL_ROOT_DIR=/opt/openssl \
@@ -73,6 +75,10 @@ RUN cmake -S . -B build -G Ninja \
 
 # ---------- runtime stage ----------
 FROM ubuntu:24.04 AS runtime
+ARG LAKE_BUILD_REVISION=unknown
+ARG LAKE_BUILD_CREATED=unknown
+LABEL org.opencontainers.image.revision="${LAKE_BUILD_REVISION}" \
+      org.opencontainers.image.created="${LAKE_BUILD_CREATED}"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 libstdc++6 libpq5 libfuse3-3 ca-certificates \

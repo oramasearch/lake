@@ -24,7 +24,10 @@ git push origin <tag>
 The [`image` workflow](../../.github/workflows/image.yml) checks out the pinned bridge source,
 supplies its Zetta module as the named build context, builds `linux/amd64`, and publishes
 `oramasearch/lake:<tag>` plus `oramasearch/lake:sha-<short-sha>`. It rejects `latest`; `latest`
-and workstation-built deployment images are not used.
+and workstation-built deployment images are not used. The workflow supplies the full checked-out
+source revision and a UTC creation time as build arguments. The runtime image stamps them as
+`org.opencontainers.image.revision` and `org.opencontainers.image.created`; the binary embeds the
+revision and returns it in `GET /v1/server_info`.
 
 Wait for the workflow to succeed before updating `Lake.spec.image`; the deployment runbook is in
 [`../deployment/aks.md`](../deployment/aks.md).

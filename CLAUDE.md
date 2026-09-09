@@ -8,6 +8,22 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
+`Lake/prod` serves the Lake API from `oramasearch/lake:20260908b` on AKS. The dated
+[`docs/deployment/production-2026-09-08.md`](docs/deployment/production-2026-09-08.md) record is
+the authoritative statement of its artifact, source revision, schema, observed public routes, and
+smoke check. [`docs/design/status.md`](docs/design/status.md) distinguishes implemented,
+exercised locally, deployed, and exercised-in-deployment behavior; do not infer an end-to-end
+deployment exercise from a route's presence in OpenAPI.
+
+Every future deployment image receives OCI revision and creation labels. The binary reports the
+same embedded revision through `GET /v1/server_info`; details are in
+[`docs/build/container-image.md`](docs/build/container-image.md).
+
+## Historical status — superseded 2026-09-08
+
+The following was the prior source-tree status record. Its production claims are retained only as
+historical context and are superseded by the dated deployment record above.
+
 **The control surface serves, in production.** `Lake/prod` on AKS (3 replicas, image
 `oramasearch/lake:20260902c`) runs: one capability registry rendered as REST `/v1`, OpenAPI
 (`/v1/openapi.json`) and MCP (`POST /mcp`); users, organizations, customers and repositories over
