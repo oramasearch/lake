@@ -47,8 +47,9 @@ skip when `LAKE_TEST_DB_URI` is absent), `lake-postgres-tests` (the focused cont
 `ctest --test-dir build -N` lists the discovered cases.
 
 Postgres-backed tests connect only through `LAKE_TEST_DB_URI` and need a `LAKE_INSTANCE_KEK`.
-They neither create nor drop the database, so create one against a local Postgres, apply
-`db/schema.sql`, and run the suite with both variables set:
+The configured role needs `CREATEDB`: the test runner creates a private database per case,
+loads `db/schema.sql`, and drops only that database. Create a base connection database against
+local Postgres and run the suite with both variables set:
 
 ```sh
 createdb lake_test
@@ -58,7 +59,7 @@ LAKE_TEST_DB_URI="postgresql://$USER@127.0.0.1:5432/lake_test" \
   ctest --test-dir build --output-on-failure
 ```
 
-Concurrent suites from separate worktrees need distinct databases and KEK values; see
+Tests use the shared per-test database fixture and independent KEK values; see
 [`testing.md`](testing.md). The Docker-based equivalent that CI uses, and the `huggingface_hub`
 virtual environment for the model-client integration, are in [`ci.md`](ci.md).
 

@@ -1,3 +1,4 @@
+#include "postgres_fixture.hpp"
 #include <algorithm>
 #include <array>
 #include <barrier>
@@ -76,7 +77,7 @@ std::string signed_identity_document(std::string_view label) {
 class PostgresProvisioning : public testing::Test {
 protected:
     void SetUp() override {
-        const char* configured_uri = std::getenv("LAKE_TEST_DB_URI");
+        const char* configured_uri = lake::test::postgres_uri();
         if (configured_uri == nullptr || *configured_uri == '\0') {
             GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
         }
@@ -261,7 +262,7 @@ TEST_F(PostgresProvisioning, MalformedDocumentExplainsRecoveryWithoutCreatingUse
 }
 
 TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -392,7 +393,7 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
 }
 
 TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -542,7 +543,7 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
 }
 
 TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -643,7 +644,7 @@ TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
 }
 
 TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }

@@ -6,9 +6,11 @@ children. Fixed child names are safe; fixed names directly below the system temp
 The helper honors the platform temporary-root selection, including `TMPDIR`, reports an explicit
 error when that root is not writable, and removes the process directory at exit.
 
-Postgres-backed tests use `LAKE_TEST_DB_URI` and do not create or drop its database. A caller that
-starts concurrent suites must provide a freshly created, schema-loaded database with a unique name
-to each test process.
+Postgres-backed tests obtain connections through `postgres_fixture.hpp`. `test_main.cpp` creates
+and schema-loads a fresh database on first use in each test and drops it after fixture destruction.
+`LAKE_TEST_DB_URI` supplies connection settings and a role with `CREATEDB`; its database remains
+untouched. Each test receives a random `LAKE_INSTANCE_KEK`. Ownership is documented in
+[`testing.md`](../docs/build/testing.md).
 
 The `scenarios/` cases combine those production Postgres stores with an in-process Lake, public
 HTTP routes, and public client libraries. The drive scenario signs users up, synchronizes and

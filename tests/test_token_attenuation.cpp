@@ -1,4 +1,5 @@
 #include "personal_customer_test_support.hpp"
+#include "postgres_fixture.hpp"
 
 #include <gtest/gtest.h>
 
@@ -112,7 +113,7 @@ protected:
         postgres_ = GetParam().starts_with("Postgres");
         mcp_ = GetParam().ends_with("MCP");
         if (postgres_) {
-            const char* uri = std::getenv("LAKE_TEST_DB_URI");
+            const char* uri = lake::test::postgres_uri();
             if (!uri || !*uri) {
                 GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
             }
@@ -130,8 +131,7 @@ protected:
             tx.exec(schema_sql);
             tx.commit();
             database_uri_ = uri;
-            database_uri_ += database_uri_.contains('?') ? "&" : "?";
-            database_uri_ += "options=-csearch_path%3D" + schema_;
+            database_uri_ += " options='-csearch_path=" + schema_ + "'";
             store_ = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
         } else {
             store_ = std::make_shared<lake::control::InMemoryStore>();
@@ -172,7 +172,7 @@ protected:
         server_.reset();
         store_.reset();
         if (postgres_) {
-            pqxx::connection connection(std::getenv("LAKE_TEST_DB_URI"));
+            pqxx::connection connection(lake::test::postgres_uri());
             pqxx::work tx(connection);
             tx.exec("SET client_min_messages TO warning");
             tx.exec("DROP SCHEMA " + tx.quote_name(schema_) + " CASCADE");

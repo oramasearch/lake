@@ -1,4 +1,5 @@
 #include "personal_customer_test_support.hpp"
+#include "postgres_fixture.hpp"
 
 #include <gtest/gtest.h>
 
@@ -147,7 +148,7 @@ json token_claims(const std::string& token) {
 }
 
 TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }

@@ -1,4 +1,5 @@
 #include "personal_customer_test_support.hpp"
+#include "postgres_fixture.hpp"
 
 #include <gtest/gtest.h>
 
@@ -1830,7 +1831,7 @@ TEST(Audit, IdentityRotatesAndRetentionFloorIsEnforced) {
 }
 
 TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -3876,7 +3877,7 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
 }
 
 TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -4084,7 +4085,7 @@ TEST(SyncHttp, PushWithoutWriteAccessIsRejectedAndAudited) {
 }
 
 TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -4173,7 +4174,7 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
 }
 
 TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }

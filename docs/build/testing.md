@@ -8,9 +8,25 @@ exit. The helper uses `std::filesystem::temp_directory_path`, so platform select
 remain effective. Failure to create the process directory reports the selected root and the
 filesystem error.
 
-Postgres-backed tests connect only through `LAKE_TEST_DB_URI`. They do not create or drop the named
-database. Concurrent suites therefore receive distinct, freshly created databases with
-`db/schema.sql` applied and distinct random `LAKE_INSTANCE_KEK` values.
+Postgres-backed tests call `lake::test::postgres_uri()` from `tests/postgres_fixture.hpp`.
+The shared GoogleTest runner lazily creates a UUID-named database from `template0`, loads
+`db/schema.sql`, and drops that database after the test fixture is destroyed. Repeated calls in
+one test return the same connection string, including when the test restarts a server or opens a
+second store. A missing `LAKE_TEST_DB_URI` returns null so existing skip behavior is preserved.
+
+`LAKE_TEST_DB_URI` supplies the administrative connection settings. Its database is never
+modified, copied, or dropped. Its role needs `CREATEDB`. The runner generates a fresh random
+`LAKE_INSTANCE_KEK` per test; fixtures with explicit cryptographic test keys may retain those
+keys within their private database. There is no cross-test persisted identity. Database creation,
+schema loading and cleanup errors fail the test; they do not turn into skips. A process killed
+before teardown can leave its UUID-named database behind; remove only databases whose ownership
+you have established.
+
+We chose per-test databases because isolation covers every append-only table, sequences and
+advisory locks automatically. A test cannot accidentally omit a tenant or request filter on a
+write and contaminate another case. The implementation also works when several tests run in one
+executable, with shuffle or repeat, rather than relying on CTest's usual one-case-per-process
+execution. Existing HTTP/token fixtures retain their nested schemas inside the private database.
 
 ## Why
 

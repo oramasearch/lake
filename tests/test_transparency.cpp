@@ -1,3 +1,4 @@
+#include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -1674,7 +1675,7 @@ TEST(TransparencyScenario, ExportedBundleVerifiesOfflineAndSplitViewIsDetected) 
 }
 
 TEST(PostgresTransparency, LiveCheckpointCarriesAuthenticatedMonotonicTime) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -1769,7 +1770,7 @@ TEST(PostgresTransparency, LiveCheckpointCarriesAuthenticatedMonotonicTime) {
 }
 
 TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
