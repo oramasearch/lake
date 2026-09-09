@@ -52,7 +52,9 @@ jobs:
             exit 1
           fi
           echo "release=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -70,6 +72,9 @@ jobs:
           build-contexts: zetta_source=${{ github.workspace }}/_external/zetta-bridge/modules/zetta
           push: true
           platforms: linux/amd64
+          build-args: |
+            LAKE_BUILD_REVISION=${{ steps.image_tags.outputs.revision }}
+            LAKE_BUILD_CREATED=${{ steps.image_tags.outputs.created }}
           tags: |
             oramasearch/lake:${{ steps.image_tags.outputs.release }}
             oramasearch/lake:sha-${{ steps.image_tags.outputs.short_sha }}

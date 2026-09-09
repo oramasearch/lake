@@ -249,6 +249,7 @@ int main(int argc, char** argv) {
         nlohmann::json{
             {"event", "startup"},
             {"version", lake::version_string()},
+            {"revision", lake::build_revision_string()},
             {"listen", "http://" + opts.listen_address + ":" + std::to_string(server.port())},
             {"node", opts.node_name},
             {"store", store_kind},

@@ -51,6 +51,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/telemetry/metrics.hpp"
+#include "lake/version.hpp"
 #include "temporary_directory.hpp"
 
 using nlohmann::json;
@@ -1261,6 +1262,7 @@ TEST(Registry, ServerInfoNeedsNoAuth) {
     ASSERT_TRUE(r.ok);
     EXPECT_EQ(r.value["name"], "lake");
     EXPECT_EQ(r.value["store"], "memory");
+    EXPECT_EQ(r.value["revision"], lake::build_revision_string());
 }
 
 TEST(Telemetry, PrometheusCounterAndHistogram) {

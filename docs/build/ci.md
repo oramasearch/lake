@@ -93,6 +93,12 @@ oramasearch/lake:sha-<short-sha>
 `latest` is rejected. Git tags used for images must also be valid Docker tag strings. Deployments
 reference the Git-tag image; the SHA tag provides a second immutable source identifier.
 
+The workflow passes the complete checked-out commit and a UTC creation timestamp to the Dockerfile.
+The resulting OCI image labels are `org.opencontainers.image.revision` and
+`org.opencontainers.image.created`. Lake embeds the same revision in `server_info`; a deployment
+record can therefore compare its source revision with one public API response. Images published
+before this change lack those fields and need a clearly marked manually maintained source record.
+
 The Linux/amd64 image is verified by this native CI worker or the AKS builder after
 `ORAMA_SUBMODULES_TOKEN` is available. Apple Silicon developer machines do not need to emulate the
 amd64 image recipe; that emulation is not a release proof.
