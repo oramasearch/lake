@@ -52,10 +52,12 @@ is required for this workflow.
 
 ## Executable browser-to-terminal proof
 
-Build the pinned Liquid CLI separately so Lake continues to consume its library-only submodule:
+Build the pinned Liquid CLI separately so Lake continues to consume it as a library only.
+Liquid is not a submodule of this repository: it is a sibling module of `liquid-bridge`, and
+`LAKE_LIQUID_SOURCE_DIR` points at it (default `../liquid`).
 
 ```sh
-cmake -S modules/liquid -B build-liquid -G Ninja -DLIQUID_BUILD_TESTS=OFF
+cmake -S ../liquid -B build-liquid -G Ninja -DLIQUID_BUILD_TESTS=OFF
 cmake --build build-liquid --target liquid-cli -j 6
 ```
 

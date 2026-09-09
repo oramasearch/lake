@@ -55,8 +55,8 @@ add_custom_command(
   VERBATIM)
 
 # -----------------------------------------------------------------------------
-# Vendored modules — libliquid is library-only and provides Capy, Corosio and
-# HTTP to its consumers. Beast2 remains lake's Zetta-shaped serving stack.
+# Sibling and vendored modules — libliquid is library-only and provides Capy, Corosio
+# and HTTP to its consumers. Beast2 remains lake's Zetta-shaped serving stack.
 # Order matters: OpenSSL → Boost core libs → liquid → beast2. liquid owns the
 # one HTTP target shared by its sync client and lake's server.
 # -----------------------------------------------------------------------------
@@ -75,9 +75,20 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(boost_core_libs)
+# liquid is not vendored here. One pin, in liquid-bridge, is the single source of truth;
+# a second submodule pointer in this repo could disagree with it. The default is the
+# sibling checkout in that bridge (../liquid); CI and standalone builds pass the path.
+set(LAKE_LIQUID_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../liquid"
+    CACHE PATH "Path to the liquid source tree providing libliquid")
+if(NOT EXISTS "${LAKE_LIQUID_SOURCE_DIR}/CMakeLists.txt")
+  message(FATAL_ERROR
+    "LAKE_LIQUID_SOURCE_DIR does not contain a liquid source tree: ${LAKE_LIQUID_SOURCE_DIR}\n"
+    "liquid is a sibling module of liquid-bridge, not a submodule of lake. Build lake from the "
+    "bridge checkout, or pass -DLAKE_LIQUID_SOURCE_DIR=<path to oramasearch/liquid>.")
+endif()
 set(LIQUID_BUILD_CLI OFF CACHE BOOL "" FORCE)
 set(LIQUID_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-add_subdirectory(modules/liquid EXCLUDE_FROM_ALL)
+add_subdirectory("${LAKE_LIQUID_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_liquid" EXCLUDE_FROM_ALL)
 if(BUILD_SHARED_LIBS AND LAKE_BUILD_TESTS)
   # Existing Lake tests exercise libliquid's internal conformance helpers. A nested dependency
   # selects hidden C++ visibility globally, so expose those helpers only in shared test builds.
@@ -143,7 +154,7 @@ add_library(lake-core STATIC
   src/control/pki.cpp
   src/control/platform.cpp
   src/control/zetta_control.cpp
-  modules/liquid/src/scan/detectors.cpp
+  "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
   src/api/web_ui.cpp
   src/api/oauth.cpp
@@ -177,7 +188,8 @@ add_library(lake-core STATIC
   src/transparency/timestamps.cpp
   src/telemetry/metrics.cpp
 )
-target_include_directories(lake-core PUBLIC include PRIVATE modules/liquid modules/liquid/src)
+target_include_directories(lake-core PUBLIC include
+  PRIVATE "${LAKE_LIQUID_SOURCE_DIR}" "${LAKE_LIQUID_SOURCE_DIR}/src")
 target_compile_features(lake-core PUBLIC cxx_std_26)
 target_compile_definitions(lake-core PRIVATE LAKE_BUILD_REVISION=\"${LAKE_BUILD_REVISION}\")
 target_link_libraries(lake-core

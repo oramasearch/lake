@@ -33,6 +33,17 @@ jobs:
           submodules: recursive
           token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
 
+      - name: Check out the liquid source
+        # liquid is a sibling module of liquid-bridge, not a submodule of lake. The bridge holds
+        # the one pin; bump this ref when the bridge bumps liquid.
+        uses: actions/checkout@v4
+        with:
+          repository: oramasearch/liquid
+          ref: aa60e8788b883f3e041706741650277fd5befdcb
+          path: _external/liquid
+          submodules: recursive
+          token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
+
       - name: Resolve image tags
         id: image_tags
         env:
@@ -69,7 +80,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          build-contexts: zetta_source=${{ github.workspace }}/_external/zetta-bridge/modules/zetta
+          build-contexts: |
+            zetta_source=${{ github.workspace }}/_external/zetta-bridge/modules/zetta
+            liquid_source=${{ github.workspace }}/_external/liquid
           push: true
           platforms: linux/amd64
           build-args: |
