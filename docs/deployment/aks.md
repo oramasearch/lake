@@ -1,10 +1,15 @@
 # `Lake/prod` on AKS
 
-The production lake instance runs on the sandbox AKS cluster `orama-production-cluster-01`,
-deployed by `oramasearch/orama-operator` from one `Lake` resource. This page is the current
-state and the runbook; the CR's field reference is the operator's `docs/crd-reference.md`.
+This page contains the AKS runbook. The current production facts are in the dated
+[2026-09-08 deployment record](production-2026-09-08.md), which supersedes the historical
+inventory below. The production lake instance runs on the sandbox AKS cluster
+`orama-production-cluster-01`, deployed by `oramasearch/orama-operator` from one `Lake` resource.
+The CR field reference is the operator's `docs/crd-reference.md`.
 
-## What exists (2026-09-02)
+## Historical inventory — 2026-09-02
+
+This snapshot is retained to explain earlier operator assumptions. It does not describe the
+current deployment; use the 2026-09-08 record above.
 
 | | |
 |---|---|
