@@ -1426,6 +1426,27 @@ Session session_of(const pqxx::row& r) {
                    r[12].as<std::string>()};
 }
 
+// ls1.<public UUID>.<256-bit random secret>; reject malformed input before opening a transaction.
+std::optional<std::string> session_lookup_id(std::string_view bearer) {
+    if (bearer.size() != 105 || !bearer.starts_with("ls1.") || bearer[40] != '.') {
+        return std::nullopt;
+    }
+    for (std::size_t index = 4; index < bearer.size(); ++index) {
+        if (index == 40) {
+            continue;
+        }
+        if (index == 12 || index == 17 || index == 22 || index == 27) {
+            if (bearer[index] != '-') {
+                return std::nullopt;
+            }
+        } else if (!((bearer[index] >= '0' && bearer[index] <= '9') ||
+                     (bearer[index] >= 'a' && bearer[index] <= 'f'))) {
+            return std::nullopt;
+        }
+    }
+    return std::string(bearer.substr(4, 36));
+}
+
 bool active_session_lineage(pqxx::work& tx,
                             const std::string& session_id,
                             const std::string& user_id,
@@ -4548,46 +4569,57 @@ public:
         });
     }
     Result<Principal> context_for(const std::string& secret) override {
-        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
-            const pqxx::result rows =
-                tx.exec(std::string("SELECT ") + qualified_session_columns +
-                        ", COALESCE(users.taap_id, ''), secret_hash, "
-                        "floor(extract(epoch FROM sessions.expires_at))::bigint FROM sessions "
-                        "LEFT JOIN devices ON devices.id = sessions.device_id "
-                        "LEFT JOIN users ON users.id = sessions.user_id "
-                        "WHERE sessions.revoked_at IS NULL AND (sessions.expires_at IS NULL "
-                        "OR sessions.expires_at > now()) AND (devices.id IS NULL OR "
-                        "devices.revoked_at IS NULL) AND (sessions.pool_id = 'lake' OR EXISTS "
-                        "(SELECT 1 FROM auth_applications JOIN auth_app_users ON "
-                        "auth_app_users.application_id = auth_applications.id WHERE "
-                        "auth_applications.pool_id = sessions.pool_id AND "
-                        "auth_app_users.user_id = sessions.user_id AND "
-                        "auth_app_users.status = 'active'))");
-            for (const pqxx::row& row : rows) {
-                const std::string secret_hash = row[14].as<std::string>();
-                if (!identity_crypto::verify_secret(secret_hash, secret)) {
-                    continue;
-                }
-                const Session session = session_of(row);
-                if (!session.parent_session_id.empty() &&
-                    !active_session_lineage(tx, session.id, session.user_id, session.pool_id)) {
-                    return std::unexpected(
-                        StoreError{"unauthorized", "issuing session is not active"});
-                }
-                tx.exec_params("UPDATE sessions SET last_used_at = now() WHERE id = $1::uuid",
-                               session.id);
-                return Principal{session.user_id,
-                                 row[13].as<std::string>(),
-                                 session.id,
-                                 session.device_id,
-                                 session.pool_id,
-                                 session.kind,
-                                 session.scopes,
-                                 row[15].is_null()
-                                     ? std::nullopt
-                                     : std::optional<std::int64_t>(row[15].as<std::int64_t>())};
-            }
+        const auto lookup_id = session_lookup_id(secret);
+        if (!lookup_id) {
             return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        if (digest.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not hash session credential"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + qualified_session_columns +
+                    ", COALESCE(users.taap_id, ''), secret_hash, "
+                    "floor(extract(epoch FROM sessions.expires_at))::bigint FROM sessions "
+                    "LEFT JOIN devices ON devices.id = sessions.device_id "
+                    "LEFT JOIN users ON users.id = sessions.user_id "
+                    "WHERE sessions.lookup_id = $1::uuid AND sessions.revoked_at IS NULL "
+                    "AND (sessions.expires_at IS NULL OR sessions.expires_at > now()) "
+                    "AND (devices.id IS NULL OR devices.revoked_at IS NULL) "
+                    "AND (sessions.pool_id = 'lake' OR EXISTS "
+                    "(SELECT 1 FROM auth_applications JOIN auth_app_users ON "
+                    "auth_app_users.application_id = auth_applications.id WHERE "
+                    "auth_applications.pool_id = sessions.pool_id AND "
+                    "auth_app_users.user_id = sessions.user_id AND "
+                    "auth_app_users.status = 'active'))",
+                *lookup_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            const auto& row = rows.front();
+            const std::string expected = row[14].as<std::string>();
+            if (expected.size() != digest.size() ||
+                CRYPTO_memcmp(expected.data(), digest.data(), digest.size()) != 0) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            const Session session = session_of(row);
+            if (!session.parent_session_id.empty() &&
+                !active_session_lineage(tx, session.id, session.user_id, session.pool_id)) {
+                return std::unexpected(StoreError{"unauthorized", "issuing session is not active"});
+            }
+            tx.exec_params("UPDATE sessions SET last_used_at = now() WHERE id = $1::uuid",
+                           session.id);
+            return Principal{session.user_id,
+                             row[13].as<std::string>(),
+                             session.id,
+                             session.device_id,
+                             session.pool_id,
+                             session.kind,
+                             session.scopes,
+                             row[15].is_null()
+                                 ? std::nullopt
+                                 : std::optional<std::int64_t>(row[15].as<std::int64_t>())};
         });
     }
 
@@ -7287,9 +7319,14 @@ private:
                                         const std::string& reason,
                                         int lifetime_seconds,
                                         const std::string& parent_session_id = {}) {
-        const std::string secret = identity_crypto::random_secret();
-        const std::string secret_hash = identity_crypto::hash_secret(secret);
-        if (secret.empty() || secret_hash.empty()) {
+        const std::string random = identity_crypto::random_secret();
+        if (random.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not create session secret"});
+        }
+        const std::string lookup_id = new_uuid_v4();
+        const std::string secret = "ls1." + lookup_id + "." + random;
+        const std::string secret_hash = identity_crypto::sha256_hex(secret);
+        if (secret_hash.empty()) {
             return std::unexpected(
                 StoreError{"store_error", "could not derive session credential"});
         }
@@ -7305,13 +7342,14 @@ private:
         const pqxx::result sessions = tx.exec_params(
             std::string("INSERT INTO sessions (user_id, device_id, pool_id, kind, "
                         "name, secret_hash, ") +
-                "scopes, reason, expires_at, parent_session_id) VALUES ($1::uuid, $2::uuid, $3, "
+                "scopes, reason, expires_at, parent_session_id, lookup_id) VALUES ($1::uuid, "
+                "$2::uuid, $3, "
                 "$4, "
                 "$5, $6, "
                 "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, "
                 "LEAST(CASE WHEN $9 > 0 THEN now() + make_interval(secs => $9) ELSE NULL "
                 "END, (SELECT expires_at FROM sessions WHERE id = $10::uuid)), "
-                "$10::uuid) RETURNING " +
+                "$10::uuid, $11::uuid) RETURNING " +
                 session_columns,
             user_id,
             nullable(device_id),
@@ -7322,7 +7360,8 @@ private:
             nlohmann::json(scopes).dump(),
             reason,
             lifetime_seconds,
-            nullable(parent_session_id));
+            nullable(parent_session_id),
+            lookup_id);
         const Session session = session_of(sessions[0]);
         return IssuedSession{session, secret};
     }

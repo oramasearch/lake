@@ -323,8 +323,8 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation')" \
-  -c "SELECT to_regclass('token_attenuation_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup')" \
+  -c "SELECT to_regclass('session_lookup_guard')"
 ```
 
 ## Token attenuation migration
@@ -341,3 +341,25 @@ copy is a separate repository change; this issue’s worktree contains only Lake
 full PostgreSQL-backed static and shared suites and the token derivation tests described in
 [`../api/identity.md`](../api/identity.md). When changing ancestry storage, keep both stores,
 `Session`/`Principal`, and the common authenticated request context aligned.
+
+## Session lookup migration
+
+`0022_session_lookup` adds nullable `sessions.lookup_id uuid` and the unique B-tree index
+`sessions_lookup_id_idx`. New credentials have a random public UUID plus a 256-bit random secret;
+`secret_hash` holds SHA-256 of the complete versioned bearer, never the bearer itself. A selector
+lookup returns at most one row before constant-time digest verification and live authorization
+checks. The existing primary-key and parent indexes serve the derived token's ancestor checks.
+
+Pre-migration rows have no lookup UUID and cannot be backfilled from their Argon2 hashes. The
+migration revokes those rows once, guarded by its `schema_migrations` entry. Users sign in again
+and recreate API/static tokens. Keeping old rows preserves history; their null lookup values are
+never queried during authentication. Reapplying the schema does not revoke new credentials.
+An older binary can still write a null lookup, but the new binary refuses it without scanning.
+Coordinate migration and rollout so every serving replica understands the new format.
+
+The new deployment guard is `session_lookup_guard`. Before deployment, the operator must vendor
+the complete schema byte-for-byte, select this guard and apply the migration. That operator
+change is deliberately outside this Lake worktree. Verification uses the full PostgreSQL-backed
+static/shared suites, including `PostgresSessionAuthentication.*`; see
+[authentication](../api/auth.md) and [measurement proof](../build/session-authentication.md).
+Changes to the lookup or digest format must update this migration contract and those regressions.

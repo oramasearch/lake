@@ -6,3 +6,6 @@ token ancestry and the one-use invalidation of legacy API/static tokens. See
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
+
+[schema.md](schema.md#session-lookup-migration) documents the indexed session selector, stored digest,
+legacy-session invalidation and required operator handoff for `0022_session_lookup`.
