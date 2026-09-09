@@ -12,10 +12,11 @@ caller-owned liquid store.
 
 ## Repository URL and requests
 
-The URL passed to `liquid push` or `liquid pull` identifies one repository. For lake it is:
+The URL passed to `liquid clone`, `liquid push` or `liquid pull` identifies one repository. For
+lake it is:
 
 ```text
-https://<lake>/v1/repositories/<repository-id>
+<configured-external-origin>/v1/repositories/<repository-id>
 ```
 
 Clients append the paths below. Requests and responses use
@@ -41,6 +42,12 @@ objects the receiver reports absent.
 
 An optional `Authorization: Bearer <token>` header carries lake authentication. The CLI reads the
 token from `LIQUID_TOKEN`; credentials never appear in the URL or output.
+The repository page uses the full `LAKE_EXTERNAL_ORIGIN` configuration for its examples; see
+[`../serving/configuration.md`](../serving/configuration.md). Obtain a token from that same instance.
+Use `liquid clone <url> ./checkout` for an initial materialized checkout, then `cd ./checkout`.
+`liquid pull` and `liquid push` require an existing local Liquid repository in the current
+directory. The native browser-to-terminal proof and private runbook are in
+[`../deployment/private-install.md`](../deployment/private-install.md).
 
 An offline publisher also sends `Liquid-Offline-Grant: <grant-uuid>`. The grant is context for
 publication reauthorization, never a replacement for the ordinary credential. Push verifies its

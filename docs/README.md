@@ -35,3 +35,13 @@ to the detailed contracts and records.
 
 The product specification is in `oramasearch/liquid` `docs/features/18-lake-service.md`; the
 cross-repository plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
+cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
+
+[api/provisioning.md](api/provisioning.md) specifies personal customer sign-up;
+[ui/sign-up-walkthrough.md](ui/sign-up-walkthrough.md) records the first-repository proof.
+
+[ui/front-door.md](ui/front-door.md) records the customer landing copy, viewer navigation,
+authentication routing, and browser proof.
+
+[deployment/private-install.md](deployment/private-install.md) configures an instance's external
+origin and proves its displayed clone/push commands with a native browser and Liquid CLI.

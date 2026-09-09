@@ -37,6 +37,9 @@ struct ServerOptions {
     std::string node_name = "lake";
     // Public hostname used in OAuth callbacks and as the WebAuthn RP ID.
     std::string public_host;
+    // Configured browser-facing HTTP(S) origin, including any non-default port.
+    // Empty suppresses repository terminal instructions; request headers never supply it.
+    std::string external_origin;
     // The control-plane store the capabilities call; null = none configured
     // (capabilities answer store_unavailable). Owned by the caller for the
     // server's lifetime.

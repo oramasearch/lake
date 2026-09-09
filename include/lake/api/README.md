@@ -1,5 +1,11 @@
 # Public API types
 
+`ServerOptions::external_origin` is trusted instance configuration for repository terminal
+instructions. The HTTP adapter validates it and supplies it to `RepositoryHomeData`; an empty
+value omits commands. It is independent of identity/platform `public_host`. See
+[configuration.md](../../../docs/serving/configuration.md) and
+[forge.md](../../../docs/ui/forge.md).
+
 `ApiContext` carries trusted issuer session ID, kind, scopes and expiry from the common credential
 resolver. Token request JSON cannot supply those fields. Keep HTTP and PostgreSQL types out of
 these public headers.

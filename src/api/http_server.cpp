@@ -62,6 +62,7 @@
 #include <boost/http/server/cors.hpp>
 #include <boost/http/server/router.hpp>
 #include <boost/json.hpp>
+#include <boost/url.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -7078,6 +7079,7 @@ struct ApiServer::Impl {
             return serve_repository_page_error(route, ctx, refs_result);
         }
         RepositoryHomeData data;
+        data.external_origin = options.external_origin;
         for (const nlohmann::json& value : refs_result.value.at("items")) {
             data.refs.push_back(repository_content_ref_from_json(value));
         }
@@ -9810,6 +9812,26 @@ bool ApiServer::start() {
         return true;
     if (!impl.failure_reason.empty()) {
         return false;
+    }
+
+    if (!impl.options.external_origin.empty()) {
+        const auto origin = boost::urls::parse_uri(impl.options.external_origin);
+        if (!origin ||
+            (origin->scheme_id() != boost::urls::scheme::http &&
+             origin->scheme_id() != boost::urls::scheme::https) ||
+            !origin->has_authority() || origin->encoded_host().empty() || origin->has_userinfo() ||
+            origin->has_query() || origin->has_fragment() ||
+            (!origin->encoded_path().empty() && origin->encoded_path() != "/") ||
+            (origin->has_port() && origin->port_number() == 0)) {
+            impl.failure_reason =
+                "LAKE_EXTERNAL_ORIGIN must be an HTTP(S) origin with a host and optional "
+                "port (1-65535), without credentials, path, query or fragment";
+            return false;
+        }
+        const std::string scheme =
+            origin->scheme_id() == boost::urls::scheme::http ? "http://" : "https://";
+        const auto authority = origin->encoded_authority();
+        impl.options.external_origin = scheme + std::string(authority.data(), authority.size());
     }
 
     if (impl.options.store) {

@@ -52,6 +52,8 @@ int usage() {
     std::println("  --control-db   Postgres URI of the control plane (default "
                  "$LAKE_CONTROL_DB_URI)");
     std::println("  --store-root   customer and instance data root (default $LAKE_STORE_ROOT)");
+    std::println("  --external-origin HTTP(S) origin for repository commands "
+                 "(default $LAKE_EXTERNAL_ORIGIN; unset hides commands)");
     std::println("  --admin-token  bearer for /v1 capabilities and MCP tools "
                  "(default $LAKE_ADMIN_TOKEN)");
     std::println("  LAKE_REPLICATION_TOKEN bearer presented to peer lake instances "
@@ -87,6 +89,7 @@ int main(int argc, char** argv) {
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
+    opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     const std::string operator_zetta_url = env_or("LAKE_OPERATOR_ZETTA_URL", "");
     const std::string operator_zetta_token = env_or("LAKE_OPERATOR_ZETTA_TOKEN", "");
     const std::string logs_url = env_or("LAKE_LOGS_URL", "");
@@ -148,6 +151,10 @@ int main(int argc, char** argv) {
         }
         if (arg == "--node") {
             opts.node_name = value("--node");
+            continue;
+        }
+        if (arg == "--external-origin") {
+            opts.external_origin = value("--external-origin");
             continue;
         }
         if (arg == "--control-db") {

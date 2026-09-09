@@ -199,7 +199,7 @@ add_library(lake-api STATIC
   src/api/http_server.cpp
 )
 target_link_libraries(lake-api PUBLIC lake-core)
-target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boost::corosio Boost::corosio_openssl)
+target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boost::url Boost::corosio Boost::corosio_openssl)
 
 add_executable(lake src/main.cpp)
 target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
