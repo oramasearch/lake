@@ -34,7 +34,8 @@ public:
     Result<std::vector<Organization>> list_organizations(int limit) override;
     Result<Organization> get_organization(const std::string& id) override;
     Result<Customer> create_customer(const NewCustomer&) override;
-    Result<std::vector<Customer>> list_customers(int limit) override;
+    Result<std::vector<Customer>> list_customers(int limit,
+                                                 const std::string& user_id = {}) override;
     Result<Customer> get_customer(const std::string& id) override;
     Result<Repository> create_repository(const NewRepository&) override;
     Result<std::vector<Repository>> list_repositories(const std::string& customer_id,

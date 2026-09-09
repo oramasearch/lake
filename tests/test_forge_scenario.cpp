@@ -1,3 +1,4 @@
+#include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -251,7 +252,7 @@ auto reference_outcome(const liquid::sync_report& report, std::string_view name)
 } // namespace
 
 TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }

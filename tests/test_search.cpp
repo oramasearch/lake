@@ -1,3 +1,4 @@
+#include "audit_test_support.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -480,7 +481,7 @@ TEST(Search, RegisteredCapabilityReturnsAuthorizedHits) {
     EXPECT_EQ(result.value.at("mode"), "hot");
     EXPECT_EQ(result.value.at("scanned_changes"), 0U);
     EXPECT_EQ(result.value.at("items").front().at("path"), "hit.txt");
-    const auto events = control.list_audit_events({.limit = 100});
+    const auto events = lake::test::audit_events(control, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     ASSERT_FALSE(events->empty());
     EXPECT_EQ(events->front().draft.details.value("mode", ""), "hot");

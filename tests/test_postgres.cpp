@@ -1,3 +1,5 @@
+#include "audit_test_support.hpp"
+#include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -78,7 +80,7 @@ std::string create_search_change(const std::filesystem::path& path, const std::s
 }
 
 TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
@@ -95,6 +97,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     context.request_id = "postgres-integration";
     context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     auto call = [&](const std::string& name, json input = json::object()) {
+        context.request_id = lake::control::new_uuid_v4();
         return registry.call(name, input, context);
     };
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
@@ -155,6 +158,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     ASSERT_TRUE(transferred.ok) << transferred.error.message;
     EXPECT_EQ(transferred.value.at("customer_id"), destination.value.at("id"));
     const ApiResult deleted = call("delete_repository", {{"id", repository.value.at("id")}});
+    const std::string deletion_request = context.request_id;
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
     EXPECT_FALSE(deleted.value.at("deleted_at").is_null());
     EXPECT_EQ(
@@ -165,6 +169,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
         call("audit",
              {{"object", "repository/" + repository.value.at("id").get<std::string>()},
               {"outcome", "success"},
+              {"request_id", deletion_request},
               {"limit", 1}});
     ASSERT_TRUE(audit.ok) << audit.error.message;
     ASSERT_EQ(audit.value.at("items").size(), 1U);
@@ -234,7 +239,7 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
 }
 
 TEST(PostgresCapabilities, DriveShareLinksRoundTrip) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
@@ -282,7 +287,7 @@ TEST(PostgresCapabilities, DriveShareLinksRoundTrip) {
 }
 
 TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
@@ -359,7 +364,7 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     ASSERT_EQ(scan.value.at("items").size(), 1U);
     EXPECT_EQ(scan.value.at("items").front().at("change"), allowed_change);
 
-    const auto events = store->list_audit_events({.principal = "reader", .limit = 100});
+    const auto events = lake::test::audit_events(*store, {.request_id = context.request_id});
     ASSERT_TRUE(events) << events.error().message;
     const auto scan_event = std::find_if(events->begin(), events->end(), [&](const auto& event) {
         return event.draft.request_id == context.request_id;
@@ -370,7 +375,7 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
 }
 
 TEST(PostgresMetering, AggregatesHourlyUsageAndRecordsBuildOnce) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
@@ -412,7 +417,7 @@ TEST(PostgresMetering, AggregatesHourlyUsageAndRecordsBuildOnce) {
 }
 
 TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
@@ -544,7 +549,7 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
 }
 
 TEST(PostgresPlatform, EnvironmentBindingAndMirrorRoundTrip) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }

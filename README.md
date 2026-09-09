@@ -230,7 +230,8 @@ Git-tag image plus `sha-<short-sha>`. `latest` and workstation-built deployment 
 Once the Actions credentials are configured, publish a deployment image by pushing an immutable
 Docker-compatible Git tag:
 Without `LAKE_TEST_DB_URI` the Postgres-backed cases skip. To run them against a local Postgres,
-create a database, apply the schema, and set the two variables:
+create a base database with a role that has `CREATEDB`, apply the schema, and set the two variables.
+The [test fixture](docs/build/testing.md) creates and removes a private database for each case:
 
 ```sh
 createdb lake_test

@@ -1,3 +1,4 @@
+#include "audit_test_support.hpp"
 #include <gtest/gtest.h>
 
 #include <arpa/inet.h>
@@ -458,7 +459,7 @@ TEST(OAuth, AuthorizationCodePkceOidcAndCachedJwks) {
     const auto principal = store->context_for(secret);
     ASSERT_TRUE(principal) << principal.error().message;
     EXPECT_EQ(principal->pool_id, "lake");
-    const auto audit_events = store->list_audit_events(lake::audit::Filter{.limit = 100});
+    const auto audit_events = lake::test::audit_events(*store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(audit_events) << audit_events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*audit_events, [](const lake::audit::Event& event) {
         return event.draft.kind == "authentication" && event.draft.action == "sign_in" &&

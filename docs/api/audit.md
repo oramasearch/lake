@@ -76,3 +76,18 @@ event contract. New callers must use `audit::record` rather than writing `audit_
 The audit implementation is compiled once into `lake-core`. Control-store implementations depend
 on that library for the provider-neutral audit API; they do not include its implementation source.
 This keeps the static-library link graph valid on ELF linkers as well as macOS.
+
+## Exact requests and complete traversal
+
+`audit` and `export_audit` accept `request_id` for exact equality against the recorded request.
+Combine it with the existing object/outcome filters to ask for a particular operation; the
+filters apply before `limit`. `after_id` continues strictly after a returned event's UUID in
+append order. It composes with every filter and does not depend on timestamp uniqueness. A
+missing cursor returns no rows. Continue from the last returned ID to traverse a history. For
+a finite snapshot through the registry, hold `to` fixed: audit queries themselves append events.
+The same fields are available on `audit::Filter` in both stores. The test helper reads the store
+directly, so it can exhaust pages until empty without generating further audit events.
+
+The regression in `tests/test_audit_isolation.cpp` places a target after 1,105 same-object events,
+queries its request through the registry, and verifies the complete signed chain across pages.
+See [testing.md](../build/testing.md) for fixture ownership and the bounded-read sweep.

@@ -1,3 +1,4 @@
+#include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -246,7 +247,7 @@ class HttpResponseIsolation : public testing::TestWithParam<std::tuple<bool, boo
 protected:
     void SetUp() override {
         if (std::get<0>(GetParam())) {
-            const char* uri = std::getenv("LAKE_TEST_DB_URI");
+            const char* uri = lake::test::postgres_uri();
             if (uri == nullptr || *uri == '\0') {
                 GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
             }
@@ -265,8 +266,7 @@ protected:
             tx.exec(schema_sql);
             tx.commit();
             database_uri_ = postgres_uri_;
-            database_uri_ += database_uri_.contains('?') ? "&" : "?";
-            database_uri_ += "options=-csearch_path%3D" + schema_;
+            database_uri_ += " options='-csearch_path=" + schema_ + "'";
             store_ = lake::control::make_postgres_store(database_uri_, instance_kek_);
             create_identity_document();
             ASSERT_FALSE(identity_document_.empty());

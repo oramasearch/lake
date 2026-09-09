@@ -1,3 +1,5 @@
+#include "audit_test_support.hpp"
+#include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -935,7 +937,7 @@ TEST(TransparencyRegistry, ReplicationCapabilityConvergesTwoInstancesAndRecordsA
     EXPECT_EQ(target_state->tree_size, source_state->tree_size);
     EXPECT_EQ(target_state->root_hash, source_state->root_hash);
 
-    const auto events = store.list_audit_events({.limit = 100});
+    const auto events = lake::test::audit_events(store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.kind == "replication" &&
@@ -1324,7 +1326,7 @@ TEST(TransparencyTimestampRegistry, CapabilitiesTimestampRenewReadAndAudit) {
     ASSERT_TRUE(fetched.ok) << fetched.error.message;
     EXPECT_EQ(fetched.value.at("evidence_record"), renewed.value.at("evidence_record"));
 
-    const auto events = store.list_audit_events({.limit = 100});
+    const auto events = lake::test::audit_events(store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     for (const std::string_view action :
          {"timestamp_checkpoint", "renew_timestamp_evidence", "timestamp_evidence"}) {
@@ -1375,7 +1377,7 @@ TEST(TransparencyTimestamp, OwnerLoopRenewsDueEvidenceThroughRegistry) {
     const auto renewed = initial.evidence(checkpoint_digest, policy);
     ASSERT_TRUE(renewed) << renewed.error().message;
     EXPECT_EQ(renewed->archive_timestamps.size(), 2U);
-    const auto events = store->list_audit_events({.limit = 100});
+    const auto events = lake::test::audit_events(*store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.action == "renew_timestamp_evidence" &&
@@ -1568,7 +1570,7 @@ TEST(TransparencyRegistry, CapabilitiesServeMetadataAndRecordAudit) {
     ASSERT_TRUE(fetched.ok) << fetched.error.message;
     EXPECT_EQ(fetched.value.at("encoded"), first.timestamp.dump());
 
-    const auto events = store.list_audit_events({.limit = 100});
+    const auto events = lake::test::audit_events(store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.kind == "transparency" && event.draft.action == "publish_tuf_metadata" &&
@@ -1674,7 +1676,7 @@ TEST(TransparencyScenario, ExportedBundleVerifiesOfflineAndSplitViewIsDetected) 
 }
 
 TEST(PostgresTransparency, LiveCheckpointCarriesAuthenticatedMonotonicTime) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -1769,7 +1771,7 @@ TEST(PostgresTransparency, LiveCheckpointCarriesAuthenticatedMonotonicTime) {
 }
 
 TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
-    const char* database_uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* database_uri = lake::test::postgres_uri();
     if (database_uri == nullptr || *database_uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -1901,14 +1903,14 @@ TEST(PostgresTransparency, CapabilitiesPersistSignedAuditOutcomes) {
     EXPECT_EQ(replica_checkpoint->at("checkpoint_hash_sha256"),
               checkpoint.value.at("checkpoint_hash_sha256"));
 
-    const auto events = store->list_audit_events({.limit = 1000000});
+    const auto events = lake::test::audit_events(*store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
-    const auto event = std::ranges::find_if(*events, [](const lake::audit::Event& candidate) {
-        return candidate.draft.request_id == "postgres-transparency-read";
-    });
-    ASSERT_NE(event, events->end());
-    EXPECT_EQ(event->draft.kind, "transparency");
-    EXPECT_EQ(event->draft.outcome, "success");
+    const auto read_events =
+        lake::test::audit_events(*store, {.request_id = "postgres-transparency-read"});
+    ASSERT_TRUE(read_events) << read_events.error().message;
+    ASSERT_EQ(read_events->size(), 1U);
+    EXPECT_EQ(read_events->front().draft.kind, "transparency");
+    EXPECT_EQ(read_events->front().draft.outcome, "success");
     for (const std::string_view action : {"initialize_tuf",
                                           "publish_tuf_metadata",
                                           "append_transparency_entries",

@@ -6,3 +6,7 @@ trusted capability code, and both store implementations persist and enforce its 
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
+
+`Store::list_customers(limit, user_id)` optionally selects the personal owner before limiting.
+Audit filters select exact request IDs and continue after event IDs in append order. Both stores
+and the telemetry wrapper preserve these filters; see `docs/build/testing.md`.

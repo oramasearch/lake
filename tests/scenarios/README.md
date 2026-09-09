@@ -1,8 +1,9 @@
 # Scenario tests
 
 These tests exercise complete user outcomes through an in-process Lake, its production Postgres
-store, public HTTP routes, and public client libraries. They use the caller-provided
-`LAKE_TEST_DB_URI`; the proof runner owns database creation and schema loading.
+store, public HTTP routes, and public client libraries. They use `lake::test::postgres_uri()` to obtain a fresh database for each case. The caller
+provides `LAKE_TEST_DB_URI` for connection settings and a role with database-creation rights;
+the shared test fixture loads the schema and removes only its own database afterward.
 
 `drive_test.cpp` covers the drive exit:
 

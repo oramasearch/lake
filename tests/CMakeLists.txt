@@ -5,7 +5,8 @@ if(NOT LAKE_JSONSCHEMA_RESULT EQUAL 0)
   message(FATAL_ERROR "Lake schema conformance tests require Python jsonschema")
 endif()
 
-add_executable(lake-tests test_web_ui.cpp
+add_executable(lake-tests test_main.cpp test_web_ui.cpp
+  test_audit_isolation.cpp
   test_schema_conformance.cpp
   scenarios/drive_test.cpp
   test_apps.cpp
@@ -30,7 +31,7 @@ add_executable(lake-tests test_web_ui.cpp
   test_postgres_identity.cpp
   test_token_attenuation.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
-  Boost::beast2 Boost::http Boost::corosio GTest::gtest_main)
+  Boost::beast2 Boost::http Boost::corosio GTest::gtest)
 target_include_directories(lake-tests PRIVATE ${PROJECT_SOURCE_DIR}/modules/liquid/src)
 target_compile_definitions(lake-tests PRIVATE
   LAKE_TEST_PYTHON="${Python3_EXECUTABLE}"
@@ -41,8 +42,10 @@ add_dependencies(lake-tests lake)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)
 
-add_executable(lake-postgres-tests test_postgres.cpp)
-target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres GTest::gtest_main)
+add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp)
+target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest)
+target_compile_definitions(lake-postgres-tests PRIVATE
+  LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 gtest_discover_tests(lake-postgres-tests)
 
 add_executable(lake-debug-fixture debug_fixture.cpp)

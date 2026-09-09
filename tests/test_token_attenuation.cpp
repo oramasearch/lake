@@ -1,4 +1,6 @@
+#include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
+#include "postgres_fixture.hpp"
 
 #include <gtest/gtest.h>
 
@@ -112,7 +114,7 @@ protected:
         postgres_ = GetParam().starts_with("Postgres");
         mcp_ = GetParam().ends_with("MCP");
         if (postgres_) {
-            const char* uri = std::getenv("LAKE_TEST_DB_URI");
+            const char* uri = lake::test::postgres_uri();
             if (!uri || !*uri) {
                 GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
             }
@@ -130,8 +132,7 @@ protected:
             tx.exec(schema_sql);
             tx.commit();
             database_uri_ = uri;
-            database_uri_ += database_uri_.contains('?') ? "&" : "?";
-            database_uri_ += "options=-csearch_path%3D" + schema_;
+            database_uri_ += " options='-csearch_path=" + schema_ + "'";
             store_ = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
         } else {
             store_ = std::make_shared<lake::control::InMemoryStore>();
@@ -161,7 +162,7 @@ protected:
             return;
         }
         server_->stop();
-        const auto events = store_->list_audit_events({.limit = 100000});
+        const auto events = lake::test::audit_events(*store_, {.limit = 100});
         ASSERT_TRUE(events);
         const auto verified = lake::audit::verify(*store_, *events);
         ASSERT_TRUE(verified) << verified.error().message;
@@ -172,7 +173,7 @@ protected:
         server_.reset();
         store_.reset();
         if (postgres_) {
-            pqxx::connection connection(std::getenv("LAKE_TEST_DB_URI"));
+            pqxx::connection connection(lake::test::postgres_uri());
             pqxx::work tx(connection);
             tx.exec("SET client_min_messages TO warning");
             tx.exec("DROP SCHEMA " + tx.quote_name(schema_) + " CASCADE");
@@ -225,7 +226,7 @@ protected:
     }
 
     void verify_call_audit(const std::string& id, const std::string& name, const json& result) {
-        const auto events = store_->list_audit_events({.limit = 100000});
+        const auto events = lake::test::audit_events(*store_, {.request_id = id});
         ASSERT_TRUE(events);
         std::vector<lake::audit::Event> matches;
         std::ranges::copy_if(*events, std::back_inserter(matches), [&](const auto& event) {
@@ -473,6 +474,8 @@ TEST_P(TokenAttenuation, ApplicationPoolsReturnOnlyDerivedSessionBearer) {
     const auto events =
         store_->list_application_webhook_events(application.at("value").at("id"), 100);
     ASSERT_TRUE(events);
+    ASSERT_LT(events->size(), 100U)
+        << "The application event query must return its complete fixture";
     EXPECT_EQ(std::ranges::count_if(
                   *events, [](const auto& event) { return event.event == "session.started"; }),
               3);

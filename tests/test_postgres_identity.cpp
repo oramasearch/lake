@@ -1,3 +1,4 @@
+#include "postgres_fixture.hpp"
 #include <algorithm>
 #include <array>
 #include <barrier>
@@ -73,10 +74,30 @@ std::string signed_identity_document(std::string_view label) {
     return base64url(document);
 }
 
+lake::api::ApiResult claim_recovery_delivery(lake::api::Registry& registry,
+                                             lake::api::ApiContext& context,
+                                             const std::string& recovery_id) {
+    for (;;) {
+        const auto page = registry.call("claim_recovery_deliveries", {{"limit", 1}}, context);
+        if (!page.ok) {
+            return page;
+        }
+        const auto& items = page.value.at("items");
+        for (const auto& item : items) {
+            if (item.at("recovery_id") == recovery_id) {
+                return lake::api::ApiResult::success(item);
+            }
+        }
+        if (items.empty()) {
+            return lake::api::ApiResult::failure("not_found", "recovery delivery was not queued");
+        }
+    }
+}
+
 class PostgresProvisioning : public testing::Test {
 protected:
     void SetUp() override {
-        const char* configured_uri = std::getenv("LAKE_TEST_DB_URI");
+        const char* configured_uri = lake::test::postgres_uri();
         if (configured_uri == nullptr || *configured_uri == '\0') {
             GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
         }
@@ -261,7 +282,7 @@ TEST_F(PostgresProvisioning, MalformedDocumentExplainsRecoveryWithoutCreatingUse
 }
 
 TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -353,6 +374,13 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
                                     {"metadata", {{"plan", "test"}}}});
     ASSERT_TRUE(organization.ok) << organization.error.message;
     const std::string organization_id = organization.value.at("id");
+    const auto events =
+        call("list_application_webhook_events", {{"application_id", application_id}, {"limit", 1}});
+    ASSERT_TRUE(events.ok) << events.error.message;
+    ASSERT_EQ(events.value.at("items").size(), 1U);
+    const auto subscribed = events.value.at("items").front();
+    EXPECT_EQ(subscribed.at("event"), "organization.created");
+
     EXPECT_TRUE(call("list_application_organizations", {{"application_id", application_id}}).ok);
     EXPECT_TRUE(call("update_application_organization",
                      {{"application_id", application_id},
@@ -361,17 +389,9 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
                       {"metadata", {{"plan", "updated"}}}})
                     .ok);
 
-    const auto events =
-        call("list_application_webhook_events", {{"application_id", application_id}});
-    ASSERT_TRUE(events.ok) << events.error.message;
-    ASSERT_FALSE(events.value.at("items").empty());
-    const auto subscribed = std::ranges::find_if(events.value.at("items"), [](const auto& event) {
-        return event.at("event") == "organization.created";
-    });
-    ASSERT_NE(subscribed, events.value.at("items").end());
     EXPECT_TRUE(call("retry_application_webhook",
                      {{"application_id", application_id},
-                      {"event_id", subscribed->at("id")},
+                      {"event_id", subscribed.at("id")},
                       {"webhook_id", webhook.value.at("id")}})
                     .ok);
 
@@ -392,7 +412,7 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
 }
 
 TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -542,7 +562,7 @@ TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
 }
 
 TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -631,19 +651,21 @@ TEST(PostgresIdentity, SsoFederationAndScimDeactivation) {
                                                       false,
                                                       {}});
     ASSERT_TRUE(deactivated) << deactivated.error().message;
+    const auto logs = store->list_sso_provisioning_logs(provider->id, 1);
+    ASSERT_TRUE(logs) << logs.error().message;
+    ASSERT_EQ(logs->size(), 1U);
+    EXPECT_EQ(logs->front().external_id, created->external_id);
+    EXPECT_EQ(logs->front().resource, "user");
+    EXPECT_EQ(logs->front().operation, "deactivate");
+
     EXPECT_FALSE(store->context_for(issued->secret));
     ASSERT_TRUE(store->delete_scim_user(provider->id, created->user_id));
     ASSERT_TRUE(store->delete_scim_group(provider->id, group->team_id));
     EXPECT_FALSE(store->get_scim_group(provider->id, group->team_id));
-    const auto logs = store->list_sso_provisioning_logs(provider->id, 100);
-    ASSERT_TRUE(logs) << logs.error().message;
-    EXPECT_TRUE(std::ranges::any_of(*logs, [](const lake::control::ProvisioningLog& log) {
-        return log.resource == "user" && log.operation == "deactivate";
-    }));
 }
 
 TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -760,18 +782,13 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
                          pqxx::params{email.value["id"].get<std::string>()});
         transaction.commit();
     }
-    const lake::api::ApiResult email_claimed =
-        registry.call("claim_recovery_deliveries", {{"limit", 1000}}, operator_context);
-    ASSERT_TRUE(email_claimed.ok) << email_claimed.error.message;
     const auto email_delivery =
-        std::ranges::find_if(email_claimed.value["items"], [&](const nlohmann::json& item) {
-            return item["recovery_id"] == email.value["id"];
-        });
-    ASSERT_NE(email_delivery, email_claimed.value["items"].end());
-    const lake::api::ApiResult email_restored =
-        registry.call("complete_recovery",
-                      {{"recovery_id", email.value["id"]}, {"token", (*email_delivery)["token"]}},
-                      anonymous);
+        claim_recovery_delivery(registry, operator_context, email.value["id"]);
+    ASSERT_TRUE(email_delivery.ok) << email_delivery.error.message;
+    const lake::api::ApiResult email_restored = registry.call(
+        "complete_recovery",
+        {{"recovery_id", email.value["id"]}, {"token", email_delivery.value["token"]}},
+        anonymous);
     ASSERT_TRUE(email_restored.ok) << email_restored.error.message;
     EXPECT_TRUE(store->context_for(email_restored.value["secret"]));
 
@@ -808,17 +825,12 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
         "approve_admin_recovery", {{"recovery_id", admin_started.value["id"]}}, second_context);
     ASSERT_TRUE(admin_approved.ok) << admin_approved.error.message;
     EXPECT_EQ(admin_approved.value["approval_count"], 2);
-    const lake::api::ApiResult admin_claimed =
-        registry.call("claim_recovery_deliveries", {{"limit", 1000}}, operator_context);
-    ASSERT_TRUE(admin_claimed.ok) << admin_claimed.error.message;
     const auto admin_delivery =
-        std::ranges::find_if(admin_claimed.value["items"], [&](const nlohmann::json& item) {
-            return item["recovery_id"] == admin_started.value["id"];
-        });
-    ASSERT_NE(admin_delivery, admin_claimed.value["items"].end());
+        claim_recovery_delivery(registry, operator_context, admin_started.value["id"]);
+    ASSERT_TRUE(admin_delivery.ok) << admin_delivery.error.message;
     const lake::api::ApiResult admin_restored = registry.call(
         "complete_recovery",
-        {{"recovery_id", admin_started.value["id"]}, {"token", (*admin_delivery)["token"]}},
+        {{"recovery_id", admin_started.value["id"]}, {"token", admin_delivery.value["token"]}},
         anonymous);
     ASSERT_TRUE(admin_restored.ok) << admin_restored.error.message;
     EXPECT_TRUE(store->context_for(admin_restored.value["secret"]));

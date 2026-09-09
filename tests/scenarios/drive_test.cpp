@@ -1,4 +1,5 @@
 #include "../personal_customer_test_support.hpp"
+#include "../postgres_fixture.hpp"
 
 #include <gtest/gtest.h>
 
@@ -203,7 +204,7 @@ int run_process(const std::vector<std::string>& arguments) {
 class DriveScenario : public testing::Test {
 protected:
     void SetUp() override {
-        database_uri_ = std::getenv("LAKE_TEST_DB_URI");
+        database_uri_ = lake::test::postgres_uri();
         if (database_uri_ == nullptr || *database_uri_ == '\0') {
             GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
         }

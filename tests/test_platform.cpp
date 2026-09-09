@@ -1,3 +1,4 @@
+#include "audit_test_support.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -345,7 +346,7 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     const auto object = store->get_policy_object(object_id);
     ASSERT_TRUE(object);
     EXPECT_EQ(object->object_type, "environment");
-    auto events = store->list_audit_events({});
+    auto events = lake::test::audit_events(*store, {});
     ASSERT_TRUE(events);
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.kind == "platform.deployment.phase";
@@ -358,7 +359,7 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     const auto environment = platform->get_environment(repository.id, "production");
     ASSERT_TRUE(environment);
     EXPECT_EQ(environment->at("deployment").at("phase"), "healthy");
-    events = store->list_audit_events({});
+    events = lake::test::audit_events(*store, {});
     ASSERT_TRUE(events);
     EXPECT_EQ(std::ranges::count_if(*events,
                                     [](const lake::audit::Event& event) {
@@ -482,7 +483,7 @@ TEST_F(PlatformFixture, PlatformReducersProduceTheSameResultForEveryInputOrder) 
         EXPECT_EQ(environment->at("env").at(0).at("value"), "blue");
         EXPECT_EQ(environment->at("deployment").at("phase"), "ready");
 
-        const auto events = store->list_audit_events({});
+        const auto events = lake::test::audit_events(*store, {});
         ASSERT_TRUE(events);
         std::vector<std::string> phases;
         for (const lake::audit::Event& event : *events) {

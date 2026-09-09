@@ -1,4 +1,6 @@
+#include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
+#include "postgres_fixture.hpp"
 
 #include <gtest/gtest.h>
 
@@ -147,7 +149,7 @@ json token_claims(const std::string& token) {
 }
 
 TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
@@ -294,7 +296,7 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     EXPECT_FALSE(revoked_check.ok);
     EXPECT_EQ(revoked_check.error.code, "unauthorized");
     EXPECT_TRUE(call("check_agent_certificate", {{"certificate_id", rotated.value.at("id")}}).ok);
-    const auto certificate_events = store->list_audit_events({.limit = 1000000});
+    const auto certificate_events = lake::test::audit_events(*store, {.limit = 100});
     ASSERT_TRUE(certificate_events) << certificate_events.error().message;
     const auto count_certificate_events = [&](std::string_view action,
                                               std::string_view outcome = "success") {
@@ -331,10 +333,10 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     EXPECT_FALSE(revoked.value.at("revoked_at").get<std::string>().empty());
 
     const auto events =
-        store->list_audit_events({.object = "dynamic_secret/" + lease_id, .limit = 10});
+        lake::test::audit_events(*store, {.object = "dynamic_secret/" + lease_id, .limit = 10});
     ASSERT_TRUE(events) << events.error().message;
     ASSERT_EQ(events->size(), 3);
-    const auto all_audit_events = store->list_audit_events({.limit = 1000000});
+    const auto all_audit_events = lake::test::audit_events(*store, {.limit = 100});
     ASSERT_TRUE(all_audit_events) << all_audit_events.error().message;
     const auto audit_verified = lake::audit::verify(*store, *all_audit_events);
     ASSERT_TRUE(audit_verified) << audit_verified.error().message;

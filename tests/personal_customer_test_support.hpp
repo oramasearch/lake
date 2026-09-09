@@ -6,17 +6,15 @@ namespace lake::test {
 
 inline control::Result<control::Customer> personal_customer(control::Store& store,
                                                             const std::string& user_id) {
-    const auto customers = store.list_customers(10000);
+    const auto customers = store.list_customers(2, user_id);
     if (!customers) {
         return std::unexpected(customers.error());
     }
-    for (const auto& customer : *customers) {
-        if (customer.user_id == user_id) {
-            return customer;
-        }
+    if (customers->size() == 1) {
+        return customers->front();
     }
     return std::unexpected(
-        control::StoreError{"not_found", "sign-up did not provision a customer"});
+        control::StoreError{"not_found", "sign-up did not provision exactly one customer"});
 }
 
 } // namespace lake::test

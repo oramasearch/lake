@@ -6,9 +6,12 @@ children. Fixed child names are safe; fixed names directly below the system temp
 The helper honors the platform temporary-root selection, including `TMPDIR`, reports an explicit
 error when that root is not writable, and removes the process directory at exit.
 
-Postgres-backed tests use `LAKE_TEST_DB_URI` and do not create or drop its database. A caller that
-starts concurrent suites must provide a freshly created, schema-loaded database with a unique name
-to each test process.
+Postgres-backed tests obtain connections through `postgres_fixture.hpp`. `test_main.cpp` creates
+and schema-loads a fresh database on first use in each test and drops it after fixture destruction.
+`LAKE_TEST_DB_URI` supplies connection settings and a role with `CREATEDB`; its database remains
+untouched. Each test receives a random `LAKE_INSTANCE_KEK`. See
+[`testing.md`](../docs/build/testing.md) for ownership, assertion patterns, and the sweep.
+`audit_test_support.hpp` exhausts append-order pages; use exact request filters for specific calls.
 
 The `scenarios/` cases combine those production Postgres stores with an in-process Lake, public
 HTTP routes, and public client libraries. The drive scenario signs users up, synchronizes and
@@ -119,5 +122,6 @@ Front-door renderer checks cover the landing journey and visitor/account/operato
 stores, valid and invalid cookies, and operator credentials; each advertised global link must
 return HTTP 200 for that same viewer. It also pins customer redirects to `/sign-in`. The browser
 proof is in [front-door.md](../docs/ui/front-door.md). `PostgresCapabilities.OrganizationAndPolicyRoundTrip`
-filters its deletion audit assertion by the exact `repository/<id>` object, so unrelated events
-cannot hide the record it created.
+filters its deletion audit assertion by the exact request ID and `repository/<id>` object.
+`Stores/AuditIsolation.*` proves lookup after 1,105 same-object events and complete cursor traversal
+against memory and PostgreSQL stores. Personal-customer lookup filters by user before limiting.

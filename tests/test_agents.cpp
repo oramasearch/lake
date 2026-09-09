@@ -1,3 +1,5 @@
+#include "audit_test_support.hpp"
+#include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -261,7 +263,7 @@ void exercise_agent_session(lake::control::Store& store,
     EXPECT_EQ(expired.error.message, "agent session key has expired");
 
     const auto events =
-        store.list_audit_events({.object = "agent_session/" + session_id, .limit = 100});
+        lake::test::audit_events(store, {.object = "agent_session/" + session_id, .limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.kind == "agent_session" &&
@@ -289,7 +291,7 @@ TEST(AgentSessions, MintsAttributesUsesAndExpiresSessionKey) {
 }
 
 TEST(PostgresAgentSessions, PersistsLoggedSessionAndDurableAttribution) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || *uri == '\0') {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }

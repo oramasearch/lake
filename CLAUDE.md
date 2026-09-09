@@ -322,6 +322,10 @@ that licence boundary.
 4. `cmake --build build && ctest --test-dir build` green, and the binary smoke-tested by hand.
 5. Commit means push.
 
+PostgreSQL tests use `lake::test::postgres_uri()` for a fresh database per test. The configured
+`LAKE_TEST_DB_URI` database belongs to the caller and is not modified. Query specific audit calls
+by request ID; use cursor exhaustion for whole-history assertions. See `docs/build/testing.md`.
+
 ## Formatting
 
 `.clang-format` at the root is the formatter configuration (LLVM base, 100 columns, 4-space indents,

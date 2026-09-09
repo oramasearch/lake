@@ -1,3 +1,4 @@
+#include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
 #include <cstdlib>
@@ -137,7 +138,7 @@ TEST(Callers, RegistryRecordsFederatedAndCloudExchanges) {
 }
 
 TEST(PostgresCallers, PersistsKubernetesAndFederatedCredentialMetadata) {
-    const char* uri = std::getenv("LAKE_TEST_DB_URI");
+    const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
