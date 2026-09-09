@@ -45,6 +45,17 @@ jobs:
           submodules: recursive
           token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
 
+      - name: Check out the liquid source
+        # liquid is a sibling module of liquid-bridge, not a submodule of lake. The bridge holds
+        # the one pin; bump this ref when the bridge bumps liquid.
+        uses: actions/checkout@v4
+        with:
+          repository: oramasearch/liquid
+          ref: aa60e8788b883f3e041706741650277fd5befdcb
+          path: _external/liquid
+          submodules: recursive
+          token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
+
       - name: Restore FetchContent dependencies
         uses: actions/cache@v4
         with:
@@ -84,6 +95,7 @@ jobs:
           -DLAKE_BUILD_TESTS=ON
           -DPython3_EXECUTABLE=/usr/bin/python3
           -DLAKE_ZETTA_SOURCE_DIR=${{ github.workspace }}/_external/zetta-bridge/modules/zetta
+          -DLAKE_LIQUID_SOURCE_DIR=${{ github.workspace }}/_external/liquid
           -DCMAKE_C_COMPILER=clang-19
           -DCMAKE_CXX_COMPILER=clang++-19
           -DOPENSSL_ROOT_DIR=/opt/openssl

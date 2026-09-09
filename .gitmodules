@@ -21,7 +21,3 @@
 	path = modules/oramacore-cpp
 	url = git@github.com:oramasearch/oramacore-cpp.git
 	branch = main
-[submodule "modules/liquid"]
-	path = modules/liquid
-	url = git@github.com:oramasearch/liquid.git
-	branch = main

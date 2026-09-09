@@ -34,7 +34,7 @@
 
 #include <liquid/liquid.hpp>
 
-#include "../modules/liquid/src/objects/records.hpp"
+#include "objects/records.hpp"  // from LAKE_LIQUID_SOURCE_DIR/src (see tests/CMakeLists.txt)
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
