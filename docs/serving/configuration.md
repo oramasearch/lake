@@ -13,6 +13,7 @@ same list. Every value below is read once at startup; SIGINT and SIGTERM stop th
 | `--control-db URI` | Postgres URI of the control plane (default `$LAKE_CONTROL_DB_URI`) |
 | `--memory-store` | an in-memory control plane for local demos and tests |
 | `--store-root PATH` | customer and instance data root (default `$LAKE_STORE_ROOT`) |
+| `--external-origin ORIGIN` | external HTTP(S) origin for repository terminal commands (default `$LAKE_EXTERNAL_ORIGIN`; otherwise derived from `$LAKE_PUBLIC_HOST`; hidden only when both are unset) |
 | `--admin-token TOKEN` | bearer for `/v1` capabilities and MCP tools (default `$LAKE_ADMIN_TOKEN`) |
 | `--identity-seed BASE64` | base64 Ed25519 seed for lake's TAAP identity (default `$LAKE_IDENTITY_SEED`) |
 | `--instance-kek VALUE` | key-encryption key for a generated identity and wrapped keys (default `$LAKE_INSTANCE_KEK`) |
@@ -33,6 +34,7 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_INSTANCE_KEK` | customer-independent key-encryption key for the generated identity and wrapped keys; required wherever a Postgres store runs | [`../api/audit.md`](../api/audit.md), [`../api/encryption.md`](../api/encryption.md) |
 | `LAKE_STORE_ROOT` | root of the per-customer liquid stores (`<customer>/store`), search segments (`<customer>/index/`) and the instance log (`<instance>/log/`) | [`../deployment/store-volume.md`](../deployment/store-volume.md), [`../api/search.md`](../api/search.md), [`../api/transparency.md`](../api/transparency.md) |
 | `LAKE_PUBLIC_HOST` | the Lake namespace value on every operator row; required when the operator Zetta client is enabled | [`../control-plane/platform.md`](../control-plane/platform.md) |
+| `LAKE_EXTERNAL_ORIGIN` | browser-facing scheme, host and optional non-default port; used by clone/push instructions, with no default hostname | [`../ui/forge.md`](../ui/forge.md), [`../deployment/private-install.md`](../deployment/private-install.md) |
 | `LAKE_OPERATOR_ZETTA_URL`, `LAKE_OPERATOR_ZETTA_TOKEN` | operator Zetta service URL and secret bearer; set together, they enable platform sync and writes | [`../control-plane/platform.md`](../control-plane/platform.md) |
 | `LAKE_LOGS_URL`, `LAKE_LOGS_TOKEN` | Loki-compatible log endpoint and optional secret bearer; enable `environment_logs` and the log pages | [`../api/platform.md`](../api/platform.md) |
 | `LAKE_PLATFORM_SYNC_SECONDS` | platform poll interval, default 15, must be greater than zero | [`../api/platform.md`](../api/platform.md) |
@@ -49,6 +51,21 @@ together, when the operator client is enabled without `LAKE_PUBLIC_HOST`, when
 case exits with status 2 and one line on stderr. The startup JSON event records `admin_token_set`
 and `replication_token_set` as `yes` or `no`, never a token value
 ([`telemetry.md`](telemetry.md)).
+
+`LAKE_EXTERNAL_ORIGIN` is independent of the bind address. Set it to the origin customers use, for
+example `https://code.example.internal:8443` behind a TLS proxy or `http://127.0.0.1:49127` for a
+local instance. The scheme is lowercased and a trailing slash is accepted and removed. Startup
+rejects values with credentials, paths, queries, fragments, missing hosts, invalid ports, or a
+scheme other than HTTP(S).
+
+Repository terminal commands select their destination in this order: an explicit
+`--external-origin` or `LAKE_EXTERNAL_ORIGIN`; then `https://` plus `LAKE_PUBLIC_HOST`; then no
+destination. The fallback uses the same browser-facing hostname that OAuth callbacks use. It cannot
+express a non-default port or HTTP, so configure `LAKE_EXTERNAL_ORIGIN` for either. When both values
+are unset, repository pages explain the missing configuration and show no terminal commands.
+`Host`, `Forwarded`, and `X-Forwarded-*` headers never select the destination for a
+credential-bearing sync command. Changing either value requires a restart. No new API capability is
+introduced; clone and push use the existing sync registry.
 
 ## Build and test variables
 

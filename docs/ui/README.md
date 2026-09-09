@@ -1,5 +1,8 @@
 # The web UI
 
+Repository clone/push instructions use the configured external origin and a valid first checkout.
+See [forge.md](forge.md) and the [private-instance runbook](../deployment/private-install.md).
+
 Drive browsing, preview, sharing, conflict history, end-to-end scenarios, and documented Linux client states are in
 [drive.md](drive.md). The sharing decision and management screens are in
 [sharing.md](sharing.md).

@@ -43,6 +43,19 @@ std::string web_ui_escape(std::string_view text) {
 
 namespace {
 
+std::string shell_argument(std::string_view value) {
+    std::string quoted = "'";
+    for (const char character : value) {
+        if (character == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted += character;
+        }
+    }
+    quoted += '\'';
+    return quoted;
+}
+
 std::string markdown_slug(std::string_view heading) {
     std::string slug;
     bool pending_dash = false;
@@ -1198,15 +1211,27 @@ std::string web_ui_repository(const control::Repository& repository,
         content += "<div class=\"empty compact-empty\">Add a README.md to explain this "
                    "repository.</div>";
     }
-    content +=
-        "</section></div><aside class=\"repository-sidebar\" aria-label=\"Repository "
-        "details\"><section class=\"panel\"><h2>Clone and push</h2><p class=\"muted\">"
-        "Use the repository URL with liquid.</p><pre><code>LIQUID_TOKEN=&lt;token&gt; liquid "
-        "pull https://lake.live/v1/repositories/" +
-        web_ui_escape(repository.id) +
-        "</code></pre><pre><code>LIQUID_TOKEN=&lt;token&gt; liquid push "
-        "https://lake.live/v1/repositories/" +
-        web_ui_escape(repository.id) + "</code></pre></section>";
+    content += "</section></div><aside class=\"repository-sidebar\" aria-label=\"Repository "
+               "details\"><section class=\"panel\"><h2>Clone and push</h2>";
+    if (data.external_origin.empty()) {
+        content += "<p class=\"muted\">An administrator must set "
+                   "<code>LAKE_EXTERNAL_ORIGIN</code> or <code>LAKE_PUBLIC_HOST</code> before "
+                   "clone and push commands are available.</p>";
+    } else {
+        const std::string url =
+            shell_argument(data.external_origin + "/v1/repositories/" + repository.id);
+        const std::string directory = shell_argument("./" + repository.name);
+        content +=
+            "<p class=\"muted\">Create an account token on this instance under "
+            "<a href=\"/tokens\">Tokens</a> and export it as <code>LIQUID_TOKEN</code> "
+            "in your terminal. Use a token issued by this instance only.</p>"
+            "<p>First checkout into a new directory:</p><pre><code>" +
+            web_ui_escape("liquid clone " + url + " " + directory + "\ncd " + directory) +
+            "</code></pre><p>From that checkout, after capturing and naming your changes:</p>"
+            "<pre><code>" +
+            web_ui_escape("liquid push " + url) + "</code></pre>";
+    }
+    content += "</section>";
     content += "<section class=\"panel\"><h2>References</h2>";
     if (data.refs.empty()) {
         content += "<p class=\"muted\">No references are published.</p>";

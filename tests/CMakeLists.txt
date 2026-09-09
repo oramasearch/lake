@@ -7,6 +7,7 @@ endif()
 
 add_executable(lake-tests test_main.cpp test_web_ui.cpp
   test_audit_isolation.cpp
+  test_instance_origin.cpp
   test_schema_conformance.cpp
   scenarios/drive_test.cpp
   test_apps.cpp
@@ -35,6 +36,7 @@ target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx Ope
 target_include_directories(lake-tests PRIVATE ${PROJECT_SOURCE_DIR}/modules/liquid/src)
 target_compile_definitions(lake-tests PRIVATE
   LAKE_TEST_PYTHON="${Python3_EXECUTABLE}"
+  LAKE_TEST_NODE="${LAKE_NODE_EXECUTABLE}"
   LAKE_TEST_CMAKE_COMMAND="${CMAKE_COMMAND}"
   LAKE_TEST_SERVER_PATH="$<TARGET_FILE:lake>"
   LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

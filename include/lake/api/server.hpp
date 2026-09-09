@@ -35,8 +35,13 @@ struct ServerOptions {
     unsigned short port = 4900; // 0 = pick an ephemeral port
     int worker_coroutines = 32;
     std::string node_name = "lake";
-    // Public hostname used in OAuth callbacks and as the WebAuthn RP ID.
+    // Public hostname used in OAuth callbacks, as the WebAuthn RP ID, and as
+    // the HTTPS repository-command origin when external_origin is unset.
     std::string public_host;
+    // Configured browser-facing HTTP(S) origin, including any non-default port.
+    // It takes precedence over public_host. When both are empty, repository
+    // terminal instructions are suppressed; request headers never supply it.
+    std::string external_origin;
     // The control-plane store the capabilities call; null = none configured
     // (capabilities answer store_unavailable). Owned by the caller for the
     // server's lifetime.
@@ -80,6 +85,19 @@ struct ServerOptions {
     transparency::TsaSender tsa_sender;
     MeteringConfig metering;
 };
+
+// Prefer the full configured origin. public_host is already the browser-facing
+// hostname used by OAuth, so it supplies a safe HTTPS fallback when no origin
+// was configured. The empty result keeps credential-bearing commands hidden.
+inline std::string repository_external_origin(const ServerOptions& options) {
+    if (!options.external_origin.empty()) {
+        return options.external_origin;
+    }
+    if (!options.public_host.empty()) {
+        return "https://" + options.public_host;
+    }
+    return {};
+}
 
 class ApiServer {
 public:

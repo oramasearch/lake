@@ -31,6 +31,23 @@ attributes. Pages use the complete value for links and capability calls.
 The tree uses native `details` and `summary` elements for expansion, so the structure remains
 available without JavaScript. Clone and push examples use the repository sync URL documented in
 [`../api/sync.md`](../api/sync.md) and keep credentials in `LIQUID_TOKEN`, never in the URL.
+The URL comes first from `LAKE_EXTERNAL_ORIGIN` (or `--external-origin`), including its scheme and
+non-default port. When that is unset, Lake uses `https://` plus `LAKE_PUBLIC_HOST`, the hostname
+already used for OAuth callbacks. Request and proxy headers cannot replace either value. With
+neither configured the panel explains the missing setting and omits commands. See
+[`../serving/configuration.md`](../serving/configuration.md) for validation and proxy configuration.
+
+The first block runs `liquid clone` into a new directory and then enters that directory. The
+second runs `liquid push` from that checkout after changes have been captured and named. The
+panel tells the user to export an account token issued by this instance as `LIQUID_TOKEN` before
+running either block. URLs and directory names are shell-quoted before HTML escaping.
+
+`tests/instance_origin.mjs` opens the actual PostgreSQL-backed page in Chromium, copies the two
+blocks from its DOM, and executes those exact strings. It uses an explicitly configured,
+non-default loopback port, rejects off-origin browser requests and terminal URLs before execution,
+and compares binary and empty-file bytes after clone and a binary edit after push into a fresh
+clone. The private installation and proof commands are in
+[`../deployment/private-install.md`](../deployment/private-install.md).
 
 ## Tree and file
 

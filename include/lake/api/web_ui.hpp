@@ -122,6 +122,8 @@ struct RepositoryHomeData {
     std::optional<RepositoryFile> readme;
     std::vector<control::EffectiveAccessEntry> access;
     std::vector<control::ForgeRecord> releases;
+    // Validated instance configuration, never inferred from a request header.
+    std::string external_origin;
 };
 
 std::string web_ui_repository(const control::Repository& repository,

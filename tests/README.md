@@ -1,5 +1,12 @@
 # Tests
 
+`test_instance_origin.cpp` checks external-origin precedence, startup validation and repository
+command rendering. `InstanceOrigin.BrowserToTerminal` runs `instance_origin.mjs`: a native Chromium page
+supplies the actual clone/push text executed by the pinned Liquid CLI against the shared fixture's
+fresh database, non-default loopback port, store and credential. It refuses off-origin requests and compares
+cloned and pushed bytes. Set `LAKE_TEST_DB_URI` and `LAKE_TEST_LIQUID`, plus the native browser
+and Puppeteer paths where needed. See [private-install.md](../docs/deployment/private-install.md).
+
 Every filesystem fixture lives below the process-unique directory returned by
 `lake::test::process_fixture_root()` in `temporary_directory.hpp`. Use `fixture_path()` for named
 children. Fixed child names are safe; fixed names directly below the system temporary root are not.
