@@ -477,7 +477,8 @@ public:
     virtual Result<Organization> get_organization(const std::string& id) = 0;
 
     virtual Result<Customer> create_customer(const NewCustomer&) = 0;
-    virtual Result<std::vector<Customer>> list_customers(int limit) = 0;
+    virtual Result<std::vector<Customer>> list_customers(int limit,
+                                                         const std::string& user_id = {}) = 0;
     virtual Result<Customer> get_customer(const std::string& id) = 0;
 
     virtual Result<Repository> create_repository(const NewRepository&) = 0;

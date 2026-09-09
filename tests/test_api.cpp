@@ -1,3 +1,4 @@
+#include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
 
@@ -1658,7 +1659,7 @@ TEST(ScimHttp, RecordedClientSessionProvisionsUsersGroupsAndRevokesAccess) {
                                                    "Bearer " + token);
     EXPECT_NE(deleted_group.find(" 204 "), std::string::npos) << deleted_group;
     EXPECT_FALSE(store->get_team(group_id).has_value());
-    const auto events = store->list_audit_events({.limit = 1000});
+    const auto events = lake::test::audit_events(*store, {.limit = 100});
     ASSERT_TRUE(events.has_value());
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.action == "scim_delete_user" && event.draft.outcome == "success";
@@ -1718,7 +1719,7 @@ TEST(Audit, RegistryRecordsEachCapabilityOutcomeAndDetectsDeletedRows) {
     for (const auto& capability : s.registry.list()) {
         s.call(capability->name);
     }
-    auto events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
+    auto events = lake::test::audit_events(s.store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(events);
     ASSERT_EQ(events->size(), s.registry.list().size());
     for (const auto& capability : s.registry.list()) {
@@ -1759,7 +1760,7 @@ TEST(Audit, DeniedAuthorizationAndJsonLinesExportAreRecorded) {
     EXPECT_EQ(decoded[0]["outcome"], "denied");
     EXPECT_EQ(decoded[0]["action"], "list_users");
 
-    auto events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
+    auto events = lake::test::audit_events(s.store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(events);
     ASSERT_EQ(events->size(), 2u);
     EXPECT_TRUE(lake::audit::verify(s.store, *events));
@@ -1797,7 +1798,7 @@ TEST(Audit, IdentityRotatesAndRetentionFloorIsEnforced) {
         externally_seeded_store, externally_seeded_event, externally_seeded_options);
     ASSERT_TRUE(recorded) << recorded.error().message;
     auto externally_seeded_events =
-        externally_seeded_store.list_audit_events(lake::audit::Filter{.limit = 1000});
+        lake::test::audit_events(externally_seeded_store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(externally_seeded_events);
     EXPECT_TRUE(lake::audit::verify(externally_seeded_store, *externally_seeded_events));
 
@@ -1819,7 +1820,7 @@ TEST(Audit, IdentityRotatesAndRetentionFloorIsEnforced) {
     EXPECT_FALSE(refused.ok);
     EXPECT_EQ(refused.error.code, "invalid_input");
 
-    auto events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
+    auto events = lake::test::audit_events(s.store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(events);
     const auto retention =
         std::find_if(events->rbegin(), events->rend(), [](const lake::audit::Event& event) {
@@ -1839,7 +1840,7 @@ TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
         database_uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     const auto ready = store->ping();
     ASSERT_TRUE(ready) << ready.error().message;
-    const auto before = store->list_audit_events(lake::audit::Filter{.limit = 1000000});
+    const auto before = lake::test::audit_events(*store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(before) << before.error().message;
     Registry registry;
     register_core_capabilities(registry, "0.0.1");
@@ -1859,7 +1860,7 @@ TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
     const ApiResult result = registry.call("list_users", json::object(), context);
     EXPECT_EQ(result.error.code, "unauthorized");
 
-    auto events = store->list_audit_events(lake::audit::Filter{.limit = 1000000});
+    auto events = lake::test::audit_events(*store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     ASSERT_EQ(events->size(), before->size() + registry.list().size() + 1);
     EXPECT_EQ(events->back().draft.outcome, "denied");
@@ -2019,7 +2020,7 @@ TEST(SyncRegistry, DeclaresTransportPolicyAndRecordsDenial) {
     const ApiResult denied = surface.call("push", {{"repository_id", "missing"}});
     EXPECT_FALSE(denied.ok);
     EXPECT_EQ(denied.error.code, "unauthorized");
-    const auto events = surface.store.list_audit_events({.limit = 100});
+    const auto events = lake::test::audit_events(surface.store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     ASSERT_FALSE(events->empty());
     EXPECT_EQ(events->back().draft.action, "push");
@@ -2078,7 +2079,7 @@ TEST(SyncRegistry, RevokedOfflineGrantRefusesPublicationWithChangeAndReason) {
     EXPECT_FALSE(surface.ctx.reauthorization_results[0]["allowed"]);
     EXPECT_EQ(surface.ctx.reauthorization_results[0]["reason"],
               "offline grant was revoked before publication");
-    const auto events = surface.store.list_audit_events({.limit = 1000});
+    const auto events = lake::test::audit_events(surface.store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
         return event.draft.action == "push_change" && event.draft.outcome == "denied" &&
@@ -3613,6 +3614,7 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
     ASSERT_TRUE(transferred.ok);
     EXPECT_EQ(transferred.value["customer_id"], second_customer.value["id"]);
     const ApiResult deleted = surface.call("delete_repository", {{"id", repository_id}});
+    const std::string deletion_request = surface.ctx.request_id;
     ASSERT_TRUE(deleted.ok);
     EXPECT_FALSE(deleted.value["deleted_at"].is_null());
     EXPECT_FALSE(deleted.value["retention_until"].is_null());
@@ -3620,7 +3622,8 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
         surface.call("rename_repository", {{"id", repository_id}, {"name", "again"}}).error.code,
         "conflict");
 
-    const ApiResult events = surface.call("audit", {{"limit", 100}});
+    const ApiResult events =
+        surface.call("audit", {{"request_id", deletion_request}, {"limit", 1}});
     ASSERT_TRUE(events.ok);
     EXPECT_TRUE(std::ranges::any_of(events.value["items"], [](const json& event) {
         return event["action"] == "delete_repository" && event["outcome"] == "success";
@@ -3866,7 +3869,7 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
     const auto references = control->list_repository_refs(repository->id);
     ASSERT_TRUE(references) << references.error().message;
     EXPECT_FALSE(references->empty());
-    const auto events = control->list_audit_events({.limit = 1000});
+    const auto events = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
         return event.draft.action == "push_change" && event.draft.outcome == "success";
@@ -4076,7 +4079,7 @@ TEST(SyncHttp, PushWithoutWriteAccessIsRejectedAndAudited) {
     const auto references = control->list_repository_refs(repository->id);
     ASSERT_TRUE(references) << references.error().message;
     EXPECT_TRUE(references->empty());
-    const auto events = control->list_audit_events({.limit = 1000});
+    const auto events = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
         return event.draft.outcome == "denied" &&
@@ -4163,7 +4166,7 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     const auto references = control->list_repository_refs(repository->id);
     ASSERT_TRUE(references) << references.error().message;
     EXPECT_FALSE(references->empty());
-    const auto events = control->list_audit_events({.limit = 1000});
+    const auto events = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
         return event.draft.action == "push" && event.draft.outcome == "success";
@@ -4252,7 +4255,7 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     EXPECT_EQ(fast_forward_refusal->reason,
               "branch protection rejects a non-fast-forward update to main");
 
-    const auto events_before_unauthorized = control->list_audit_events({.limit = 1000});
+    const auto events_before_unauthorized = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events_before_unauthorized) << events_before_unauthorized.error().message;
     const auto branch_events_before =
         std::ranges::count_if(*events_before_unauthorized, [](const auto& event) {
@@ -4280,7 +4283,7 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     const auto anonymous = liquid::runtime::block_on(anonymous_endpoint.push(*anonymous_source));
     ASSERT_FALSE(anonymous);
     EXPECT_EQ(anonymous.error().code, liquid::errc::unauthorized);
-    const auto events_after_anonymous = control->list_audit_events({.limit = 1000});
+    const auto events_after_anonymous = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events_after_anonymous) << events_after_anonymous.error().message;
     const auto branch_events_after =
         std::ranges::count_if(*events_after_anonymous, [](const auto& event) {
@@ -4513,7 +4516,7 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     EXPECT_FALSE(static_token.ok);
     EXPECT_EQ(static_token.error.code, "unauthorized");
     EXPECT_FALSE(s.store.context_for(token.value["secret"]));
-    auto audit_events = s.store.list_audit_events(lake::audit::Filter{.limit = 1000});
+    auto audit_events = lake::test::audit_events(s.store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(audit_events);
     EXPECT_TRUE(std::ranges::any_of(*audit_events, [](const lake::audit::Event& event) {
         return event.draft.action == "create_token" && event.draft.outcome == "success";

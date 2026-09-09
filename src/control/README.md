@@ -10,3 +10,7 @@ contract in `docs/api/identity.md` updated with changes to token derivation.
 Password sign-up provisions a personal customer and ownership grant in the same PostgreSQL
 transaction as the account and session. The memory store stages fallible credential derivation
 before publishing account rows. See `docs/api/provisioning.md`.
+
+Customer lists optionally filter by user ID before the limit. Audit lists apply exact request
+filters and event-ID cursors before the limit in both stores. The test regressions and fixture
+rules are in `docs/build/testing.md`; the public query contract is in `docs/api/audit.md`.

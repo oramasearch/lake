@@ -1,3 +1,4 @@
+#include "audit_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
@@ -262,7 +263,7 @@ void exercise_agent_session(lake::control::Store& store,
     EXPECT_EQ(expired.error.message, "agent session key has expired");
 
     const auto events =
-        store.list_audit_events({.object = "agent_session/" + session_id, .limit = 100});
+        lake::test::audit_events(store, {.object = "agent_session/" + session_id, .limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
         return event.draft.kind == "agent_session" &&

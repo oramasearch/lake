@@ -323,7 +323,8 @@ that licence boundary.
 5. Commit means push.
 
 PostgreSQL tests use `lake::test::postgres_uri()` for a fresh database per test. The configured
-`LAKE_TEST_DB_URI` database belongs to the caller and is not modified. See `docs/build/testing.md`.
+`LAKE_TEST_DB_URI` database belongs to the caller and is not modified. Query specific audit calls
+by request ID; use cursor exhaustion for whole-history assertions. See `docs/build/testing.md`.
 
 ## Formatting
 

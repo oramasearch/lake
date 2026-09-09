@@ -475,7 +475,15 @@ Result<audit::Event> InMemoryStore::latest_audit_event() {
 Result<std::vector<audit::Event>> InMemoryStore::list_audit_events(const audit::Filter& filter) {
     std::lock_guard lock(mutex_);
     std::vector<audit::Event> events;
+    bool after = filter.after_id.empty();
     for (const audit::Event& event : audit_events_) {
+        if (!after) {
+            after = event.id == filter.after_id;
+            continue;
+        }
+        if (!filter.request_id.empty() && event.draft.request_id != filter.request_id) {
+            continue;
+        }
         if (!filter.principal.empty() && event.draft.principal != filter.principal) {
             continue;
         }
@@ -728,9 +736,14 @@ Result<Customer> InMemoryStore::create_customer(const NewCustomer& in) {
     return customers_.back();
 }
 
-Result<std::vector<Customer>> InMemoryStore::list_customers(int limit) {
+Result<std::vector<Customer>> InMemoryStore::list_customers(int limit, const std::string& user_id) {
     std::lock_guard lock(mutex_);
-    std::vector<Customer> out(customers_.rbegin(), customers_.rend());
+    std::vector<Customer> out;
+    for (auto it = customers_.rbegin(); it != customers_.rend(); ++it) {
+        if (user_id.empty() || it->user_id == user_id) {
+            out.push_back(*it);
+        }
+    }
     if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
         out.resize(static_cast<std::size_t>(limit));
     return out;

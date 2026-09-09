@@ -1090,6 +1090,8 @@ json audit_filter_input() {
     return {{"type", "object"},
             {"properties",
              {{"principal", {{"type", "string"}}},
+              {"request_id", {{"type", "string"}}},
+              {"after_id", {{"type", "string"}}},
               {"object", {{"type", "string"}}},
               {"outcome", {{"type", "string"}}},
               {"from", {{"type", "string"}}},
@@ -1106,6 +1108,8 @@ audit::Filter audit_filter_of(const json& input) {
         .from = input.value("from", ""),
         .to = input.value("to", ""),
         .limit = limit_of(input),
+        .request_id = input.value("request_id", ""),
+        .after_id = input.value("after_id", ""),
     };
 }
 

@@ -172,6 +172,7 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
                                            {"issuer", "https://saml.stub.example"},
                                            {"subject", "saml-user"},
                                            {"claims", {{"email", "saml-user@example.com"}}}});
+    const std::string denied_request = surface.context.request_id;
     EXPECT_FALSE(denied.ok);
     EXPECT_EQ(denied.error.code, "unauthorized");
 
@@ -211,7 +212,7 @@ TEST(Sso, SamlAndOidcProviderAssertionsRequireFederationPolicy) {
 
     surface.context.authorized = true;
     surface.context.operator_credential = true;
-    const ApiResult audit = surface.call("audit", {{"limit", 1000}});
+    const ApiResult audit = surface.call("audit", {{"request_id", denied_request}, {"limit", 1}});
     ASSERT_TRUE(audit.ok) << audit.error.message;
     EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
         return event.at("action") == "sign_in_sso" && event.at("outcome") == "denied";
@@ -255,10 +256,11 @@ TEST(Sso, SignedSamlAssertionIsVerifiedBeforeSignIn) {
     tampered[tampered.size() / 2] = tampered[tampered.size() / 2] == 'A' ? 'B' : 'A';
     const ApiResult rejected = surface.call(
         "sign_in_saml", {{"provider_id", provider.value.at("id")}, {"saml_response", tampered}});
+    const std::string rejected_request = surface.context.request_id;
     EXPECT_FALSE(rejected.ok);
     surface.context.authorized = true;
     surface.context.operator_credential = true;
-    const ApiResult audit = surface.call("audit", {{"limit", 100}});
+    const ApiResult audit = surface.call("audit", {{"request_id", rejected_request}, {"limit", 1}});
     ASSERT_TRUE(audit.ok) << audit.error.message;
     EXPECT_TRUE(std::ranges::any_of(audit.value.at("items"), [](const json& event) {
         return event.at("action") == "sign_in_saml" && event.at("outcome") == "denied";
@@ -337,11 +339,11 @@ TEST(Scim, UserUpdateGroupReplacementAndDeactivationRevokeSessions) {
     EXPECT_FALSE(surface.store.context_for(session.value.at("secret")).has_value());
 
     const ApiResult logs =
-        surface.call("list_sso_provisioning_logs", {{"provider_id", provider_id}});
+        surface.call("list_sso_provisioning_logs", {{"provider_id", provider_id}, {"limit", 1}});
     ASSERT_TRUE(logs.ok) << logs.error.message;
-    EXPECT_TRUE(std::ranges::any_of(logs.value.at("items"), [](const json& entry) {
-        return entry.at("resource") == "user" && entry.at("operation") == "deactivate";
-    }));
+    ASSERT_EQ(logs.value.at("items").size(), 1U);
+    EXPECT_EQ(logs.value.at("items").front().at("resource"), "user");
+    EXPECT_EQ(logs.value.at("items").front().at("operation"), "deactivate");
 }
 
 } // namespace

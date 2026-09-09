@@ -1,3 +1,4 @@
+#include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
 
@@ -161,7 +162,7 @@ protected:
             return;
         }
         server_->stop();
-        const auto events = store_->list_audit_events({.limit = 100000});
+        const auto events = lake::test::audit_events(*store_, {.limit = 100});
         ASSERT_TRUE(events);
         const auto verified = lake::audit::verify(*store_, *events);
         ASSERT_TRUE(verified) << verified.error().message;
@@ -225,7 +226,7 @@ protected:
     }
 
     void verify_call_audit(const std::string& id, const std::string& name, const json& result) {
-        const auto events = store_->list_audit_events({.limit = 100000});
+        const auto events = lake::test::audit_events(*store_, {.request_id = id});
         ASSERT_TRUE(events);
         std::vector<lake::audit::Event> matches;
         std::ranges::copy_if(*events, std::back_inserter(matches), [&](const auto& event) {
@@ -473,6 +474,8 @@ TEST_P(TokenAttenuation, ApplicationPoolsReturnOnlyDerivedSessionBearer) {
     const auto events =
         store_->list_application_webhook_events(application.at("value").at("id"), 100);
     ASSERT_TRUE(events);
+    ASSERT_LT(events->size(), 100U)
+        << "The application event query must return its complete fixture";
     EXPECT_EQ(std::ranges::count_if(
                   *events, [](const auto& event) { return event.event == "session.started"; }),
               3);

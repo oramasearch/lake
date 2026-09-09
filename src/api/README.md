@@ -22,3 +22,6 @@ The landing page and all shared-shell renderers receive `WebUiViewer` from the c
 resolver. Global and repository navigation omit destinations unavailable to that viewer; customer
 authentication redirects use `/sign-in`. OpenAPI describes account tokens. The behavior and
 verification are in [front-door.md](../../docs/ui/front-door.md).
+
+Audit query and export schemas accept exact `request_id` and append-order `after_id` filters.
+Their contract and regression coverage are in [audit.md](../../docs/api/audit.md).

@@ -213,8 +213,9 @@ public:
     control::Result<control::Customer> create_customer(const control::NewCustomer& value) override {
         return call("create_customer", [&] { return store_->create_customer(value); });
     }
-    control::Result<std::vector<control::Customer>> list_customers(int limit) override {
-        return call("list_customers", [&] { return store_->list_customers(limit); });
+    control::Result<std::vector<control::Customer>>
+    list_customers(int limit, const std::string& user_id) override {
+        return call("list_customers", [&] { return store_->list_customers(limit, user_id); });
     }
     control::Result<control::Customer> get_customer(const std::string& id) override {
         return call("get_customer", [&] { return store_->get_customer(id); });

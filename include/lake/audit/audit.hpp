@@ -53,6 +53,9 @@ struct Filter {
     std::string from;
     std::string to;
     int limit = 100;
+    std::string request_id;
+    // Continue after this event in append order, independently of timestamps.
+    std::string after_id;
 };
 
 struct Identity {

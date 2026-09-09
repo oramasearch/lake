@@ -2030,12 +2030,14 @@ public:
             return customer;
         });
     }
-    Result<std::vector<Customer>> list_customers(int limit) override {
+    Result<std::vector<Customer>> list_customers(int limit, const std::string& user_id) override {
         return with_tx<std::vector<Customer>>([&](pqxx::work& tx) -> Result<std::vector<Customer>> {
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + customer_columns +
-                                   " FROM customers ORDER BY created_at DESC LIMIT $1",
-                               limit);
+                                   " FROM customers WHERE ($2 = '' OR user_id::text = $2) "
+                                   "ORDER BY created_at DESC LIMIT $1",
+                               limit,
+                               user_id);
             std::vector<Customer> out;
             for (const auto& r : rows)
                 out.push_back(customer_of(r));
@@ -3716,13 +3718,18 @@ public:
                         "AND ($3 = '' OR outcome = $3) "
                         "AND ($4 = '' OR occurred_at >= $4::timestamptz) "
                         "AND ($5 = '' OR occurred_at <= $5::timestamptz) "
+                        "AND ($7 = '' OR request_id = $7) "
+                        "AND ($8 = '' OR sequence > "
+                        "(SELECT sequence FROM audit_events WHERE id::text = $8)) "
                         "ORDER BY sequence ASC LIMIT $6",
                     filter.principal,
                     filter.object,
                     filter.outcome,
                     filter.from,
                     filter.to,
-                    filter.limit);
+                    filter.limit,
+                    filter.request_id,
+                    filter.after_id);
                 std::vector<audit::Event> events;
                 for (const pqxx::row& row : rows) {
                     events.push_back(audit_event_of(row));

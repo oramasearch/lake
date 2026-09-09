@@ -6,6 +6,7 @@ if(NOT LAKE_JSONSCHEMA_RESULT EQUAL 0)
 endif()
 
 add_executable(lake-tests test_main.cpp test_web_ui.cpp
+  test_audit_isolation.cpp
   test_schema_conformance.cpp
   scenarios/drive_test.cpp
   test_apps.cpp
