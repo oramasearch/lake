@@ -109,3 +109,25 @@ GET /v1/server_info: HTTP 200 ok=true
 
 The complete documentation link check reports zero broken links. Linux proof deferred: the
 host's prescribed `linux-proof.sh` runner is absent. No container proof was run.
+
+## Final shared proof
+
+The required fetch/rebase found `origin/main` unchanged at
+`d9d03d90ad92160c51714134217355844e58156d`. Submodules were synchronized, so the static proof above
+remains valid. A separate shared build used `BUILD_SHARED_LIBS=ON`, the same toolchain and local
+PostgreSQL fixture, and at most six build jobs. Downloaded dependency sources were reused; all
+shared objects were built in `build-shared`.
+
+```text
+ctest --test-dir build-shared --output-on-failure
+100% tests passed, 0 tests failed out of 239
+Total Test time (real) = 163.20 sec
+
+The following tests did not run:
+131 - SearchBenchmark.BuildAndQueryTenThousandFiles (Disabled)
+```
+
+No test failed, and no PostgreSQL or optional-client case skipped in either full suite. The six
+new regressions and the existing REST/MCP attenuation cases passed in both builds. The shared
+binary also prints `lake 0.0.1`. The operator schema copy and deployment remain separate required
+work before rollout; neither was performed here.
