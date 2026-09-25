@@ -10,7 +10,7 @@ no tenancy: a cluster's `list_projects`, `list_models` and the rest return every
 | Section | Page | Zetta capabilities behind it |
 |---|---|---|
 | Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `capture_intent` then `compile_intent` (build a pipeline from what the project should predict), `approve_plan` (approve a proposed pipeline), `gate` then `run` (check and run an approved pipeline) |
-| Train | `/train/data` | `list_connections`, `list_datasets` |
+| Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`) |
 | Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run_report` |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |
 | Ship | `/ship/indexes` | `list_indexes` |
@@ -41,13 +41,28 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `start_workspace` | action | `write` | Appends a `desired` event; repeating it appends nothing |
 | `delete_workspace` | action | `admin` | Needs `confirm` equal to the workspace id; appends a `withdrawn` event. Refused with `not_found` when no workspace is requested |
 | `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job` |
-| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain` |
+| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain` |
 
 Input for the last two is `{customer_id, capability, input}`, where `input` is the Zetta
 capability's own input. Anything off the lists is refused with `invalid_input`, so nothing reaches
 Zetta's administrative surface (`sql`, users, cloud provisioning) through lake. Audit records carry
 `workspace.query`, `workspace.act`, `workspace.start` or `workspace.delete` with the customer, the workspace and the
 Zetta capability.
+
+## Connections and their credential
+
+The connection form posts the password or access token once, to `create_connection` on the
+customer's own workspace, which stores it and never returns it (`list_connections` omits it).
+lake keeps no copy, never renders it back into the form, and records only the capability name in
+its audit event. Pulling a dataset names the saved connection, so the credential does not travel
+again.
+
+`create_dataset_from_query` is consent-gated in Zetta: a node started with `--governance` answers
+the first call with a `consent_required` challenge that only a different principal can approve.
+Workspace clusters run without `--governance` (the operator sets no such flag), so Zetta runs the
+query and audits it as `consent_bypassed`; lake's own `write` authorization on the customer is the
+gate. Should a workspace ever enforce consent, the page says an approval is needed that lake cannot
+give, instead of passing the challenge through.
 
 ## How lake finds and calls a workspace
 
@@ -103,7 +118,8 @@ while `kubectl -n lake get oramazettacluster` loses `<lake>-<workspace>`.
 
 - A workspace cannot be suspended, only deleted. The quota is per Lake
   (`spec.workspaces.maxWorkspaces`, orama-operator `docs/lake/workspaces.md`), not per customer.
-- Adding a connection or a dataset has no form yet; use `workspace_act` with `create_connection`.
+- A file cannot be uploaded as a dataset yet: Zetta has no row-upload capability
+  (https://github.com/oramasearch/zetta/issues/1008).
 - A published model or index is reachable inside the workspace only; lake does not route to it.
 - Workspace reads time out after 15 seconds and actions after 60. Run reports do not load on the
   current workspace image: `get_run_report` never answers (https://github.com/oramasearch/zetta/issues/1007).

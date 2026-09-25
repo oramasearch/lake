@@ -4662,6 +4662,9 @@ struct ApiServer::Impl {
             "/ship/packages",
             "/workspace/start",
             "/workspace/delete",
+            "/train/data/connect",
+            "/train/data/disconnect",
+            "/train/data/pull",
             "/environments",
             "/environment",
             "/logs",
@@ -7264,6 +7267,60 @@ struct ApiServer::Impl {
                 "delete_workspace",
                 {{"customer_id", customer_id}, {"confirm", form_field(body, "confirm")}},
                 context));
+        } else if (action == "connect") {
+            back = "/train/data?" + query;
+            const std::string type = form_field(body, "type");
+            nlohmann::json connector{{"type", type}};
+            const std::vector<const char*> fields =
+                type == "postgres"
+                    ? std::vector<const char*>{"host",
+                                               "port",
+                                               "user",
+                                               "sslmode",
+                                               "database",
+                                               "schema",
+                                               "token"}
+                    : std::vector<const char*>{
+                          "account", "warehouse", "role", "database", "schema", "token"};
+            for (const char* field : fields) {
+                if (const std::string value = form_field(body, field); !value.empty()) {
+                    connector[field] = value;
+                }
+            }
+            result = unwrap(co_await act(
+                "create_connection",
+                {{"name", form_field(body, "name")}, {"connector", std::move(connector)}}));
+        } else if (action == "disconnect") {
+            back = "/train/data?" + query;
+            result =
+                unwrap(co_await act("delete_connection", {{"name", form_field(body, "name")}}));
+        } else if (action == "pull") {
+            back = "/train/data?" + query;
+            nlohmann::json input{{"connection", form_field(body, "connection")},
+                                 {"query", form_field(body, "query")},
+                                 {"table_name", form_field(body, "table_name")}};
+            if (const std::string max_rows = form_field(body, "max_rows"); !max_rows.empty()) {
+                long long rows = 0;
+                const auto [end, error] =
+                    std::from_chars(max_rows.data(), max_rows.data() + max_rows.size(), rows);
+                if (error != std::errc() || end != max_rows.data() + max_rows.size() || rows < 1) {
+                    result = ApiResult::failure("invalid_input",
+                                                "The row limit must be a whole number.");
+                } else {
+                    input["max_rows"] = rows;
+                }
+            }
+            if (result.ok) {
+                result = unwrap(co_await act("create_dataset_from_query", std::move(input)));
+                // A workspace started with --governance asks for a consent approval lake cannot
+                // give; say so rather than pass Zetta's challenge through.
+                if (!result.ok && result.error.code == "consent_required") {
+                    result = ApiResult::failure(
+                        "consent_required",
+                        "This workspace requires an approval before it reaches an outside "
+                        "database, and lake cannot approve it.");
+                }
+            }
         } else if (action == "create_project") {
             const std::string name = form_field(body, "name");
             nlohmann::json input{{"name", name}};
@@ -10812,9 +10869,12 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 7>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 10>{
              {{"/workspace/start", "start"},
               {"/workspace/delete", "delete"},
+              {"/train/data/connect", "connect"},
+              {"/train/data/disconnect", "disconnect"},
+              {"/train/data/pull", "pull"},
               {"/design/projects/create", "create_project"},
               {"/design/project/compile", "compile"},
               {"/design/project/approve", "approve"},

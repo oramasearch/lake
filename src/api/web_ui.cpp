@@ -1781,10 +1781,55 @@ std::string workspace_content(const WorkspacePage& page) {
         const nlohmann::json datasets = data.value("list_datasets", nlohmann::json::object())
                                             .value("datasets", nlohmann::json::array());
         out += "<section class=\"panel\"><h2>Connections</h2>";
-        out += connections.empty()
-                   ? "<p>No connections yet. Add one through the API with <code>workspace_act"
-                     "</code> and <code>create_connection</code>.</p>"
-                   : workspace_table(connections, {{"name", "Name"}, {"created", "Created"}});
+        if (connections.empty()) {
+            out += "<p>No connections yet. Add the database your data lives in below.</p>";
+        } else {
+            out += "<table><thead><tr><th>Name</th><th>Type</th><th>Where</th><th>Saved</th>"
+                   "<th></th></tr></thead><tbody>";
+            for (const nlohmann::json& connection : connections) {
+                const nlohmann::json connector =
+                    connection.value("connector", nlohmann::json::object());
+                const std::string where =
+                    json_text(connector, "type") == "postgres"
+                        ? json_text(connector, "host") + "/" + json_text(connector, "database")
+                        : json_text(connector, "account");
+                out += std::format(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><form method=\"post\" "
+                    "action=\"/train/data/disconnect\">{}{}<button type=\"submit\">Remove"
+                    "</button></form></td></tr>",
+                    web_ui_escape(json_text(connection, "name")),
+                    web_ui_escape(json_text(connector, "type")),
+                    web_ui_escape(where),
+                    web_ui_escape(json_text(connection, "created")),
+                    hidden("customer_id", page.customer_id),
+                    hidden("name", json_text(connection, "name")));
+            }
+            out += "</tbody></table>";
+        }
+        // The credential goes to the workspace, which stores it and never returns it; lake keeps
+        // no copy, and the field is never filled back in.
+        out += std::format(
+            "<details><summary>Add a connection</summary><form class=\"stack\" method=\"post\" "
+            "action=\"/train/data/connect\" autocomplete=\"off\">{}<label>Name<input "
+            "name=\"name\" required pattern=\"[A-Za-z0-9_\\-]{{1,64}}\" "
+            "placeholder=\"warehouse\"></label><label>Type<select name=\"type\"><option "
+            "value=\"postgres\">Postgres</option><option value=\"snowflake\">Snowflake</option>"
+            "</select></label><fieldset><legend>Postgres</legend><label>Host<input "
+            "name=\"host\" placeholder=\"db.example.com\"></label><label>Port<input name=\"port\" "
+            "inputmode=\"numeric\" placeholder=\"5432\"></label><label>User<input "
+            "name=\"user\"></label><label>SSL mode<select name=\"sslmode\"><option "
+            "value=\"require\">require</option><option value=\"verify-full\">verify-full"
+            "</option><option value=\"disable\">disable</option></select></label></fieldset>"
+            "<fieldset><legend>Snowflake</legend><label>Account<input name=\"account\" "
+            "placeholder=\"ab12345.us-east-1\"></label><label>Warehouse<input "
+            "name=\"warehouse\"></label><label>Role<input name=\"role\"></label></fieldset>"
+            "<label>Database<input name=\"database\"></label><label>Schema<input "
+            "name=\"schema\"></label><label>Password or access token<input type=\"password\" "
+            "name=\"token\" autocomplete=\"new-password\"></label><p class=\"muted\">Use a "
+            "read-only account: only a single SELECT ever runs against it.</p><button "
+            "class=\"button button-primary\" type=\"submit\">Save connection</button></form>"
+            "</details>",
+            hidden("customer_id", page.customer_id));
         out += "</section><section class=\"panel\"><h2>Datasets</h2>";
         out += datasets.empty() ? "<p>No datasets yet.</p>"
                                 : workspace_table(datasets,
@@ -1792,6 +1837,25 @@ std::string workspace_content(const WorkspacePage& page) {
                                                    {"rows", "Rows"},
                                                    {"size_bytes", "Bytes"},
                                                    {"format", "Format"}});
+        if (!connections.empty()) {
+            std::string options;
+            for (const nlohmann::json& connection : connections) {
+                options += std::format("<option>{}</option>",
+                                       web_ui_escape(json_text(connection, "name")));
+            }
+            out += std::format(
+                "<details><summary>Pull a dataset</summary><form class=\"stack\" "
+                "method=\"post\" action=\"/train/data/pull\">{}<label>From<select "
+                "name=\"connection\">{}</select></label><label>Query<textarea name=\"query\" "
+                "rows=\"4\" required placeholder=\"SELECT account_id, plan, seats, renewed FROM "
+                "accounts\"></textarea></label><label>Dataset name<input name=\"table_name\" "
+                "required pattern=\"[A-Za-z_][A-Za-z0-9_]{{0,62}}\" placeholder=\"accounts\">"
+                "</label><label>At most this many rows<input name=\"max_rows\" "
+                "inputmode=\"numeric\" placeholder=\"100000\"></label><button class=\"button "
+                "button-primary\" type=\"submit\">Pull dataset</button></form></details>",
+                hidden("customer_id", page.customer_id),
+                options);
+        }
         out += "</section>";
     } else if (page.section == "runs") {
         const nlohmann::json runs = data.value("list_runs", nlohmann::json::object())
