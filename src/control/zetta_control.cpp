@@ -131,9 +131,17 @@ liquid::runtime::task<ZettaControlResult<ZettaRows>> ZettaControlClient::sql(std
              response.error.empty() ? "operator Zetta request failed" : response.error});
     }
     if (response.status < 200 || response.status >= 300) {
-        co_return zetta_failure<ZettaRows>(
-            {"store_unavailable",
-             "operator Zetta returned HTTP " + std::to_string(response.status)});
+        // Keep Zetta's own reason (a SQL error, a missing database); it is what makes the failure
+        // diagnosable. The request's secret header is never part of it.
+        const nlohmann::json failure = nlohmann::json::parse(response.body, nullptr, false);
+        const std::string reason =
+            failure.is_object()
+                ? failure.value("error", nlohmann::json::object()).value("message", std::string())
+                : std::string();
+        co_return zetta_failure<ZettaRows>({"store_unavailable",
+                                            "operator Zetta returned HTTP " +
+                                                std::to_string(response.status) +
+                                                (reason.empty() ? std::string() : ": " + reason)});
     }
     const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
     if (body.is_discarded() || !body.is_object() || !body.value("ok", false)) {

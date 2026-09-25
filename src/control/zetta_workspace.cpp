@@ -149,14 +149,15 @@ WorkspaceService::state(std::string customer_id) {
         co_return workspace_failure<WorkspaceState>("store_unavailable",
                                                     "workspaces are not configured on this lake");
     }
-    const auto quoted_slug = quote_zetta_literal(state.slug);
     const auto quoted_lake = quote_zetta_literal(config_.lake_name);
-    if (!quoted_slug || !quoted_lake) {
+    if (!quoted_lake) {
         co_return workspace_failure<WorkspaceState>("invalid_input", "invalid workspace identity");
     }
+    // Zetta's SQL takes one predicate per WHERE clause (no AND), so filter by Lake in the query
+    // and by workspace here, as the operator does.
     auto completed = co_await control_->sql(
-        "SELECT record_type, phase, message, updated_at FROM " + std::string(workspaces_table) +
-            " WHERE workspace_id = " + *quoted_slug + " AND lake = " + *quoted_lake,
+        "SELECT workspace_id, record_type, phase, message, updated_at FROM " +
+            std::string(workspaces_table) + " WHERE lake = " + *quoted_lake,
         std::string(operator_control_database));
     if (!completed) {
         co_return workspace_failure<WorkspaceState>("store_unavailable", completed.error().message);
@@ -167,6 +168,9 @@ WorkspaceService::state(std::string customer_id) {
     }
     std::string latest;
     for (const nlohmann::json& row : *rows) {
+        if (text_of(row, "workspace_id") != state.slug) {
+            continue;
+        }
         const std::string type = text_of(row, "record_type");
         if (type == "desired") {
             state.requested = true;
