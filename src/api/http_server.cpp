@@ -7108,13 +7108,16 @@ struct ApiServer::Impl {
             } else if (section == "runs") {
                 reads = {{"list_runs", nlohmann::json::object()}};
             } else if (section == "run") {
-                reads = {{"get_run_report", {{"run_id", page.subject}}}};
+                // The report is requested once the run has finished: asking a running run for
+                // its report makes the deployed Zetta drop the connection.
+                reads = {{"get_run", {{"run_id", page.subject}}}};
             } else if (section == "models") {
                 reads = {{"list_models", nlohmann::json::object()}};
             } else if (section == "indexes") {
                 reads = {{"list_indexes", nlohmann::json::object()}};
             }
-            for (auto& [capability, input] : reads) {
+            for (std::size_t index = 0; index < reads.size(); ++index) {
+                auto& [capability, input] = reads[index];
                 const ApiResult result =
                     unwrap(co_await workspace_call("workspace_query",
                                                    {{"customer_id", page.customer_id},
@@ -7123,6 +7126,11 @@ struct ApiServer::Impl {
                                                    context));
                 if (result.ok) {
                     page.data[capability] = result.value;
+                    const std::string status = result.value.value("status", std::string());
+                    if (capability == "get_run" && status != "running" && status != "queued" &&
+                        status != "pending") {
+                        reads.push_back({"get_run_report", {{"run_id", page.subject}}});
+                    }
                 } else if (page.error.empty()) {
                     page.error = result.error.message;
                 }

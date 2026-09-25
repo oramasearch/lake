@@ -1762,9 +1762,18 @@ std::string workspace_content(const WorkspacePage& page) {
             out += "</tbody></table>";
         }
     } else if (page.section == "run") {
-        const nlohmann::json report = data.value("get_run_report", nlohmann::json::object());
-        out += std::format("<section class=\"panel\"><h2>Report</h2><pre>{}</pre></section>",
-                           web_ui_escape(report.dump(2)));
+        const nlohmann::json run = data.value("get_run", nlohmann::json::object());
+        const std::string status = json_text(run, "status");
+        out += std::format("<p>Status: <span class=\"badge\">{}</span></p>",
+                           web_ui_escape(status.empty() ? "unknown" : status));
+        if (data.contains("get_run_report")) {
+            out += std::format("<section class=\"panel\"><h2>Report</h2><pre>{}</pre></section>",
+                               web_ui_escape(data.at("get_run_report").dump(2)));
+        } else if (status == "running" || status == "queued" || status == "pending") {
+            out += "<div class=\"panel\" role=\"status\">The report appears when the run "
+                   "finishes. This page checks again every 15 seconds.<meta "
+                   "http-equiv=\"refresh\" content=\"15\"></div>";
+        }
     } else if (page.section == "models") {
         const nlohmann::json models = data.value("list_models", nlohmann::json::object())
                                           .value("models", nlohmann::json::array());

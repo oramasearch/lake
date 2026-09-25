@@ -281,6 +281,17 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
         << "the proposed plan offers Approve, the approved one Check and run";
     page.subject.clear();
 
+    page.section = "run";
+    page.subject = "r1";
+    page.data["get_run"] = {{"status", "running"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("The report appears when the run finishes"), std::string::npos);
+    page.data["get_run"] = {{"status", "succeeded"}};
+    page.data["get_run_report"] = {{"model", {{"auc", 0.9}}}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<h2>Report</h2>"), std::string::npos);
+    page.subject.clear();
+
     page.section = "models";
     page.data["list_models"] = {{"models", json::array({{{"name", "churn"}, {"kind", "gbdt"}}})}};
     html = lake::api::web_ui_workspace(page, true);
