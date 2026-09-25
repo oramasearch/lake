@@ -1,5 +1,8 @@
 # Web UI visual direction mocks
 
+The cloud navigation mock for [`../../cloud.md`](../../cloud.md) is in [`cloud/`](cloud/README.md). It
+uses the served design system, unlike the three directions below, which predate it.
+
 These static mocks put the same dense repository, change review, and organization data into three
 visual directions before Lake adopts a design system. They are reference material only: they do
 not change `src/api/web_ui.cpp`, `/style.css`, or any served page.
