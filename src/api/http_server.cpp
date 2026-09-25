@@ -4579,6 +4579,7 @@ struct ApiServer::Impl {
             "/design/project",
             "/design/projects/create",
             "/design/project/compile",
+            "/design/project/approve",
             "/design/project/run",
             "/train/data",
             "/train/runs",
@@ -7193,6 +7194,11 @@ struct ApiServer::Impl {
                 }
                 result = unwrap(co_await act("compile_intent", std::move(input)));
             }
+        } else if (action == "approve") {
+            const std::string project = form_field(body, "project");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            result = unwrap(co_await act(
+                "approve_plan", {{"project", project}, {"graph", form_field(body, "graph")}}));
         } else if (action == "run") {
             const std::string project = form_field(body, "project");
             const std::string graph = form_field(body, "graph");
@@ -10649,10 +10655,11 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 5>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 6>{
              {{"/workspace/start", "start"},
               {"/design/projects/create", "create_project"},
               {"/design/project/compile", "compile"},
+              {"/design/project/approve", "approve"},
               {"/design/project/run", "run"},
               {"/ship/models/publish", "publish"}}}) {
         router.add(http::method::post,
