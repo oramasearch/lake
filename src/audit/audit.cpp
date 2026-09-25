@@ -476,6 +476,20 @@ IdentityOptions options_for_store(control::Store& store, IdentityOptions options
 
 } // namespace
 
+Result<Identity> mint_custodial_identity(std::string_view instance_kek) {
+    if (instance_kek.empty()) {
+        return std::unexpected(
+            Error{"invalid_input", "an instance key is required to hold an identity"});
+    }
+    auto seed = random_seed();
+    if (!seed) {
+        return std::unexpected(seed.error());
+    }
+    IdentityOptions options;
+    options.instance_kek = std::string(instance_kek);
+    return identity_from_seed(*seed, options);
+}
+
 nlohmann::json to_json(const Event& event) {
     nlohmann::json value = stored(event);
     value["digest"] = event.digest;

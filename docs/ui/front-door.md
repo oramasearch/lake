@@ -5,6 +5,11 @@ data, with repositories at the centre. It follows the design in
 [`../design/cloud.md`](../design/cloud.md) and liquid-bridge decision 43. It uses the existing
 design-system shell, panels, grid, and theme controls. No schema was added.
 
+**Sign-in.** When `LAKE_CLERK_PUBLISHABLE_KEY` is set, Sign in and Create account open Clerk's
+forms and lake's own password, TOTP, passkey and identity-document pages leave the navigation; see
+[`../api/clerk.md`](../api/clerk.md). Without it, they work as below, which is what an on-prem
+install uses.
+
 ## Landing copy
 
 **lake by Orama**
@@ -37,7 +42,7 @@ the homepage and forms do not confer additional access.
 | Viewer | Sidebar | Top bar |
 |---|---|---|
 | Signed out or invalid credential | Home, Public repositories | Sign in, Create account |
-| Ordinary account | Home, Repositories, Shared with me, Search · **Ship:** Deployments · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys, Tokens, Sign out |
+| Ordinary account | Home, Repositories, Shared with me, Search · **Ship:** Deployments · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
 | Operator | Home, Repositories, Search · **Ship:** Deployments · **Administration:** Customers, Organizations, Applications, Metering, Secrets, Audit · **Developer:** API | Sign out |
 
 The **Design** and **Train** sections of the design are not in the sidebar yet. A section appears

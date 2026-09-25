@@ -1455,6 +1455,66 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     return issued;
 }
 
+Result<IssuedSession> InMemoryStore::sign_in_clerk(const ClerkIdentity& input) {
+    if (input.subject.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
+    }
+    std::lock_guard lock(mutex_);
+    const std::string subject = "clerk:" + input.subject;
+    std::string user_id;
+    for (const auto& credential : oauth_credentials_) {
+        if (credential.pool_id == "lake" && credential.subject == subject) {
+            user_id = credential.user_id;
+        }
+    }
+    if (user_id.empty() && !input.email.empty()) {
+        for (const auto& user : users_) {
+            if (lower(user.email) == lower(input.email)) {
+                user_id = user.id;
+            }
+        }
+        if (!user_id.empty()) {
+            oauth_credentials_.push_back(OAuthCredential{user_id, "lake", subject});
+        }
+    }
+    if (user_id.empty()) {
+        if (input.custodial_taap_id.empty() || input.custodial_public_key.empty() ||
+            input.custodial_wrapped_seed.empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "a custodial identity is required to create a user"});
+        }
+        const std::string now = now_iso8601();
+        users_.push_back(User{
+            new_uuid_v4(), input.custodial_taap_id, input.email, input.display_name, now, now});
+        user_id = users_.back().id;
+        custodial_identities_[user_id] = input;
+        oauth_credentials_.push_back(OAuthCredential{user_id, "lake", subject});
+        std::string handle;
+        do {
+            handle = generate_handle();
+        } while (std::ranges::any_of(
+            customers_, [&](const Customer& customer) { return customer.name == handle; }));
+        customers_.push_back(Customer{new_uuid_v4(), "individual", user_id, "", handle, now, now});
+        policy_objects_.push_back(
+            PolicyObject{new_uuid_v4(), "customer", customers_.back().id, "", now, now, true});
+        grants_.push_back(Grant{new_uuid_v4(),
+                                input.custodial_taap_id,
+                                policy_objects_.back().id,
+                                "admin",
+                                subject,
+                                input.custodial_taap_id,
+                                now,
+                                now});
+    }
+    Device& device = add_device(devices_, user_id, input.device_name);
+    IssuedSession issued =
+        add_session(sessions_, user_id, "lake", device.id, "browser", "", {"*"}, "", 86400);
+    if (issued.secret.empty())
+        return std::unexpected(StoreError{"store_error", "could not issue session"});
+    issued.session.reason.clear();
+    return issued;
+}
+
 Result<void> InMemoryStore::register_oauth_provider(const OAuthProvider& input) {
     if (input.pool_id.empty() || input.provider.empty() || input.issuer.empty() ||
         input.client_id.empty() || input.client_secret.empty()) {

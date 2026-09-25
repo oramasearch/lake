@@ -552,6 +552,56 @@ TEST(HttpServer, ResponseResetPreservesCurrentProtocolAndCors) {
     EXPECT_TRUE(response_header(healthy, "access-control-allow-methods").empty());
 }
 
+TEST(HttpServer, ClerkReplacesTheBrowserSignInPagesWhenConfigured) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.instance_kek = "clerk-http-test-kek";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    // base64("127.0.0.1$"): a Frontend API host that refuses connections, so the JWKS fetch fails
+    // fast and every token is refused.
+    options.clerk_publishable_key = "pk_test_MTI3LjAuMC4xJA";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+
+    const std::string sign_in = connection.request("GET", "/sign-in");
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 200")) << sign_in;
+    EXPECT_NE(sign_in.find("data-clerk-publishable-key=\"pk_test_MTI3LjAuMC4xJA\""),
+              std::string::npos);
+    EXPECT_NE(sign_in.find("mountSignIn"), std::string::npos);
+    EXPECT_EQ(sign_in.find("name=\"password\""), std::string::npos);
+    const std::string sign_up = connection.request("GET", "/sign-up");
+    ASSERT_TRUE(sign_up.starts_with("HTTP/1.1 200"));
+    EXPECT_NE(sign_up.find("mountSignUp"), std::string::npos);
+    EXPECT_EQ(sign_up.find("identity_document"), std::string::npos);
+
+    const std::string refused =
+        connection.request("POST", "/identity/clerk-session", "token=not.a.jwt&device_name=b");
+    ASSERT_TRUE(refused.starts_with("HTTP/1.1 302")) << refused;
+    EXPECT_TRUE(response_header(refused, "location").starts_with("/sign-in?error="));
+    EXPECT_TRUE(response_header(refused, "set-cookie").empty());
+
+    const std::string signed_out = connection.request("POST", "/logout");
+    EXPECT_EQ(response_header(signed_out, "location"), "/sign-in?signed_out=1");
+}
+
+TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.instance_kek = "clerk-off-http-test-kek";
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    EXPECT_TRUE(connection.request("POST", "/identity/clerk-session", "token=x")
+                    .starts_with("HTTP/1.1 404"));
+    const std::string sign_in = connection.request("GET", "/sign-in");
+    EXPECT_EQ(sign_in.find("clerk"), std::string::npos);
+    EXPECT_EQ(response_header(connection.request("POST", "/logout"), "location"), "/");
+}
+
 TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {
     StderrPipe captured_stderr;
     ASSERT_TRUE(captured_stderr.ready());

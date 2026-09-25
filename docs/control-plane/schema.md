@@ -309,7 +309,9 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    `0018_settings_surface` and `settings_guard`; platform adds `0019_platform` and
    `platform_guard`; the identity-exit scenario adds `0020_identity_exit` and
    `identity_exit_guard`; token attenuation adds `0021_token_attenuation` and
-   `token_attenuation_guard`. The operator copy remains deferred to the single
+   `token_attenuation_guard`; session lookup adds `0022_session_lookup` and
+   `session_lookup_guard`; Clerk sign-in adds `0023_custodial_identities` and
+   `custodial_identity_guard`. The operator copy remains deferred to the single
    wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
@@ -323,8 +325,8 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup')" \
-  -c "SELECT to_regclass('session_lookup_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities')" \
+  -c "SELECT to_regclass('custodial_identity_guard')"
 ```
 
 ## Token attenuation migration
@@ -363,3 +365,16 @@ change is deliberately outside this Lake worktree. Verification uses the full Po
 static/shared suites, including `PostgresSessionAuthentication.*`; see
 [authentication](../api/auth.md) and [measurement proof](../build/session-authentication.md).
 Changes to the lookup or digest format must update this migration contract and those regressions.
+
+## Custodial identity migration
+
+`0023_custodial_identities` adds `custodial_identities`, one row per user for whom lake holds a TAAP
+identity: `user_id` (primary key, cascading from `users`), the unique `taap_id`, the base64
+Ed25519 `public_key`, and `wrapped_seed`, the seed wrapped under `LAKE_INSTANCE_KEK` exactly as
+`lake_identity.wrapped_seed` is. A row is written only when a person first signs in through Clerk
+and no lake account matches them; the user's `users.taap_id` is the same identifier. See
+[`../api/clerk.md`](../api/clerk.md).
+
+The migration is additive and needs no backfill. The new deployment guard is
+`custodial_identity_guard`. The operator must vendor this schema byte-for-byte and select that
+guard before the binary that writes the table is deployed; an older binary never reads it.

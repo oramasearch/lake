@@ -282,6 +282,7 @@ public:
                                                     const std::string& origin) override;
     Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) override;
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) override;
+    Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) override;
     Result<void> register_oauth_provider(const OAuthProvider&) override;
     Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                              const std::string& provider) override;
@@ -444,6 +445,8 @@ private:
     std::set<std::string> taap_assertions_;
     std::vector<PasskeyCredential> passkeys_;
     std::vector<OAuthCredential> oauth_credentials_;
+    // user id -> the TAAP identity lake minted for a Clerk sign-in (custodial_identities).
+    std::map<std::string, ClerkIdentity> custodial_identities_;
     std::vector<WebAuthnChallengeRecord> webauthn_challenges_;
     std::vector<OAuthProvider> oauth_providers_;
     struct OAuthFlowRecord {

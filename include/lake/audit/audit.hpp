@@ -4,6 +4,7 @@
 #include <expected>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -92,6 +93,11 @@ Result<void> verify(control::Store& store, const std::vector<Event>& events);
 // Returns the current instance identity, creating and persisting it when
 // necessary.
 Result<Identity> identity(control::Store& store, const IdentityOptions& options);
+
+// Mints a fresh Ed25519 TAAP identity whose seed is wrapped under `instance_kek`, for a person
+// lake holds an identity for (the custodial_identities table, docs/api/clerk.md). Nothing is
+// stored here; the caller persists the result.
+Result<Identity> mint_custodial_identity(std::string_view instance_kek);
 
 // Creates a dual-signed TAAP rotation document and makes the new identity
 // current.

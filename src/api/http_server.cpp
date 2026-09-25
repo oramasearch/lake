@@ -4316,6 +4316,7 @@ struct ApiServer::Impl {
         std::chrono::steady_clock::time_point fetched_at;
     };
     std::map<std::string, CachedJwks> jwks_cache;
+    std::optional<ClerkConfig> clerk;
     boost::corosio::io_context io_context;
     std::unique_ptr<boost::beast2::http_server> server;
     std::thread io_thread;
@@ -4359,6 +4360,7 @@ struct ApiServer::Impl {
             timestamping = std::make_unique<transparency::TimestampService>(options.store_root,
                                                                             options.node_name);
         }
+        clerk = clerk_config(options.clerk_publishable_key);
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
         metrics.set_gauge("lake_build_info",
@@ -4623,6 +4625,7 @@ struct ApiServer::Impl {
             "/tokens",
             "/identity/sign-up",
             "/identity/sign-in",
+            "/identity/clerk-session",
             "/identity/mfa/verify",
             "/identity/mfa/enroll",
             "/identity/mfa/disable",
@@ -4762,6 +4765,7 @@ struct ApiServer::Impl {
     WebUiViewer viewer_for(const ApiContext& context) const {
         WebUiViewer viewer{context.authorized, context.operator_credential};
         viewer.path = context.request_path;
+        viewer.clerk = clerk.has_value();
         return viewer;
     }
 
@@ -5186,7 +5190,11 @@ struct ApiServer::Impl {
                              "application/json; charset=utf-8",
                              "no-store");
         }
-        return redirect(route, "/", "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+        // With Clerk, the browser also holds a Clerk session; the sign-in page ends it too, or the
+        // next visit would sign the person straight back in.
+        return redirect(route,
+                        clerk ? "/sign-in?signed_out=1" : "/",
+                        "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     }
 
     boost::http::route_task serve_page_error(boost::http::route_params& route,
@@ -6043,12 +6051,24 @@ struct ApiServer::Impl {
     boost::http::route_task serve_sign_up(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.authorized) {
-            return redirect(route, context.operator_credential ? "/repositories" : "/sessions");
+            return redirect(route,
+                            context.operator_credential || clerk ? "/repositories" : "/sessions");
         }
         if (auto application = application_for_domain(route)) {
             return send_text(route,
                              boost::http::status::ok,
                              web_ui_application_sign_up(*application, ""),
+                             "text/html; charset=utf-8",
+                             "no-store");
+        }
+        if (clerk) {
+            return send_text(route,
+                             boost::http::status::ok,
+                             web_ui_clerk_sign_in(*clerk,
+                                                  "sign-up",
+                                                  query_value(route, "error"),
+                                                  !query_value(route, "signed_out").empty(),
+                                                  viewer_for(context)),
                              "text/html; charset=utf-8",
                              "no-store");
         }
@@ -6062,12 +6082,24 @@ struct ApiServer::Impl {
     boost::http::route_task serve_sign_in(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.authorized) {
-            return redirect(route, context.operator_credential ? "/repositories" : "/sessions");
+            return redirect(route,
+                            context.operator_credential || clerk ? "/repositories" : "/sessions");
         }
         if (auto application = application_for_domain(route)) {
             return send_text(route,
                              boost::http::status::ok,
                              web_ui_application_sign_in(*application, ""),
+                             "text/html; charset=utf-8",
+                             "no-store");
+        }
+        if (clerk) {
+            return send_text(route,
+                             boost::http::status::ok,
+                             web_ui_clerk_sign_in(*clerk,
+                                                  "sign-in",
+                                                  query_value(route, "error"),
+                                                  !query_value(route, "signed_out").empty(),
+                                                  viewer_for(context)),
                              "text/html; charset=utf-8",
                              "no-store");
         }
@@ -6628,6 +6660,106 @@ struct ApiServer::Impl {
                          error_body("unauthorized", message),
                          "application/json; charset=utf-8",
                          "no-store");
+    }
+
+    // POST /identity/clerk-session (docs/api/clerk.md): the sign-in page posts Clerk's `lake`
+    // template token once. It is verified against the instance JWKS (RS256, iss, aud = lake,
+    // exp/nbf/iat), then the same session, audit and cookie path as OAuth sign-in runs. Failures
+    // return to the sign-in page with a message rather than an API error.
+    boost::http::route_task serve_clerk_session(boost::http::route_params& route) {
+        namespace http = boost::http;
+        // redirect() takes views and runs when awaited, so the location lives in this frame.
+        std::string failure;
+        const auto back = [&](std::string_view message) {
+            failure = "/sign-in?error=" + oauth_url_encode(std::string(message));
+            return redirect(route, failure);
+        };
+        if (!clerk || !options.store) {
+            co_return co_await send_text(route,
+                                         http::status::not_found,
+                                         error_body("not_found", "Clerk sign-in is not configured"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
+        }
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        const std::string token = form_field(body, "token");
+        std::string device_name = form_field(body, "device_name");
+        if (device_name.empty()) {
+            device_name = "browser";
+        }
+        const std::string audience(clerk_token_template);
+        std::optional<control::identity_crypto::OidcClaims> claims;
+        if (!token.empty()) {
+            for (const bool refresh : {false, true}) {
+                const std::optional<std::string> jwks = jwks_for(clerk->jwks_url, refresh);
+                claims = jwks ? control::identity_crypto::verify_oidc_id_token(
+                                    token, *jwks, clerk->issuer, audience, "")
+                              : std::nullopt;
+                if (claims) {
+                    break;
+                }
+            }
+        }
+        ApiContext context = context_for(route);
+        context.authentication_method = "clerk";
+        if (!claims) {
+            (void)record_direct_event(context,
+                                      audit::EventDraft{
+                                          .kind = "authentication",
+                                          .object = "clerk",
+                                          .action = "sign_in",
+                                          .outcome = "denied",
+                                          .method = "clerk",
+                                          .device = device_name,
+                                      });
+            co_return co_await back("Your sign-in could not be verified. Please try again.");
+        }
+        const auto minted = audit::mint_custodial_identity(options.instance_kek);
+        if (!minted) {
+            co_return co_await back("lake cannot create an identity right now: " +
+                                    minted.error().message);
+        }
+        control::Result<control::IssuedSession> issued =
+            options.store->sign_in_clerk({claims->subject,
+                                          claims->email,
+                                          claims->display_name,
+                                          device_name,
+                                          minted->taap_id,
+                                          minted->public_key,
+                                          minted->wrapped_seed});
+        if (!issued) {
+            co_return co_await back(issued.error().message);
+        }
+        if (const auto principal = options.store->context_for(issued->secret)) {
+            context.authorized = true;
+            context.acting_user_id = principal->user_id;
+            context.acting_identity = principal->taap_id;
+        }
+        const ApiResult session_result =
+            application_session_result(std::move(issued), context, "session.started");
+        if (!session_result.ok) {
+            co_return co_await back(session_result.error.message);
+        }
+        if (!record_direct_event(context,
+                                 audit::EventDraft{
+                                     .kind = "authentication",
+                                     .object = "clerk",
+                                     .action = "sign_in",
+                                     .outcome = "success",
+                                     .method = "clerk",
+                                     .device = device_name,
+                                 })) {
+            co_return co_await back("lake could not record the sign-in. Please try again.");
+        }
+        std::string cookie = "lake_session=" + session_result.value.value("secret", "") +
+                             "; HttpOnly; SameSite=Lax; Path=/";
+        if (request_is_https(route)) {
+            cookie += "; Secure";
+        }
+        co_return co_await redirect(route, "/repositories", cookie);
     }
 
     boost::http::route_task serve_oauth_callback(boost::http::route_params& route) {
@@ -10225,6 +10357,12 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/sign-in", impl.serve_identity_sign_in(route));
+               });
+    router.add(http::method::post,
+               "/identity/clerk-session",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/identity/clerk-session", impl.serve_clerk_session(route));
                });
     router.add(http::method::post,
                "/identity/mfa/verify",
