@@ -119,8 +119,7 @@ Clerk sign-in ticket: [`browser-testing.md`](browser-testing.md).
 
 | Environment | Stop new sign-ins | End existing sessions and tokens |
 |---|---|---|
-| Clerk (dev, lake.live) | Delete or ban the user in Clerk (`clerk users` or the dashboard) | **Only the person can**, on `/sessions`; lake has no operator capability to revoke another user's sessions yet (https://github.com/oramasearch/lake/issues/150). A browser session lasts up to 30 days |
-| Without Clerk | Revoke the password credential; SCIM deprovisioning revokes sessions for SSO users (`docs/api/sso.md`) | The person, on `/sessions` |
+| Clerk (dev, lake.live) | Delete or ban the user in Clerk (`clerk users` or the dashboard) | Operator: `POST /v1/revoke_user_sessions {"user_id": "<lake user id>"}` with the admin token revokes every live session and token; derived tokens stop with their parent. Find the id with `GET /v1/list_users` |
+| Without Clerk | Revoke the password credential; SCIM deprovisioning revokes sessions for SSO users (`docs/api/sso.md`) | The same operator capability, or the person on `/sessions` |
 
-Until that capability exists, removing someone urgently from a Clerk environment also needs their
-sessions revoked in the control database, which is a production write: ask first.
+Signing out also ends the session on the server, so a copied cookie stops working at once.

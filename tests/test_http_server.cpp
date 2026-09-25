@@ -471,6 +471,22 @@ TEST_P(HttpResponseIsolation, NavigationUsesTheResolvedViewerOnEveryPage) {
     }
 }
 
+TEST_P(HttpResponseIsolation, SignOutEndsTheSessionOnTheServer) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    ASSERT_TRUE(connection->request("GET", "/sessions", {}, cookie).starts_with("HTTP/1.1 200"));
+    const std::string signed_out = connection->request("POST", "/logout", {}, cookie);
+    ASSERT_TRUE(signed_out.starts_with("HTTP/1.1 302"));
+    // The same cookie, replayed after sign-out, no longer authenticates.
+    const std::string replayed = connection->request("GET", "/sessions", {}, cookie);
+    EXPECT_TRUE(replayed.starts_with("HTTP/1.1 302")) << replayed;
+    EXPECT_EQ(response_header(replayed, "location"), "/sign-in");
+}
+
 TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {
     for (const std::string_view path :
          {"/", "/sign-up", "/sign-in", "/v1/server_info", "/v1/openapi.json"}) {

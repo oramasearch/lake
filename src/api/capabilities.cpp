@@ -2321,6 +2321,44 @@ void register_identity_capabilities(Registry& registry) {
             return result ? ApiResult::success({{"revoked", true}})
                           : from_store_error(result.error());
         }});
+    registry.add(Capability{
+        .name = "revoke_user_sessions",
+        .title = "Revoke a user's sessions",
+        .description = "Operator action: revoke every live session and token of one user, for "
+                       "example after removing them from the identity provider. Derived tokens "
+                       "stop with their parent. The user can sign in again unless their sign-in "
+                       "is also removed.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"user_id", {{"type", "string"}}}}},
+                         {"required", json::array({"user_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "user collection",
+        .action = "admin",
+        .resolve_object = global_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store)
+                return no_store();
+            const std::string user_id = input.at("user_id");
+            int revoked = 0;
+            for (const std::string pool : {"lake"}) {
+                auto sessions = context.store->list_sessions(user_id, pool);
+                if (!sessions)
+                    return from_store_error(sessions.error());
+                for (const auto& session : *sessions) {
+                    if (!session.revoked_at.empty())
+                        continue;
+                    if (auto result = context.store->revoke_session(user_id, session.id)) {
+                        ++revoked;
+                    } else if (result.error().code != "not_found") {
+                        return from_store_error(result.error());
+                    }
+                }
+            }
+            context.audit_details = {{"user_id", user_id}, {"revoked", revoked}};
+            return ApiResult::success({{"user_id", user_id}, {"revoked", revoked}});
+        }});
     registry.add(
         Capability{.name = "list_devices",
                    .title = "List devices",

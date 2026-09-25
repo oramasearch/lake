@@ -14,7 +14,9 @@
 #include <openssl/rsa.h>
 #include <pqxx/pqxx>
 
+#include "lake/api/capabilities.hpp"
 #include "lake/api/clerk.hpp"
+#include "lake/api/registry.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -352,4 +354,36 @@ TEST(Clerk, AccountMenuOmitsLakePasskeysUnderClerk) {
     const std::string home = lake::api::web_ui_home(viewer);
     EXPECT_EQ(home.find("href=\"/passkeys\""), std::string::npos);
     EXPECT_NE(home.find("href=\"/tokens\""), std::string::npos);
+}
+
+TEST(Clerk, OperatorsRevokeEveryLiveSessionOfAUser) {
+    lake::control::InMemoryStore store;
+    const auto first = store.sign_in_clerk(minted("user_revoked", "revoked@example.test"));
+    const auto second = store.sign_in_clerk(minted("user_revoked", "revoked@example.test"));
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    const auto principal = store.context_for(first->secret);
+    ASSERT_TRUE(principal);
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext user;
+    user.store = &store;
+    user.authorized = true;
+    user.acting_user_id = principal->user_id;
+    user.acting_identity = principal->taap_id;
+    EXPECT_FALSE(registry.call("revoke_user_sessions", {{"user_id", principal->user_id}}, user).ok)
+        << "only an operator may revoke another user's sessions";
+
+    lake::api::ApiContext operator_context;
+    operator_context.store = &store;
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    const auto revoked =
+        registry.call("revoke_user_sessions", {{"user_id", principal->user_id}}, operator_context);
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    EXPECT_EQ(revoked.value["revoked"], 2);
+    EXPECT_FALSE(store.context_for(first->secret));
+    EXPECT_FALSE(store.context_for(second->secret));
 }
