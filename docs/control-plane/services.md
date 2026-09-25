@@ -45,7 +45,7 @@ skips it.
 
 For each `Lake` with `spec.services.enabled` (or the deprecated `spec.workspaces.enabled`):
 
-1. **Connect** with pgx using the CloudNativePG application Secret `<lake>-controldb-app`, key
+1. **Connect** with pgx using the CloudNativePG application Secret `lake-<lake>-controldb-app`, key
    `uri`, and read every service joined to its status.
 2. **Present** services: create or update `<lake>-<slug>` in the Lake's namespace, controlled by
    the Lake, labelled `orama.cloud/lake`, `orama.cloud/service-id`, `orama.cloud/service-kind`,
