@@ -9,7 +9,7 @@ no tenancy: a cluster's `list_projects`, `list_models` and the rest return every
 
 | Section | Page | Zetta capabilities behind it |
 |---|---|---|
-| Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `compile_intent` (build a pipeline from what the project should predict), `gate` then `run` (check and run a pipeline) |
+| Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `capture_intent` then `compile_intent` (build a pipeline from what the project should predict), `approve_plan` (approve a proposed pipeline), `gate` then `run` (check and run an approved pipeline) |
 | Train | `/train/data` | `list_connections`, `list_datasets` |
 | Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run_report` |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |

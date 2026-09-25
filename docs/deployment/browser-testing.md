@@ -52,6 +52,7 @@ writes a numbered screenshot per step plus `log.json` to the output directory. T
 | Design → Projects | **Start your workspace** is offered, then *Preparing your workspace*, and within a few minutes the project form appears (the workspace is Ready) |
 | Create project | A project is created in the customer's workspace and its page opens |
 | Build pipeline | The description is captured as the project's intent and compiled into a pipeline |
+| Approve | A proposed pipeline is approved (`approve_plan`); Zetta verifies and runs only approved plans |
 | Check and run | The pipeline passes `gate` and a run starts; the Runs page lists it |
 | Train → Data, Runs; Ship → Models, Search indexes, Deployments; Home | Each page answers 200 with no error line |
 | Run report | The first run's report opens |

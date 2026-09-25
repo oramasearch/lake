@@ -268,6 +268,19 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     EXPECT_EQ(html.find("retention<review>"), std::string::npos);
     EXPECT_NE(html.find("action=\"/design/projects/create\""), std::string::npos);
 
+    page.section = "project";
+    page.subject = "retention";
+    page.data["get_project"] = {
+        {"graphs",
+         json::array({{{"id", "g1"}, {"name", "proposed plan"}, {"approval", "proposed"}},
+                      {{"id", "g2"}, {"name", "approved plan"}, {"approval", "approved"}}})}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find(">Approve</button>"), std::string::npos);
+    EXPECT_NE(html.find(">Check and run</button>"), std::string::npos);
+    EXPECT_LT(html.find("/design/project/approve"), html.find("/design/project/run"))
+        << "the proposed plan offers Approve, the approved one Check and run";
+    page.subject.clear();
+
     page.section = "models";
     page.data["list_models"] = {{"models", json::array({{{"name", "churn"}, {"kind", "gbdt"}}})}};
     html = lake::api::web_ui_workspace(page, true);

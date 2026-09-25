@@ -1698,15 +1698,18 @@ std::string workspace_content(const WorkspacePage& page) {
                    "<tbody>";
             for (const nlohmann::json& graph : graphs) {
                 const std::string id = json_text(graph, "id");
+                // Zetta verifies and runs only an approved plan; a person approves it here first.
+                const bool approved = json_text(graph, "approval") == "approved";
                 out += std::format(
-                    "<tr><td>{}</td><td>{}</td><td><form method=\"post\" "
-                    "action=\"/design/project/run\">{}{}{}<button type=\"submit\">Check and "
-                    "run</button></form></td></tr>",
+                    "<tr><td>{}</td><td>{}</td><td><form method=\"post\" action=\"{}\">{}{}{}"
+                    "<button type=\"submit\">{}</button></form></td></tr>",
                     web_ui_escape(json_text(graph, "name").empty() ? id : json_text(graph, "name")),
                     web_ui_escape(json_text(graph, "approval")),
+                    approved ? "/design/project/run" : "/design/project/approve",
                     hidden("customer_id", page.customer_id),
                     hidden("project", page.subject),
-                    hidden("graph", id));
+                    hidden("graph", id),
+                    approved ? "Check and run" : "Approve");
             }
             out += "</tbody></table>";
         }
