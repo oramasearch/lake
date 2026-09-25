@@ -110,6 +110,11 @@ The operator credential is not a user account. It is the `token` key of the Secr
 `lake-<name>-admin` in the Lake's namespace (`lake-prod-admin` for dev), used at `/login`. Treat it
 as a secret; never paste it into a ticket or chat.
 
+## Signing in as a tester
+
+To sign in from a browser without an email code, or to walk every page after a roll, use a one-time
+Clerk sign-in ticket: [`browser-testing.md`](browser-testing.md).
+
 ## Removing access
 
 | Environment | Stop new sign-ins | End existing sessions and tokens |
