@@ -11,8 +11,8 @@ with the operator is [`../control-plane/services.md`](../control-plane/services.
 
 | Section | Page | Zetta capabilities behind it |
 |---|---|---|
-| Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `capture_intent` then `compile_intent` (build a pipeline from what the project should predict), `approve_plan` (approve a proposed pipeline), `gate` then `run` (check and run an approved pipeline) |
-| Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`) |
+| Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `delete_project` (typed confirmation; the project's runs and models stay listed), `capture_intent` then `compile_intent` (build a pipeline from what the project should predict), `approve_plan` (approve a proposed pipeline), `gate` then `run` (check and run an approved pipeline) |
+| Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB, posted as `multipart/form-data` to `/train/data/upload`) |
 | Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run_report` |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |
 | Ship | `/ship/indexes` | `list_indexes` |
@@ -43,7 +43,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `start_workspace` | action | `write` | Appends a `desired` event; repeating it appends nothing |
 | `delete_workspace` | action | `admin` | Needs `confirm` equal to the workspace id; marks the default service absent. Refused with `not_found` when no workspace is requested |
 | `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job` |
-| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain` |
+| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `upload_dataset`, `delete_project`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain` |
 
 Input for the last two is `{customer_id, capability, input}`, where `input` is the Zetta
 capability's own input. Anything off the lists is refused with `invalid_input`, so nothing reaches
@@ -116,8 +116,8 @@ while `kubectl -n lake get oramazettacluster` loses `<lake>-<workspace>`.
 
 - A workspace cannot be suspended, only deleted. The workspace counts toward the customer's
   service limit and the Lake's `spec.services.maxServices` ([`services.md`](services.md)).
-- A file cannot be uploaded as a dataset yet: Zetta has no row-upload capability
-  (https://github.com/oramasearch/zetta/issues/1008).
+- Upload and project deletion need a workspace image with Zetta's `upload_dataset` and
+  `delete_project` (zetta PRs #1012 and #1013); an older image answers them with an error.
 - A published model or index is reachable inside the workspace only; lake does not route to it.
 - Workspace reads time out after 15 seconds and actions after 60. Run reports do not load on the
   current workspace image: `get_run_report` never answers (https://github.com/oramasearch/zetta/issues/1007).

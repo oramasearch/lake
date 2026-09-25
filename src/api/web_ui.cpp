@@ -1879,6 +1879,17 @@ std::string workspace_content(const WorkspacePage& page) {
             "</form></section>",
             hidden("customer_id", page.customer_id),
             hidden("project", page.subject));
+        out += std::format(
+            "<section class=\"panel\"><details><summary>Delete project</summary><form "
+            "class=\"stack\" method=\"post\" action=\"/design/project/delete\">{}{}<p>Removes the "
+            "project, its intent and its pipelines. Its runs and models stay "
+            "listed.</p><label>Type "
+            "<code>{}</code> to delete it<input name=\"confirm\" required autocomplete=\"off\">"
+            "</label><button class=\"button button-danger\" type=\"submit\">Delete project"
+            "</button></form></details></section>",
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject),
+            web_ui_escape(page.subject));
     } else if (page.section == "data") {
         const nlohmann::json connections = data.value("list_connections", nlohmann::json::object())
                                                .value("connections", nlohmann::json::array());
@@ -1941,6 +1952,17 @@ std::string workspace_content(const WorkspacePage& page) {
                                                    {"rows", "Rows"},
                                                    {"size_bytes", "Bytes"},
                                                    {"format", "Format"}});
+        out += std::format(
+            "<details><summary>Upload a file</summary><form class=\"stack\" method=\"post\" "
+            "action=\"/train/data/upload\" enctype=\"multipart/form-data\">{}<label>File (CSV or "
+            "JSONL, up to 16 MiB)<input type=\"file\" name=\"file\" required "
+            "accept=\".csv,.jsonl,.ndjson,text/csv\"></label><label>Format<select name=\"format\">"
+            "<option value=\"\">From the file name</option><option value=\"csv\">CSV</option>"
+            "<option value=\"jsonl\">JSONL</option></select></label><label>Dataset name<input "
+            "name=\"table_name\" required pattern=\"[A-Za-z_][A-Za-z0-9_]{{0,62}}\" "
+            "placeholder=\"accounts\"></label><button class=\"button button-primary\" "
+            "type=\"submit\">Upload</button></form></details>",
+            hidden("customer_id", page.customer_id));
         if (!connections.empty()) {
             std::string options;
             for (const nlohmann::json& connection : connections) {

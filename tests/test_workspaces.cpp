@@ -270,8 +270,11 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
                                 {{"customer_id", owner_customer}, {"capability", "list_projects"}});
     ASSERT_FALSE(not_ready.ok);
     EXPECT_EQ(not_ready.error.code, "workspace_not_ready");
-    for (const char* action :
-         {"create_connection", "delete_connection", "create_dataset_from_query"}) {
+    for (const char* action : {"create_connection",
+                               "delete_connection",
+                               "create_dataset_from_query",
+                               "upload_dataset",
+                               "delete_project"}) {
         const auto allowed = call(*owner_principal,
                                   "workspace_act",
                                   {{"customer_id", owner_customer}, {"capability", action}});
@@ -400,6 +403,7 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find(">Approve</button>"), std::string::npos);
     EXPECT_NE(html.find(">Check and run</button>"), std::string::npos);
+    EXPECT_NE(html.find("action=\"/design/project/delete\""), std::string::npos);
     EXPECT_LT(html.find("/design/project/approve"), html.find("/design/project/run"))
         << "the proposed plan offers Approve, the approved one Check and run";
     page.subject.clear();
@@ -419,6 +423,9 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     page.data["list_connections"] = json::object();
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("action=\"/train/data/connect\""), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/data/upload\" enctype=\"multipart/form-data\""),
+              std::string::npos)
+        << "a file can be uploaded without any connection";
     EXPECT_NE(html.find("type=\"password\" name=\"token\""), std::string::npos);
     EXPECT_EQ(html.find("action=\"/train/data/pull\""), std::string::npos)
         << "no dataset can be pulled before a connection exists";

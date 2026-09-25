@@ -54,13 +54,15 @@ writes a numbered screenshot per step plus `log.json` to the output directory. T
 | Build pipeline | The description is captured as the project's intent and compiled into a pipeline |
 | Approve | A proposed pipeline is approved (`approve_plan`); Zetta verifies and runs only approved plans |
 | Check and run | The pipeline passes `gate` and a run starts; the Runs page lists it |
-| Train → Data, Runs; Ship → Models, Search indexes, Deployments; Home | Each page answers 200 with no error line |
+| Delete project | The project it created is deleted again (typed confirmation), so the tester's workspace does not fill up |
+| Train → Data, Runs; Ship → Models, Search indexes, Deployments, Services; Home | Each page answers 200 with no error line |
 | Run report | The first run's page opens with its status. Its report is unavailable on the current workspace image: Zetta's `get_run_report` never answers (https://github.com/oramasearch/zetta/issues/1007), so the page shows *the workspace did not answer get_run_report* after 15 seconds. Expected until that is fixed |
 | Account menu → Sign out | lake and Clerk both sign out; `/design/projects` then redirects to sign-in |
 
 Read `log.json` and **look at the screenshots**: a page can answer 200 and still show an error
 line or an empty state that should not be empty. The walkthrough creates a project named
-`e2e-<time>` in the tester's workspace each run; that is expected.
+`e2e-<time>` in the tester's workspace each run and deletes it at the end; on a workspace image
+without Zetta's `delete_project` the delete step reports an error and the project stays.
 
 ## What a failure usually means
 

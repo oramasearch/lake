@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <format>
@@ -4666,6 +4667,8 @@ struct ApiServer::Impl {
             "/services/create",
             "/services/delete",
             "/services/connection",
+            "/train/data/upload",
+            "/design/project/delete",
             "/train/data/connect",
             "/train/data/disconnect",
             "/train/data/pull",
@@ -7245,6 +7248,56 @@ struct ApiServer::Impl {
 
     // Form posts. Each runs one or two registry capabilities as the signed-in user and returns to
     // the page it came from; a failure comes back as ?error=.
+    // Train > Data > Upload a file: a CSV or JSONL file becomes a dataset in the workspace
+    // (Zetta's upload_dataset, which takes at most 16 MiB of content).
+    boost::http::route_task serve_workspace_upload(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string content_type = route.req.count(http::field::content_type) == 0
+                                             ? std::string{}
+                                             : std::string(route.req.at(http::field::content_type));
+        MultipartForm form = parse_multipart(body, content_type);
+        const std::string customer_id = form.fields["customer_id"];
+        std::string back = "/train/data?customer_id=" + oauth_url_encode(customer_id);
+        constexpr std::size_t upload_limit = std::size_t{16} * 1024 * 1024;
+        ApiResult result = ApiResult::success(nlohmann::json::object());
+        if (!form.error.empty()) {
+            result = ApiResult::failure("invalid_input", form.error);
+        } else if (form.files.size() != 1 || form.files.front().contents.empty()) {
+            result = ApiResult::failure("invalid_input", "Choose one CSV or JSONL file.");
+        } else if (form.files.front().contents.size() > upload_limit) {
+            result = ApiResult::failure("invalid_input", "The file is larger than 16 MiB.");
+        } else {
+            const MultipartFile& file = form.files.front();
+            std::string format = form.fields["format"];
+            if (format.empty()) {
+                format = file.name.ends_with(".jsonl") || file.name.ends_with(".ndjson") ? "jsonl"
+                                                                                         : "csv";
+            }
+            std::string content(file.contents.size(), '\0');
+            std::memcpy(content.data(), file.contents.data(), file.contents.size());
+            result = unwrap(co_await workspace_call("workspace_act",
+                                                    {{"customer_id", customer_id},
+                                                     {"capability", "upload_dataset"},
+                                                     {"input",
+                                                      {{"table_name", form.fields["table_name"]},
+                                                       {"format", format},
+                                                       {"content", std::move(content)}}}},
+                                                    context));
+        }
+        if (!result.ok) {
+            back += "&error=" + oauth_url_encode(result.error.message);
+        }
+        co_return co_await redirect(route, back);
+    }
+
     boost::http::route_task serve_workspace_form(boost::http::route_params& route,
                                                  std::string action) {
         auto [read_error, body] = co_await read_string_body(route);
@@ -7282,6 +7335,18 @@ struct ApiServer::Impl {
                 "delete_workspace",
                 {{"customer_id", customer_id}, {"confirm", form_field(body, "confirm")}},
                 context));
+        } else if (action == "delete_project") {
+            const std::string project = form_field(body, "project");
+            if (form_field(body, "confirm") != project) {
+                result =
+                    ApiResult::failure("invalid_input", "Type the project's name to delete it.");
+                back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            } else {
+                result = unwrap(co_await act("delete_project", {{"name", project}}));
+                back = result.ok
+                           ? "/design/projects?" + query
+                           : "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            }
         } else if (action == "service_create") {
             back = "/services?" + query;
             nlohmann::json input{{"customer_id", customer_id},
@@ -10939,8 +11004,9 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 13>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 14>{
              {{"/workspace/start", "start"},
+              {"/design/project/delete", "delete_project"},
               {"/services/create", "service_create"},
               {"/services/delete", "service_delete"},
               {"/services/connection", "service_connection"},
@@ -10960,6 +11026,12 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_form(route, action));
                    });
     }
+    router.add(http::method::post,
+               "/train/data/upload",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/train/data/upload", impl.serve_workspace_upload(route));
+               });
     router.add(http::method::get,
                "/ship/packages",
                [&impl](http::route_params& route) -> http::route_task {
