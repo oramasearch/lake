@@ -54,13 +54,15 @@ writes a numbered screenshot per step plus `log.json` to the output directory. T
 | Build pipeline | The description is captured as the project's intent and compiled into a pipeline |
 | Approve | A proposed pipeline is approved (`approve_plan`); Zetta verifies and runs only approved plans |
 | Check and run | The pipeline passes `gate` and a run starts; the Runs page lists it |
-| Train → Data, Runs; Ship → Models, Search indexes, Deployments; Home | Each page answers 200 with no error line |
+| Delete project | The project it created is deleted again (typed confirmation), so the tester's workspace does not fill up |
+| Train → Data, Runs; Ship → Models, Search indexes, Deployments, Services; Home | Each page answers 200 with no error line |
 | Run report | The first run's page opens with its status. Its report is unavailable on the current workspace image: Zetta's `get_run_report` never answers (https://github.com/oramasearch/zetta/issues/1007), so the page shows *the workspace did not answer get_run_report* after 15 seconds. Expected until that is fixed |
 | Account menu → Sign out | lake and Clerk both sign out; `/design/projects` then redirects to sign-in |
 
 Read `log.json` and **look at the screenshots**: a page can answer 200 and still show an error
 line or an empty state that should not be empty. The walkthrough creates a project named
-`e2e-<time>` in the tester's workspace each run; that is expected.
+`e2e-<time>` in the tester's workspace each run and deletes it at the end; on a workspace image
+without Zetta's `delete_project` the delete step reports an error and the project stays.
 
 ## What a failure usually means
 
@@ -68,7 +70,7 @@ line or an empty state that should not be empty. The walkthrough creates a proje
 |---|---|
 | Stays on `/sign-in` after the ticket | The ticket expired or was already used, or the Clerk instance does not match the site's `LAKE_CLERK_PUBLISHABLE_KEY` (`../api/clerk.md`) |
 | `/sign-in?error=Your sign-in could not be verified` | lake could not verify the `lake` JWT template token: the template's `aud` is not `lake`, or the instance JWKS is unreachable from the pod |
-| "Design, Train and Ship are not available on this lake yet" | The Lake has `spec.workspaces.enabled: false`, or the operator has not injected `LAKE_DATA_PLANE_*` / `LAKE_WORKSPACE_*` (`../api/workspaces.md`) |
+| "Design, Train and Ship are not available on this lake yet" | The Lake has neither `spec.services.enabled` nor `spec.workspaces.enabled`, or the operator has not mounted `LAKE_SERVICE_DIR` (`../api/services.md`) |
 | An error line starting `operator Zetta returned HTTP 422:` | Zetta refused the control-plane SQL; the text after the colon is Zetta's own reason |
 | *Preparing your workspace* never ends | The operator's logs for the Lake's data-plane `OramaZettaCluster` (`workspace sync deferred`), and the workspace cluster `<lake>-ws-…` in the Lake namespace |
 | Build pipeline or run fails with a Zetta message | The message is the workspace's own answer; a new workspace has no data yet, so steps that need a dataset fail until one is added |

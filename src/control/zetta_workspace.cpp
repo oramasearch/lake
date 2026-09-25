@@ -18,11 +18,6 @@ template <class T> ZettaControlResult<T> workspace_failure(std::string code, std
     return std::unexpected(ZettaControlError{std::move(code), std::move(message)});
 }
 
-std::string now_rfc3339() {
-    return std::format("{:%FT%TZ}",
-                       std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
-}
-
 std::string percent_encode(std::string_view input) {
     constexpr std::string_view hex = "0123456789ABCDEF";
     std::string output;
@@ -39,32 +34,33 @@ std::string percent_encode(std::string_view input) {
     return output;
 }
 
-std::string text_of(const nlohmann::json& row, const char* key) {
-    const auto found = row.find(key);
-    return found != row.end() && found->is_string() ? found->get<std::string>() : std::string();
-}
-
 } // namespace
 
 std::string workspace_slug(std::string_view customer_id) {
-    std::string hex;
-    for (const char character : customer_id) {
-        if (character == '-') {
-            continue;
-        }
-        if (std::isxdigit(static_cast<unsigned char>(character)) == 0) {
-            return {};
-        }
-        hex += static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-    }
-    if (hex.size() != 32) {
-        return {};
-    }
-    return "ws-" + hex.substr(0, 12);
+    return managed_service_slug("ws", customer_id);
+}
+
+nlohmann::json service_json(const ManagedService& service) {
+    return {{"id", service.id},
+            {"customer_id", service.customer_id},
+            {"kind", service.kind},
+            {"name", service.name},
+            {"slug", service.slug},
+            {"default", service.is_default},
+            {"instances", service.instances},
+            {"storage_gi", service.storage_gi},
+            {"desired", service.desired},
+            {"generation", service.generation},
+            {"phase", service.phase},
+            {"message", service.message},
+            {"endpoint", service.endpoint},
+            {"observed_generation", service.observed_generation},
+            {"created_at", service.created_at}};
 }
 
 nlohmann::json WorkspaceState::to_json() const {
     return {{"workspace", slug},
+            {"service_id", service_id},
             {"requested", requested},
             {"phase", phase},
             {"message", message},
@@ -129,175 +125,162 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
 }
 
 WorkspaceService::WorkspaceService(WorkspaceConfig config,
-                                   std::shared_ptr<ZettaControl> control,
+                                   std::shared_ptr<Store> store,
                                    std::shared_ptr<WorkspaceCaller> caller)
-    : config_(std::move(config)), control_(std::move(control)), caller_(std::move(caller)) {}
+    : config_(std::move(config)), store_(std::move(store)), caller_(std::move(caller)) {}
 
-std::string WorkspaceService::token_for(std::string_view slug) const {
-    std::ifstream input(std::filesystem::path(config_.token_dir) / std::string(slug));
-    std::string token((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    while (!token.empty() && std::isspace(static_cast<unsigned char>(token.back())) != 0) {
-        token.pop_back();
-    }
-    return token;
+Result<std::vector<ManagedService>> WorkspaceService::services(const std::string& customer_id) {
+    return store_->list_services(customer_id);
 }
+
+Result<ManagedService> WorkspaceService::service(const std::string& customer_id,
+                                                 const std::string& service_id) {
+    Result<ManagedService> found = store_->get_service(service_id);
+    if (found && found->customer_id != customer_id) {
+        return std::unexpected(StoreError{"not_found", "no service " + service_id});
+    }
+    return found;
+}
+
+Result<ManagedService> WorkspaceService::create_service(NewManagedService service) {
+    service.max_per_customer = config_.max_per_customer;
+    return store_->create_service(service);
+}
+
+Result<ManagedService> WorkspaceService::delete_service(const std::string& customer_id,
+                                                        const std::string& service_id) {
+    const Result<ManagedService> found = service(customer_id, service_id);
+    if (!found) {
+        return found;
+    }
+    return store_->withdraw_service(service_id);
+}
+
+std::optional<nlohmann::json> WorkspaceService::connection(const ManagedService& service) const {
+    if (service.slug.empty() || config_.service_dir.empty()) {
+        return std::nullopt;
+    }
+    std::ifstream input(std::filesystem::path(config_.service_dir) / (service.slug + ".json"));
+    if (!input) {
+        return std::nullopt;
+    }
+    const std::string text((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+    nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+Result<std::optional<ManagedService>>
+WorkspaceService::default_service(const std::string& customer_id) {
+    const Result<std::vector<ManagedService>> listed = store_->list_services(customer_id);
+    if (!listed) {
+        return std::unexpected(listed.error());
+    }
+    for (const ManagedService& service : *listed) {
+        if (service.is_default && service.desired == "present") {
+            return std::optional<ManagedService>(service);
+        }
+    }
+    return std::optional<ManagedService>();
+}
+
+WorkspaceState WorkspaceService::state_of(const std::string& customer_id,
+                                          const std::optional<ManagedService>& service) const {
+    WorkspaceState state;
+    state.slug = workspace_slug(customer_id);
+    if (!service) {
+        return state;
+    }
+    state.slug = service->slug;
+    state.service_id = service->id;
+    state.requested = true;
+    state.phase = service->phase;
+    state.message = service->message;
+    state.endpoint = service->endpoint;
+    const std::optional<nlohmann::json> connection = this->connection(*service);
+    state.credential = connection && !connection->value("token", std::string()).empty();
+    if (state.endpoint.empty() && connection) {
+        state.endpoint = connection->value("endpoint", std::string());
+    }
+    return state;
+}
+
+namespace {
+
+template <class T> ZettaControlResult<T> from_store(const StoreError& error) {
+    return workspace_failure<T>(error.code, error.message);
+}
+
+} // namespace
 
 liquid::runtime::task<ZettaControlResult<WorkspaceState>>
 WorkspaceService::state(std::string customer_id) {
-    WorkspaceState state;
-    state.slug = workspace_slug(customer_id);
-    if (state.slug.empty()) {
+    if (workspace_slug(customer_id).empty()) {
         co_return workspace_failure<WorkspaceState>("invalid_input", "customer id is not a UUID");
     }
-    if (!config_.configured() || !control_) {
-        co_return workspace_failure<WorkspaceState>("store_unavailable",
-                                                    "workspaces are not configured on this lake");
+    const Result<std::optional<ManagedService>> found = default_service(customer_id);
+    if (!found) {
+        co_return from_store<WorkspaceState>(found.error());
     }
-    const auto quoted_lake = quote_zetta_literal(config_.lake_name);
-    if (!quoted_lake) {
-        co_return workspace_failure<WorkspaceState>("invalid_input", "invalid workspace identity");
-    }
-    // Zetta's SQL takes one predicate per WHERE clause (no AND), so filter by Lake in the query
-    // and by workspace here, as the operator does.
-    auto completed = co_await control_->sql(
-        "SELECT workspace_id, record_type, phase, message, updated_at FROM " +
-            std::string(workspaces_table) + " WHERE lake = " + *quoted_lake,
-        std::string(operator_control_database));
-    if (!completed) {
-        co_return workspace_failure<WorkspaceState>("store_unavailable", completed.error().message);
-    }
-    auto rows = std::move(*completed);
-    if (!rows) {
-        co_return workspace_failure<WorkspaceState>(rows.error().code, rows.error().message);
-    }
-    // The newest request or withdrawal decides whether the workspace is wanted. Status rows older
-    // than the latest withdrawal describe a previous life of the workspace and are ignored; they
-    // are not compared with the request's time, which comes from lake's clock, not the operator's.
-    std::string latest_desired, latest_withdrawn;
-    for (const nlohmann::json& row : *rows) {
-        if (text_of(row, "workspace_id") != state.slug) {
-            continue;
-        }
-        const std::string type = text_of(row, "record_type");
-        const std::string at = text_of(row, "updated_at");
-        if (type == "desired") {
-            latest_desired = std::max(latest_desired, at);
-        } else if (type == "withdrawn") {
-            latest_withdrawn = std::max(latest_withdrawn, at);
-        }
-    }
-    state.requested = !latest_desired.empty() && latest_desired > latest_withdrawn;
-    std::string latest;
-    for (const nlohmann::json& row : *rows) {
-        if (text_of(row, "workspace_id") != state.slug || text_of(row, "record_type") != "status") {
-            continue;
-        }
-        const std::string at = text_of(row, "updated_at");
-        if (at >= latest_withdrawn && at >= latest) {
-            latest = at;
-            state.phase = text_of(row, "phase");
-            state.message = text_of(row, "message");
-        }
-    }
-    if (state.requested && state.phase == "Deleted") {
-        state.phase.clear(); // restarted, and the operator has not picked the request up yet
-        state.message.clear();
-    }
-    state.credential = !token_for(state.slug).empty();
-    co_return ZettaControlResult<WorkspaceState>(std::move(state));
+    co_return state_of(customer_id, *found);
 }
 
 liquid::runtime::task<ZettaControlResult<WorkspaceState>>
-WorkspaceService::request(std::string customer_id) {
-    auto current = co_await state(customer_id);
-    if (!current) {
-        co_return workspace_failure<WorkspaceState>("store_unavailable", current.error().message);
+WorkspaceService::request(std::string customer_id, std::string requested_by) {
+    if (workspace_slug(customer_id).empty()) {
+        co_return workspace_failure<WorkspaceState>("invalid_input", "customer id is not a UUID");
     }
-    if (!*current) {
-        co_return workspace_failure<WorkspaceState>(current->error().code,
-                                                    current->error().message);
+    NewManagedService workspace;
+    workspace.customer_id = customer_id;
+    workspace.kind = "zetta";
+    workspace.name = "workspace";
+    workspace.is_default = true;
+    workspace.created_by_taap_id = std::move(requested_by);
+    const Result<ManagedService> created = create_service(std::move(workspace));
+    if (!created) {
+        co_return from_store<WorkspaceState>(created.error());
     }
-    WorkspaceState result = std::move(**current);
-    if (result.requested) {
-        co_return ZettaControlResult<WorkspaceState>(std::move(result));
-    }
-    auto appended = co_await control_->append(std::string(workspaces_table),
-                                              {{"workspace_id", result.slug},
-                                               {"record_type", "desired"},
-                                               {"lake", config_.lake_name},
-                                               {"customer_id", customer_id},
-                                               {"phase", ""},
-                                               {"url", ""},
-                                               {"message", ""},
-                                               {"updated_at", now_rfc3339()}});
-    if (!appended) {
-        co_return workspace_failure<WorkspaceState>("store_unavailable", appended.error().message);
-    }
-    if (!*appended) {
-        co_return workspace_failure<WorkspaceState>(appended->error().code,
-                                                    appended->error().message);
-    }
-    result.requested = true;
-    co_return ZettaControlResult<WorkspaceState>(std::move(result));
+    co_return state_of(customer_id, *created);
 }
 
 liquid::runtime::task<ZettaControlResult<WorkspaceState>>
 WorkspaceService::withdraw(std::string customer_id) {
-    auto current = co_await state(customer_id);
-    if (!current) {
-        co_return workspace_failure<WorkspaceState>("store_unavailable", current.error().message);
+    const Result<std::optional<ManagedService>> found = default_service(customer_id);
+    if (!found) {
+        co_return from_store<WorkspaceState>(found.error());
     }
-    if (!*current) {
-        co_return workspace_failure<WorkspaceState>(current->error().code,
-                                                    current->error().message);
-    }
-    WorkspaceState result = std::move(**current);
-    if (!result.requested) {
+    if (!*found) {
         co_return workspace_failure<WorkspaceState>("not_found", "there is no workspace to delete");
     }
-    auto appended = co_await control_->append(std::string(workspaces_table),
-                                              {{"workspace_id", result.slug},
-                                               {"record_type", "withdrawn"},
-                                               {"lake", config_.lake_name},
-                                               {"customer_id", customer_id},
-                                               {"phase", ""},
-                                               {"url", ""},
-                                               {"message", ""},
-                                               {"updated_at", now_rfc3339()}});
-    if (!appended) {
-        co_return workspace_failure<WorkspaceState>("store_unavailable", appended.error().message);
+    const Result<ManagedService> withdrawn = store_->withdraw_service((*found)->id);
+    if (!withdrawn) {
+        co_return from_store<WorkspaceState>(withdrawn.error());
     }
-    if (!*appended) {
-        co_return workspace_failure<WorkspaceState>(appended->error().code,
-                                                    appended->error().message);
-    }
-    result.requested = false;
-    result.phase.clear();
-    result.message.clear();
-    co_return ZettaControlResult<WorkspaceState>(std::move(result));
+    WorkspaceState state = state_of(customer_id, std::nullopt);
+    state.slug = withdrawn->slug;
+    state.service_id = withdrawn->id;
+    co_return state;
 }
 
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
     std::string customer_id, std::string capability, bool read, nlohmann::json input) {
-    auto current = co_await state(customer_id);
-    if (!current) {
-        co_return workspace_failure<nlohmann::json>("store_unavailable", current.error().message);
+    const Result<std::optional<ManagedService>> found = default_service(customer_id);
+    if (!found) {
+        co_return from_store<nlohmann::json>(found.error());
     }
-    if (!*current) {
-        co_return workspace_failure<nlohmann::json>(current->error().code,
-                                                    current->error().message);
-    }
-    const WorkspaceState& workspace = **current;
+    const WorkspaceState workspace = state_of(customer_id, *found);
     if (!workspace.ready()) {
         co_return workspace_failure<nlohmann::json>("workspace_not_ready",
                                                     workspace.requested
                                                         ? "the workspace is still being prepared"
                                                         : "start the workspace first");
     }
-    std::string url = config_.url_template;
-    url.replace(url.find("{workspace}"), std::string_view("{workspace}").size(), workspace.slug);
+    const std::string token = connection(**found)->value("token", std::string());
     auto called = co_await caller_->call(
-        std::move(url), token_for(workspace.slug), std::move(capability), read, std::move(input));
+        workspace.endpoint, token, std::move(capability), read, std::move(input));
     if (!called) {
         co_return workspace_failure<nlohmann::json>("store_unavailable", called.error().message);
     }
