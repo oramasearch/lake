@@ -198,6 +198,12 @@ to the tiled transparency log before public session metadata is persisted; the p
 returned once and never stored. Drip verification binds the session signature back to the durable
 agent and rejects the key at expiry. Its contract is `docs/api/agents.md`.
 
+## Creating users
+
+To give someone a lake account in any environment (Clerk on lake.oramadev.net, lake.live, local,
+on-prem) or take access away, follow [`docs/deployment/users.md`](docs/deployment/users.md). On
+dev, accounts are added in the Clerk application `lake`, never through the site.
+
 ## Where to read Zetta
 
 lake builds on Zetta, so you will read Zetta constantly. **Read it only from the umbrella
