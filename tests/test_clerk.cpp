@@ -387,3 +387,56 @@ TEST(Clerk, OperatorsRevokeEveryLiveSessionOfAUser) {
     EXPECT_FALSE(store.context_for(first->secret));
     EXPECT_FALSE(store.context_for(second->secret));
 }
+
+TEST(Clerk, AccountsSeeTheirOrganizationSectionAndOnlyTheirOwnActivity) {
+    const std::string account = lake::api::web_ui_home(true);
+    for (const std::string_view link : {"<p class=\"nav-label\">Organization</p>",
+                                        "href=\"/organizations\"",
+                                        "href=\"/secret-mounts\"",
+                                        "href=\"/metering\"",
+                                        "href=\"/activity\""}) {
+        EXPECT_NE(account.find(link), std::string::npos) << link;
+    }
+    EXPECT_EQ(lake::api::web_ui_home({true, true}).find("href=\"/activity\""), std::string::npos)
+        << "operators keep the instance audit under Administration";
+
+    lake::control::InMemoryStore store;
+    const auto first = store.sign_in_clerk(minted("user_activity_a", "a@example.test"));
+    const auto second = store.sign_in_clerk(minted("user_activity_b", "b@example.test"));
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    const auto a = store.context_for(first->secret);
+    const auto b = store.context_for(second->secret);
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(b);
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto as = [&](const lake::control::Principal& principal) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.authorized = true;
+        context.acting_user_id = principal.user_id;
+        context.acting_identity = principal.taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        return context;
+    };
+    auto a_context = as(*a);
+    ASSERT_TRUE(registry.call("list_sessions", json::object(), a_context).ok);
+    auto a_again = as(*a);
+    const auto mine = registry.call("my_audit", {{"limit", 100}}, a_again);
+    ASSERT_TRUE(mine.ok) << mine.error.message;
+    ASSERT_FALSE(mine.value["items"].empty());
+    for (const json& event : mine.value["items"]) {
+        EXPECT_EQ(event.value("principal", ""), a->taap_id);
+    }
+    auto b_context = as(*b);
+    const auto theirs =
+        registry.call("my_audit", {{"principal", a->taap_id}, {"limit", 100}}, b_context);
+    ASSERT_TRUE(theirs.ok);
+    for (const json& event : theirs.value["items"]) {
+        EXPECT_EQ(event.value("principal", ""), b->taap_id) << "a principal filter cannot widen it";
+    }
+    auto b_audit = as(*b);
+    EXPECT_FALSE(registry.call("audit", {{"limit", 10}}, b_audit).ok)
+        << "the instance audit log stays operator-only";
+}

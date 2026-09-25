@@ -91,3 +91,11 @@ directly, so it can exhaust pages until empty without generating further audit e
 The regression in `tests/test_audit_isolation.cpp` places a target after 1,105 same-object events,
 queries its request through the registry, and verifies the complete signed chain across pages.
 See [testing.md](../build/testing.md) for fixture ownership and the bounded-read sweep.
+
+## An account's own events
+
+`my_audit` takes the same filters as `audit` but always returns only the caller's own events: the
+principal is forced to the signed-in TAAP identity, and a `principal` filter cannot widen it. It is
+authorized on the caller's own principal object, so any signed-in account may call it; `audit`
+itself stays instance-wide and operator-only. The `/activity` page (Organization in the sidebar)
+renders it.
