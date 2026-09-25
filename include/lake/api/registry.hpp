@@ -96,6 +96,7 @@ struct ApiContext {
     std::string acting_identity; // TAAP id, "admin" for operator, empty otherwise
     std::string acting_user_id;  // database user id for identity operations
     std::string request_id;
+    std::string request_path; // the page route, for web UI navigation; never used to authorize
     std::string authentication_method;
     std::string device;
     std::string credential_device_id;

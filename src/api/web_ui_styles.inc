@@ -255,6 +255,61 @@ a:hover {
   color: var(--lake-text-secondary);
   font-size: var(--lake-text-12);
 }
+.account-menu {
+  position: relative;
+  font-size: var(--lake-text-12);
+}
+.account-menu summary {
+  display: flex;
+  align-items: center;
+  gap: var(--lake-space-2);
+  min-height: var(--lake-control-sm);
+  padding: 0 var(--lake-space-3);
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: var(--lake-radius-control);
+  color: var(--lake-text-primary);
+  cursor: pointer;
+  list-style: none;
+}
+.account-menu summary::-webkit-details-marker {
+  display: none;
+}
+.account-menu[open] summary {
+  border-color: var(--lake-border-strong);
+}
+.account-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--lake-space-1));
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 11rem;
+  padding: var(--lake-space-1) 0;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: var(--lake-radius-control);
+  background: var(--lake-layer);
+}
+.account-menu-panel a,
+.account-menu-panel button {
+  display: block;
+  width: 100%;
+  padding: var(--lake-space-2) var(--lake-space-3);
+  border: 0;
+  background: none;
+  color: var(--lake-text-primary);
+  font-size: var(--lake-text-12);
+  text-align: left;
+  text-decoration: none;
+}
+.account-menu-panel a:hover,
+.account-menu-panel button:hover {
+  background: var(--lake-surface);
+}
+.account-menu-panel form {
+  border-top: var(--lake-border-width) solid var(--lake-border-subtle);
+  margin-top: var(--lake-space-1);
+}
 .theme-toggle,
 .button,
 button,

@@ -342,9 +342,72 @@ std::string stylesheet_link() {
     return std::format("<link rel=\"stylesheet\" href=\"{}\">", web_ui_stylesheet_url());
 }
 
-bool navigation_is_current(std::string_view title, std::string_view key) {
+// The routes each navigation item owns. A request path matches an entry exactly or as a parent
+// ("/drive" owns "/drive/preview"). Repository pages, including a repository's own environments
+// and logs, belong to Repositories; the cross-repository list belongs to Deployments.
+std::span<const std::string_view> navigation_routes(std::string_view key) {
+    static constexpr std::string_view home[] = {"/"};
+    static constexpr std::string_view repositories[] = {
+        "/repositories", "/repository",  "/file",     "/changes",  "/change",
+        "/issues",       "/issue",       "/releases", "/webhooks", "/protection",
+        "/conflicts",    "/artifacts",   "/artifact", "/exports",  "/drive",
+        "/environments", "/environment", "/logs",     "/models",   "/datasets"};
+    static constexpr std::string_view shared[] = {"/shared-with-me", "/share"};
+    static constexpr std::string_view search[] = {"/search"};
+    static constexpr std::string_view deployments[] = {"/deployments"};
+    static constexpr std::string_view customers[] = {"/customers"};
+    static constexpr std::string_view organizations[] = {"/organizations",
+                                                         "/organization",
+                                                         "/teams",
+                                                         "/team",
+                                                         "/members",
+                                                         "/member",
+                                                         "/invitations",
+                                                         "/grants",
+                                                         "/access",
+                                                         "/sso"};
+    static constexpr std::string_view applications[] = {"/applications", "/application"};
+    static constexpr std::string_view metering[] = {"/metering"};
+    static constexpr std::string_view secrets[] = {
+        "/secret-mounts", "/secrets", "/encryption-keys"};
+    static constexpr std::string_view audit[] = {"/audit"};
+    if (key == "home")
+        return home;
+    if (key == "repositories")
+        return repositories;
+    if (key == "shared with me")
+        return shared;
+    if (key == "search")
+        return search;
+    if (key == "deployments")
+        return deployments;
+    if (key == "customers")
+        return customers;
+    if (key == "organizations")
+        return organizations;
+    if (key == "applications")
+        return applications;
+    if (key == "metering")
+        return metering;
+    if (key == "secret")
+        return secrets;
+    if (key == "audit")
+        return audit;
+    return {};
+}
+
+bool route_owns(std::string_view path, std::string_view route) {
+    if (route == "/") {
+        return path == "/";
+    }
+    return path == route ||
+           (path.starts_with(route) && path.size() > route.size() && path[route.size()] == '/');
+}
+
+// Fallback for renderers called without a request path: the page title decides.
+bool title_is_current(std::string_view title, std::string_view key) {
     if (key == "home") {
-        return title == "lake — your repositories, together";
+        return title == "lake — design, train, and ship AI";
     }
     if (key == "repositories") {
         return title == "lake — repositories" || title == "lake — tree" || title == "lake — file" ||
@@ -375,65 +438,91 @@ bool navigation_is_current(std::string_view title, std::string_view key) {
     return title == std::format("lake — {}", key);
 }
 
+bool navigation_is_current(const WebUiViewer& viewer,
+                           std::string_view title,
+                           std::string_view key) {
+    if (viewer.path.empty()) {
+        return title_is_current(title, key);
+    }
+    for (const std::string_view route : navigation_routes(key)) {
+        if (route_owns(viewer.path, route)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string nav_link(std::string_view href,
                      std::string_view label,
                      std::string_view icon,
                      std::string_view key,
+                     const WebUiViewer& viewer,
                      std::string_view title) {
     return std::format("<a class=\"nav-link\" href=\"{}\"{}>{}<span>{}</span></a>",
                        href,
-                       navigation_is_current(title, key) ? " aria-current=\"page\"" : "",
+                       navigation_is_current(viewer, title, key) ? " aria-current=\"page\"" : "",
                        web_ui_icon(icon),
                        label);
 }
 
-std::string nav(WebUiViewer viewer, std::string_view title) {
-    std::string out = "<nav class=\"primary-nav\" aria-label=\"Primary\">"
-                      "<p class=\"nav-label\">Workspace</p>";
-    out += nav_link("/", "Home", "home", "home", title);
+// The sidebar follows docs/design/cloud.md: the viewer's repositories first, then the sections
+// that act on them. A section appears only when it has a page the viewer can open; Design and
+// Train join when their pages exist. Account pages live in the top-bar account menu.
+std::string nav(const WebUiViewer& viewer, std::string_view title) {
+    std::string out = "<nav class=\"primary-nav\" aria-label=\"Primary\">";
+    out += nav_link("/", "Home", "home", "home", viewer, title);
     out += nav_link("/repositories",
                     viewer.signed_in ? "Repositories" : "Public repositories",
                     "repository",
                     "repositories",
+                    viewer,
                     title);
     if (viewer.signed_in) {
         if (!viewer.administrator) {
             out += nav_link(
-                "/shared-with-me", "Shared with me", "repository", "shared with me", title);
+                "/shared-with-me", "Shared with me", "repository", "shared with me", viewer, title);
         }
-        out += nav_link("/search", "Search", "search", "search", title);
+        out += nav_link("/search", "Search", "search", "search", viewer, title);
+        out += "<p class=\"nav-label\">Ship</p>";
+        out += nav_link("/deployments", "Deployments", "api", "deployments", viewer, title);
     }
     if (viewer.administrator) {
         out += "<p class=\"nav-label\">Administration</p>";
-        out += nav_link("/customers", "Customers", "customers", "customers", title);
-        out += nav_link("/organizations", "Organizations", "organization", "organizations", title);
-        out += nav_link("/applications", "Applications", "api", "applications", title);
-        out += nav_link("/metering", "Metering", "metering", "metering", title);
-        out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", title);
-        out += nav_link("/audit", "Audit", "audit", "audit", title);
-    }
-    if (viewer.signed_in && !viewer.administrator) {
-        out += "<p class=\"nav-label\">Account</p>";
-        out += nav_link("/settings", "Settings", "identity", "settings", title);
-        out += nav_link("/sessions", "Sessions", "identity", "sessions", title);
-        out += nav_link("/passkeys", "Passkeys", "identity", "passkeys", title);
-        out += nav_link("/tokens", "Tokens", "identity", "tokens", title);
+        out += nav_link("/customers", "Customers", "customers", "customers", viewer, title);
+        out += nav_link(
+            "/organizations", "Organizations", "organization", "organizations", viewer, title);
+        out += nav_link("/applications", "Applications", "api", "applications", viewer, title);
+        out += nav_link("/metering", "Metering", "metering", "metering", viewer, title);
+        out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", viewer, title);
+        out += nav_link("/audit", "Audit", "audit", "audit", viewer, title);
     }
     if (viewer.signed_in) {
         out += "<p class=\"nav-label\">Developer</p>";
-        out += nav_link("/v1/openapi.json", "API", "api", "api", title);
+        out += nav_link("/v1/openapi.json", "API", "api", "api", viewer, title);
     }
     out += "</nav>";
     return out;
 }
 
-std::string session_control(bool signed_in) {
-    if (signed_in) {
-        return "<span class=\"session\"><form class=\"inline\" method=\"post\" "
-               "action=\"/logout\"><button type=\"submit\">Sign out</button></form></span>";
+// Signed out: sign in and create account. Signed in: an account menu that needs no script
+// (<details>), holding the person's own pages and sign out. Operators have no personal pages.
+std::string session_control(const WebUiViewer& viewer) {
+    static constexpr std::string_view sign_out =
+        "<form class=\"inline\" method=\"post\" action=\"/logout\"><button "
+        "type=\"submit\">Sign out</button></form>";
+    if (!viewer.signed_in) {
+        return "<span class=\"session\"><a href=\"/sign-in\">Sign in</a><a "
+               "href=\"/sign-up\">Create account</a></span>";
     }
-    return "<span class=\"session\"><a href=\"/sign-in\">Sign in</a><a "
-           "href=\"/sign-up\">Create account</a></span>";
+    if (viewer.administrator) {
+        return std::format("<span class=\"session\">{}</span>", sign_out);
+    }
+    return std::format("<details class=\"account-menu\"><summary>{}<span>Account</span></summary>"
+                       "<div class=\"account-menu-panel\"><a href=\"/settings\">Settings</a>"
+                       "<a href=\"/sessions\">Sessions</a><a href=\"/passkeys\">Passkeys</a>"
+                       "<a href=\"/tokens\">Tokens</a>{}</div></details>",
+                       web_ui_icon("identity"),
+                       sign_out);
 }
 
 std::string row_link(std::string_view href, std::string_view text) {
@@ -460,18 +549,19 @@ std::string
 forge_tabs(const control::Repository& repository, std::string_view current, WebUiViewer viewer) {
     const std::string id = url_component(repository.id);
     const std::vector<std::tuple<std::string, std::string, std::string>> tabs{
+        {"Files", "/drive?repository_id=" + id, "files"},
         {"Code", "/repository?id=" + id, "code"},
         {"Changes", "/changes?repository_id=" + id, "changes"},
         {"Issues", "/issues?repository_id=" + id, "issues"},
         {"Releases", "/releases?repository_id=" + id, "releases"},
         {"Artifacts", "/artifacts?repository_id=" + id, "artifacts"},
-        {"Platform", "/environments?repository_id=" + id, "platform"},
+        {"Deployments", "/environments?repository_id=" + id, "platform"},
         {"Webhooks", "/webhooks?repository_id=" + id, "webhooks"},
         {"Protection", "/protection?repository_id=" + id, "protection"},
     };
     std::string output = "<nav class=\"tabs forge-tabs\" aria-label=\"Repository\">";
     for (const auto& [label, href, key] : tabs) {
-        if (!viewer.signed_in && (key == "platform" || key == "webhooks")) {
+        if (!viewer.signed_in && (key == "files" || key == "platform" || key == "webhooks")) {
             continue;
         }
         // The protection page includes the instance audit capability.
@@ -968,7 +1058,7 @@ std::string web_ui_shell(std::string_view title,
         nav(viewer, title),
         web_ui_escape(meta),
         web_ui_icon("theme"),
-        session_control(viewer.signed_in),
+        session_control(viewer),
         content,
         theme_toggle_script);
 }
@@ -995,36 +1085,36 @@ std::string web_ui_loading(std::string_view subject, WebUiViewer viewer) {
 
 std::string web_ui_home(WebUiViewer viewer) {
     std::string content =
-        "<p class=\"eyebrow\">Repositories for your work</p>"
-        "<h1>Keep your code and files together.</h1>"
-        "<p class=\"sub\">Lake hosts your Liquid repositories so you can store your work, "
-        "browse its history, and share it with other people.</p>";
+        "<p class=\"eyebrow\">lake by Orama</p>"
+        "<h1>Design, train, and ship AI on your own data.</h1>"
+        "<p class=\"sub\">Keep your files, datasets and models in shared repositories, train "
+        "models on them, and put them into production, in Orama's cloud or your own.</p>";
     if (viewer.signed_in) {
-        content += "<p class=\"actions\"><a href=\"/repositories\">Open your repositories</a></p>";
+        content += "<p class=\"actions\"><a class=\"button button-primary\" "
+                   "href=\"/repositories\">Open your repositories</a> <a class=\"button\" "
+                   "href=\"/deployments\">See your deployments</a></p>";
     } else {
-        content += "<p class=\"actions\"><a href=\"/sign-up\">Create account</a> "
-                   "<a href=\"/sign-in\">Sign in</a></p>";
+        content += "<p class=\"actions\"><a class=\"button button-primary\" "
+                   "href=\"/sign-up\">Create account</a> <a class=\"button\" "
+                   "href=\"/sign-in\">Sign in</a></p>";
     }
-    content += "<h2>From your first account to your first push</h2>"
-               "<div class=\"grid\">"
-               "<section class=\"card\"><h3>1. Create an account</h3>"
-               "<p>Use your email, a password, and your public Liquid identity document. "
-               "You get a personal space with a generated handle that you own.</p>"
-               "<p>Sign-up explains how to install Liquid and export the public document. "
-               "Installing Liquid currently requires access to its source repository.</p></section>"
-               "<section class=\"card\"><h3>2. Create a repository</h3>"
-               "<p>Choose a name in your personal space. Your new repository starts private, "
-               "and you can manage it with your account.</p></section>"
-               "<section class=\"card\"><h3>3. Push with Liquid</h3>"
-               "<p>Liquid is the command-line tool that sends your local work to Lake. "
-               "Create a token with write access in your account's Tokens page. "
-               "Use it as <code>LIQUID_TOKEN</code> when you run <code>liquid push</code> "
-               "with your repository's URL.</p>";
+    content += "<div class=\"grid\">"
+               "<section class=\"card\"><h3>Design</h3>"
+               "<p>Start from the business question and the decisions it drives. Keep the plan, "
+               "the data and the work in one repository your team edits together.</p></section>"
+               "<section class=\"card\"><h3>Train</h3>"
+               "<p>Put datasets and models in repositories. Each revision is stored once, and "
+               "every model records the data and code it was trained from.</p></section>"
+               "<section class=\"card\"><h3>Ship</h3>"
+               "<p>Deploy a repository to an environment, serve it on your domain, and read its "
+               "logs. Push your work with <code>liquid push</code> and a token from your "
+               "account. Installing Liquid currently requires access to its source "
+               "repository.</p>";
     if (viewer.signed_in && !viewer.administrator) {
         content += "<p><a href=\"/tokens\">Create a token</a></p>";
     }
     content += "</section></div>";
-    return web_ui_shell("lake — your repositories, together", "Welcome to Lake", content, viewer);
+    return web_ui_shell("lake — design, train, and ship AI", "Welcome to lake", content, viewer);
 }
 
 std::string web_ui_login(std::string_view error, WebUiViewer viewer) {
@@ -1368,6 +1458,42 @@ std::string platform_heading(const control::Repository& repository,
 }
 
 } // namespace
+
+std::string web_ui_deployments(const std::vector<DeploymentSummary>& environments,
+                               std::string_view stale_since,
+                               WebUiViewer viewer) {
+    std::string content = "<p class=\"eyebrow\">Ship</p><h1>Deployments</h1><p class=\"sub\">"
+                          "Every environment across the repositories you can open: what is "
+                          "running, which change it runs, and where it is served.</p>";
+    content += platform_stale_banner(stale_since);
+    if (environments.empty()) {
+        content += "<div class=\"panel empty\">Nothing is deployed yet. Deploy a repository with "
+                   "<code>liquid deploy</code>, and its environments appear here.</div>";
+    } else {
+        content += "<table><thead><tr><th>Repository</th><th>Environment</th><th>Phase</th>"
+                   "<th>Change</th><th>URL</th><th>Updated</th></tr></thead><tbody>";
+        for (const DeploymentSummary& row : environments) {
+            const std::string repository_id = url_component(row.repository.id);
+            const std::string name = platform_text(row.environment, "name");
+            const std::string url = platform_text(row.environment, "url");
+            content += std::format(
+                "<tr><td>{}</td><td>{}</td><td><span class=\"badge\">{}</span></td>"
+                "<td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                row_link("/environments?repository_id=" + repository_id,
+                         repository_name(row.repository)),
+                row_link("/environment?repository_id=" + repository_id +
+                             "&name=" + url_component(name),
+                         name),
+                web_ui_escape(platform_text(row.environment, "phase")),
+                web_ui_escape(abbreviated_identifier(platform_text(row.environment, "change"))),
+                url.empty() ? "<span class=\"muted\">—</span>" : platform_url(url),
+                web_ui_escape(platform_text(row.environment, "updated_at")));
+        }
+        content += "</tbody></table>";
+    }
+    return web_ui_shell(
+        "lake — deployments", std::format("{} environments", environments.size()), content, viewer);
+}
 
 std::string web_ui_environments(const control::Repository& repository,
                                 const nlohmann::json& environments,

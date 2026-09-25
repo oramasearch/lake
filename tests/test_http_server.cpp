@@ -434,9 +434,19 @@ TEST_P(HttpResponseIsolation, NavigationUsesTheResolvedViewerOnEveryPage) {
             ASSERT_TRUE(response.starts_with("HTTP/1.1 200"));
             const auto begin = response.find("<nav class=\"primary-nav\"");
             ASSERT_NE(begin, std::string::npos);
-            const std::string nav = response.substr(begin, response.find("</nav>", begin) - begin);
+            std::string nav = response.substr(begin, response.find("</nav>", begin) - begin);
             EXPECT_EQ(nav.contains("Administration"), administrator) << path;
-            EXPECT_EQ(nav.contains("href=\"/tokens\""), signed_in && !administrator) << path;
+            EXPECT_EQ(nav.contains("href=\"/deployments\""), signed_in) << path;
+            // Account pages moved from the sidebar to the top-bar account menu.
+            EXPECT_FALSE(nav.contains("href=\"/tokens\"")) << path;
+            const auto menu = response.find("<details class=\"account-menu\">");
+            EXPECT_EQ(menu != std::string::npos, signed_in && !administrator) << path;
+            if (menu != std::string::npos) {
+                const std::string links =
+                    response.substr(menu, response.find("</details>", menu) - menu);
+                EXPECT_TRUE(links.contains("href=\"/tokens\"")) << path;
+                nav += links;
+            }
             EXPECT_EQ(nav.contains("href=\"/shared-with-me\""), signed_in && !administrator)
                 << path;
             EXPECT_EQ(nav.contains("href=\"/search\""), signed_in) << path;

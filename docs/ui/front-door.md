@@ -1,32 +1,32 @@
 # Customer entry and navigation
 
-The homepage explains hosted Liquid repositories and the account → repository → push path that
-personal customer provisioning already supports. It uses the existing design-system shell,
-panels, grid, and theme controls. No schema or capability was added.
+The homepage says what lake is for: designing, training and shipping AI on the customer's own
+data, with repositories at the centre. It follows the design in
+[`../design/cloud.md`](../design/cloud.md) and liquid-bridge decision 43. It uses the existing
+design-system shell, panels, grid, and theme controls. No schema was added.
 
 ## Landing copy
 
-**Repositories for your work**
+**lake by Orama**
 
-**Keep your code and files together.**
+**Design, train, and ship AI on your own data.**
 
-Lake hosts your Liquid repositories so you can store your work, browse its history, and share it
-with other people.
+Keep your files, datasets and models in shared repositories, train models on them, and put them
+into production, in Orama's cloud or your own.
 
 The visitor actions are **Create account** and **Sign in**. An authenticated visitor instead gets
-**Open your repositories**.
+**Open your repositories** and **See your deployments**.
 
-**From your first account to your first push**
+Three cards follow, one per verb. Each states only what lake does today:
 
-1. **Create an account.** Use your email, a password, and your public Liquid identity document.
-   You get a personal space with a generated handle that you own. Sign-up explains how to install
-   Liquid and export the public document. Installing Liquid currently requires access to its
-   source repository.
-2. **Create a repository.** Choose a name in your personal space. Your new repository starts
-   private, and you can manage it with your account.
-3. **Push with Liquid.** Liquid is the command-line tool that sends your local work to Lake.
-   Create a token with write access in your account's Tokens page. Use it as `LIQUID_TOKEN` when
-   you run `liquid push` with your repository's URL.
+1. **Design.** Start from the business question and the decisions it drives, keeping the plan,
+   the data and the work in one repository the team edits together.
+2. **Train.** Datasets and models live in repositories; each revision is stored once, and every
+   model records the data and code it was trained from (`../api/models.md`).
+3. **Ship.** Deploy a repository to an environment, serve it on a domain, and read its logs
+   (`../api/platform.md`). The card names `liquid push` with an account token, and says that
+   installing Liquid currently requires access to its source repository. An ordinary account also
+   gets a **Create a token** link.
 
 The Tokens page gives the existing sync capability scopes:
 `refs,find_missing,push,pull,upload_chunks,read_chunk`. Tokens retain the user's repository policy;
@@ -34,13 +34,34 @@ the homepage and forms do not confer additional access.
 
 ## Navigation
 
-| Viewer | Workspace | Account | Administration | Developer | Session |
-|---|---|---|---|---|---|
-| Signed out or invalid credential | Home, Public repositories | — | — | — | Sign in, Create account |
-| Ordinary account | Home, Repositories, Shared with me, Search | Settings, Sessions, Passkeys, Tokens | — | API | Sign out |
-| Operator | Home, Repositories, Search | — | Customers, Organizations, Applications, Metering, Secrets, Audit | API | Sign out |
+| Viewer | Sidebar | Top bar |
+|---|---|---|
+| Signed out or invalid credential | Home, Public repositories | Sign in, Create account |
+| Ordinary account | Home, Repositories, Shared with me, Search · **Ship:** Deployments · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys, Tokens, Sign out |
+| Operator | Home, Repositories, Search · **Ship:** Deployments · **Administration:** Customers, Organizations, Applications, Metering, Secrets, Audit · **Developer:** API | Sign out |
 
-Previously, every viewer saw Home, Repositories, Shared with me, Search, Customers, Organizations,
+The **Design** and **Train** sections of the design are not in the sidebar yet. A section appears
+only when it has a page the viewer can open, and projects and the dataset and model lists need a
+repository kind that lake does not record yet.
+
+**The current item is chosen by request path.** `context_for` records the route path on
+`ApiContext::request_path`, `viewer_for` copies it into `WebUiViewer::path`, and `nav` compares
+it against each item's routes: an exact match, or a parent (`/drive` owns `/drive/preview`, and a
+repository's own `/environments` belongs to Repositories). A renderer called without a request, as
+in the unit tests, falls back to matching the page title. The path is never used to authorize.
+
+The account menu is a `<details>` element, so it needs no script. Operators have no personal pages
+and get Sign out alone.
+
+**Deployments** (`GET /deployments`) lists every environment across the repositories the caller may
+list, from the same `list_repositories` and `list_environments` capabilities the per-repository
+pages call. A repository whose environments the caller may not read is skipped. Signed-out
+requests redirect to `/sign-in`.
+
+Inside a repository, the first tab is **Files** (the drive view) for signed-in viewers, then
+**Code**. The tab formerly labelled Platform is **Deployments**.
+
+Before 2026-09-08, every viewer saw Home, Repositories, Shared with me, Search, Customers, Organizations,
 Applications, Metering, Secrets, Audit, and API, plus an implementation label in the sidebar footer.
 The footer is removed. The public repository list is filtered by the existing registry policy.
 
