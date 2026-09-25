@@ -84,7 +84,8 @@ struct Workspaces {
             caller);
     }
     void status(std::string phase, std::string at) {
-        control->rows.push_back({{"record_type", "status"},
+        control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
+                                 {"record_type", "status"},
                                  {"phase", std::move(phase)},
                                  {"message", "note"},
                                  {"updated_at", std::move(at)}});
@@ -115,9 +116,9 @@ TEST(Workspaces, RequestAppendsOnceAndStateFollowsTheLatestStatus) {
     ASSERT_TRUE(state);
     EXPECT_FALSE(state->requested);
     EXPECT_FALSE(state->ready());
-    EXPECT_NE(w.control->statements.back().find("workspace_id = 'ws-0f1e2d3c4b5a'"),
-              std::string::npos);
-    EXPECT_NE(w.control->statements.back().find("lake = 'prod'"), std::string::npos);
+    EXPECT_NE(w.control->statements.back().find("WHERE lake = 'prod'"), std::string::npos);
+    EXPECT_EQ(w.control->statements.back().find(" AND "), std::string::npos)
+        << "Zetta's SQL takes one predicate per WHERE clause";
 
     auto requested = w.run(w.service->request(std::string(customer)));
     ASSERT_TRUE(requested);
@@ -149,7 +150,12 @@ TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().code, "workspace_not_ready");
 
-    w.control->rows.push_back({{"record_type", "desired"}});
+    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"}, {"record_type", "desired"}});
+    // Another workspace's rows on the same Lake are ignored.
+    w.control->rows.push_back({{"workspace_id", "ws-aaaaaaaaaaaa"},
+                               {"record_type", "status"},
+                               {"phase", "Failed"},
+                               {"updated_at", "2026-09-26T00:00:00Z"}});
     w.status("Ready", "2026-09-25T10:02:00Z");
     w.deliver("ws-0f1e2d3c4b5a");
     w.caller->value = {{"projects", json::array({"retention"})}};
