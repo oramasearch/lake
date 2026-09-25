@@ -42,7 +42,7 @@ the homepage and forms do not confer additional access.
 | Viewer | Sidebar | Top bar |
 |---|---|---|
 | Signed out or invalid credential | Home, Public repositories | Sign in, Create account |
-| Ordinary account | Home, Repositories, Shared with me, Search · **Design:** Projects · **Train:** Data, Runs · **Ship:** Models, Search indexes, Deployments · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
+| Ordinary account | Home, Repositories, Shared with me, Search · **Design:** Projects · **Train:** Data, Runs · **Ship:** Models, Search indexes, Packages, Deployments · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
 | Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Metering, Secrets, Audit · **Developer:** API | Sign out |
 
 **Design, Train and Ship** run on the customer's own Zetta workspace; see

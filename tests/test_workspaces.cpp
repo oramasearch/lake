@@ -323,3 +323,19 @@ TEST(Workspaces, NavigationOffersDesignTrainAndShip) {
     EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/train/runs\" aria-current=\"page\""),
               std::string::npos);
 }
+
+TEST(Workspaces, PackagesPageListsTheRegistriesWithInstallCommands) {
+    const json catalog{{"oci", json::array({{{"name", "scoring"}, {"versions", {"v1", "v2"}}}})},
+                       {"npm", json::array({{{"name", "@acme/ui<x>"}, {"versions", {"1.0.0"}}}})},
+                       {"python", json::array()}};
+    const std::string html =
+        lake::api::web_ui_packages(catalog, true, "https://lake.example.test", true);
+    EXPECT_NE(html.find("docker pull lake.example.test/scoring:v2"), std::string::npos);
+    EXPECT_NE(html.find("npm install @acme/ui&lt;x&gt; --registry https://lake.example.test"),
+              std::string::npos);
+    EXPECT_NE(html.find("None published."), std::string::npos);
+    EXPECT_NE(lake::api::web_ui_packages(json::object(), false, "", true)
+                  .find("no registry storage configured"),
+              std::string::npos);
+    EXPECT_NE(lake::api::web_ui_home(true).find("href=\"/ship/packages\""), std::string::npos);
+}

@@ -14,6 +14,7 @@ no tenancy: a cluster's `list_projects`, `list_models` and the rest return every
 | Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run_report` |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |
 | Ship | `/ship/indexes` | `list_indexes` |
+| Ship | `/ship/packages` | lake's own registries, not the workspace (`docs/api/registry.md`) |
 | Ship | `/deployments` | lake's own platform deployments (`docs/api/platform.md`) |
 
 Every page takes `customer_id` and defaults to the viewer's personal space; a selector lists the

@@ -621,6 +621,78 @@ public:
         return !root_.empty();
     }
 
+    // What the registries hold, for the Ship > Packages page: OCI repositories with their tags,
+    // npm packages with their versions, Python projects with their files. Everything listed is
+    // already a public read.
+    nlohmann::json catalog() const {
+        nlohmann::json out{{"oci", nlohmann::json::array()},
+                           {"npm", nlohmann::json::array()},
+                           {"python", nlohmann::json::array()}};
+        if (!available()) {
+            return out;
+        }
+        std::error_code error;
+        const auto sorted_entries = [&](const std::filesystem::path& directory) {
+            std::vector<std::filesystem::directory_entry> entries;
+            for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+                entries.push_back(entry);
+            }
+            std::ranges::sort(entries, {}, [](const auto& entry) { return entry.path(); });
+            return entries;
+        };
+        for (const auto& repository : sorted_entries(root_ / "manifests")) {
+            if (!repository.is_directory()) {
+                continue;
+            }
+            nlohmann::json tags = nlohmann::json::array();
+            for (const auto& manifest : sorted_entries(repository.path())) {
+                if (manifest.path().extension() == ".json") {
+                    tags.push_back(manifest.path().stem().string());
+                }
+            }
+            out["oci"].push_back(
+                {{"name", repository.path().filename().string()}, {"versions", tags}});
+        }
+        for (const auto& package : sorted_entries(root_ / "npm")) {
+            const auto metadata = read_text(package.path() / "metadata.json");
+            const nlohmann::json document =
+                metadata ? nlohmann::json::parse(*metadata, nullptr, false) : nlohmann::json();
+            nlohmann::json versions = nlohmann::json::array();
+            if (document.is_object() && document.contains("versions") &&
+                document["versions"].is_object()) {
+                for (const auto& [version, value] : document["versions"].items()) {
+                    versions.push_back(version);
+                }
+            }
+            out["npm"].push_back(
+                {{"name",
+                  document.is_object() ? document.value("name", package.path().filename().string())
+                                       : package.path().filename().string()},
+                 {"versions", versions}});
+        }
+        for (const auto& index : sorted_entries(root_ / "python" / "simple")) {
+            if (index.path().extension() != ".json") {
+                continue;
+            }
+            const auto text = read_text(index.path());
+            const nlohmann::json files =
+                text ? nlohmann::json::parse(*text, nullptr, false) : nlohmann::json();
+            nlohmann::json versions = nlohmann::json::array();
+            if (files.is_array()) {
+                for (const auto& file : files) {
+                    const std::string version = file.value("version", std::string());
+                    if (!version.empty() &&
+                        std::ranges::find(versions, nlohmann::json(version)) == versions.end()) {
+                        versions.push_back(version);
+                    }
+                }
+            }
+            out["python"].push_back(
+                {{"name", index.path().stem().string()}, {"versions", versions}});
+        }
+        return out;
+    }
+
     ArtifactResult<std::string> begin_upload(std::string_view repository) {
         if (!safe_component(repository)) {
             return std::unexpected("OCI repository name is invalid");
@@ -4587,6 +4659,7 @@ struct ApiServer::Impl {
             "/ship/models",
             "/ship/models/publish",
             "/ship/indexes",
+            "/ship/packages",
             "/workspace/start",
             "/environments",
             "/environment",
@@ -7240,6 +7313,27 @@ struct ApiServer::Impl {
             back += "&error=" + oauth_url_encode(result.error.message);
         }
         co_return co_await redirect(route, back);
+    }
+
+    // Ship > Packages: what this lake's registries hold. The registries are instance-wide and every
+    // package is a public read, so the page shows the catalog to any signed-in viewer.
+    boost::http::route_task serve_packages_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/sign-in");
+        }
+        return send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_packages(artifacts.catalog(),
+                            artifacts.available(),
+                            options.external_origin.empty()
+                                ? (options.public_host.empty() ? std::string()
+                                                               : "https://" + options.public_host)
+                                : options.external_origin,
+                            viewer_for(context)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     // Every environment across the repositories the caller may list, from the same two
@@ -10684,6 +10778,12 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_form(route, action));
                    });
     }
+    router.add(http::method::get,
+               "/ship/packages",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/ship/packages", impl.serve_packages_page(route));
+               });
     router.add(
         http::method::get, "/deployments", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/deployments", impl.serve_deployments_page(route));
