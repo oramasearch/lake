@@ -44,9 +44,6 @@ ZettaControlResult<std::span<const std::string_view>> columns_for(std::string_vi
     if (table == domains_table) {
         return column_span(domain_columns);
     }
-    if (table == workspaces_table) {
-        return column_span(workspace_columns);
-    }
     return std::unexpected(
         ZettaControlError{"invalid_input", "unknown operator control table " + std::string(table)});
 }

@@ -1,6 +1,6 @@
 # Managed services: the lake ↔ operator contract
 
-**Status: designed 2026-09-25 (liquid-bridge decision 46).** A customer runs any number of
+**Status: implemented in lake 2026-09-25 (liquid-bridge decision 46); the operator side is orama-operator `docs/lake/services.md`.** A customer runs any number of
 services on the Lake's cluster — Zetta clusters and Postgres clusters today. lake records what the
 customer wants in its **control Postgres**; the Orama operator reads it, creates one Kubernetes
 resource per service (an `OramaZettaCluster`, or a CloudNativePG `Cluster` that the CloudNativePG

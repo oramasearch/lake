@@ -361,6 +361,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view models[] = {"/ship/models"};
     static constexpr std::string_view indexes[] = {"/ship/indexes"};
     static constexpr std::string_view packages[] = {"/ship/packages"};
+    static constexpr std::string_view services[] = {"/services"};
     static constexpr std::string_view activity[] = {"/activity"};
     static constexpr std::string_view customers[] = {"/customers"};
     static constexpr std::string_view organizations[] = {"/organizations",
@@ -398,6 +399,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return models;
     if (key == "indexes")
         return indexes;
+    if (key == "services")
+        return services;
     if (key == "packages")
         return packages;
     if (key == "activity")
@@ -514,6 +517,7 @@ std::string nav(const WebUiViewer& viewer, std::string_view title) {
         out += nav_link("/ship/indexes", "Search indexes", "search", "indexes", viewer, title);
         out += nav_link("/ship/packages", "Packages", "repository", "packages", viewer, title);
         out += nav_link("/deployments", "Deployments", "api", "deployments", viewer, title);
+        out += nav_link("/services", "Services", "api", "services", viewer, title);
     }
     // A signed-in account's own organizations, secrets, usage and activity. Operators reach the
     // instance-wide versions under Administration instead.
@@ -1565,7 +1569,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 7> workspace_sections{{
+constexpr std::array<WorkspaceSection, 8> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1594,6 +1598,12 @@ constexpr std::array<WorkspaceSection, 7> workspace_sections{{
      "Search indexes",
      "/ship/indexes",
      "Search indexes over your data, and whether each is published for queries."},
+    {"services",
+     "Ship",
+     "Services",
+     "/services",
+     "The Zetta and Postgres clusters this space runs on lake, each its own, with its data kept "
+     "apart from every other customer's. Your workspace is the one Design, Train and Ship use."},
 }};
 
 const WorkspaceSection& workspace_section(std::string_view key) {
@@ -1703,6 +1713,100 @@ std::string workspace_gate(const WorkspacePage& page, const WorkspaceSection& se
         "</form></div>",
         hidden("customer_id", page.customer_id),
         hidden("return", section.path));
+}
+
+std::string service_phase(const nlohmann::json& service) {
+    const std::string phase = json_text(service, "phase");
+    if (json_text(service, "desired") == "absent") {
+        return phase.empty() || phase == "Ready" ? "Deleting" : phase;
+    }
+    return phase.empty() ? "Waiting for the operator" : phase;
+}
+
+// Services: every Zetta and Postgres cluster of the customer (docs/api/services.md). Never shows a
+// credential except the one Postgres connection the viewer asked for, on the response to that post.
+std::string services_content(const WorkspacePage& page) {
+    const nlohmann::json services = page.data.value("list_services", nlohmann::json::object())
+                                        .value("services", nlohmann::json::array());
+    std::string out;
+    bool settling = false;
+    if (const auto connection = page.data.find("service_connection");
+        connection != page.data.end()) {
+        out += std::format(
+            "<section class=\"panel notice\" role=\"status\"><h2>Connection to {}</h2><p>Reachable "
+            "inside the lake cluster, from your other services. Copy it now; it is not shown "
+            "again unless you ask.</p><p><code>{}</code></p></section>",
+            web_ui_escape(json_text(*connection, "name")),
+            web_ui_escape(json_text(*connection, "uri")));
+    }
+    if (services.empty()) {
+        out += "<div class=\"panel empty\">No services yet.</div>";
+    } else {
+        out += "<table><thead><tr><th>Name</th><th>Kind</th><th>Size</th><th>Status</th>"
+               "<th>Address</th><th></th></tr></thead><tbody>";
+        for (const nlohmann::json& service : services) {
+            const std::string id = json_text(service, "id");
+            const std::string name = json_text(service, "name");
+            const std::string kind = json_text(service, "kind");
+            const std::string phase = service_phase(service);
+            const bool deleting = json_text(service, "desired") == "absent";
+            settling = settling || (phase != "Ready" && phase != "Failed");
+            std::string actions;
+            if (!deleting && kind == "postgres" && phase == "Ready") {
+                actions += std::format("<form method=\"post\" action=\"/services/connection\">{}{}"
+                                       "<button type=\"submit\">Show connection</button></form>",
+                                       hidden("customer_id", page.customer_id),
+                                       hidden("service_id", id));
+            }
+            if (!deleting) {
+                actions += std::format(
+                    "<details><summary>Delete</summary><form class=\"stack\" method=\"post\" "
+                    "action=\"/services/delete\">{}{}<label>Type <code>{}</code> to delete it "
+                    "and all of its data, which cannot be recovered<input name=\"confirm\" "
+                    "required autocomplete=\"off\"></label><button class=\"button button-danger\" "
+                    "type=\"submit\">Delete {}</button></form></details>",
+                    hidden("customer_id", page.customer_id),
+                    hidden("service_id", id),
+                    web_ui_escape(name),
+                    web_ui_escape(name));
+            }
+            out += std::format(
+                "<tr><td>{}{}</td><td>{}</td><td>{} × {} GiB</td><td>{}{}</td><td><code>{}</code>"
+                "</td><td>{}</td></tr>",
+                web_ui_escape(name),
+                service.value("default", false) ? " <span class=\"muted\">(workspace)</span>" : "",
+                kind == "postgres" ? "Postgres" : "Zetta",
+                web_ui_escape(json_text(service, "instances")),
+                web_ui_escape(json_text(service, "storage_gi")),
+                web_ui_escape(phase),
+                json_text(service, "message").empty()
+                    ? std::string()
+                    : "<br><span class=\"muted\">" + web_ui_escape(json_text(service, "message")) +
+                          "</span>",
+                web_ui_escape(json_text(service, "endpoint")),
+                actions);
+        }
+        out += "</tbody></table>";
+    }
+    if (settling) {
+        out += "<p class=\"muted\">This page checks again every 15 seconds while a service is "
+               "changing.</p><meta http-equiv=\"refresh\" content=\"15\">";
+    }
+    out += std::format(
+        "<section class=\"panel\"><h2>New service</h2><form class=\"stack\" method=\"post\" "
+        "action=\"/services/create\">{}<label>Kind<select name=\"kind\"><option "
+        "value=\"postgres\">Postgres</option><option value=\"zetta\">Zetta</option></select>"
+        "</label><label>Name<input name=\"name\" required pattern=\"[a-z][a-z0-9\\-]{{0,30}}\" "
+        "placeholder=\"crm\"></label><label>Instances<select name=\"instances\"><option>1"
+        "</option><option>2</option><option>3</option></select></label><label>Storage (GiB)"
+        "<input name=\"storage_gi\" type=\"number\" min=\"1\" max=\"100\" value=\"10\">"
+        "</label><p class=\"muted\">This space may run {} services at once.</p><button "
+        "class=\"button button-primary\" type=\"submit\">Create service</button></form>"
+        "</section>",
+        hidden("customer_id", page.customer_id),
+        web_ui_escape(
+            json_text(page.data.value("list_services", nlohmann::json::object()), "limit")));
+    return out;
 }
 
 std::string workspace_content(const WorkspacePage& page) {
@@ -1971,6 +2075,8 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     if (!page.unavailable.empty()) {
         content +=
             std::format("<div class=\"panel empty\">{}</div>", web_ui_escape(page.unavailable));
+    } else if (page.section == "services") {
+        content += services_content(page);
     } else if (!page.state.value("ready", false)) {
         content += workspace_gate(page, section);
     } else {

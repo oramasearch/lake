@@ -68,7 +68,7 @@ line or an empty state that should not be empty. The walkthrough creates a proje
 |---|---|
 | Stays on `/sign-in` after the ticket | The ticket expired or was already used, or the Clerk instance does not match the site's `LAKE_CLERK_PUBLISHABLE_KEY` (`../api/clerk.md`) |
 | `/sign-in?error=Your sign-in could not be verified` | lake could not verify the `lake` JWT template token: the template's `aud` is not `lake`, or the instance JWKS is unreachable from the pod |
-| "Design, Train and Ship are not available on this lake yet" | The Lake has `spec.workspaces.enabled: false`, or the operator has not injected `LAKE_DATA_PLANE_*` / `LAKE_WORKSPACE_*` (`../api/workspaces.md`) |
+| "Design, Train and Ship are not available on this lake yet" | The Lake has neither `spec.services.enabled` nor `spec.workspaces.enabled`, or the operator has not mounted `LAKE_SERVICE_DIR` (`../api/services.md`) |
 | An error line starting `operator Zetta returned HTTP 422:` | Zetta refused the control-plane SQL; the text after the colon is Zetta's own reason |
 | *Preparing your workspace* never ends | The operator's logs for the Lake's data-plane `OramaZettaCluster` (`workspace sync deferred`), and the workspace cluster `<lake>-ws-…` in the Lake namespace |
 | Build pipeline or run fails with a Zetta message | The message is the workspace's own answer; a new workspace has no data yet, so steps that need a dataset fail until one is added |

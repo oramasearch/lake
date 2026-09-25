@@ -4662,6 +4662,10 @@ struct ApiServer::Impl {
             "/ship/packages",
             "/workspace/start",
             "/workspace/delete",
+            "/services",
+            "/services/create",
+            "/services/delete",
+            "/services/connection",
             "/train/data/connect",
             "/train/data/disconnect",
             "/train/data/pull",
@@ -7170,8 +7174,19 @@ struct ApiServer::Impl {
         if (page.customer_id.empty()) {
             page.unavailable = "You have no space to work in yet.";
         } else if (!options.workspaces) {
-            page.unavailable = "Design, Train and Ship are not available on this lake yet: it has "
-                               "no workspace control plane configured.";
+            page.unavailable = section == "services"
+                                   ? "Services are not available on this lake yet: the operator "
+                                     "has not enabled them."
+                                   : "Design, Train and Ship are not available on this lake yet: "
+                                     "it has no workspace control plane configured.";
+        } else if (section == "services") {
+            const ApiResult listed = unwrap(co_await workspace_call(
+                "list_services", {{"customer_id", page.customer_id}}, context));
+            if (listed.ok) {
+                page.data["list_services"] = listed.value;
+            } else {
+                page.unavailable = listed.error.message;
+            }
         } else {
             const ApiResult status = unwrap(co_await workspace_call(
                 "workspace_status", {{"customer_id", page.customer_id}}, context));
@@ -7267,6 +7282,60 @@ struct ApiServer::Impl {
                 "delete_workspace",
                 {{"customer_id", customer_id}, {"confirm", form_field(body, "confirm")}},
                 context));
+        } else if (action == "service_create") {
+            back = "/services?" + query;
+            nlohmann::json input{{"customer_id", customer_id},
+                                 {"kind", form_field(body, "kind")},
+                                 {"name", form_field(body, "name")}};
+            for (const char* field : {"instances", "storage_gi"}) {
+                const std::string value = form_field(body, field);
+                int number = 0;
+                const auto [end, error] =
+                    std::from_chars(value.data(), value.data() + value.size(), number);
+                if (!value.empty() && error == std::errc() && end == value.data() + value.size()) {
+                    input[field] = number;
+                }
+            }
+            result = unwrap(co_await workspace_call("create_service", std::move(input), context));
+        } else if (action == "service_delete") {
+            back = "/services?" + query;
+            result = unwrap(co_await workspace_call("delete_service",
+                                                    {{"customer_id", customer_id},
+                                                     {"service_id", form_field(body, "service_id")},
+                                                     {"confirm", form_field(body, "confirm")}},
+                                                    context));
+        } else if (action == "service_connection") {
+            // Answered with the page itself, so the password never rides in a redirect URL.
+            const std::string service_id = form_field(body, "service_id");
+            result = unwrap(
+                co_await workspace_call("service_connection",
+                                        {{"customer_id", customer_id}, {"service_id", service_id}},
+                                        context));
+            if (result.ok) {
+                WorkspacePage page;
+                page.section = "services";
+                auto selection = workspace_selection(context, customer_id);
+                page.customers = std::move(selection.customers);
+                page.customer_id = std::move(selection.customer_id);
+                const ApiResult listed = unwrap(co_await workspace_call(
+                    "list_services", {{"customer_id", customer_id}}, context));
+                if (listed.ok) {
+                    page.data["list_services"] = listed.value;
+                    for (const nlohmann::json& service :
+                         listed.value.value("services", nlohmann::json::array())) {
+                        if (service.value("id", std::string()) == service_id) {
+                            result.value["name"] = service.value("name", std::string());
+                        }
+                    }
+                }
+                page.data["service_connection"] = std::move(result.value);
+                co_return co_await send_text(route,
+                                             boost::http::status::ok,
+                                             web_ui_workspace(page, viewer_for(context)),
+                                             "text/html; charset=utf-8",
+                                             "no-store");
+            }
+            back = "/services?" + query;
         } else if (action == "connect") {
             back = "/train/data?" + query;
             const std::string type = form_field(body, "type");
@@ -10855,13 +10924,14 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 7>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 8>{{{"/design/projects", "projects"},
                                                              {"/design/project", "project"},
                                                              {"/train/data", "data"},
                                                              {"/train/runs", "runs"},
                                                              {"/train/run", "run"},
                                                              {"/ship/models", "models"},
-                                                             {"/ship/indexes", "indexes"}}}) {
+                                                             {"/ship/indexes", "indexes"},
+                                                             {"/services", "services"}}}) {
         router.add(http::method::get,
                    path,
                    [&impl, path, section](http::route_params& route) -> http::route_task {
@@ -10869,8 +10939,11 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 10>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 13>{
              {{"/workspace/start", "start"},
+              {"/services/create", "service_create"},
+              {"/services/delete", "service_delete"},
+              {"/services/connection", "service_connection"},
               {"/workspace/delete", "delete"},
               {"/train/data/connect", "connect"},
               {"/train/data/disconnect", "disconnect"},

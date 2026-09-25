@@ -623,6 +623,111 @@ Result<std::optional<std::uint64_t>> InMemoryStore::storage_quota(const std::str
     return quota->second;
 }
 
+Result<std::vector<ManagedService>> InMemoryStore::list_services(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<ManagedService> services;
+    for (const ManagedService& service : services_) {
+        if (service.customer_id == customer_id &&
+            !(service.desired == "absent" && service.phase == "Deleted")) {
+            services.push_back(service);
+        }
+    }
+    return services;
+}
+
+Result<ManagedService> InMemoryStore::get_service(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    for (const ManagedService& service : services_) {
+        if (service.id == id) {
+            return service;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no service " + id});
+}
+
+Result<ManagedService> InMemoryStore::create_service(const NewManagedService& in) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == in.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+    }
+    std::size_t live = 0;
+    for (const ManagedService& service : services_) {
+        if (service.customer_id != in.customer_id || service.desired != "present") {
+            continue;
+        }
+        if (in.is_default && service.is_default) {
+            return service;
+        }
+        if (service.name == in.name) {
+            return std::unexpected(
+                StoreError{"conflict", "a service named " + in.name + " already exists"});
+        }
+        ++live;
+    }
+    if (in.max_per_customer != 0 && live >= in.max_per_customer) {
+        return std::unexpected(StoreError{"quota_exceeded",
+                                          "this account already runs " +
+                                              std::to_string(in.max_per_customer) + " services"});
+    }
+    ManagedService service;
+    service.id = new_uuid_v4();
+    service.customer_id = in.customer_id;
+    service.kind = in.kind;
+    service.name = in.name;
+    service.slug = managed_service_slug("svc", service.id);
+    if (in.is_default) {
+        const std::string workspace = managed_service_slug("ws", in.customer_id);
+        if (std::ranges::none_of(services_, [&](const ManagedService& existing) {
+                return existing.slug == workspace;
+            })) {
+            service.slug = workspace;
+        }
+    }
+    service.is_default = in.is_default;
+    service.instances = in.instances;
+    service.storage_gi = in.storage_gi;
+    service.desired = "present";
+    service.created_by_taap_id = in.created_by_taap_id;
+    service.created_at = service.updated_at = now_iso8601();
+    services_.push_back(service);
+    return service;
+}
+
+Result<ManagedService> InMemoryStore::withdraw_service(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    for (ManagedService& service : services_) {
+        if (service.id != id) {
+            continue;
+        }
+        if (service.desired != "present") {
+            return std::unexpected(StoreError{"conflict", "the service is already deleted"});
+        }
+        service.desired = "absent";
+        ++service.generation;
+        service.updated_at = now_iso8601();
+        return service;
+    }
+    return std::unexpected(StoreError{"not_found", "no service " + id});
+}
+
+Result<void> InMemoryStore::set_service_status(const std::string& id,
+                                               std::string phase,
+                                               std::string message,
+                                               std::string endpoint) {
+    std::lock_guard lock(mutex_);
+    for (ManagedService& service : services_) {
+        if (service.id == id) {
+            service.phase = std::move(phase);
+            service.message = std::move(message);
+            service.endpoint = std::move(endpoint);
+            service.observed_generation = service.generation;
+            return {};
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no service " + id});
+}
+
 Result<std::uint64_t> InMemoryStore::set_storage_quota(const std::string& customer_id,
                                                        std::uint64_t quota_bytes) {
     std::lock_guard lock(mutex_);
