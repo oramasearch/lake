@@ -188,6 +188,41 @@ void register_workspace_capabilities(Registry& registry) {
             }
             co_return ApiResult::success((*state)->to_json());
         }});
+    registry.add(Capability{
+        .name = "delete_workspace",
+        .title = "Delete a workspace",
+        .description =
+            "Delete the customer's Zetta workspace. The operator removes its cluster, "
+            "projects, data and models, which cannot be recovered. `confirm` must be the "
+            "workspace id.",
+        .input_schema =
+            customer_input_schema({{"confirm", {{"type", "string"}}}}, json::array({"confirm"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string slug =
+                control::workspace_slug(input.at("customer_id").get<std::string>());
+            if (input.at("confirm") != slug) {
+                co_return ApiResult::failure(
+                    "invalid_input", "confirm must be the workspace id " + slug, "/confirm");
+            }
+            set_audit(context, "workspace.delete", input, "");
+            auto state = co_await context.workspaces->withdraw(input.at("customer_id"));
+            if (!state) {
+                co_return ApiResult::failure("store_unavailable", state.error().message);
+            }
+            if (!*state) {
+                co_return ApiResult::failure(state->error().code, state->error().message);
+            }
+            co_return ApiResult::success((*state)->to_json());
+        }});
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);
 }

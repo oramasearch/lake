@@ -170,22 +170,38 @@ WorkspaceService::state(std::string customer_id) {
     if (!rows) {
         co_return workspace_failure<WorkspaceState>(rows.error().code, rows.error().message);
     }
-    std::string latest;
+    // The newest request or withdrawal decides whether the workspace is wanted. Status rows older
+    // than the latest withdrawal describe a previous life of the workspace and are ignored; they
+    // are not compared with the request's time, which comes from lake's clock, not the operator's.
+    std::string latest_desired, latest_withdrawn;
     for (const nlohmann::json& row : *rows) {
         if (text_of(row, "workspace_id") != state.slug) {
             continue;
         }
         const std::string type = text_of(row, "record_type");
+        const std::string at = text_of(row, "updated_at");
         if (type == "desired") {
-            state.requested = true;
-        } else if (type == "status") {
-            const std::string at = text_of(row, "updated_at");
-            if (at >= latest) {
-                latest = at;
-                state.phase = text_of(row, "phase");
-                state.message = text_of(row, "message");
-            }
+            latest_desired = std::max(latest_desired, at);
+        } else if (type == "withdrawn") {
+            latest_withdrawn = std::max(latest_withdrawn, at);
         }
+    }
+    state.requested = !latest_desired.empty() && latest_desired > latest_withdrawn;
+    std::string latest;
+    for (const nlohmann::json& row : *rows) {
+        if (text_of(row, "workspace_id") != state.slug || text_of(row, "record_type") != "status") {
+            continue;
+        }
+        const std::string at = text_of(row, "updated_at");
+        if (at >= latest_withdrawn && at >= latest) {
+            latest = at;
+            state.phase = text_of(row, "phase");
+            state.message = text_of(row, "message");
+        }
+    }
+    if (state.requested && state.phase == "Deleted") {
+        state.phase.clear(); // restarted, and the operator has not picked the request up yet
+        state.message.clear();
     }
     state.credential = !token_for(state.slug).empty();
     co_return ZettaControlResult<WorkspaceState>(std::move(state));
@@ -222,6 +238,42 @@ WorkspaceService::request(std::string customer_id) {
                                                     appended->error().message);
     }
     result.requested = true;
+    co_return ZettaControlResult<WorkspaceState>(std::move(result));
+}
+
+liquid::runtime::task<ZettaControlResult<WorkspaceState>>
+WorkspaceService::withdraw(std::string customer_id) {
+    auto current = co_await state(customer_id);
+    if (!current) {
+        co_return workspace_failure<WorkspaceState>("store_unavailable", current.error().message);
+    }
+    if (!*current) {
+        co_return workspace_failure<WorkspaceState>(current->error().code,
+                                                    current->error().message);
+    }
+    WorkspaceState result = std::move(**current);
+    if (!result.requested) {
+        co_return workspace_failure<WorkspaceState>("not_found", "there is no workspace to delete");
+    }
+    auto appended = co_await control_->append(std::string(workspaces_table),
+                                              {{"workspace_id", result.slug},
+                                               {"record_type", "withdrawn"},
+                                               {"lake", config_.lake_name},
+                                               {"customer_id", customer_id},
+                                               {"phase", ""},
+                                               {"url", ""},
+                                               {"message", ""},
+                                               {"updated_at", now_rfc3339()}});
+    if (!appended) {
+        co_return workspace_failure<WorkspaceState>("store_unavailable", appended.error().message);
+    }
+    if (!*appended) {
+        co_return workspace_failure<WorkspaceState>(appended->error().code,
+                                                    appended->error().message);
+    }
+    result.requested = false;
+    result.phase.clear();
+    result.message.clear();
     co_return ZettaControlResult<WorkspaceState>(std::move(result));
 }
 

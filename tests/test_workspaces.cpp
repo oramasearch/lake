@@ -144,6 +144,58 @@ TEST(Workspaces, RequestAppendsOnceAndStateFollowsTheLatestStatus) {
     EXPECT_EQ(state->to_json()["ready"], true);
 }
 
+TEST(Workspaces, WithdrawalEndsTheWorkspaceAndARestartIgnoresItsOldStatus) {
+    Workspaces w;
+    auto refused = w.run(w.service->withdraw(std::string(customer)));
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "not_found") << "nothing to delete before a request";
+
+    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
+                               {"record_type", "desired"},
+                               {"updated_at", "2026-09-25T10:00:00Z"}});
+    w.status("Ready", "2026-09-25T10:02:00Z");
+    w.deliver("ws-0f1e2d3c4b5a");
+    auto withdrawn = w.run(w.service->withdraw(std::string(customer)));
+    ASSERT_TRUE(withdrawn);
+    EXPECT_FALSE(withdrawn->requested);
+    EXPECT_EQ(w.control->rows.back()["record_type"], "withdrawn");
+    EXPECT_EQ(w.control->rows.back()["customer_id"], customer);
+    EXPECT_EQ(w.control->rows.back().size(), 8U) << "every workspaces column";
+    w.control->rows.back()["updated_at"] = "2026-09-25T11:00:00Z";
+
+    auto state = w.run(w.service->state(std::string(customer)));
+    ASSERT_TRUE(state);
+    EXPECT_FALSE(state->requested);
+    EXPECT_EQ(state->phase, "") << "the Ready status predates the withdrawal";
+    EXPECT_FALSE(state->ready()) << "a leftover token does not make it callable";
+    w.status("Deleted", "2026-09-25T11:01:00Z");
+    state = w.run(w.service->state(std::string(customer)));
+    ASSERT_TRUE(state);
+    EXPECT_EQ(state->phase, "Deleted");
+
+    // Starting again: only statuses after the new request count.
+    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
+                               {"record_type", "desired"},
+                               {"updated_at", "2026-09-25T12:00:00Z"}});
+    state = w.run(w.service->state(std::string(customer)));
+    ASSERT_TRUE(state);
+    EXPECT_TRUE(state->requested);
+    EXPECT_EQ(state->phase, "");
+    EXPECT_FALSE(state->ready());
+    w.status("Ready", "2026-09-25T12:03:00Z");
+    state = w.run(w.service->state(std::string(customer)));
+    ASSERT_TRUE(state);
+    EXPECT_TRUE(state->ready());
+
+    // A withdrawal in the same second as the request wins, as the operator decides.
+    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
+                               {"record_type", "withdrawn"},
+                               {"updated_at", "2026-09-25T12:00:00Z"}});
+    state = w.run(w.service->state(std::string(customer)));
+    ASSERT_TRUE(state);
+    EXPECT_FALSE(state->requested);
+}
+
 TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     Workspaces w;
     auto refused = w.run(w.service->call(std::string(customer), "list_projects", true, {}));
@@ -242,6 +294,23 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
                                 {{"customer_id", owner_customer}, {"capability", "list_projects"}});
     ASSERT_FALSE(not_ready.ok);
     EXPECT_EQ(not_ready.error.code, "workspace_not_ready");
+
+    const std::string slug = lake::control::workspace_slug(owner_customer);
+    const auto foreign_delete = call(
+        *other_principal, "delete_workspace", {{"customer_id", owner_customer}, {"confirm", slug}});
+    EXPECT_FALSE(foreign_delete.ok) << "another customer cannot delete the workspace";
+    const auto unconfirmed = call(*owner_principal,
+                                  "delete_workspace",
+                                  {{"customer_id", owner_customer}, {"confirm", "yes"}});
+    ASSERT_FALSE(unconfirmed.ok);
+    EXPECT_EQ(unconfirmed.error.code, "invalid_input");
+    const auto rows_before = w.control->rows.size();
+    const auto deleted = call(
+        *owner_principal, "delete_workspace", {{"customer_id", owner_customer}, {"confirm", slug}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["requested"], false);
+    ASSERT_EQ(w.control->rows.size(), rows_before + 1);
+    EXPECT_EQ(w.control->rows.back()["record_type"], "withdrawn");
 }
 
 TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
@@ -267,6 +336,23 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     EXPECT_NE(html.find("retention&lt;review&gt;"), std::string::npos);
     EXPECT_EQ(html.find("retention<review>"), std::string::npos);
     EXPECT_NE(html.find("action=\"/design/projects/create\""), std::string::npos);
+    EXPECT_EQ(html.find("action=\"/workspace/delete\""), std::string::npos)
+        << "the delete form needs the workspace id from the state";
+    page.state["workspace"] = "ws-0f1e2d3c4b5a";
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("action=\"/workspace/delete\""), std::string::npos);
+    EXPECT_NE(html.find("name=\"confirm\" value=\"ws-0f1e2d3c4b5a\" required"), std::string::npos);
+
+    page.state = {{"requested", true},
+                  {"phase", "Failed"},
+                  {"ready", false},
+                  {"workspace", "ws-0f1e2d3c4b5a"},
+                  {"message", "workspace quota reached (3)"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("as many workspaces as it allows"), std::string::npos);
+    EXPECT_NE(html.find(">Cancel workspace</button>"), std::string::npos);
+    page.state = {
+        {"requested", true}, {"phase", "Ready"}, {"ready", true}, {"workspace", "ws-0f1e2d3c4b5a"}};
 
     page.section = "project";
     page.subject = "retention";

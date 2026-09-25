@@ -35,7 +35,7 @@ std::string workspace_slug(std::string_view customer_id);
 
 struct WorkspaceState {
     std::string slug;
-    bool requested = false; // a desired event exists
+    bool requested = false; // the latest desired event is newer than any withdrawal
     std::string phase;      // latest operator status: Provisioning, Ready, Failed; empty if none
     std::string message;
     bool credential = false; // the operator's mounted token is present
@@ -84,6 +84,9 @@ public:
     // Appends a desired event. Asking again for an existing workspace is harmless: the operator
     // keys clusters by slug.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> request(std::string customer_id);
+    // Appends a withdrawn event: the operator deletes the cluster, its data volume and its token,
+    // which cannot be undone. Refuses when no workspace is requested.
+    liquid::runtime::task<ZettaControlResult<WorkspaceState>> withdraw(std::string customer_id);
     // Calls `capability` on the customer's own cluster. Refuses when the workspace is not ready.
     liquid::runtime::task<ZettaControlResult<nlohmann::json>>
     call(std::string customer_id, std::string capability, bool read, nlohmann::json input);

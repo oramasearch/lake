@@ -4661,6 +4661,7 @@ struct ApiServer::Impl {
             "/ship/indexes",
             "/ship/packages",
             "/workspace/start",
+            "/workspace/delete",
             "/environments",
             "/environment",
             "/logs",
@@ -7257,6 +7258,12 @@ struct ApiServer::Impl {
             back += "?" + query;
             result = unwrap(co_await workspace_call(
                 "start_workspace", {{"customer_id", customer_id}}, context));
+        } else if (action == "delete") {
+            back = "/design/projects?" + query;
+            result = unwrap(co_await workspace_call(
+                "delete_workspace",
+                {{"customer_id", customer_id}, {"confirm", form_field(body, "confirm")}},
+                context));
         } else if (action == "create_project") {
             const std::string name = form_field(body, "name");
             nlohmann::json input{{"name", name}};
@@ -10805,8 +10812,9 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 6>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 7>{
              {{"/workspace/start", "start"},
+              {"/workspace/delete", "delete"},
               {"/design/projects/create", "create_project"},
               {"/design/project/compile", "compile"},
               {"/design/project/approve", "approve"},

@@ -1641,14 +1641,50 @@ workspace_table(const nlohmann::json& rows,
     return output + "</tbody></table>";
 }
 
+// Deleting needs the box ticked; its value is the workspace id, which delete_workspace checks.
+std::string workspace_delete_form(const WorkspacePage& page,
+                                  std::string_view heading,
+                                  std::string_view explanation,
+                                  std::string_view button) {
+    const std::string slug = page.state.value("workspace", std::string());
+    if (slug.empty()) {
+        return {};
+    }
+    return std::format(
+        "<section class=\"panel\"><h2>{}</h2><p>{}</p><form class=\"stack\" method=\"post\" "
+        "action=\"/workspace/delete\">{}<label><input type=\"checkbox\" name=\"confirm\" "
+        "value=\"{}\" required> I understand that workspace <code>{}</code> and everything in it "
+        "is deleted and cannot be recovered.</label><button class=\"button button-danger\" "
+        "type=\"submit\">{}</button></form></section>",
+        web_ui_escape(heading),
+        web_ui_escape(explanation),
+        hidden("customer_id", page.customer_id),
+        web_ui_escape(slug),
+        web_ui_escape(slug),
+        web_ui_escape(button));
+}
+
 std::string workspace_gate(const WorkspacePage& page, const WorkspaceSection& section) {
     const nlohmann::json& state = page.state;
     if (state.value("requested", false)) {
         const std::string phase = state.value("phase", std::string());
         if (phase == "Failed") {
-            return std::format("<div class=\"panel notice status-danger\"><h2>Your workspace "
-                               "could not be prepared</h2><p>{}</p></div>",
-                               web_ui_escape(state.value("message", std::string())));
+            const std::string message = state.value("message", std::string());
+            // The operator refuses a new workspace once the Lake holds spec.workspaces.
+            // maxWorkspaces of them, and says so as "workspace quota reached (<n>)".
+            const bool quota = message.starts_with("workspace quota reached");
+            return std::format(
+                       "<div class=\"panel notice status-danger\"><h2>Your workspace could not "
+                       "be prepared</h2><p>{}</p></div>",
+                       quota ? "This lake already runs as many workspaces as it allows (" +
+                                   web_ui_escape(message) +
+                                   "). An operator can raise the limit; yours starts as soon as "
+                                   "there is room, or cancel the request below."
+                             : web_ui_escape(message)) +
+                   workspace_delete_form(page,
+                                         "Cancel this workspace",
+                                         "Withdraw the request so you can start again later.",
+                                         "Cancel workspace");
         }
         return std::format(
             "<div class=\"panel\" role=\"status\"><h2>Preparing your workspace</h2><p>lake asked "
@@ -1875,6 +1911,15 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
         content += workspace_gate(page, section);
     } else {
         content += workspace_content(page);
+        if (page.section == "projects") {
+            content += workspace_delete_form(
+                page,
+                "Delete workspace",
+                "Removes your Zetta cluster with every project, dataset, run and model in it. "
+                "Nothing else in lake is touched, and you can start a new, empty workspace "
+                "afterwards.",
+                "Delete workspace");
+        }
     }
     return web_ui_shell("lake — " + title, std::string(section.verb), content, viewer);
 }
