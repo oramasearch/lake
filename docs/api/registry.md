@@ -23,6 +23,15 @@ completion recalculates SHA-256 and refuses bytes that do not match the requeste
 manifest is accepted only when it is schema version 2 JSON and every referenced config or layer
 digest is already present.
 
+## The Packages page
+
+`GET /ship/packages` (signed in; Ship in the sidebar) lists what the registries hold, read from the
+storage layout above: OCI repositories with their tags, npm packages with the versions in their
+metadata, and Python projects with the versions of their files. Each row carries the install
+command for this lake's public origin (`LAKE_EXTERNAL_ORIGIN`, else `https://LAKE_PUBLIC_HOST`).
+Everything listed is already a public read. The registries are instance-wide, and publishing still
+needs the operator credential, which the page says.
+
 ## Protocol routes
 
 | Protocol | Routes |

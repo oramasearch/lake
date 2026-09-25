@@ -176,6 +176,13 @@ struct WorkspacePage {
 };
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
 
+// Ship > Packages: the registries' catalog ({oci, npm, python}: [{name, versions}]). `origin` is
+// the public origin for install commands; empty omits them.
+std::string web_ui_packages(const nlohmann::json& catalog,
+                            bool available,
+                            std::string_view origin,
+                            WebUiViewer viewer = true);
+
 // One environment of one repository, for the cross-repository deployments page.
 struct DeploymentSummary {
     control::Repository repository;

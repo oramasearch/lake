@@ -360,6 +360,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
     static constexpr std::string_view models[] = {"/ship/models"};
     static constexpr std::string_view indexes[] = {"/ship/indexes"};
+    static constexpr std::string_view packages[] = {"/ship/packages"};
     static constexpr std::string_view customers[] = {"/customers"};
     static constexpr std::string_view organizations[] = {"/organizations",
                                                          "/organization",
@@ -396,6 +397,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return models;
     if (key == "indexes")
         return indexes;
+    if (key == "packages")
+        return packages;
     if (key == "customers")
         return customers;
     if (key == "organizations")
@@ -506,6 +509,7 @@ std::string nav(const WebUiViewer& viewer, std::string_view title) {
         out += "<p class=\"nav-label\">Ship</p>";
         out += nav_link("/ship/models", "Models", "api", "models", viewer, title);
         out += nav_link("/ship/indexes", "Search indexes", "search", "indexes", viewer, title);
+        out += nav_link("/ship/packages", "Packages", "repository", "packages", viewer, title);
         out += nav_link("/deployments", "Deployments", "api", "deployments", viewer, title);
     }
     if (viewer.administrator) {
@@ -1860,6 +1864,72 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
         content += workspace_content(page);
     }
     return web_ui_shell("lake — " + title, std::string(section.verb), content, viewer);
+}
+
+std::string web_ui_packages(const nlohmann::json& catalog,
+                            bool available,
+                            std::string_view origin,
+                            WebUiViewer viewer) {
+    std::string content =
+        "<p class=\"eyebrow\">Ship</p><h1>Packages</h1><p class=\"sub\">Container images, npm "
+        "packages and Python distributions published to this lake. Anyone can install them; "
+        "publishing needs the operator credential for now.</p>";
+    if (!available) {
+        content += "<div class=\"panel empty\">This lake has no registry storage configured.</div>";
+        return web_ui_shell("lake — packages", "Packages", content, viewer);
+    }
+    struct Kind {
+        std::string_view key, title, install;
+    };
+    const std::string host = std::string(origin).starts_with("https://")
+                                 ? std::string(origin).substr(8)
+                                 : std::string(origin);
+    for (const Kind& kind : {Kind{"oci", "Container images", "docker pull {host}/{name}:{version}"},
+                             Kind{"npm", "npm packages", "npm install {name} --registry {origin}"},
+                             Kind{"python",
+                                  "Python distributions",
+                                  "pip install {name} --index-url {origin}/simple/"}}) {
+        const nlohmann::json items = catalog.value(std::string(kind.key), nlohmann::json::array());
+        content += std::format("<section class=\"panel\"><h2>{}</h2>", kind.title);
+        if (items.empty()) {
+            content += "<p class=\"muted\">None published.</p></section>";
+            continue;
+        }
+        content += "<table><thead><tr><th>Name</th><th>Versions</th><th>Install</th></tr></thead>"
+                   "<tbody>";
+        for (const nlohmann::json& item : items) {
+            const std::string name = item.value("name", std::string());
+            std::string versions;
+            std::string latest;
+            for (const nlohmann::json& version : item.value("versions", nlohmann::json::array())) {
+                const std::string text = version.is_string() ? version.get<std::string>() : "";
+                versions += (versions.empty() ? "" : ", ") + text;
+                latest = text;
+            }
+            std::string install;
+            if (!origin.empty()) {
+                install = std::string(kind.install);
+                for (const auto& [placeholder, value] :
+                     std::array<std::pair<std::string_view, std::string>, 4>{
+                         {{"{host}", host},
+                          {"{origin}", std::string(origin)},
+                          {"{name}", name},
+                          {"{version}", latest.empty() ? "latest" : latest}}}) {
+                    for (std::size_t at = install.find(placeholder); at != std::string::npos;
+                         at = install.find(placeholder)) {
+                        install.replace(at, placeholder.size(), value);
+                    }
+                }
+            }
+            content += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                                   web_ui_escape(name),
+                                   web_ui_escape(versions),
+                                   install.empty() ? std::string("<span class=\"muted\">—</span>")
+                                                   : "<code>" + web_ui_escape(install) + "</code>");
+        }
+        content += "</tbody></table></section>";
+    }
+    return web_ui_shell("lake — packages", "Packages", content, viewer);
 }
 
 std::string web_ui_deployments(const std::vector<DeploymentSummary>& environments,
