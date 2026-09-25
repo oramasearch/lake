@@ -24,7 +24,8 @@ ctest --test-dir build --output-on-failure
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
-| `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
+| `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages; with `LAKE_CLERK_PUBLISHABLE_KEY` set, `/sign-in` and `/sign-up` are Clerk's forms ([`docs/api/clerk.md`](docs/api/clerk.md)) |
+| `POST /identity/clerk-session` | exchanges a verified Clerk `lake` template token for a `lake_session`; absent without Clerk |
 | `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |

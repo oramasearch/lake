@@ -32,6 +32,7 @@ the exact commands and outputs.
 | Serving and control plane | Yes | Yes | `server_info`, OpenAPI, and Postgres server observation | `server_info` | [HTTP](../serving/http.md), [schema](../control-plane/schema.md) |
 | Indexed PostgreSQL session authentication (`0022_session_lookup`) | Yes | See [measurement proof](../build/session-authentication.md) | No | No | [authentication](../api/auth.md) |
 | Identity and SSO | Yes | Yes, including Postgres cases | Public routes listed in observed OpenAPI | No | [identity](../api/identity.md), [SSO](../api/sso.md) |
+| Clerk browser sign-in and custodial identities (`0023_custodial_identities`) | Yes | Yes, including Postgres cases | No | No | [Clerk](../api/clerk.md) |
 | Audit and authorization | Yes | Yes | Public routes listed in observed OpenAPI | No | [audit](../api/audit.md), [policy](../api/policy.md) |
 | Repositories and sync | Yes | Yes, including Postgres cases | Public routes listed in observed OpenAPI | No | [repositories](../api/repositories.md), [sync](../api/sync.md) |
 | Forge and export | Yes | Yes, including PostgreSQL review scenario | Public routes listed in observed OpenAPI | No | [forge](../api/forge.md), [export](../api/export.md) |

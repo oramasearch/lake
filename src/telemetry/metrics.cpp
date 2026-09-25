@@ -834,6 +834,10 @@ public:
     sign_in_oauth(const control::OAuthIdentity& value) override {
         return call("sign_in_oauth", [&] { return store_->sign_in_oauth(value); });
     }
+    control::Result<control::IssuedSession>
+    sign_in_clerk(const control::ClerkIdentity& value) override {
+        return call("sign_in_clerk", [&] { return store_->sign_in_clerk(value); });
+    }
     control::Result<void> register_oauth_provider(const control::OAuthProvider& value) override {
         return call("register_oauth_provider",
                     [&] { return store_->register_oauth_provider(value); });

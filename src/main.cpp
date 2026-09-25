@@ -62,6 +62,8 @@ int usage() {
                  "(default $LAKE_IDENTITY_SEED)");
     std::println("  --instance-kek key-encryption key for a generated identity "
                  "(default $LAKE_INSTANCE_KEK)");
+    std::println("  --clerk-publishable-key Clerk key; browser sign-in goes through Clerk "
+                 "(default $LAKE_CLERK_PUBLISHABLE_KEY)");
     std::println("  LAKE_LOG_MODE air-gapped, witnessed (default), or anchored when "
                  "LAKE_STORE_ROOT is set");
     std::println("  LAKE_LOG_WITNESSES JSON witness endpoint/public_key records; "
@@ -87,6 +89,7 @@ int main(int argc, char** argv) {
     opts.replication_token = env_or("LAKE_REPLICATION_TOKEN", "");
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
+    opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
@@ -171,6 +174,10 @@ int main(int argc, char** argv) {
         }
         if (arg == "--identity-seed") {
             opts.identity_seed = value("--identity-seed");
+            continue;
+        }
+        if (arg == "--clerk-publishable-key") {
+            opts.clerk_publishable_key = value("--clerk-publishable-key");
             continue;
         }
         if (arg == "--instance-kek") {

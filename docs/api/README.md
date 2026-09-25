@@ -39,7 +39,7 @@ or handler execution. Invalid nested input reports `invalid_input` and a JSON po
 retain their absent-value interpretation. File encoding validation remains with the capability's
 byte decoder; `contentEncoding` documents the encoding in the schema.
 
-**Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). `server_info`,
+**Auth.** Operator bearer or row-resolved user credential, see [`auth.md`](auth.md). Browser sign-in through Clerk, when configured, ends in the same row-resolved session; see [`clerk.md`](clerk.md). `server_info`,
 the lake `identity`, and the identity sign-up/sign-in entry capabilities document their public use.
 The [identity contract](identity.md) includes response isolation: a completed sign-in cannot
 send its session cookie or redirect through another request, including a new client connection.

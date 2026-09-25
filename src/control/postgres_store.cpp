@@ -4359,6 +4359,62 @@ public:
                                  60 * 60 * 24 * 30);
         });
     }
+    Result<IssuedSession> sign_in_clerk(const ClerkIdentity& in) override {
+        if (in.subject.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "a Clerk subject is required"});
+        }
+        return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
+            const std::string subject = "clerk:" + in.subject;
+            pqxx::result rows =
+                tx.exec_params("SELECT user_id::text FROM credentials WHERE pool_id = 'lake' "
+                               "AND kind = 'oauth' AND subject = $1 AND revoked_at IS NULL",
+                               subject);
+            std::string user_id;
+            if (!rows.empty()) {
+                user_id = rows[0][0].as<std::string>();
+            } else {
+                // Clerk verified this address, so an existing lake account with it is the same
+                // person: link it rather than create a second account.
+                if (!in.email.empty()) {
+                    rows = tx.exec_params("SELECT id::text FROM users WHERE pool_id = 'lake' "
+                                          "AND lower(email) = lower($1)",
+                                          in.email);
+                }
+                if (!rows.empty()) {
+                    user_id = rows[0][0].as<std::string>();
+                } else {
+                    if (in.custodial_taap_id.empty() || in.custodial_public_key.empty() ||
+                        in.custodial_wrapped_seed.empty()) {
+                        return std::unexpected(StoreError{
+                            "invalid_input", "a custodial identity is required to create a user"});
+                    }
+                    rows = tx.exec_params("INSERT INTO users (taap_id, email, display_name, "
+                                          "pool_id) VALUES ($1, $2, $3, 'lake') RETURNING id::text",
+                                          in.custodial_taap_id,
+                                          nullable(in.email),
+                                          in.display_name);
+                    user_id = rows[0][0].as<std::string>();
+                    tx.exec_params("INSERT INTO custodial_identities (user_id, taap_id, "
+                                   "public_key, wrapped_seed) VALUES ($1::uuid, $2, $3, $4)",
+                                   user_id,
+                                   in.custodial_taap_id,
+                                   in.custodial_public_key,
+                                   in.custodial_wrapped_seed);
+                    const auto customer =
+                        provision_personal_customer(tx, user_id, in.custodial_taap_id, subject);
+                    if (!customer) {
+                        return std::unexpected(customer.error());
+                    }
+                }
+                tx.exec_params("INSERT INTO credentials (user_id, pool_id, kind, subject) "
+                               "VALUES ($1::uuid, 'lake', 'oauth', $2)",
+                               user_id,
+                               subject);
+            }
+            return issue_session(
+                tx, user_id, "lake", in.device_name, "browser", "", {"*"}, "", 60 * 60 * 24 * 30);
+        });
+    }
     Result<void> register_oauth_provider(const OAuthProvider& in) override {
         if (in.pool_id.empty() || in.provider.empty() || in.issuer.empty() ||
             in.client_id.empty() || in.client_secret.empty()) {
@@ -7230,6 +7286,14 @@ private:
     Result<std::string> provision_personal_customer(pqxx::work& tx,
                                                     const std::string& user_id,
                                                     const VerifiedIdentityDocument& identity) {
+        return provision_personal_customer(
+            tx, user_id, identity.identifier, "sign_up_password/" + identity.hash);
+    }
+
+    Result<std::string> provision_personal_customer(pqxx::work& tx,
+                                                    const std::string& user_id,
+                                                    const std::string& taap_id,
+                                                    const std::string& attestation_digest) {
         for (int attempt = 0; attempt < 32; ++attempt) {
             const std::string name = generate_handle();
             if (!tx.exec_params("SELECT 1 FROM customers WHERE name = $1", name).empty()) {
@@ -7252,9 +7316,9 @@ private:
             tx.exec_params(
                 "INSERT INTO grants (principal_taap_id, object_id, role, attestation_digest, "
                 "granted_by_taap_id) VALUES ($1, $2::uuid, 'admin', $3, $1)",
-                identity.identifier,
+                taap_id,
                 objects[0][0].as<std::string>(),
-                "sign_up_password/" + identity.hash);
+                attestation_digest);
             return customer_id;
         }
         return std::unexpected(

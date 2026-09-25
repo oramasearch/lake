@@ -61,6 +61,10 @@ struct ServerOptions {
     std::string identity_seed;
     // Customer-independent key-encryption key for the generated identity seed.
     std::string instance_kek;
+    // Clerk publishable key (LAKE_CLERK_PUBLISHABLE_KEY). When it is a valid key, browser sign-in
+    // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
+    // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
+    std::string clerk_publishable_key;
     // Configured external attestation verifiers. Lake owns their invocation but
     // callers retain their lifetime for the server lifetime.
     control::callers::TokenReviewer* token_reviewer = nullptr;

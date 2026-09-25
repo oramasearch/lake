@@ -179,6 +179,12 @@ struct PasskeyAssertion {
 struct OAuthIdentity {
     std::string pool_id, provider, subject, email, display_name, device_name, identity_document;
 };
+// A person who signed in through Clerk (docs/api/clerk.md). The custodial fields carry a TAAP
+// identity lake minted for them; the store keeps it only when it creates the user.
+struct ClerkIdentity {
+    std::string subject, email, display_name, device_name;
+    std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+};
 struct OAuthProvider {
     std::string pool_id, provider, issuer, client_id, client_secret;
     std::vector<std::string> scopes;
@@ -739,6 +745,10 @@ public:
                                                             const std::string& origin) = 0;
     virtual Result<IssuedSession> sign_in_passkey(const PasskeyAssertion&) = 0;
     virtual Result<IssuedSession> sign_in_oauth(const OAuthIdentity&) = 0;
+    // Signs in the lake-pool user linked to this Clerk subject. With no link, it links the lake
+    // user with the same email; with neither, it creates the user with the custodial identity
+    // and provisions their personal customer, as password sign-up does.
+    virtual Result<IssuedSession> sign_in_clerk(const ClerkIdentity&) = 0;
     virtual Result<void> register_oauth_provider(const OAuthProvider&) = 0;
     virtual Result<OAuthProvider> get_oauth_provider(const std::string& pool_id,
                                                      const std::string& provider) = 0;

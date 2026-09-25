@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/clerk.hpp"
 #include "lake/api/drive.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
@@ -28,6 +29,9 @@ struct WebUiViewer {
     // called outside a request (tests, error pages built without one); the page title decides
     // then, as it did before the path was carried.
     std::string path;
+    // True when Clerk is lake's sign-in (docs/api/clerk.md); lake's own passkey page is then not
+    // offered.
+    bool clerk = false;
 
     WebUiViewer() = default;
     WebUiViewer(bool authenticated) : signed_in(authenticated) {}
@@ -138,6 +142,15 @@ std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const std::vector<RepositoryContentRef>& refs = {},
                               WebUiViewer viewer = true);
+// The sign-in or sign-up page when Clerk is configured: Clerk's form, then a one-time exchange of
+// Clerk's `lake` template token for a lake session at POST /identity/clerk-session. `mode` is
+// "sign-in" or "sign-up"; `signed_out` signs the browser out of Clerk first.
+std::string web_ui_clerk_sign_in(const ClerkConfig& clerk,
+                                 std::string_view mode,
+                                 std::string_view error,
+                                 bool signed_out,
+                                 WebUiViewer viewer = {});
+
 // One environment of one repository, for the cross-repository deployments page.
 struct DeploymentSummary {
     control::Repository repository;

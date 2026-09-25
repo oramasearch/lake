@@ -519,9 +519,10 @@ std::string session_control(const WebUiViewer& viewer) {
     }
     return std::format("<details class=\"account-menu\"><summary>{}<span>Account</span></summary>"
                        "<div class=\"account-menu-panel\"><a href=\"/settings\">Settings</a>"
-                       "<a href=\"/sessions\">Sessions</a><a href=\"/passkeys\">Passkeys</a>"
+                       "<a href=\"/sessions\">Sessions</a>{}"
                        "<a href=\"/tokens\">Tokens</a>{}</div></details>",
                        web_ui_icon("identity"),
+                       viewer.clerk ? "" : "<a href=\"/passkeys\">Passkeys</a>",
                        sign_out);
 }
 
@@ -1115,6 +1116,59 @@ std::string web_ui_home(WebUiViewer viewer) {
     }
     content += "</section></div>";
     return web_ui_shell("lake — design, train, and ship AI", "Welcome to lake", content, viewer);
+}
+
+std::string web_ui_clerk_sign_in(const ClerkConfig& clerk,
+                                 std::string_view mode,
+                                 std::string_view error,
+                                 bool signed_out,
+                                 WebUiViewer viewer) {
+    const bool sign_up = mode == "sign-up";
+    std::string content = std::format(
+        "<p class=\"eyebrow\">lake by Orama</p><h1>{}</h1><p class=\"sub\">{}</p>",
+        sign_up ? "Create your account" : "Sign in",
+        sign_up ? "Accounts are added by invitation while lake is in development. Ask the "
+                  "person who invited you, or sign in if you already have access."
+                : "Sign in with the email address you were invited with.");
+    if (!error.empty()) {
+        content += std::format("<p class=\"error\" role=\"alert\">{}</p>", web_ui_escape(error));
+    }
+    content += "<div id=\"clerk-mount\"></div>"
+               "<p id=\"clerk-status\" class=\"muted\" role=\"status\" aria-live=\"polite\"></p>"
+               "<noscript><p class=\"error\">Sign-in needs JavaScript.</p></noscript>";
+    // clerk-js comes from the instance's own Frontend API host, the address Clerk documents for a
+    // script-tag installation. After Clerk signs the person in, the page posts the `lake` template
+    // token once as an ordinary form; the server verifies it and answers with a redirect that sets
+    // lake_session. Nothing else in lake reads Clerk state.
+    content += std::format(
+        "<script async crossorigin=\"anonymous\" data-clerk-publishable-key=\"{0}\" "
+        "src=\"https://{1}/npm/@clerk/clerk-js@5/dist/clerk.browser.js\"></script>"
+        "<script id=\"clerk-sign-in\">window.addEventListener('load',async()=>{{"
+        "const s=document.getElementById('clerk-status');"
+        "try{{await window.Clerk.load();"
+        "if({2}){{await window.Clerk.signOut();history.replaceState(null,'',location.pathname);}}"
+        "let busy=false;const exchange=async()=>{{if(busy||!window.Clerk.session)return;busy=true;"
+        "s.textContent='Signing you in.';"
+        "const token=await window.Clerk.session.getToken({{template:'{3}'}});"
+        "const f=document.createElement('form');f.method='post';f.action='/identity/clerk-session';"
+        "for(const[k,v]of[['token',token],['device_name','browser']]){{"
+        "const i=document.createElement('input');i.type='hidden';i.name=k;i.value=v;f.append(i);}}"
+        "document.body.append(f);f.submit();}};"
+        "if(window.Clerk.session){{await exchange();return;}}"
+        "window.Clerk.addListener(({{session}})=>{{if(session)exchange();}});"
+        "const m=document.getElementById('clerk-mount');"
+        "{4}}}catch(e){{s.textContent='Sign-in could not load: '+e.message;}}}});</script>",
+        web_ui_escape(clerk.publishable_key),
+        web_ui_escape(clerk.frontend_api),
+        signed_out ? "true" : "false",
+        clerk_token_template,
+        sign_up
+            ? "window.Clerk.mountSignUp(m,{signInUrl:'/sign-in',forceRedirectUrl:'/sign-in'});"
+            : "window.Clerk.mountSignIn(m,{signUpUrl:'/sign-up',forceRedirectUrl:'/sign-in'});");
+    return web_ui_shell(sign_up ? "lake — create account" : "lake — sign in",
+                        sign_up ? "Create account" : "Sign in",
+                        content,
+                        viewer);
 }
 
 std::string web_ui_login(std::string_view error, WebUiViewer viewer) {
