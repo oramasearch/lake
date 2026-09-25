@@ -5190,6 +5190,13 @@ struct ApiServer::Impl {
 
     boost::http::route_task serve_logout(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
+        // End the session on the server too, so a copied cookie stops working (lake#159). An
+        // operator credential is not a session and is left alone.
+        if (context.authorized && !context.operator_credential && options.store &&
+            !context.credential_session_id.empty()) {
+            (void)options.store->revoke_session(context.acting_user_id,
+                                                context.credential_session_id);
+        }
         if (!record_direct_event(context,
                                  audit::EventDraft{
                                      .kind = "session",
