@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 
@@ -35,13 +36,17 @@ constexpr std::array<std::string_view, 18> workspace_reads = {"server_info",
                                                               "search",
                                                               "list_jobs",
                                                               "get_job"};
-constexpr std::array<std::string_view, 14> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 18> workspace_actions = {"create_project",
                                                                 "capture_intent",
                                                                 "compile_intent",
                                                                 "approve_plan",
                                                                 "gate",
                                                                 "run",
                                                                 "create_connection",
+                                                                "delete_connection",
+                                                                "create_dataset_from_query",
+                                                                "upload_dataset",
+                                                                "delete_project",
                                                                 "create_index",
                                                                 "expose_model",
                                                                 "unexpose_model",
@@ -134,6 +139,209 @@ void register_workspace_call(Registry& registry, bool read) {
         }});
 }
 
+ApiResult store_failure(const control::StoreError& error) {
+    return ApiResult::failure(error.code, error.message);
+}
+
+void service_audit(ApiContext& context, std::string kind, const control::ManagedService& service) {
+    context.audit_kind = std::move(kind);
+    context.audit_details = {{"customer_id", service.customer_id},
+                             {"service_id", service.id},
+                             {"service_kind", service.kind},
+                             {"service_name", service.name}};
+}
+
+bool valid_service_name(const std::string& name) {
+    if (name.empty() || name.size() > 31 || name.front() < 'a' || name.front() > 'z') {
+        return false;
+    }
+    return std::ranges::all_of(name, [](char character) {
+        return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') ||
+               character == '-';
+    });
+}
+
+void register_service_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "list_services",
+        .title = "List services",
+        .description = "The customer's managed services (Zetta and Postgres clusters) with the "
+                       "operator's phase and in-cluster endpoint. Never includes credentials.",
+        .input_schema = customer_input_schema(json::object(), json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        // Like every list_ capability it authorizes itself: read on the customer.
+        .authorizes_candidates = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            const auto object = customer_object(input, context);
+            if (!object) {
+                co_return ApiResult::failure(
+                    object.error().code, object.error().message, object.error().path);
+            }
+            if (context.acting_identity != "admin") {
+                const auto decision = control::authorize(*context.store,
+                                                         context.acting_identity,
+                                                         *object,
+                                                         "read",
+                                                         context.authorization_cache);
+                if (!decision) {
+                    co_return store_failure(decision.error());
+                }
+                if (!decision->allowed) {
+                    co_return ApiResult::failure("unauthorized",
+                                                 "principal is not allowed to read the customer");
+                }
+            }
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto listed = context.workspaces->services(input.at("customer_id"));
+            if (!listed) {
+                co_return store_failure(listed.error());
+            }
+            json services = json::array();
+            for (const control::ManagedService& service : *listed) {
+                services.push_back(control::service_json(service));
+            }
+            co_return ApiResult::success(
+                {{"services", std::move(services)},
+                 {"limit", context.workspaces->config().max_per_customer}});
+        }});
+    registry.add(Capability{
+        .name = "create_service",
+        .title = "Create a service",
+        .description = "Ask the operator for a new Zetta or Postgres cluster for the customer. "
+                       "`instances` is 1-3 (default 1), `storage_gi` 1-100 (default 10).",
+        .input_schema = customer_input_schema(
+            {{"kind", {{"type", "string"}, {"enum", json::array({"zetta", "postgres"})}}},
+             {"name", {{"type", "string"}}},
+             {"instances", {{"type", "integer"}, {"minimum", 1}, {"maximum", 3}}},
+             {"storage_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
+            json::array({"kind", "name"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            control::NewManagedService service;
+            service.customer_id = input.at("customer_id");
+            service.kind = input.at("kind");
+            service.name = input.at("name");
+            service.instances = input.value("instances", 1);
+            service.storage_gi = input.value("storage_gi", 10);
+            service.created_by_taap_id = context.acting_identity;
+            if (service.kind != "zetta" && service.kind != "postgres") {
+                co_return ApiResult::failure(
+                    "invalid_input", "kind must be zetta or postgres", "/kind");
+            }
+            if (!valid_service_name(service.name)) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "name must start with a letter and use lowercase letters, digits and '-', at "
+                    "most 31 characters",
+                    "/name");
+            }
+            if (service.instances < 1 || service.instances > 3 || service.storage_gi < 1 ||
+                service.storage_gi > 100) {
+                co_return ApiResult::failure("invalid_input",
+                                             "instances must be 1-3 and storage_gi 1-100");
+            }
+            const auto created = context.workspaces->create_service(std::move(service));
+            if (!created) {
+                co_return store_failure(created.error());
+            }
+            service_audit(context, "service.create", *created);
+            co_return ApiResult::success(control::service_json(*created));
+        }});
+    registry.add(Capability{
+        .name = "delete_service",
+        .title = "Delete a service",
+        .description = "Delete one of the customer's services. The operator removes the cluster "
+                       "and its data, which cannot be recovered. `confirm` must be the service's "
+                       "name.",
+        .input_schema = customer_input_schema(
+            {{"service_id", {{"type", "string"}}}, {"confirm", {{"type", "string"}}}},
+            json::array({"service_id", "confirm"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto found =
+                context.workspaces->service(input.at("customer_id"), input.at("service_id"));
+            if (!found) {
+                co_return store_failure(found.error());
+            }
+            if (input.at("confirm") != found->name) {
+                co_return ApiResult::failure(
+                    "invalid_input", "confirm must be the service name " + found->name, "/confirm");
+            }
+            service_audit(context, "service.delete", *found);
+            const auto deleted =
+                context.workspaces->delete_service(input.at("customer_id"), input.at("service_id"));
+            if (!deleted) {
+                co_return store_failure(deleted.error());
+            }
+            co_return ApiResult::success(control::service_json(*deleted));
+        }});
+    registry.add(Capability{
+        .name = "service_connection",
+        .title = "Service connection",
+        .description = "The connection details of a Ready Postgres service, including its "
+                       "password. Audited. A Zetta service's admin token is never returned: lake "
+                       "calls it on the customer's behalf through workspace_query and "
+                       "workspace_act.",
+        .input_schema = customer_input_schema({{"service_id", {{"type", "string"}}}},
+                                              json::array({"service_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto found =
+                context.workspaces->service(input.at("customer_id"), input.at("service_id"));
+            if (!found) {
+                co_return store_failure(found.error());
+            }
+            service_audit(context, "service.connection", *found);
+            if (found->kind != "postgres") {
+                co_return ApiResult::failure("invalid_input",
+                                             "only a Postgres service has connection details",
+                                             "/service_id");
+            }
+            const auto connection = context.workspaces->connection(*found);
+            if (found->phase != "Ready" || !connection) {
+                co_return ApiResult::failure("workspace_not_ready", "the service is not ready yet");
+            }
+            json value = json::object();
+            for (const char* key : {"host", "port", "database", "user", "password", "uri"}) {
+                if (connection->contains(key)) {
+                    value[key] = connection->at(key);
+                }
+            }
+            co_return ApiResult::success(std::move(value));
+        }});
+}
+
 } // namespace
 
 void register_workspace_capabilities(Registry& registry) {
@@ -179,7 +387,8 @@ void register_workspace_capabilities(Registry& registry) {
                 co_return unavailable();
             }
             set_audit(context, "workspace.start", input, "");
-            auto state = co_await context.workspaces->request(input.at("customer_id"));
+            auto state = co_await context.workspaces->request(input.at("customer_id"),
+                                                              context.acting_identity);
             if (!state) {
                 co_return ApiResult::failure("store_unavailable", state.error().message);
             }
@@ -207,8 +416,14 @@ void register_workspace_capabilities(Registry& registry) {
             if (!context.workspaces) {
                 co_return unavailable();
             }
-            const std::string slug =
-                control::workspace_slug(input.at("customer_id").get<std::string>());
+            auto current = co_await context.workspaces->state(input.at("customer_id"));
+            if (!current) {
+                co_return ApiResult::failure("store_unavailable", current.error().message);
+            }
+            if (!*current) {
+                co_return ApiResult::failure(current->error().code, current->error().message);
+            }
+            const std::string slug = (*current)->slug;
             if (input.at("confirm") != slug) {
                 co_return ApiResult::failure(
                     "invalid_input", "confirm must be the workspace id " + slug, "/confirm");
@@ -225,6 +440,7 @@ void register_workspace_capabilities(Registry& registry) {
         }});
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);
+    register_service_capabilities(registry);
 }
 
 } // namespace lake::api

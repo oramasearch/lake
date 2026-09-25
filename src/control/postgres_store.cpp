@@ -3875,6 +3875,152 @@ public:
             });
     }
 
+    static constexpr const char* service_columns =
+        "s.id::text, s.customer_id::text, s.kind, s.name, s.slug, s.is_default, "
+        "COALESCE((s.spec->>'instances')::int, 1), COALESCE((s.spec->>'storage_gi')::int, 10), "
+        "s.desired, s.generation, s.created_by_taap_id, "
+        "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
+        "COALESCE(st.observed_generation, 0)";
+
+    static ManagedService service_from(const pqxx::row& row) {
+        ManagedService service;
+        service.id = row[0].as<std::string>();
+        service.customer_id = row[1].as<std::string>();
+        service.kind = row[2].as<std::string>();
+        service.name = row[3].as<std::string>();
+        service.slug = row[4].as<std::string>();
+        service.is_default = row[5].as<bool>();
+        service.instances = row[6].as<int>();
+        service.storage_gi = row[7].as<int>();
+        service.desired = row[8].as<std::string>();
+        service.generation = row[9].as<std::int64_t>();
+        service.created_by_taap_id = row[10].as<std::string>();
+        service.created_at = row[11].as<std::string>();
+        service.updated_at = row[12].as<std::string>();
+        service.phase = row[13].as<std::string>();
+        service.message = row[14].as<std::string>();
+        service.endpoint = row[15].as<std::string>();
+        service.observed_generation = row[16].as<std::int64_t>();
+        return service;
+    }
+
+    static Result<ManagedService> one_service(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + service_columns +
+                " FROM services s LEFT JOIN service_status st ON st.service_id = s.id "
+                "WHERE s.id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no service " + id});
+        }
+        return service_from(rows[0]);
+    }
+
+    Result<std::vector<ManagedService>> list_services(const std::string& customer_id) override {
+        return with_tx<std::vector<ManagedService>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ManagedService>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + service_columns +
+                        " FROM services s LEFT JOIN service_status st ON st.service_id = s.id "
+                        "WHERE s.customer_id = $1::uuid AND NOT (s.desired = 'absent' AND "
+                        "COALESCE(st.phase, '') = 'Deleted') ORDER BY s.created_at, s.id",
+                    customer_id);
+                std::vector<ManagedService> services;
+                for (const pqxx::row& row : rows) {
+                    services.push_back(service_from(row));
+                }
+                return services;
+            });
+    }
+
+    Result<ManagedService> get_service(const std::string& id) override {
+        return with_tx<ManagedService>(
+            [&](pqxx::work& tx) -> Result<ManagedService> { return one_service(tx, id); });
+    }
+
+    Result<ManagedService> create_service(const NewManagedService& in) override {
+        return with_tx<ManagedService>([&](pqxx::work& tx) -> Result<ManagedService> {
+            // One writer at a time per customer, so the count and the name check hold.
+            const pqxx::result customers = tx.exec_params(
+                "SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", in.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+            }
+            if (in.is_default) {
+                const pqxx::result existing = tx.exec_params(
+                    "SELECT id::text FROM services WHERE customer_id = $1::uuid AND is_default "
+                    "AND desired = 'present'",
+                    in.customer_id);
+                if (!existing.empty()) {
+                    return one_service(tx, existing[0][0].as<std::string>());
+                }
+            }
+            const pqxx::result named = tx.exec_params(
+                "SELECT 1 FROM services WHERE customer_id = $1::uuid AND name = $2 AND desired = "
+                "'present'",
+                in.customer_id,
+                in.name);
+            if (!named.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "a service named " + in.name + " already exists"});
+            }
+            const pqxx::result live = tx.exec_params(
+                "SELECT count(*) FROM services WHERE customer_id = $1::uuid AND desired = "
+                "'present'",
+                in.customer_id);
+            if (in.max_per_customer != 0 && live[0][0].as<std::size_t>() >= in.max_per_customer) {
+                return std::unexpected(StoreError{"quota_exceeded",
+                                                  "this account already runs " +
+                                                      std::to_string(in.max_per_customer) +
+                                                      " services"});
+            }
+            const std::string id = new_uuid_v4();
+            std::string slug = managed_service_slug("svc", id);
+            if (in.is_default) {
+                // The first workspace keeps decision 45's name so the operator adopts its
+                // cluster; a slug is never reused, so a later one gets a service slug.
+                const std::string workspace = managed_service_slug("ws", in.customer_id);
+                const pqxx::result taken =
+                    tx.exec_params("SELECT 1 FROM services WHERE slug = $1", workspace);
+                if (taken.empty()) {
+                    slug = workspace;
+                }
+            }
+            const nlohmann::json spec{{"instances", in.instances}, {"storage_gi", in.storage_gi}};
+            tx.exec_params("INSERT INTO services (id, customer_id, kind, name, slug, is_default, "
+                           "spec, created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, "
+                           "$6, $7::jsonb, $8)",
+                           id,
+                           in.customer_id,
+                           in.kind,
+                           in.name,
+                           slug,
+                           in.is_default,
+                           spec.dump(),
+                           in.created_by_taap_id);
+            return one_service(tx, id);
+        });
+    }
+
+    Result<ManagedService> withdraw_service(const std::string& id) override {
+        return with_tx<ManagedService>([&](pqxx::work& tx) -> Result<ManagedService> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE services SET desired = 'absent', generation = generation + 1, "
+                "updated_at = now() WHERE id = $1::uuid AND desired = 'present' RETURNING id",
+                id);
+            if (rows.empty()) {
+                const Result<ManagedService> existing = one_service(tx, id);
+                if (!existing) {
+                    return existing;
+                }
+                return std::unexpected(StoreError{"conflict", "the service is already deleted"});
+            }
+            return one_service(tx, id);
+        });
+    }
+
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override {
         return with_tx<std::uint64_t>([&](pqxx::work& tx) -> Result<std::uint64_t> {

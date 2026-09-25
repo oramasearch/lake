@@ -311,7 +311,7 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    `identity_exit_guard`; token attenuation adds `0021_token_attenuation` and
    `token_attenuation_guard`; session lookup adds `0022_session_lookup` and
    `session_lookup_guard`; Clerk sign-in adds `0023_custodial_identities` and
-   `custodial_identity_guard`. The operator copy remains deferred to the single
+   `custodial_identity_guard`; managed services add `0024_services` and `services_guard`. The operator copy remains deferred to the single
    wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
@@ -325,8 +325,8 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities')" \
-  -c "SELECT to_regclass('custodial_identity_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services')" \
+  -c "SELECT to_regclass('services_guard')"
 ```
 
 ## Token attenuation migration
@@ -378,3 +378,16 @@ and no lake account matches them; the user's `users.taap_id` is the same identif
 The migration is additive and needs no backfill. The new deployment guard is
 `custodial_identity_guard`. The operator must vendor this schema byte-for-byte and select that
 guard before the binary that writes the table is deployed; an older binary never reads it.
+
+## Managed services migration
+
+`0024_services` adds `services`, written by lake, and `service_status`, written by the Orama
+operator: the desired and observed state of each customer's Zetta and Postgres clusters. Partial
+unique indexes keep one live service per name and one live default workspace per customer; `slug`
+is unique for the life of the Lake. The contract, including which side writes which column, is
+[`services.md`](services.md).
+
+The migration is additive and needs no backfill: an existing decision-45 workspace is recorded the
+next time its customer starts it, and the operator adopts the cluster. The new deployment guard is
+`services_guard`. The operator must vendor this schema and select that guard before the binary that
+reads the tables is deployed.

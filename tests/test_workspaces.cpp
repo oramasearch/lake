@@ -22,27 +22,6 @@ using lake::control::ZettaControlResult;
 
 constexpr std::string_view customer = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
 
-class FakeControl final : public lake::control::ZettaControl {
-public:
-    std::vector<json> rows;
-    std::vector<std::string> statements;
-
-    liquid::runtime::task<ZettaControlResult<lake::control::ZettaRows>>
-    sql(std::string statement, std::string database) override {
-        statements.push_back(statement);
-        if (database != lake::control::operator_control_database) {
-            co_return ZettaControlResult<lake::control::ZettaRows>(std::unexpected(
-                lake::control::ZettaControlError{"invalid_input", "wrong database"}));
-        }
-        co_return ZettaControlResult<lake::control::ZettaRows>(rows);
-    }
-    liquid::runtime::task<ZettaControlResult<void>> append(std::string table, json row) override {
-        EXPECT_EQ(table, lake::control::workspaces_table);
-        rows.push_back(row);
-        co_return ZettaControlResult<void>{};
-    }
-};
-
 class FakeCaller final : public lake::control::WorkspaceCaller {
 public:
     std::string url, token, capability;
@@ -64,34 +43,41 @@ public:
     }
 };
 
+lake::control::ClerkIdentity minted(std::string subject) {
+    const auto identity = lake::audit::mint_custodial_identity("workspace-test-kek");
+    return lake::control::ClerkIdentity{subject,
+                                        subject + "@example.test",
+                                        "",
+                                        "browser",
+                                        identity->taap_id,
+                                        identity->public_key,
+                                        identity->wrapped_seed};
+}
+
+// A store with one signed-in person and their personal customer, and the service over it.
 struct Workspaces {
-    std::filesystem::path tokens =
-        lake::test::fixture_path("workspace-tokens-" + lake::control::new_uuid_v4());
-    std::shared_ptr<FakeControl> control = std::make_shared<FakeControl>();
+    std::filesystem::path dir =
+        lake::test::fixture_path("service-connections-" + lake::control::new_uuid_v4());
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
     std::shared_ptr<FakeCaller> caller = std::make_shared<FakeCaller>();
     std::shared_ptr<lake::control::WorkspaceService> service;
+    std::string customer_id, secret;
 
-    Workspaces() {
-        std::filesystem::create_directories(tokens);
+    explicit Workspaces(std::size_t limit = 5) {
+        std::filesystem::create_directories(dir);
         service = std::make_shared<lake::control::WorkspaceService>(
-            lake::control::WorkspaceConfig{
-                "prod",
-                "http://control.test:4800",
-                "control-token",
-                tokens.string(),
-                "http://prod-{workspace}-zetta-client.lake.svc.cluster.local:4800"},
-            control,
-            caller);
+            lake::control::WorkspaceConfig{dir.string(), limit}, store, caller);
+        const auto session = store->sign_in_clerk(minted("owner"));
+        EXPECT_TRUE(session);
+        secret = session->secret;
+        const auto principal = store->context_for(secret);
+        const auto customers = store->list_customers(10, principal->user_id);
+        customer_id = customers->front().id;
     }
-    void status(std::string phase, std::string at) {
-        control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
-                                 {"record_type", "status"},
-                                 {"phase", std::move(phase)},
-                                 {"message", "note"},
-                                 {"updated_at", std::move(at)}});
-    }
-    void deliver(std::string_view slug) {
-        std::ofstream(tokens / std::string(slug)) << "workspace-admin-token\n";
+    // What the operator does once a service is Ready.
+    void deliver(const lake::control::ManagedService& service, json connection) {
+        std::ofstream(dir / (service.slug + ".json")) << connection.dump();
     }
     template <class Task> auto run(Task task) {
         auto completed = liquid::runtime::block_on(std::move(task));
@@ -110,113 +96,118 @@ TEST(Workspaces, SlugIsDerivedFromTheCustomerId) {
     EXPECT_EQ(lake::control::workspace_slug("0f1e2d3c-4b5a"), "");
 }
 
-TEST(Workspaces, RequestAppendsOnceAndStateFollowsTheLatestStatus) {
+TEST(Workspaces, TheWorkspaceIsTheDefaultZettaServiceAndReadyNeedsTheOperator) {
     Workspaces w;
-    auto state = w.run(w.service->state(std::string(customer)));
+    auto state = w.run(w.service->state(w.customer_id));
     ASSERT_TRUE(state);
     EXPECT_FALSE(state->requested);
     EXPECT_FALSE(state->ready());
-    EXPECT_NE(w.control->statements.back().find("WHERE lake = 'prod'"), std::string::npos);
-    EXPECT_EQ(w.control->statements.back().find(" AND "), std::string::npos)
-        << "Zetta's SQL takes one predicate per WHERE clause";
 
-    auto requested = w.run(w.service->request(std::string(customer)));
+    auto requested = w.run(w.service->request(w.customer_id, "taap:owner"));
     ASSERT_TRUE(requested);
     EXPECT_TRUE(requested->requested);
-    ASSERT_EQ(w.control->rows.size(), 1U);
-    EXPECT_EQ(w.control->rows[0]["record_type"], "desired");
-    EXPECT_EQ(w.control->rows[0]["workspace_id"], "ws-0f1e2d3c4b5a");
-    EXPECT_EQ(w.control->rows[0]["customer_id"], customer);
-    EXPECT_EQ(w.control->rows[0]["lake"], "prod");
-    ASSERT_TRUE(w.run(w.service->request(std::string(customer))));
-    EXPECT_EQ(w.control->rows.size(), 1U) << "a second request appends nothing";
+    EXPECT_EQ(requested->slug, lake::control::workspace_slug(w.customer_id))
+        << "the first workspace keeps decision 45's name, so its cluster is adopted";
+    ASSERT_TRUE(w.run(w.service->request(w.customer_id)));
+    const auto services = w.store->list_services(w.customer_id);
+    ASSERT_TRUE(services);
+    ASSERT_EQ(services->size(), 1U) << "asking again creates nothing";
+    const lake::control::ManagedService workspace = services->front();
+    EXPECT_EQ(workspace.kind, "zetta");
+    EXPECT_TRUE(workspace.is_default);
+    EXPECT_EQ(workspace.created_by_taap_id, "taap:owner");
 
-    w.status("Provisioning", "2026-09-25T10:00:00Z");
-    w.status("Ready", "2026-09-25T10:02:00Z");
-    state = w.run(w.service->state(std::string(customer)));
+    ASSERT_TRUE(w.store->set_service_status(workspace.id, "Ready", "", "http://ws.test:4800"));
+    state = w.run(w.service->state(w.customer_id));
     ASSERT_TRUE(state);
     EXPECT_EQ(state->phase, "Ready");
     EXPECT_FALSE(state->ready()) << "no credential delivered yet";
-    w.deliver("ws-0f1e2d3c4b5a");
-    state = w.run(w.service->state(std::string(customer)));
+    w.deliver(workspace, {{"kind", "zetta"}, {"token", "workspace-admin-token"}});
+    state = w.run(w.service->state(w.customer_id));
     ASSERT_TRUE(state);
     EXPECT_TRUE(state->ready());
     EXPECT_EQ(state->to_json()["ready"], true);
 }
 
-TEST(Workspaces, WithdrawalEndsTheWorkspaceAndARestartIgnoresItsOldStatus) {
+TEST(Workspaces, DeletingTheWorkspaceWithdrawsItAndARestartGetsANewSlug) {
     Workspaces w;
-    auto refused = w.run(w.service->withdraw(std::string(customer)));
+    auto refused = w.run(w.service->withdraw(w.customer_id));
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().code, "not_found") << "nothing to delete before a request";
 
-    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
-                               {"record_type", "desired"},
-                               {"updated_at", "2026-09-25T10:00:00Z"}});
-    w.status("Ready", "2026-09-25T10:02:00Z");
-    w.deliver("ws-0f1e2d3c4b5a");
-    auto withdrawn = w.run(w.service->withdraw(std::string(customer)));
+    auto first = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(w.store->set_service_status(first->service_id, "Ready", "", "http://a:4800"));
+    auto withdrawn = w.run(w.service->withdraw(w.customer_id));
     ASSERT_TRUE(withdrawn);
     EXPECT_FALSE(withdrawn->requested);
-    EXPECT_EQ(w.control->rows.back()["record_type"], "withdrawn");
-    EXPECT_EQ(w.control->rows.back()["customer_id"], customer);
-    EXPECT_EQ(w.control->rows.back().size(), 8U) << "every workspaces column";
-    w.control->rows.back()["updated_at"] = "2026-09-25T11:00:00Z";
+    const auto old = w.store->get_service(first->service_id);
+    ASSERT_TRUE(old);
+    EXPECT_EQ(old->desired, "absent");
+    EXPECT_EQ(old->generation, 2);
 
-    auto state = w.run(w.service->state(std::string(customer)));
+    auto state = w.run(w.service->state(w.customer_id));
     ASSERT_TRUE(state);
-    EXPECT_FALSE(state->requested);
-    EXPECT_EQ(state->phase, "") << "the Ready status predates the withdrawal";
-    EXPECT_FALSE(state->ready()) << "a leftover token does not make it callable";
-    w.status("Deleted", "2026-09-25T11:01:00Z");
-    state = w.run(w.service->state(std::string(customer)));
-    ASSERT_TRUE(state);
-    EXPECT_EQ(state->phase, "Deleted");
+    EXPECT_FALSE(state->requested) << "a deleting workspace is not the workspace";
+    auto second = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(second);
+    EXPECT_NE(second->service_id, first->service_id);
+    EXPECT_TRUE(second->slug.starts_with("svc-")) << "a slug is never reused";
+    EXPECT_EQ(second->phase, "") << "the old Ready does not carry over";
 
-    // Starting again: only statuses after the new request count.
-    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
-                               {"record_type", "desired"},
-                               {"updated_at", "2026-09-25T12:00:00Z"}});
-    state = w.run(w.service->state(std::string(customer)));
-    ASSERT_TRUE(state);
-    EXPECT_TRUE(state->requested);
-    EXPECT_EQ(state->phase, "");
-    EXPECT_FALSE(state->ready());
-    w.status("Ready", "2026-09-25T12:03:00Z");
-    state = w.run(w.service->state(std::string(customer)));
-    ASSERT_TRUE(state);
-    EXPECT_TRUE(state->ready());
+    ASSERT_TRUE(w.store->set_service_status(first->service_id, "Deleted", "", ""));
+    const auto listed = w.store->list_services(w.customer_id);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->size(), 1U) << "a finished deletion is history";
+}
 
-    // A withdrawal in the same second as the request wins, as the operator decides.
-    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"},
-                               {"record_type", "withdrawn"},
-                               {"updated_at", "2026-09-25T12:00:00Z"}});
-    state = w.run(w.service->state(std::string(customer)));
-    ASSERT_TRUE(state);
-    EXPECT_FALSE(state->requested);
+TEST(Workspaces, ServicesAreNamedPerCustomerAndCapped) {
+    Workspaces w(2);
+    lake::control::NewManagedService postgres{w.customer_id, "postgres", "crm", "taap:owner"};
+    const auto created = w.service->create_service(postgres);
+    ASSERT_TRUE(created);
+    EXPECT_TRUE(created->slug.starts_with("svc-"));
+    EXPECT_EQ(created->desired, "present");
+    const auto duplicate = w.service->create_service(postgres);
+    ASSERT_FALSE(duplicate);
+    EXPECT_EQ(duplicate.error().code, "conflict");
+    ASSERT_TRUE(w.service->create_service({w.customer_id, "zetta", "search", ""}));
+    const auto over = w.service->create_service({w.customer_id, "zetta", "third", ""});
+    ASSERT_FALSE(over);
+    EXPECT_EQ(over.error().code, "quota_exceeded");
+
+    const auto deleted = w.service->delete_service(w.customer_id, created->id);
+    ASSERT_TRUE(deleted);
+    EXPECT_EQ(deleted->desired, "absent");
+    EXPECT_TRUE(w.service->create_service({w.customer_id, "zetta", "third", ""}))
+        << "a deleted service frees its place";
+    const auto again = w.service->delete_service(w.customer_id, created->id);
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().code, "conflict");
+    const auto foreign =
+        w.service->delete_service("11111111-2222-3333-4444-555555555555", created->id);
+    ASSERT_FALSE(foreign);
+    EXPECT_EQ(foreign.error().code, "not_found") << "another customer cannot see the service";
 }
 
 TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     Workspaces w;
-    auto refused = w.run(w.service->call(std::string(customer), "list_projects", true, {}));
+    auto refused = w.run(w.service->call(w.customer_id, "list_projects", true, {}));
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().code, "workspace_not_ready");
 
-    w.control->rows.push_back({{"workspace_id", "ws-0f1e2d3c4b5a"}, {"record_type", "desired"}});
-    // Another workspace's rows on the same Lake are ignored.
-    w.control->rows.push_back({{"workspace_id", "ws-aaaaaaaaaaaa"},
-                               {"record_type", "status"},
-                               {"phase", "Failed"},
-                               {"updated_at", "2026-09-26T00:00:00Z"}});
-    w.status("Ready", "2026-09-25T10:02:00Z");
-    w.deliver("ws-0f1e2d3c4b5a");
+    auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto workspace = w.store->get_service(requested->service_id);
+    ASSERT_TRUE(w.store->set_service_status(
+        workspace->id, "Ready", "", "http://prod-ws-own-zetta-client.lake.svc.cluster.local:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "workspace-admin-token"}});
     w.caller->value = {{"projects", json::array({"retention"})}};
     auto called =
-        w.run(w.service->call(std::string(customer), "get_project", true, {{"name", "retention"}}));
+        w.run(w.service->call(w.customer_id, "get_project", true, {{"name", "retention"}}));
     ASSERT_TRUE(called);
     EXPECT_EQ((*called)["projects"][0], "retention");
-    EXPECT_EQ(w.caller->url,
-              "http://prod-ws-0f1e2d3c4b5a-zetta-client.lake.svc.cluster.local:4800");
+    EXPECT_EQ(w.caller->url, "http://prod-ws-own-zetta-client.lake.svc.cluster.local:4800");
     EXPECT_EQ(w.caller->token, "workspace-admin-token");
     EXPECT_EQ(w.caller->capability, "get_project");
     EXPECT_TRUE(w.caller->read);
@@ -225,29 +216,14 @@ TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
 
 TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     Workspaces w;
-    lake::control::InMemoryStore store;
-    const auto minted = [](std::string subject) {
-        const auto identity = lake::audit::mint_custodial_identity("workspace-test-kek");
-        return lake::control::ClerkIdentity{subject,
-                                            subject + "@example.test",
-                                            "",
-                                            "browser",
-                                            identity->taap_id,
-                                            identity->public_key,
-                                            identity->wrapped_seed};
-    };
-    const auto owner = store.sign_in_clerk(minted("owner"));
+    lake::control::InMemoryStore& store = *w.store;
     const auto other = store.sign_in_clerk(minted("other"));
-    ASSERT_TRUE(owner);
     ASSERT_TRUE(other);
-    const auto owner_principal = store.context_for(owner->secret);
+    const auto owner_principal = store.context_for(w.secret);
     const auto other_principal = store.context_for(other->secret);
     ASSERT_TRUE(owner_principal);
     ASSERT_TRUE(other_principal);
-    const auto customers = store.list_customers(10, owner_principal->user_id);
-    ASSERT_TRUE(customers);
-    ASSERT_EQ(customers->size(), 1U);
-    const std::string owner_customer = customers->front().id;
+    const std::string owner_customer = w.customer_id;
 
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
@@ -294,6 +270,73 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
                                 {{"customer_id", owner_customer}, {"capability", "list_projects"}});
     ASSERT_FALSE(not_ready.ok);
     EXPECT_EQ(not_ready.error.code, "workspace_not_ready");
+    for (const char* action : {"create_connection",
+                               "delete_connection",
+                               "create_dataset_from_query",
+                               "upload_dataset",
+                               "delete_project"}) {
+        const auto allowed = call(*owner_principal,
+                                  "workspace_act",
+                                  {{"customer_id", owner_customer}, {"capability", action}});
+        EXPECT_EQ(allowed.error.code, "workspace_not_ready") << action << " is an allowed action";
+    }
+
+    // Services.
+    const auto created = call(*owner_principal,
+                              "create_service",
+                              {{"customer_id", owner_customer},
+                               {"kind", "postgres"},
+                               {"name", "crm"},
+                               {"storage_gi", 20}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["storage_gi"], 20);
+    const std::string service_id = created.value["id"];
+    const auto bad_name =
+        call(*owner_principal,
+             "create_service",
+             {{"customer_id", owner_customer}, {"kind", "zetta"}, {"name", "Bad"}});
+    EXPECT_FALSE(bad_name.ok);
+    const auto listed = call(*owner_principal, "list_services", {{"customer_id", owner_customer}});
+    ASSERT_TRUE(listed.ok);
+    EXPECT_EQ(listed.value["services"].size(), 2U) << "the workspace and crm";
+    EXPECT_FALSE(call(*other_principal, "list_services", {{"customer_id", owner_customer}}).ok);
+    EXPECT_FALSE(call(*other_principal,
+                      "create_service",
+                      {{"customer_id", owner_customer}, {"kind", "zetta"}, {"name", "x"}})
+                     .ok);
+
+    const auto early = call(*owner_principal,
+                            "service_connection",
+                            {{"customer_id", owner_customer}, {"service_id", service_id}});
+    ASSERT_FALSE(early.ok);
+    EXPECT_EQ(early.error.code, "workspace_not_ready");
+    const auto service = store.get_service(service_id);
+    ASSERT_TRUE(store.set_service_status(service_id, "Ready", "", "prod-crm-rw:5432"));
+    w.deliver(*service,
+              {{"kind", "postgres"}, {"host", "prod-crm-rw"}, {"user", "app"}, {"password", "pw"}});
+    const auto connection = call(*owner_principal,
+                                 "service_connection",
+                                 {{"customer_id", owner_customer}, {"service_id", service_id}});
+    ASSERT_TRUE(connection.ok) << connection.error.message;
+    EXPECT_EQ(connection.value["password"], "pw");
+    EXPECT_EQ(listed.value.dump().find("pw"), std::string::npos);
+    const auto workspace_token =
+        call(*owner_principal,
+             "service_connection",
+             {{"customer_id", owner_customer}, {"service_id", started.value["service_id"]}});
+    EXPECT_FALSE(workspace_token.ok) << "a Zetta admin token is never handed out";
+
+    const auto unconfirmed_service =
+        call(*owner_principal,
+             "delete_service",
+             {{"customer_id", owner_customer}, {"service_id", service_id}, {"confirm", "yes"}});
+    EXPECT_FALSE(unconfirmed_service.ok);
+    const auto deleted_service =
+        call(*owner_principal,
+             "delete_service",
+             {{"customer_id", owner_customer}, {"service_id", service_id}, {"confirm", "crm"}});
+    ASSERT_TRUE(deleted_service.ok) << deleted_service.error.message;
+    EXPECT_EQ(deleted_service.value["desired"], "absent");
 
     const std::string slug = lake::control::workspace_slug(owner_customer);
     const auto foreign_delete = call(
@@ -304,13 +347,10 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
                                   {{"customer_id", owner_customer}, {"confirm", "yes"}});
     ASSERT_FALSE(unconfirmed.ok);
     EXPECT_EQ(unconfirmed.error.code, "invalid_input");
-    const auto rows_before = w.control->rows.size();
     const auto deleted = call(
         *owner_principal, "delete_workspace", {{"customer_id", owner_customer}, {"confirm", slug}});
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
     EXPECT_EQ(deleted.value["requested"], false);
-    ASSERT_EQ(w.control->rows.size(), rows_before + 1);
-    EXPECT_EQ(w.control->rows.back()["record_type"], "withdrawn");
 }
 
 TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
@@ -363,6 +403,7 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find(">Approve</button>"), std::string::npos);
     EXPECT_NE(html.find(">Check and run</button>"), std::string::npos);
+    EXPECT_NE(html.find("action=\"/design/project/delete\""), std::string::npos);
     EXPECT_LT(html.find("/design/project/approve"), html.find("/design/project/run"))
         << "the proposed plan offers Approve, the approved one Check and run";
     page.subject.clear();
@@ -378,6 +419,27 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     EXPECT_NE(html.find("<h2>Report</h2>"), std::string::npos);
     page.subject.clear();
 
+    page.section = "data";
+    page.data["list_connections"] = json::object();
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("action=\"/train/data/connect\""), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/data/upload\" enctype=\"multipart/form-data\""),
+              std::string::npos)
+        << "a file can be uploaded without any connection";
+    EXPECT_NE(html.find("type=\"password\" name=\"token\""), std::string::npos);
+    EXPECT_EQ(html.find("action=\"/train/data/pull\""), std::string::npos)
+        << "no dataset can be pulled before a connection exists";
+    page.data["list_connections"] = {
+        {"connections",
+         json::array(
+             {{{"name", "warehouse"},
+               {"connector", {{"type", "postgres"}, {"host", "db.test"}, {"database", "crm"}}}}})}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("db.test/crm"), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/data/pull\""), std::string::npos);
+    EXPECT_NE(html.find("<option>warehouse</option>"), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/data/disconnect\""), std::string::npos);
+
     page.section = "models";
     page.data["list_models"] = {{"models", json::array({{{"name", "churn"}, {"kind", "gbdt"}}})}};
     html = lake::api::web_ui_workspace(page, true);
@@ -390,6 +452,58 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     EXPECT_EQ(html.find("Start your workspace"), std::string::npos);
 }
 
+TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
+    lake::api::WorkspacePage page;
+    page.section = "services";
+    page.customer_id = std::string(customer);
+    page.data["list_services"] = {{"services", json::array()}, {"limit", 5}};
+    std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("No services yet."), std::string::npos);
+    EXPECT_NE(html.find("action=\"/services/create\""), std::string::npos);
+    EXPECT_NE(html.find("may run 5 services"), std::string::npos);
+    EXPECT_EQ(html.find("Start your workspace"), std::string::npos)
+        << "the Services page does not wait for the workspace";
+
+    page.data["list_services"]["services"] =
+        json::array({{{"id", "a"},
+                      {"name", "workspace"},
+                      {"kind", "zetta"},
+                      {"default", true},
+                      {"instances", 1},
+                      {"storage_gi", 10},
+                      {"desired", "present"},
+                      {"phase", "Ready"},
+                      {"endpoint", "http://prod-ws-1-zetta-client:4800"}},
+                     {{"id", "b"},
+                      {"name", "crm"},
+                      {"kind", "postgres"},
+                      {"instances", 2},
+                      {"storage_gi", 20},
+                      {"desired", "present"},
+                      {"phase", "Ready"},
+                      {"endpoint", "prod-svc-1-rw:5432"}},
+                     {{"id", "c"},
+                      {"name", "old"},
+                      {"kind", "postgres"},
+                      {"instances", 1},
+                      {"storage_gi", 10},
+                      {"desired", "absent"},
+                      {"phase", "Ready"}}});
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("workspace <span class=\"muted\">(workspace)</span>"), std::string::npos);
+    EXPECT_NE(html.find("2 × 20 GiB"), std::string::npos);
+    EXPECT_NE(html.find("prod-svc-1-rw:5432"), std::string::npos);
+    EXPECT_NE(html.find(">Deleting<"), std::string::npos) << "an absent service is deleting";
+    EXPECT_NE(html.find("action=\"/services/connection\""), std::string::npos);
+    EXPECT_NE(html.find(">Delete crm</button>"), std::string::npos);
+    EXPECT_EQ(html.find(">Delete old</button>"), std::string::npos);
+    EXPECT_NE(html.find("http-equiv=\"refresh\""), std::string::npos) << "one is still changing";
+
+    page.data["service_connection"] = {{"name", "crm"}, {"uri", "postgresql://app:pw@host/app"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("postgresql://app:pw@host/app"), std::string::npos);
+}
+
 TEST(Workspaces, NavigationOffersDesignTrainAndShip) {
     const std::string home = lake::api::web_ui_home(true);
     for (const std::string_view label : {"<p class=\"nav-label\">Design</p>",
@@ -400,7 +514,8 @@ TEST(Workspaces, NavigationOffersDesignTrainAndShip) {
                                          "href=\"/train/runs\"",
                                          "href=\"/ship/models\"",
                                          "href=\"/ship/indexes\"",
-                                         "href=\"/deployments\""}) {
+                                         "href=\"/deployments\"",
+                                         "href=\"/services\""}) {
         EXPECT_NE(home.find(label), std::string::npos) << label;
     }
     EXPECT_EQ(lake::api::web_ui_home().find("/design/projects"), std::string::npos);

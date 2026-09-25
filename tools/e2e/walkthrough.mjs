@@ -1,6 +1,6 @@
 // End-to-end browser walkthrough of lake (docs/deployment/browser-testing.md): Clerk sign-in with a
 // one-time ticket, then every Design, Train and Ship page, with a screenshot per step and a
-// log.json. It creates one project in the signed-in customer's workspace.
+// log.json. It creates one project in the signed-in customer's workspace and deletes it again.
 //
 //   node tools/e2e/walkthrough.mjs <base-url> <ticket-file> <output-dir>
 //
@@ -89,9 +89,19 @@ try {
     }
   }
 
+  // 3b. Delete the project again, so the tester's workspace does not fill up (#164).
+  if (await page.goto(`${base}/design/project?name=${project}`).then(() => page.locator("form[action='/design/project/delete']").count())) {
+    await page.locator("form[action='/design/project/delete']").evaluate((form) => form.closest("details").open = true);
+    await page.fill("form[action='/design/project/delete'] input[name=confirm]", project);
+    await page.getByRole("button", { name: "Delete project" }).click();
+    await page.waitForLoadState("load");
+    note("delete-project", { url: page.url(), error: await errorText(), gone: !(await text()).includes(project) });
+  }
+
   // 4. Every remaining page.
   for (const [path, name] of [["/train/data", "data"], ["/train/runs", "runs"], ["/ship/models", "models"],
-                              ["/ship/indexes", "indexes"], ["/deployments", "deployments"], ["/", "home"]]) {
+                              ["/ship/indexes", "indexes"], ["/deployments", "deployments"], ["/services", "services"],
+                              ["/", "home"]]) {
     const response = await page.goto(`${base}${path}`);
     await shot(name);
     note(`page ${path}`, { status: response.status(), error: await errorText(), text: (await text()).slice(0, 160) });

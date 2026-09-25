@@ -1,7 +1,10 @@
 #pragma once
+#include <cctype>
+#include <cstdint>
 #include <expected>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -184,6 +187,40 @@ struct OAuthIdentity {
 struct ClerkIdentity {
     std::string subject, email, display_name, device_name;
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
+};
+// A service a customer runs on the Lake's cluster (docs/control-plane/services.md): lake writes
+// the desired fields, the operator the status fields. The workspace is the default Zetta service.
+struct ManagedService {
+    std::string id, customer_id, kind, name, slug;
+    bool is_default = false;
+    int instances = 1, storage_gi = 10;
+    std::string desired; // present | absent
+    std::int64_t generation = 1;
+    std::string created_by_taap_id, created_at, updated_at;
+    std::string phase, message, endpoint; // empty until the operator reports
+    std::int64_t observed_generation = 0;
+};
+// `<prefix>-` and the first 12 hexadecimal digits of a UUID, the Kubernetes suffix of a service:
+// `svc-` for most, `ws-` plus the customer id for a customer's first default workspace. Empty when
+// `uuid` is not one.
+inline std::string managed_service_slug(std::string_view prefix, std::string_view uuid) {
+    std::string hex;
+    for (const char character : uuid) {
+        if (character == '-') {
+            continue;
+        }
+        if (std::isxdigit(static_cast<unsigned char>(character)) == 0) {
+            return {};
+        }
+        hex += static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return hex.size() == 32 ? std::string(prefix) + "-" + hex.substr(0, 12) : std::string();
+}
+struct NewManagedService {
+    std::string customer_id, kind, name, created_by_taap_id;
+    bool is_default = false;
+    int instances = 1, storage_gi = 10;
+    std::size_t max_per_customer = 5; // live services per customer; 0 means no limit
 };
 struct OAuthProvider {
     std::string pool_id, provider, issuer, client_id, client_secret;
@@ -627,6 +664,15 @@ public:
                                                                    const std::string& to_hour,
                                                                    int limit) = 0;
     virtual Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) = 0;
+    // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
+    // first, leaving out deleted ones the operator has finished with.
+    virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;
+    virtual Result<ManagedService> get_service(const std::string& id) = 0;
+    // Creates a service. A default one that already exists is returned unchanged; a live name is a
+    // conflict; a customer at max_per_customer live services is refused with quota_exceeded.
+    virtual Result<ManagedService> create_service(const NewManagedService&) = 0;
+    // Marks a service absent so the operator deletes it. Refuses one already absent.
+    virtual Result<ManagedService> withdraw_service(const std::string& id) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
 
