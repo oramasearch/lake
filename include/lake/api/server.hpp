@@ -13,6 +13,7 @@ class Service;
 namespace lake::control {
 class Store;
 class PlatformService;
+class WorkspaceService;
 } // namespace lake::control
 namespace lake::control::callers {
 class TokenReviewer;
@@ -50,6 +51,9 @@ struct ServerOptions {
     // unavailable, which is useful for a control-plane-only node.
     std::shared_ptr<search::Service> search;
     std::shared_ptr<control::PlatformService> platform;
+    // Customer Zetta workspaces (docs/api/workspaces.md); null leaves Design, Train and Ship
+    // unavailable.
+    std::shared_ptr<control::WorkspaceService> workspaces;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;

@@ -42,12 +42,13 @@ the homepage and forms do not confer additional access.
 | Viewer | Sidebar | Top bar |
 |---|---|---|
 | Signed out or invalid credential | Home, Public repositories | Sign in, Create account |
-| Ordinary account | Home, Repositories, Shared with me, Search · **Ship:** Deployments · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
-| Operator | Home, Repositories, Search · **Ship:** Deployments · **Administration:** Customers, Organizations, Applications, Metering, Secrets, Audit · **Developer:** API | Sign out |
+| Ordinary account | Home, Repositories, Shared with me, Search · **Design:** Projects · **Train:** Data, Runs · **Ship:** Models, Search indexes, Deployments · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
+| Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Metering, Secrets, Audit · **Developer:** API | Sign out |
 
-The **Design** and **Train** sections of the design are not in the sidebar yet. A section appears
-only when it has a page the viewer can open, and projects and the dataset and model lists need a
-repository kind that lake does not record yet.
+**Design, Train and Ship** run on the customer's own Zetta workspace; see
+[`../api/workspaces.md`](../api/workspaces.md). Their pages live under `/design`, `/train` and
+`/ship`. The repositories list and the create-repository form mark the viewer's own personal space
+with *(you)* and *your personal space*, since its generated handle is otherwise unrecognisable.
 
 **The current item is chosen by request path.** `context_for` records the route path on
 `ApiContext::request_path`, `viewer_for` copies it into `WebUiViewer::path`, and `nav` compares
