@@ -361,6 +361,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view models[] = {"/ship/models"};
     static constexpr std::string_view indexes[] = {"/ship/indexes"};
     static constexpr std::string_view packages[] = {"/ship/packages"};
+    static constexpr std::string_view activity[] = {"/activity"};
     static constexpr std::string_view customers[] = {"/customers"};
     static constexpr std::string_view organizations[] = {"/organizations",
                                                          "/organization",
@@ -399,6 +400,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return indexes;
     if (key == "packages")
         return packages;
+    if (key == "activity")
+        return activity;
     if (key == "customers")
         return customers;
     if (key == "organizations")
@@ -511,6 +514,16 @@ std::string nav(const WebUiViewer& viewer, std::string_view title) {
         out += nav_link("/ship/indexes", "Search indexes", "search", "indexes", viewer, title);
         out += nav_link("/ship/packages", "Packages", "repository", "packages", viewer, title);
         out += nav_link("/deployments", "Deployments", "api", "deployments", viewer, title);
+    }
+    // A signed-in account's own organizations, secrets, usage and activity. Operators reach the
+    // instance-wide versions under Administration instead.
+    if (viewer.signed_in && !viewer.administrator) {
+        out += "<p class=\"nav-label\">Organization</p>";
+        out += nav_link(
+            "/organizations", "Organizations", "organization", "organizations", viewer, title);
+        out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", viewer, title);
+        out += nav_link("/metering", "Usage", "metering", "metering", viewer, title);
+        out += nav_link("/activity", "Activity", "audit", "activity", viewer, title);
     }
     if (viewer.administrator) {
         out += "<p class=\"nav-label\">Administration</p>";
@@ -3652,26 +3665,32 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
                          const audit::Filter& filter,
                          const nlohmann::json& log_configuration,
                          WebUiViewer viewer) {
-    std::string content = "<p class=\"eyebrow\">control plane</p><h1>Audit log</h1><p "
-                          "class=\"sub\">Signed, "
-                          "hash-linked events. Use the filters to narrow the evidence view.</p>"
-                          "<form class=\"filters\" method=\"get\" action=\"/audit\">"
-                          "<label>Principal<input name=\"principal\" value=\"" +
-                          web_ui_escape(filter.principal) +
-                          "\"></label>"
-                          "<label>Object<input name=\"object\" value=\"" +
-                          web_ui_escape(filter.object) +
-                          "\"></label>"
-                          "<label>Outcome<input name=\"outcome\" value=\"" +
-                          web_ui_escape(filter.outcome) +
-                          "\"></label>"
-                          "<label>From<input name=\"from\" value=\"" +
-                          web_ui_escape(filter.from) +
-                          "\"></label>"
-                          "<label>To<input name=\"to\" value=\"" +
-                          web_ui_escape(filter.to) +
-                          "\"></label>"
-                          "<button type=\"submit\">Filter</button></form>";
+    // /activity is the same view limited to the signed-in person's own events (my_audit).
+    const bool own = viewer.path == "/activity";
+    std::string content =
+        std::string(own ? "<p class=\"eyebrow\">Organization</p><h1>Your activity</h1><p "
+                          "class=\"sub\">Signed, hash-linked events for everything you did on "
+                          "this lake.</p><form class=\"filters\" method=\"get\" "
+                          "action=\"/activity\">"
+                        : "<p class=\"eyebrow\">control plane</p><h1>Audit log</h1><p "
+                          "class=\"sub\">Signed, hash-linked events. Use the filters to narrow "
+                          "the evidence view.</p><form class=\"filters\" method=\"get\" "
+                          "action=\"/audit\">") +
+        (own ? std::string()
+             : "<label>Principal<input name=\"principal\" value=\"" +
+                   web_ui_escape(filter.principal) + "\"></label>") +
+        "<label>Object<input name=\"object\" value=\"" + web_ui_escape(filter.object) +
+        "\"></label>"
+        "<label>Outcome<input name=\"outcome\" value=\"" +
+        web_ui_escape(filter.outcome) +
+        "\"></label>"
+        "<label>From<input name=\"from\" value=\"" +
+        web_ui_escape(filter.from) +
+        "\"></label>"
+        "<label>To<input name=\"to\" value=\"" +
+        web_ui_escape(filter.to) +
+        "\"></label>"
+        "<button type=\"submit\">Filter</button></form>";
     if (!log_configuration.empty()) {
         content += std::format(
             "<div class=\"panel\"><h2>Transparency log</h2><p class=\"sub\">Effective mode: "
@@ -3705,7 +3724,10 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
     content += "<p class=\"sub\">API: <code>GET /v1/audit</code>, <code>GET "
                "/v1/export_audit</code>, "
                "and <code>GET /v1/verify_audit</code>.</p>";
-    return web_ui_shell("lake — audit", std::format("{} events", events.size()), content, viewer);
+    return web_ui_shell(own ? "lake — activity" : "lake — audit",
+                        std::format("{} events", events.size()),
+                        content,
+                        viewer);
 }
 
 std::string

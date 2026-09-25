@@ -4702,6 +4702,7 @@ struct ApiServer::Impl {
             "/secrets",
             "/encryption-keys",
             "/audit",
+            "/activity",
             "/sign-up",
             "/sign-in",
             "/mfa",
@@ -9778,7 +9779,11 @@ struct ApiServer::Impl {
         if (!context.authorized) {
             return redirect(route, "/sign-in");
         }
-        const std::string customer_id = query_value(route, "customer_id");
+        std::string customer_id = query_value(route, "customer_id");
+        if (customer_id.empty() && !context.operator_credential) {
+            // An account's Usage opens on its own personal space.
+            customer_id = workspace_selection(context, "").customer_id;
+        }
         nlohmann::json usage{{"customer_id", customer_id}, {"items", nlohmann::json::array()}};
         if (!customer_id.empty()) {
             const ApiResult result =
@@ -9791,6 +9796,42 @@ struct ApiServer::Impl {
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_metering(usage, viewer_for(context)),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    // Organization > Activity: the signed-in person's own audit events (my_audit).
+    boost::http::route_task serve_activity_page(boost::http::route_params& route) {
+        ApiContext ctx = context_for(route);
+        if (!ctx.authorized)
+            return redirect(route, "/sign-in");
+        const audit::Filter filter{
+            .object = query_value(route, "object"),
+            .outcome = query_value(route, "outcome"),
+            .from = query_value(route, "from"),
+            .to = query_value(route, "to"),
+            .limit = 500,
+        };
+        nlohmann::json input = {{"limit", filter.limit}};
+        for (const auto& [key, value] :
+             {std::pair<const char*, const std::string&>{"object", filter.object},
+              {"outcome", filter.outcome},
+              {"from", filter.from},
+              {"to", filter.to}}) {
+            if (!value.empty())
+                input[key] = value;
+        }
+        const ApiResult result = registry.call("my_audit", input, ctx);
+        if (!result.ok) {
+            return serve_page_error(route, result);
+        }
+        std::vector<audit::Event> events;
+        for (const nlohmann::json& item : result.value.value("items", nlohmann::json::array())) {
+            events.push_back(audit::event_from_json(item));
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_audit(events, filter, nlohmann::json::object(), viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -11168,6 +11209,10 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/metering/quota", impl.serve_metering_quota(route));
                });
+    router.add(
+        http::method::get, "/activity", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/activity", impl.serve_activity_page(route));
+        });
     router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/audit", impl.serve_audit_page(route));
     });

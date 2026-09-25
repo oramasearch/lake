@@ -4417,6 +4417,35 @@ void register_audit_capabilities(Registry& registry) {
             return ApiResult::success({{"items", std::move(items)}});
         }});
     registry.add(Capability{
+        .name = "my_audit",
+        .title = "Query my audit events",
+        .description = "The signed-in principal's own signed audit events, filtered like audit.",
+        .input_schema = audit_filter_input(),
+        .output_schema = list_schema(audit_event_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "principal",
+        .action = "read",
+        .resolve_object = self_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return no_store();
+            }
+            if (context.acting_identity.empty()) {
+                return ApiResult::failure("unauthorized", "no signed-in principal");
+            }
+            audit::Filter filter = audit_filter_of(input);
+            filter.principal = context.acting_identity;
+            auto events = context.store->list_audit_events(filter);
+            if (!events) {
+                return from_store_error(events.error());
+            }
+            json items = json::array();
+            for (const audit::Event& event : *events) {
+                items.push_back(audit::to_json(event));
+            }
+            return ApiResult::success({{"items", std::move(items)}});
+        }});
+    registry.add(Capability{
         .name = "export_audit",
         .title = "Export audit events",
         .description = "Export matching signed audit events as JSON lines.",
