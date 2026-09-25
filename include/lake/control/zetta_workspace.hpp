@@ -1,48 +1,52 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
 
+#include "lake/control/store.hpp"
 #include "lake/control/zetta_control.hpp"
 
 namespace lake::control {
 
-// A customer's workspace: the Zetta cluster lake's Design, Train and Ship pages delegate to
-// (liquid-bridge decision 45, docs/api/workspaces.md). Zetta has no tenancy, so each customer gets
-// its own cluster. lake asks the operator for one by appending a `desired` event to
-// orama_control.workspaces on its data-plane Zetta; the operator creates the cluster, mounts its
-// admin token into lake as `<token_dir>/<slug>`, and appends `status` events.
+// A customer's managed services (docs/control-plane/services.md, liquid-bridge decision 46): Zetta
+// and Postgres clusters that lake records in its control Postgres and the Orama operator runs.
+// The operator mounts each Ready service's connection into lake as `<service_dir>/<slug>.json`.
+// The customer's workspace, the Zetta cluster Design, Train and Ship delegate to
+// (docs/api/workspaces.md), is its default Zetta service.
 struct WorkspaceConfig {
-    std::string lake_name;     // the Lake resource name, the `lake` column
-    std::string control_url;   // LAKE_DATA_PLANE_URL
-    std::string control_token; // LAKE_DATA_PLANE_TOKEN
-    std::string token_dir;     // LAKE_WORKSPACE_DIR
-    std::string url_template;  // LAKE_WORKSPACE_URL_TEMPLATE, with `{workspace}` for the slug
+    std::string service_dir;          // LAKE_SERVICE_DIR
+    std::size_t max_per_customer = 5; // LAKE_SERVICES_PER_CUSTOMER; 0 means no limit
 
     bool configured() const {
-        return !lake_name.empty() && !control_url.empty() && !control_token.empty() &&
-               !token_dir.empty() && url_template.find("{workspace}") != std::string::npos;
+        return !service_dir.empty();
     }
 };
 
 // `ws-` followed by the first 12 hexadecimal digits of the customer id; empty when the id is not
-// a UUID. Deterministic, so lake stores nothing to find a customer's workspace.
+// a UUID. The slug of a customer's first workspace, which decision 45 created clusters under.
 std::string workspace_slug(std::string_view customer_id);
 
-struct WorkspaceState {
-    std::string slug;
-    bool requested = false; // a desired event exists
-    std::string phase;      // latest operator status: Provisioning, Ready, Failed; empty if none
-    std::string message;
-    bool credential = false; // the operator's mounted token is present
+// A service as the API and the pages show it: never its credential.
+nlohmann::json service_json(const ManagedService& service);
 
-    // lake calls the cluster only when the operator has reported it Ready and delivered its token.
+struct WorkspaceState {
+    std::string slug, service_id;
+    bool requested = false; // a default Zetta service is present
+    std::string phase;      // the operator's: Provisioning, Ready, Failed, Deleting; empty if none
+    std::string message;
+    std::string endpoint;
+    bool credential = false; // the operator's mounted connection is present
+
+    // lake calls the cluster only when the operator has reported it Ready, with an address, and
+    // delivered its token.
     bool ready() const {
-        return credential && phase == "Ready";
+        return credential && phase == "Ready" && !endpoint.empty();
     }
     nlohmann::json to_json() const;
 };
@@ -73,26 +77,43 @@ public:
 class WorkspaceService {
 public:
     WorkspaceService(WorkspaceConfig config,
-                     std::shared_ptr<ZettaControl> control,
+                     std::shared_ptr<Store> store,
                      std::shared_ptr<WorkspaceCaller> caller);
 
     const WorkspaceConfig& config() const {
         return config_;
     }
 
+    // Services. Every call is on behalf of `customer_id`; a service of another customer is
+    // not_found.
+    Result<std::vector<ManagedService>> services(const std::string& customer_id);
+    Result<ManagedService> service(const std::string& customer_id, const std::string& service_id);
+    Result<ManagedService> create_service(NewManagedService service);
+    Result<ManagedService> delete_service(const std::string& customer_id,
+                                          const std::string& service_id);
+    // The operator's mounted connection for a service, or nothing before it is delivered. It
+    // carries the credential: only service_connection returns it, and never to a page.
+    std::optional<nlohmann::json> connection(const ManagedService& service) const;
+
+    // The workspace: the default Zetta service.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> state(std::string customer_id);
-    // Appends a desired event. Asking again for an existing workspace is harmless: the operator
-    // keys clusters by slug.
-    liquid::runtime::task<ZettaControlResult<WorkspaceState>> request(std::string customer_id);
+    // Creates the default Zetta service; asking again for an existing one is harmless.
+    liquid::runtime::task<ZettaControlResult<WorkspaceState>>
+    request(std::string customer_id, std::string requested_by = {});
+    // Marks the default service absent: the operator deletes the cluster, its data volume and
+    // its token, which cannot be undone. Refuses when no workspace is requested.
+    liquid::runtime::task<ZettaControlResult<WorkspaceState>> withdraw(std::string customer_id);
     // Calls `capability` on the customer's own cluster. Refuses when the workspace is not ready.
     liquid::runtime::task<ZettaControlResult<nlohmann::json>>
     call(std::string customer_id, std::string capability, bool read, nlohmann::json input);
 
 private:
-    std::string token_for(std::string_view slug) const;
+    WorkspaceState state_of(const std::string& customer_id,
+                            const std::optional<ManagedService>& service) const;
+    Result<std::optional<ManagedService>> default_service(const std::string& customer_id);
 
     WorkspaceConfig config_;
-    std::shared_ptr<ZettaControl> control_;
+    std::shared_ptr<Store> store_;
     std::shared_ptr<WorkspaceCaller> caller_;
 };
 

@@ -590,3 +590,60 @@ TEST(PostgresPlatform, EnvironmentBindingAndMirrorRoundTrip) {
 }
 
 } // namespace
+
+TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:svc-" + suffix, "svc-" + suffix + "@example.com", "Services"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "svc-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    lake::control::NewManagedService workspace{customer->id, "zetta", "workspace", "taap:x"};
+    workspace.is_default = true;
+    const auto first = store->create_service(workspace);
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ(first->slug, lake::control::managed_service_slug("ws", customer->id));
+    EXPECT_EQ(first->instances, 1);
+    EXPECT_EQ(first->storage_gi, 10);
+    EXPECT_EQ(first->phase, "") << "no status row yet";
+    const auto again = store->create_service(workspace);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->id, first->id) << "the default is created once";
+
+    lake::control::NewManagedService postgres{customer->id, "postgres", "crm", "taap:x"};
+    postgres.instances = 2;
+    postgres.storage_gi = 30;
+    postgres.max_per_customer = 2;
+    const auto crm = store->create_service(postgres);
+    ASSERT_TRUE(crm) << crm.error().message;
+    EXPECT_TRUE(crm->slug.starts_with("svc-"));
+    EXPECT_EQ(crm->instances, 2);
+    EXPECT_EQ(crm->storage_gi, 30);
+    EXPECT_EQ(store->create_service(postgres).error().code, "conflict");
+    postgres.name = "other";
+    EXPECT_EQ(store->create_service(postgres).error().code, "quota_exceeded");
+
+    const auto withdrawn = store->withdraw_service(first->id);
+    ASSERT_TRUE(withdrawn) << withdrawn.error().message;
+    EXPECT_EQ(withdrawn->desired, "absent");
+    EXPECT_EQ(withdrawn->generation, 2);
+    EXPECT_EQ(store->withdraw_service(first->id).error().code, "conflict");
+    const auto second = store->create_service(workspace);
+    ASSERT_TRUE(second) << second.error().message;
+    EXPECT_NE(second->id, first->id);
+    EXPECT_TRUE(second->slug.starts_with("svc-")) << "the ws- slug is never reused";
+
+    const auto listed = store->list_services(customer->id);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->size(), 3U)
+        << "a withdrawn service stays listed until the operator deletes it";
+    EXPECT_EQ(store->get_service(lake::control::new_uuid_v4()).error().code, "not_found");
+}

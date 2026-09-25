@@ -571,6 +571,20 @@ public:
     storage_quota(const std::string& customer_id) override {
         return call("storage_quota", [&] { return store_->storage_quota(customer_id); });
     }
+    control::Result<std::vector<control::ManagedService>>
+    list_services(const std::string& customer_id) override {
+        return call("list_services", [&] { return store_->list_services(customer_id); });
+    }
+    control::Result<control::ManagedService> get_service(const std::string& id) override {
+        return call("get_service", [&] { return store_->get_service(id); });
+    }
+    control::Result<control::ManagedService>
+    create_service(const control::NewManagedService& value) override {
+        return call("create_service", [&] { return store_->create_service(value); });
+    }
+    control::Result<control::ManagedService> withdraw_service(const std::string& id) override {
+        return call("withdraw_service", [&] { return store_->withdraw_service(id); });
+    }
     control::Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                      std::uint64_t quota_bytes) override {
         return call("set_storage_quota",

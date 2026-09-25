@@ -77,6 +77,10 @@ int usage() {
     std::println("  LAKE_OPERATOR_ZETTA_URL and LAKE_OPERATOR_ZETTA_TOKEN enable platform sync");
     std::println("  LAKE_LOGS_URL and optional LAKE_LOGS_TOKEN enable environment logs");
     std::println("  LAKE_PLATFORM_SYNC_SECONDS sets the platform poll interval (default 15)");
+    std::println(
+        "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
+    std::println(
+        "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 5, 0 = none)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -248,25 +252,28 @@ int main(int argc, char** argv) {
                                           opts.instance_kek});
     }
 
-    // Customer Zetta workspaces (docs/api/workspaces.md). The operator injects all four when the
-    // Lake enables workspaces; without them Design, Train and Ship say the feature is unavailable.
-    lake::control::WorkspaceConfig workspace_config{
-        env_or("LAKE_NAME", opts.node_name),
-        env_or("LAKE_DATA_PLANE_URL", ""),
-        env_or("LAKE_DATA_PLANE_TOKEN", ""),
-        env_or("LAKE_WORKSPACE_DIR", ""),
-        env_or("LAKE_WORKSPACE_URL_TEMPLATE", ""),
-    };
-    const bool workspaces_configured = workspace_config.configured();
+    // Managed services and the workspace (docs/control-plane/services.md). The operator mounts
+    // service connections at LAKE_SERVICE_DIR when the Lake enables services; without it the
+    // Services, Design, Train and Ship pages say the feature is unavailable.
+    lake::control::WorkspaceConfig workspace_config{env_or("LAKE_SERVICE_DIR", "")};
+    if (const std::string limit = env_or("LAKE_SERVICES_PER_CUSTOMER", ""); !limit.empty()) {
+        std::size_t parsed = 0;
+        const auto [end, error] =
+            std::from_chars(limit.data(), limit.data() + limit.size(), parsed);
+        if (error != std::errc() || end != limit.data() + limit.size()) {
+            std::println(stderr, "lake: LAKE_SERVICES_PER_CUSTOMER must be a whole number");
+            return 2;
+        }
+        workspace_config.max_per_customer = parsed;
+    }
+    const bool workspaces_configured = workspace_config.configured() && opts.store != nullptr;
     if (workspaces_configured) {
         if (!platform_transport_required) {
             lake::control::install_zetta_control_transport();
         }
-        auto control = std::make_shared<lake::control::ZettaControlClient>(
-            workspace_config.control_url, workspace_config.control_token);
         opts.workspaces = std::make_shared<lake::control::WorkspaceService>(
             std::move(workspace_config),
-            std::move(control),
+            opts.store,
             std::make_shared<lake::control::ZettaWorkspaceCaller>());
     }
 
