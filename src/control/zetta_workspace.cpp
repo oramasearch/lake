@@ -86,6 +86,9 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     request.url = url + "/v1/" + capability;
     request.headers = {{"Accept", "application/json"}, {"Authorization", "Bearer " + token}};
     request.secret_headers = {"Authorization"};
+    // A read that hangs must not hold a page for a minute (zetta#1007: get_run_report never
+    // answers); actions such as compile_intent may legitimately take longer.
+    request.timeout_seconds = read ? 15 : 60;
     if (read) {
         request.method = "GET";
         std::string query;
@@ -107,7 +110,8 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     if (transport_error || !response.error.empty()) {
         co_return workspace_failure<nlohmann::json>(
             "store_unavailable",
-            response.error.empty() ? "the workspace did not answer" : response.error);
+            "the workspace did not answer " + capability +
+                (response.error.empty() ? std::string() : ": " + response.error));
     }
     const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
     if (body.is_discarded() || !body.is_object()) {
