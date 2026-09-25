@@ -17,3 +17,7 @@ The customer landing journey and viewer navigation are recorded in
 
 Indexed PostgreSQL session authentication and the legacy-session migration are specified in
 [../api/auth.md](../api/auth.md) and recorded separately from deployment in [status.md](status.md).
+
+The design for lake as Orama's cloud (navigation by Repositories, Design, Train and Ship, and the
+new home page) is [cloud.md](cloud.md), with a static mock in [ui/mocks/cloud/](ui/mocks/cloud/README.md).
+It is not implemented.
