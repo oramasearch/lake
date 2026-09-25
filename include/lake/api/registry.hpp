@@ -34,6 +34,7 @@ class Service;
 }
 namespace lake::control {
 class PlatformService;
+class WorkspaceService;
 }
 namespace lake::transparency {
 class Service;
@@ -119,6 +120,7 @@ struct ApiContext {
     control::callers::Service* callers = nullptr;
     control::agents::Service* agents = nullptr;
     control::PlatformService* platform = nullptr;
+    control::WorkspaceService* workspaces = nullptr;
     transparency::Service* transparency = nullptr;
     transparency::CheckpointService* checkpoints = nullptr;
     transparency::TiledLog* transparency_log = nullptr;

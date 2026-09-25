@@ -4575,6 +4575,18 @@ struct ApiServer::Impl {
             "/repository",
             "/repository/tree",
             "/deployments",
+            "/design/projects",
+            "/design/project",
+            "/design/projects/create",
+            "/design/project/compile",
+            "/design/project/run",
+            "/train/data",
+            "/train/runs",
+            "/train/run",
+            "/ship/models",
+            "/ship/models/publish",
+            "/ship/indexes",
+            "/workspace/start",
             "/environments",
             "/environment",
             "/logs",
@@ -4679,6 +4691,7 @@ struct ApiServer::Impl {
         ctx.pki = &pki;
         ctx.agents = &agents;
         ctx.platform = options.platform.get();
+        ctx.workspaces = options.workspaces.get();
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
@@ -4765,6 +4778,7 @@ struct ApiServer::Impl {
     WebUiViewer viewer_for(const ApiContext& context) const {
         WebUiViewer viewer{context.authorized, context.operator_credential};
         viewer.path = context.request_path;
+        viewer.user_id = context.acting_user_id;
         viewer.clerk = clerk.has_value();
         return viewer;
     }
@@ -7003,6 +7017,198 @@ struct ApiServer::Impl {
                          web_ui_repositories(repositories, owners, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    // ---- Design, Train and Ship over the customer's Zetta workspace (docs/api/workspaces.md) ----
+
+    struct WorkspaceSelection {
+        std::vector<WorkspaceCustomer> customers;
+        std::string customer_id;
+    };
+
+    WorkspaceSelection workspace_selection(ApiContext& context, std::string_view requested) {
+        WorkspaceSelection selection;
+        const ApiResult rows = registry.call("list_customers", {{"limit", 200}}, context);
+        if (rows.ok) {
+            for (const auto& value : rows.value.value("items", nlohmann::json::array())) {
+                const control::Customer customer = customer_from_json(value);
+                selection.customers.push_back({customer.id,
+                                               customer.name,
+                                               !context.acting_user_id.empty() &&
+                                                   customer.user_id == context.acting_user_id});
+            }
+        }
+        std::stable_partition(selection.customers.begin(),
+                              selection.customers.end(),
+                              [](const WorkspaceCustomer& customer) { return customer.yours; });
+        for (const WorkspaceCustomer& customer : selection.customers) {
+            if (customer.id == requested) {
+                selection.customer_id = customer.id;
+            }
+        }
+        if (selection.customer_id.empty() && !selection.customers.empty()) {
+            selection.customer_id = selection.customers.front().id;
+        }
+        return selection;
+    }
+
+    static ApiResult unwrap(std::expected<ApiResult, liquid::error> completed) {
+        return completed ? std::move(*completed)
+                         : ApiResult::failure("store_error", completed.error().message);
+    }
+
+    // A coroutine, so `capability` and `input` live in this frame while call_async, which takes
+    // them by reference, runs.
+    liquid::runtime::task<ApiResult>
+    workspace_call(std::string capability, nlohmann::json input, ApiContext& context) {
+        co_return unwrap(co_await registry.call_async(capability, input, context));
+    }
+
+    boost::http::route_task serve_workspace_page(boost::http::route_params& route,
+                                                 std::string section) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        WorkspacePage page;
+        page.section = section;
+        page.error = query_value(route, "error");
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        if (section == "project") {
+            page.subject = query_value(route, "name");
+        } else if (section == "run") {
+            page.subject = query_value(route, "id");
+        }
+        if (page.customer_id.empty()) {
+            page.unavailable = "You have no space to work in yet.";
+        } else if (!options.workspaces) {
+            page.unavailable = "Design, Train and Ship are not available on this lake yet: it has "
+                               "no workspace control plane configured.";
+        } else {
+            const ApiResult status = unwrap(co_await workspace_call(
+                "workspace_status", {{"customer_id", page.customer_id}}, context));
+            if (!status.ok) {
+                page.unavailable = status.error.message;
+            } else {
+                page.state = status.value;
+            }
+        }
+        if (page.unavailable.empty() && page.state.value("ready", false)) {
+            std::vector<std::pair<std::string, nlohmann::json>> reads;
+            if (section == "projects") {
+                reads = {{"list_projects", nlohmann::json::object()}};
+            } else if (section == "project") {
+                reads = {{"get_project", {{"name", page.subject}}}};
+            } else if (section == "data") {
+                reads = {{"list_connections", nlohmann::json::object()},
+                         {"list_datasets", nlohmann::json::object()}};
+            } else if (section == "runs") {
+                reads = {{"list_runs", nlohmann::json::object()}};
+            } else if (section == "run") {
+                reads = {{"get_run_report", {{"run_id", page.subject}}}};
+            } else if (section == "models") {
+                reads = {{"list_models", nlohmann::json::object()}};
+            } else if (section == "indexes") {
+                reads = {{"list_indexes", nlohmann::json::object()}};
+            }
+            for (auto& [capability, input] : reads) {
+                const ApiResult result =
+                    unwrap(co_await workspace_call("workspace_query",
+                                                   {{"customer_id", page.customer_id},
+                                                    {"capability", capability},
+                                                    {"input", std::move(input)}},
+                                                   context));
+                if (result.ok) {
+                    page.data[capability] = result.value;
+                } else if (page.error.empty()) {
+                    page.error = result.error.message;
+                }
+            }
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_workspace(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    // Form posts. Each runs one or two registry capabilities as the signed-in user and returns to
+    // the page it came from; a failure comes back as ?error=.
+    boost::http::route_task serve_workspace_form(boost::http::route_params& route,
+                                                 std::string action) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        const std::string query = "customer_id=" + oauth_url_encode(customer_id);
+        const auto act = [&](std::string capability, nlohmann::json input) {
+            return workspace_call("workspace_act",
+                                  {{"customer_id", customer_id},
+                                   {"capability", std::move(capability)},
+                                   {"input", std::move(input)}},
+                                  context);
+        };
+        std::string back;
+        ApiResult result = ApiResult::success(nlohmann::json::object());
+        if (action == "start") {
+            const std::string requested = form_field(body, "return");
+            back = requested == "/design/projects" || requested == "/train/data" ||
+                           requested == "/train/runs" || requested == "/ship/models" ||
+                           requested == "/ship/indexes"
+                       ? requested
+                       : std::string("/design/projects");
+            back += "?" + query;
+            result = unwrap(co_await workspace_call(
+                "start_workspace", {{"customer_id", customer_id}}, context));
+        } else if (action == "create_project") {
+            const std::string name = form_field(body, "name");
+            nlohmann::json input{{"name", name}};
+            for (const char* field : {"description", "intent"}) {
+                if (const std::string value = form_field(body, field); !value.empty()) {
+                    input[field] = value;
+                }
+            }
+            result = unwrap(co_await act("create_project", std::move(input)));
+            back = result.ok ? "/design/project?" + query + "&name=" + oauth_url_encode(name)
+                             : "/design/projects?" + query;
+        } else if (action == "compile") {
+            const std::string project = form_field(body, "project");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            result = unwrap(co_await act(
+                "compile_intent", {{"project", project}, {"intent", form_field(body, "intent")}}));
+        } else if (action == "run") {
+            const std::string project = form_field(body, "project");
+            const std::string graph = form_field(body, "graph");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            result = unwrap(co_await act("gate", {{"project", project}, {"graph", graph}}));
+            if (result.ok && result.value.value("block_deploy", false)) {
+                result =
+                    ApiResult::failure("invalid_input",
+                                       "The pipeline did not pass its checks: " +
+                                           result.value.value("verdict", std::string("blocked")));
+            } else if (result.ok) {
+                result = unwrap(co_await act("run", {{"project", project}, {"graph", graph}}));
+                if (result.ok) {
+                    back = "/train/runs?" + query;
+                }
+            }
+        } else if (action == "publish") {
+            back = "/ship/models?" + query;
+            result = unwrap(
+                co_await act(form_field(body, "publish") == "1" ? "expose_model" : "unexpose_model",
+                             {{"model", form_field(body, "model")}}));
+        }
+        if (!result.ok) {
+            back += "&error=" + oauth_url_encode(result.error.message);
+        }
+        co_return co_await redirect(route, back);
     }
 
     // Every environment across the repositories the caller may list, from the same two
@@ -10418,6 +10624,34 @@ bool ApiServer::start() {
             return impl.observe_request(
                 route, "/repositories", impl.serve_repositories_page(route));
         });
+    for (const auto& [path, section] :
+         std::array<std::pair<const char*, const char*>, 7>{{{"/design/projects", "projects"},
+                                                             {"/design/project", "project"},
+                                                             {"/train/data", "data"},
+                                                             {"/train/runs", "runs"},
+                                                             {"/train/run", "run"},
+                                                             {"/ship/models", "models"},
+                                                             {"/ship/indexes", "indexes"}}}) {
+        router.add(http::method::get,
+                   path,
+                   [&impl, path, section](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, path, impl.serve_workspace_page(route, section));
+                   });
+    }
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 5>{
+             {{"/workspace/start", "start"},
+              {"/design/projects/create", "create_project"},
+              {"/design/project/compile", "compile"},
+              {"/design/project/run", "run"},
+              {"/ship/models/publish", "publish"}}}) {
+        router.add(http::method::post,
+                   path,
+                   [&impl, path, action](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, path, impl.serve_workspace_form(route, action));
+                   });
+    }
     router.add(
         http::method::get, "/deployments", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/deployments", impl.serve_deployments_page(route));

@@ -16,6 +16,8 @@ inline constexpr std::string_view operator_control_database = "orama_control";
 inline constexpr std::string_view deployments_table = "deployments";
 inline constexpr std::string_view environment_env_table = "environment_env";
 inline constexpr std::string_view domains_table = "domains";
+// Workspace requests and operator status (docs/api/workspaces.md, liquid-bridge decision 45).
+inline constexpr std::string_view workspaces_table = "workspaces";
 
 inline constexpr std::array<std::string_view, 16> deployment_columns = {
     "operator",
@@ -58,6 +60,17 @@ inline constexpr std::array<std::string_view, 11> domain_columns = {
     "requested_by",
     "updated_at",
     "ordering_token",
+};
+
+inline constexpr std::array<std::string_view, 8> workspace_columns = {
+    "workspace_id",
+    "record_type",
+    "lake",
+    "customer_id",
+    "phase",
+    "url",
+    "message",
+    "updated_at",
 };
 
 struct ZettaControlError {

@@ -29,6 +29,8 @@ struct WebUiViewer {
     // called outside a request (tests, error pages built without one); the page title decides
     // then, as it did before the path was carried.
     std::string path;
+    // The signed-in user's id, so pages can mark the viewer's own personal space.
+    std::string user_id;
     // True when Clerk is lake's sign-in (docs/api/clerk.md); lake's own passkey page is then not
     // offered.
     bool clerk = false;
@@ -150,6 +152,29 @@ std::string web_ui_clerk_sign_in(const ClerkConfig& clerk,
                                  std::string_view error,
                                  bool signed_out,
                                  WebUiViewer viewer = {});
+
+// A customer the viewer may act for, for the workspace pages' selector.
+struct WorkspaceCustomer {
+    std::string id;
+    std::string handle;
+    bool yours = false; // the viewer's personal space
+};
+
+// One Design, Train or Ship page over a customer's Zetta workspace (docs/api/workspaces.md).
+// `section` is projects, project, data, runs, run, models or indexes. `state` is the
+// workspace_status value; `unavailable` explains why workspaces cannot be used at all; `data` holds
+// the Zetta values the section renders, keyed by capability.
+struct WorkspacePage {
+    std::string section;
+    std::vector<WorkspaceCustomer> customers;
+    std::string customer_id;
+    nlohmann::json state = nlohmann::json::object();
+    std::string unavailable;
+    nlohmann::json data = nlohmann::json::object();
+    std::string subject; // the project name or run id of a detail page
+    std::string error;
+};
+std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
 
 // One environment of one repository, for the cross-repository deployments page.
 struct DeploymentSummary {

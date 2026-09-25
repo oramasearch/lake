@@ -1,6 +1,6 @@
 # lake as Orama's cloud: information architecture and navigation
 
-**Status: partly implemented (2026-09-25).** The regrouped sidebar, the account menu, route-keyed navigation, the new home page, Files as the first repository tab, and the cross-repository Deployments page are built; see [`../ui/front-door.md`](../ui/front-door.md). Design, Train, Packages and the Organization section are not. This page is the design for
+**Status: partly implemented (2026-09-25).** The regrouped sidebar, the account menu, route-keyed navigation, the new home page, Files as the first repository tab, and the cross-repository Deployments page are built; see [`../ui/front-door.md`](../ui/front-door.md). Design, Train and Ship over per-customer Zetta workspaces are built too ([`../api/workspaces.md`](../api/workspaces.md), decision 45); Packages and the Organization section are not. This page is the design for
 https://github.com/oramasearch/liquid-bridge/issues/30. It describes what lake's navigation and
 home page become once lake is Orama's cloud offering. What lake serves today is in
 [`../ui/front-door.md`](../ui/front-door.md) and stays accurate until the build issues listed at

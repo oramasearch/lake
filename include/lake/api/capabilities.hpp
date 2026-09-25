@@ -21,5 +21,7 @@ void register_replication_capabilities(Registry& registry);
 void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);
+// Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
+void register_workspace_capabilities(Registry& registry);
 
 } // namespace lake::api

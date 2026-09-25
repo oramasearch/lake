@@ -15,6 +15,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
 #include "lake/version.hpp"
 
@@ -247,13 +248,35 @@ int main(int argc, char** argv) {
                                           opts.instance_kek});
     }
 
+    // Customer Zetta workspaces (docs/api/workspaces.md). The operator injects all four when the
+    // Lake enables workspaces; without them Design, Train and Ship say the feature is unavailable.
+    lake::control::WorkspaceConfig workspace_config{
+        env_or("LAKE_NAME", opts.node_name),
+        env_or("LAKE_DATA_PLANE_URL", ""),
+        env_or("LAKE_DATA_PLANE_TOKEN", ""),
+        env_or("LAKE_WORKSPACE_DIR", ""),
+        env_or("LAKE_WORKSPACE_URL_TEMPLATE", ""),
+    };
+    const bool workspaces_configured = workspace_config.configured();
+    if (workspaces_configured) {
+        if (!platform_transport_required) {
+            lake::control::install_zetta_control_transport();
+        }
+        auto control = std::make_shared<lake::control::ZettaControlClient>(
+            workspace_config.control_url, workspace_config.control_token);
+        opts.workspaces = std::make_shared<lake::control::WorkspaceService>(
+            std::move(workspace_config),
+            std::move(control),
+            std::make_shared<lake::control::ZettaWorkspaceCaller>());
+    }
+
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
     lake::api::ApiServer server(opts);
     if (!server.start()) {
         std::println(stderr, "lake: cannot start: {}", server.reason());
-        if (platform_transport_required) {
+        if (platform_transport_required || workspaces_configured) {
             lake::control::shutdown_zetta_control_transport();
         }
         return 1;
@@ -282,7 +305,7 @@ int main(int argc, char** argv) {
         server.drain();
     }
     server.stop();
-    if (platform_transport_required) {
+    if (platform_transport_required || workspaces_configured) {
         lake::control::shutdown_zetta_control_transport();
     }
     return 0;
