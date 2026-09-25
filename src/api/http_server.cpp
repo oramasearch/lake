@@ -4572,6 +4572,7 @@ struct ApiServer::Impl {
             "/repositories",
             "/repository",
             "/repository/tree",
+            "/deployments",
             "/environments",
             "/environment",
             "/logs",
@@ -4669,6 +4670,7 @@ struct ApiServer::Impl {
 
     ApiContext context_for(const boost::http::route_params& route) const {
         ApiContext ctx;
+        ctx.request_path = std::string(route.url.path());
         ctx.store = options.store.get();
         ctx.search = options.search.get();
         ctx.pki = &pki;
@@ -4758,7 +4760,9 @@ struct ApiServer::Impl {
     }
 
     WebUiViewer viewer_for(const ApiContext& context) const {
-        return {context.authorized, context.operator_credential};
+        WebUiViewer viewer{context.authorized, context.operator_credential};
+        viewer.path = context.request_path;
+        return viewer;
     }
 
     WebUiViewer viewer_for(const boost::http::route_params& route) const {
@@ -6865,6 +6869,42 @@ struct ApiServer::Impl {
         return send_text(route,
                          boost::http::status::ok,
                          web_ui_repositories(repositories, owners, viewer_for(ctx)),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    // Every environment across the repositories the caller may list, from the same two
+    // capabilities the per-repository pages call. A repository whose environments the caller
+    // may not read is skipped rather than failing the page.
+    boost::http::route_task serve_deployments_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/sign-in");
+        }
+        const ApiResult rows = registry.call("list_repositories", {{"limit", 500}}, context);
+        if (!rows.ok) {
+            return serve_page_error(route, rows);
+        }
+        std::vector<DeploymentSummary> environments;
+        std::string stale_since;
+        for (const auto& value : rows.value.at("items")) {
+            control::Repository repository = repository_from_json(value);
+            const ApiResult listed =
+                registry.call("list_environments", {{"repository_id", repository.id}}, context);
+            if (!listed.ok) {
+                continue;
+            }
+            if (stale_since.empty() && listed.value.contains("stale_since") &&
+                listed.value.at("stale_since").is_string()) {
+                stale_since = listed.value.at("stale_since").get<std::string>();
+            }
+            for (const auto& item : listed.value.value("items", nlohmann::json::array())) {
+                environments.push_back({repository, item});
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_deployments(environments, stale_since, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -10239,6 +10279,10 @@ bool ApiServer::start() {
         http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/repositories", impl.serve_repositories_page(route));
+        });
+    router.add(
+        http::method::get, "/deployments", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/deployments", impl.serve_deployments_page(route));
         });
     router.add(
         http::method::get, "/environments", [&impl](http::route_params& route) -> http::route_task {

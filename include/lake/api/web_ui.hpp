@@ -24,6 +24,10 @@ namespace lake::api {
 struct WebUiViewer {
     bool signed_in = false;
     bool administrator = false;
+    // The request path, for choosing the current navigation item. Empty when a renderer is
+    // called outside a request (tests, error pages built without one); the page title decides
+    // then, as it did before the path was carried.
+    std::string path;
 
     WebUiViewer() = default;
     WebUiViewer(bool authenticated) : signed_in(authenticated) {}
@@ -134,6 +138,14 @@ std::string web_ui_repository(const control::Repository& repository,
                               const control::Customer* owner,
                               const std::vector<RepositoryContentRef>& refs = {},
                               WebUiViewer viewer = true);
+// One environment of one repository, for the cross-repository deployments page.
+struct DeploymentSummary {
+    control::Repository repository;
+    nlohmann::json environment;
+};
+std::string web_ui_deployments(const std::vector<DeploymentSummary>& environments,
+                               std::string_view stale_since,
+                               WebUiViewer viewer = true);
 std::string web_ui_environments(const control::Repository& repository,
                                 const nlohmann::json& environments,
                                 WebUiViewer viewer = true);

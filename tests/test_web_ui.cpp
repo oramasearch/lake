@@ -309,16 +309,22 @@ TEST(WebUi, DriveSharingAnswersAccessExpiryAndRevocationQuestions) {
     expect_theme_scripts(shared_with_me);
 }
 
-TEST(WebUi, HomeExplainsTheRepositoryJourney) {
+TEST(WebUi, HomeSaysDesignTrainAndShip) {
     const auto html = lake::api::web_ui_home();
     EXPECT_TRUE(html.starts_with("<!doctype html>"));
-    EXPECT_NE(html.find("Keep your code and files together."), std::string::npos);
-    EXPECT_NE(html.find("Lake hosts your Liquid repositories"), std::string::npos);
-    EXPECT_NE(html.find("1. Create an account"), std::string::npos);
-    EXPECT_NE(html.find("2. Create a repository"), std::string::npos);
-    EXPECT_NE(html.find("3. Push with Liquid"), std::string::npos);
-    EXPECT_NE(html.find("LIQUID_TOKEN"), std::string::npos);
+    EXPECT_NE(html.find("<h1>Design, train, and ship AI on your own data.</h1>"),
+              std::string::npos);
+    EXPECT_NE(html.find("lake by Orama"), std::string::npos);
+    EXPECT_NE(html.find("<h3>Design</h3>"), std::string::npos);
+    EXPECT_NE(html.find("<h3>Train</h3>"), std::string::npos);
+    EXPECT_NE(html.find("<h3>Ship</h3>"), std::string::npos);
+    EXPECT_NE(html.find("liquid push"), std::string::npos);
     EXPECT_NE(html.find("requires access to its source repository"), std::string::npos);
+    EXPECT_NE(html.find("href=\"/sign-up\""), std::string::npos);
+    EXPECT_EQ(html.find("href=\"/deployments\""), std::string::npos);
+    const auto account = lake::api::web_ui_home(true);
+    EXPECT_NE(account.find("Open your repositories"), std::string::npos);
+    EXPECT_NE(account.find("href=\"/deployments\""), std::string::npos);
     EXPECT_NE(html.find(lake::api::web_ui_stylesheet_url()), std::string::npos);
     EXPECT_EQ(html.find("href=\"/style.css\""), std::string::npos);
     EXPECT_NE(html.find("class=\"skip-link\""), std::string::npos);
@@ -1164,4 +1170,72 @@ TEST(WebUi, SharedLinkProvidesScopedNavigationPreviewAndDownload) {
         lake::api::web_ui_drive_link("Shared folder", {}, "expired or revoked");
     EXPECT_NE(denied.find("expired or revoked"), std::string::npos);
     EXPECT_EQ(denied.find("download>Download"), std::string::npos);
+}
+
+TEST(WebUi, NavigationFollowsTheRequestPath) {
+    lake::api::WebUiViewer viewer{true};
+    viewer.path = "/drive/preview";
+    const std::string drive = lake::api::web_ui_home(viewer);
+    EXPECT_NE(drive.find("href=\"/repositories\" aria-current=\"page\""), std::string::npos);
+    EXPECT_EQ(drive.find("href=\"/\" aria-current=\"page\""), std::string::npos);
+    viewer.path = "/deployments";
+    const std::string deployments = lake::api::web_ui_home(viewer);
+    EXPECT_NE(deployments.find("href=\"/deployments\" aria-current=\"page\""), std::string::npos);
+    EXPECT_EQ(deployments.find("href=\"/repositories\" aria-current=\"page\""), std::string::npos);
+    viewer.path = "/drivers";
+    EXPECT_EQ(lake::api::web_ui_home(viewer).find("aria-current=\"page\""), std::string::npos);
+    viewer.path = "/";
+    EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/\" aria-current=\"page\""),
+              std::string::npos);
+}
+
+TEST(WebUi, AccountPagesLiveInTheAccountMenu) {
+    const std::string account = lake::api::web_ui_home(true);
+    const auto menu = account.find("<details class=\"account-menu\">");
+    ASSERT_NE(menu, std::string::npos);
+    const auto sidebar_end = account.find("</aside>");
+    ASSERT_NE(sidebar_end, std::string::npos);
+    for (const std::string_view path : {"/settings", "/sessions", "/passkeys", "/tokens"}) {
+        const auto link = account.find("href=\"" + std::string(path) + "\"");
+        ASSERT_NE(link, std::string::npos) << path;
+        EXPECT_GT(link, sidebar_end) << path;
+    }
+    EXPECT_NE(account.find("<p class=\"nav-label\">Ship</p>"), std::string::npos);
+    EXPECT_EQ(lake::api::web_ui_home({true, true}).find("account-menu"), std::string::npos);
+    EXPECT_EQ(lake::api::web_ui_home().find("account-menu"), std::string::npos);
+}
+
+TEST(WebUi, RepositoryTabsOpenOnFilesAndNameDeployments) {
+    const lake::control::Repository repository{.id = "r1", .name = "data", .visibility = "public"};
+    const lake::api::RepositoryHomeData data;
+    const std::string owner = lake::api::web_ui_repository(repository, nullptr, data, true);
+    const auto files = owner.find(">Files</a>");
+    const auto code = owner.find(">Code</a>");
+    ASSERT_NE(files, std::string::npos);
+    ASSERT_NE(code, std::string::npos);
+    EXPECT_LT(files, code);
+    EXPECT_NE(owner.find("href=\"/drive?repository_id=r1\""), std::string::npos);
+    EXPECT_NE(owner.find(">Deployments</a>"), std::string::npos);
+    EXPECT_EQ(owner.find(">Platform</a>"), std::string::npos);
+    const std::string visitor = lake::api::web_ui_repository(repository, nullptr, data, false);
+    EXPECT_EQ(visitor.find(">Files</a>"), std::string::npos);
+}
+
+TEST(WebUi, DeploymentsListEveryRepositoryEnvironment) {
+    const lake::control::Repository repository{.id = "r 1", .name = "svc<&>"};
+    const nlohmann::json environment{{"name", "production"},
+                                     {"phase", "Running"},
+                                     {"change", "7f3c2a1"},
+                                     {"url", "https://svc.example.test"},
+                                     {"updated_at", "2026-09-25T00:00:00Z"}};
+    const std::string out = lake::api::web_ui_deployments({{repository, environment}}, "", true);
+    EXPECT_NE(out.find("<h1>Deployments</h1>"), std::string::npos);
+    EXPECT_NE(out.find("svc&lt;&amp;&gt;"), std::string::npos);
+    EXPECT_EQ(out.find("svc<&>"), std::string::npos);
+    EXPECT_NE(out.find("href=\"/environment?repository_id=r%201&amp;name=production\""),
+              std::string::npos);
+    EXPECT_NE(out.find("Running"), std::string::npos);
+    EXPECT_NE(lake::api::web_ui_deployments({}, "", true).find("Nothing is deployed yet"),
+              std::string::npos);
+    expect_theme_scripts(out);
 }
