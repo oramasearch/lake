@@ -85,3 +85,5 @@ start the workspace, wait for Ready, create a project, and build a pipeline.
 - A customer cannot delete or suspend a workspace yet, and there is no quota on workspaces.
 - Adding a connection or a dataset has no form yet; use `workspace_act` with `create_connection`.
 - A published model or index is reachable inside the workspace only; lake does not route to it.
+- Workspace reads time out after 15 seconds and actions after 60. Run reports do not load on the
+  current workspace image: `get_run_report` never answers (https://github.com/oramasearch/zetta/issues/1007).

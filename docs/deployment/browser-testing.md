@@ -55,7 +55,7 @@ writes a numbered screenshot per step plus `log.json` to the output directory. T
 | Approve | A proposed pipeline is approved (`approve_plan`); Zetta verifies and runs only approved plans |
 | Check and run | The pipeline passes `gate` and a run starts; the Runs page lists it |
 | Train → Data, Runs; Ship → Models, Search indexes, Deployments; Home | Each page answers 200 with no error line |
-| Run report | The first run's page opens with its status; while it runs, the page says the report comes when it finishes (lake asks for the report only then, because the deployed Zetta drops the connection when asked for a running run's report) |
+| Run report | The first run's page opens with its status. Its report is unavailable on the current workspace image: Zetta's `get_run_report` never answers (https://github.com/oramasearch/zetta/issues/1007), so the page shows *the workspace did not answer get_run_report* after 15 seconds. Expected until that is fixed |
 | Account menu → Sign out | lake and Clerk both sign out; `/design/projects` then redirects to sign-in |
 
 Read `log.json` and **look at the screenshots**: a page can answer 200 and still show an error
