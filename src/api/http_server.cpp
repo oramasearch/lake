@@ -7179,10 +7179,20 @@ struct ApiServer::Impl {
             back = result.ok ? "/design/project?" + query + "&name=" + oauth_url_encode(name)
                              : "/design/projects?" + query;
         } else if (action == "compile") {
+            // Capture the description as the project's intent, then compile that intent. Zetta
+            // compiles a captured input, and an older workspace image requires its input_id.
             const std::string project = form_field(body, "project");
             back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
             result = unwrap(co_await act(
-                "compile_intent", {{"project", project}, {"intent", form_field(body, "intent")}}));
+                "capture_intent", {{"project", project}, {"text", form_field(body, "intent")}}));
+            if (result.ok) {
+                nlohmann::json input{{"project", project}};
+                if (const std::string input_id = result.value.value("input_id", std::string());
+                    !input_id.empty()) {
+                    input["input_id"] = input_id;
+                }
+                result = unwrap(co_await act("compile_intent", std::move(input)));
+            }
         } else if (action == "run") {
             const std::string project = form_field(body, "project");
             const std::string graph = form_field(body, "graph");

@@ -204,6 +204,13 @@ To give someone a lake account in any environment (Clerk on lake.oramadev.net, l
 on-prem) or take access away, follow [`docs/deployment/users.md`](docs/deployment/users.md). On
 dev, accounts are added in the Clerk application `lake`, never through the site.
 
+## Testing in a browser
+
+Sign in to lake.oramadev.net from a browser, and walk every page, with a one-time Clerk sign-in
+ticket: [`docs/deployment/browser-testing.md`](docs/deployment/browser-testing.md)
+(`tools/e2e/clerk-ticket.sh`, then `tools/e2e/walkthrough.mjs`). Do it after any roll that changes
+what a person sees, and look at the screenshots before calling a UI change done.
+
 ## Where to read Zetta
 
 lake builds on Zetta, so you will read Zetta constantly. **Read it only from the umbrella
