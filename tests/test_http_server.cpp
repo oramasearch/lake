@@ -487,6 +487,41 @@ TEST_P(HttpResponseIsolation, SignOutEndsTheSessionOnTheServer) {
     EXPECT_EQ(response_header(replayed, "location"), "/sign-in");
 }
 
+TEST_P(HttpResponseIsolation, TheTokensPageIssuesAndRevokesAToken) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    // No lifetime asked for: the token lasts as long as the session allows (#193).
+    const std::string created = connection->request(
+        "POST", "/identity/token/create", "name=revoke-me&scopes=list_sessions", cookie);
+    ASSERT_TRUE(created.starts_with("HTTP/1.1 200")) << created.substr(0, 300);
+    const auto start = created.find("Copy this token now: <code>");
+    ASSERT_NE(start, std::string::npos);
+    const std::string token =
+        created.substr(start + 27, created.find("</code>", start) - start - 27);
+    const std::string listed =
+        connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + token);
+    ASSERT_TRUE(listed.starts_with("HTTP/1.1 200")) << listed.substr(0, 300);
+    const auto sessions = nlohmann::json::parse(listed.substr(listed.find("\r\n\r\n") + 4));
+    std::string id;
+    for (const auto& session : sessions.at("value").at("items")) {
+        if (session.value("name", "") == "revoke-me") {
+            id = session.at("id");
+        }
+    }
+    ASSERT_FALSE(id.empty());
+    // The page's Revoke button posts session_id; it must reach revoke_session as its id.
+    const std::string revoked = connection->request(
+        "POST", "/identity/session/revoke", "session_id=" + id + "&return_to=/tokens", cookie);
+    EXPECT_TRUE(revoked.starts_with("HTTP/1.1 302")) << revoked.substr(0, 300);
+    const std::string after =
+        connection->request("GET", "/v1/list_sessions", {}, "lake_session=" + token);
+    EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
+}
+
 TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {
     for (const std::string_view path :
          {"/", "/sign-up", "/sign-in", "/v1/server_info", "/v1/openapi.json"}) {
