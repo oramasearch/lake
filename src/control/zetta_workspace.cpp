@@ -58,6 +58,25 @@ nlohmann::json service_json(const ManagedService& service) {
             {"created_at", service.created_at}};
 }
 
+nlohmann::json store_json(const ManagedStore& store) {
+    return {{"id", store.id},
+            {"customer_id", store.customer_id},
+            {"type", store.type},
+            {"provider", store.provider},
+            {"name", store.name},
+            {"slug", store.slug},
+            {"size_gi", store.size_gi},
+            {"region", store.region},
+            {"public", store.is_public},
+            {"desired", store.desired},
+            {"generation", store.generation},
+            {"phase", store.phase},
+            {"message", store.message},
+            {"endpoint", store.endpoint},
+            {"observed_generation", store.observed_generation},
+            {"created_at", store.created_at}};
+}
+
 nlohmann::json WorkspaceState::to_json() const {
     return {{"workspace", slug},
             {"service_id", service_id},
@@ -171,6 +190,49 @@ std::optional<nlohmann::json> WorkspaceService::connection(const ManagedService&
         return std::nullopt;
     }
     return parsed;
+}
+
+Result<std::vector<ManagedStore>> WorkspaceService::stores(const std::string& customer_id) {
+    return store_->list_stores(customer_id);
+}
+
+Result<ManagedStore> WorkspaceService::store(const std::string& customer_id,
+                                             const std::string& store_id) {
+    Result<ManagedStore> found = store_->get_store(store_id);
+    if (found && found->customer_id != customer_id) {
+        return std::unexpected(StoreError{"not_found", "no store " + store_id});
+    }
+    return found;
+}
+
+Result<ManagedStore> WorkspaceService::create_store(NewManagedStore store) {
+    const StoreProvider* provider = find_store_provider(store.type, store.provider);
+    if (provider == nullptr) {
+        return std::unexpected(StoreError{
+            "invalid_input", "there is no " + store.provider + " " + store.type + " store"});
+    }
+    if (!provider->available) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          std::string(provider->label) +
+                                              " is not available on this lake yet: " +
+                                              std::string(provider->unavailable_reason)});
+    }
+    return store_->create_store(store);
+}
+
+Result<ManagedStore> WorkspaceService::delete_store(const std::string& customer_id,
+                                                    const std::string& store_id) {
+    const Result<ManagedStore> found = store(customer_id, store_id);
+    if (!found) {
+        return found;
+    }
+    return store_->withdraw_store(store_id);
+}
+
+std::optional<nlohmann::json> WorkspaceService::store_connection(const ManagedStore& store) const {
+    ManagedService named;
+    named.slug = store.slug;
+    return connection(named);
 }
 
 Result<std::optional<ManagedService>>

@@ -34,6 +34,8 @@ std::string workspace_slug(std::string_view customer_id);
 
 // A service as the API and the pages show it: never its credential.
 nlohmann::json service_json(const ManagedService& service);
+// A store as the API and the pages show it (docs/control-plane/storage.md): never its credential.
+nlohmann::json store_json(const ManagedStore& store);
 
 struct WorkspaceState {
     std::string slug, service_id;
@@ -94,6 +96,18 @@ public:
     // The operator's mounted connection for a service, or nothing before it is delivered. It
     // carries the credential: only service_connection returns it, and never to a page.
     std::optional<nlohmann::json> connection(const ManagedService& service) const;
+
+    // Stores (docs/control-plane/storage.md). Every call is on behalf of `customer_id`; a store of
+    // another customer is not_found.
+    Result<std::vector<ManagedStore>> stores(const std::string& customer_id);
+    Result<ManagedStore> store(const std::string& customer_id, const std::string& store_id);
+    // Refuses a type × provider pair that is not in the provider table or not available on this
+    // lake, with invalid_input naming the reason.
+    Result<ManagedStore> create_store(NewManagedStore store);
+    Result<ManagedStore> delete_store(const std::string& customer_id, const std::string& store_id);
+    // The operator's connection for a store, `<service_dir>/<slug>.json` beside the services'
+    // connections, or nothing before it is delivered.
+    std::optional<nlohmann::json> store_connection(const ManagedStore& store) const;
 
     // The workspace: the default Zetta service.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> state(std::string customer_id);

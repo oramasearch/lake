@@ -40,6 +40,14 @@ constexpr std::array group_rules{
               "ClickHouse, TiDB, Cassandra, Valkey, SQLite, DuckDB, Polars), their connections, "
               "and connecting one to your workspace.",
               [](std::string_view n) { return contains_any(n, {"service"}); }},
+    GroupRule{"Storage",
+              "Buckets, filesystems, network filesystems and volumes lake provisions for you "
+              "(a cluster volume today), and how to reach them.",
+              [](std::string_view n) {
+                  // Exact names: restore_drive_version and others also contain "store".
+                  return n == "list_store_providers" || n == "list_stores" || n == "create_store" ||
+                         n == "delete_store" || n == "store_connection";
+              }},
     GroupRule{"Audit and transparency",
               "The signed audit log, the transparency log and its proofs, timestamps and TUF "
               "metadata.",
@@ -116,8 +124,9 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 8> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 9> group_order{"Workspace: Design, Train and Ship",
                                                       "Services",
+                                                      "Storage",
                                                       "Repositories",
                                                       "Organizations and access",
                                                       "Identity and sessions",
@@ -187,8 +196,8 @@ constexpr std::string_view rules =
     "returns its credentials. Never print them.\n"
     "- `search_index` works only on a **published** index.\n"
     "- `workspace_sql` runs one read-only `SELECT` or `WITH`.\n"
-    "- Deleting a workspace, a service or a repository destroys its data: ask the person "
-    "first.\n";
+    "- Deleting a workspace, a service, a store or a repository destroys its data: ask the "
+    "person first.\n";
 
 } // namespace
 
@@ -246,6 +255,14 @@ const std::vector<Flow>& flows() {
           {"list_services", "poll until the service is `Ready`"},
           {"service_connection", "its endpoint and credentials (keep them secret)"},
           {"connect_service", "make it a Train → Data connection of your workspace"}}},
+        {"Create a volume",
+         "A store is a bucket, filesystem, network filesystem or volume lake provisions for your "
+         "space; today a cluster volume.",
+         {{"list_store_providers", "every type and provider, and which are available"},
+          {"create_store",
+           "`type: \"volume\"`, `provider: \"cluster\"`, a `name`; optional `size_gi`"},
+          {"list_stores", "poll until the store is `Ready`"},
+          {"store_connection", "the claim, namespace, size and storage class to mount"}}},
         {"Search a published index",
          "A search index is BM25F over a dataset; outside callers can search it once it is "
          "published.",

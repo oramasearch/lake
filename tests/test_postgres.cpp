@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <liquid/liquid.hpp>
+#include <pqxx/pqxx>
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
@@ -646,4 +647,92 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     EXPECT_EQ(listed->size(), 3U)
         << "a withdrawn service stays listed until the operator deletes it";
     EXPECT_EQ(store->get_service(lake::control::new_uuid_v4()).error().code, "not_found");
+}
+
+TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:st-" + suffix, "st-" + suffix + "@example.com", "Stores"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "st-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    // The operator's listener: every insert and withdrawal wakes it on the services channel.
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_services",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    lake::control::NewManagedStore volume{customer->id, "volume", "cluster", "uploads", "taap:x"};
+    volume.size_gi = 20;
+    const auto first = store->create_store(volume);
+    ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ(first->slug, lake::control::managed_service_slug("st", first->id));
+    EXPECT_EQ(first->type, "volume");
+    EXPECT_EQ(first->provider, "cluster");
+    EXPECT_EQ(first->size_gi, 20);
+    EXPECT_FALSE(first->is_public);
+    EXPECT_EQ(first->desired, "present");
+    EXPECT_EQ(first->generation, 1);
+    EXPECT_EQ(first->phase, "") << "no status row yet";
+    EXPECT_EQ(store->create_store(volume).error().code, "conflict");
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        const auto spec =
+            tx.exec_params1("SELECT spec::text FROM stores WHERE id = $1::uuid", first->id)[0]
+                .as<std::string>();
+        const json parsed = json::parse(spec);
+        EXPECT_EQ(parsed["size_gi"], 20);
+        EXPECT_EQ(parsed["public"], false);
+        EXPECT_TRUE(parsed.contains("region"));
+    }
+
+    const auto withdrawn = store->withdraw_store(first->id);
+    ASSERT_TRUE(withdrawn) << withdrawn.error().message;
+    EXPECT_EQ(withdrawn->desired, "absent");
+    EXPECT_EQ(withdrawn->generation, 2);
+    EXPECT_EQ(store->withdraw_store(first->id).error().code, "conflict");
+    const auto second = store->create_store(volume);
+    ASSERT_TRUE(second) << "a withdrawn store frees its name: " << second.error().message;
+    EXPECT_NE(second->slug, first->slug) << "a slug is never reused";
+
+    for (int waited = 0; notified.size() < 3 && waited < 50; ++waited) {
+        listener.await_notification(0, 100000);
+    }
+    EXPECT_EQ(notified, (std::vector<std::string>{first->id, first->id, second->id}));
+
+    auto listed = store->list_stores(customer->id);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->size(), 2U) << "a withdrawn store stays listed until the operator deletes it";
+    EXPECT_EQ(listed->front().id, first->id) << "oldest first";
+    {
+        // What the operator writes once the claim is gone.
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO store_status (store_id, phase, message, observed_generation) "
+                       "VALUES ($1::uuid, 'Deleted', 'deleted', 2)",
+                       first->id);
+        tx.exec_params("INSERT INTO store_status (store_id, phase, message, endpoint, "
+                       "observed_generation) VALUES ($1::uuid, 'Ready', 'binds on first use', "
+                       "'pvc/x', 1)",
+                       second->id);
+        tx.commit();
+    }
+    listed = store->list_stores(customer->id);
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 1U) << "a finished deletion is history";
+    EXPECT_EQ(listed->front().phase, "Ready");
+    EXPECT_EQ(listed->front().message, "binds on first use");
+    EXPECT_EQ(listed->front().endpoint, "pvc/x");
+    EXPECT_EQ(listed->front().observed_generation, 1);
+    EXPECT_EQ(store->get_store(first->id)->phase, "Deleted") << "history is still readable";
+    EXPECT_EQ(store->get_store(lake::control::new_uuid_v4()).error().code, "not_found");
 }

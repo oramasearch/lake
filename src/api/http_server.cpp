@@ -4690,6 +4690,9 @@ struct ApiServer::Impl {
             "/train/data/connect-service",
             "/train/data/disconnect",
             "/train/data/pull",
+            "/train/data/store-create",
+            "/train/data/store-delete",
+            "/train/data/store-connection",
             "/environments",
             "/environment",
             "/logs",
@@ -7348,8 +7351,12 @@ struct ApiServer::Impl {
         co_return page;
     }
 
+    // `customer_id` and `extra` serve a form post that answers with the page itself: the post's
+    // customer, and data to show once (the Data page's store connection), never in a URL.
     boost::http::route_task serve_workspace_page(boost::http::route_params& route,
-                                                 std::string section) {
+                                                 std::string section,
+                                                 std::string customer_id = {},
+                                                 nlohmann::json extra = nlohmann::json::object()) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
             co_return co_await redirect(route, "/sign-in");
@@ -7378,7 +7385,8 @@ struct ApiServer::Impl {
         WorkspacePage page;
         page.section = section;
         page.error = query_value(route, "error");
-        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        auto selection = workspace_selection(
+            context, customer_id.empty() ? query_value(route, "customer_id") : customer_id);
         page.customers = std::move(selection.customers);
         page.customer_id = std::move(selection.customer_id);
         if (section == "project") {
@@ -7427,6 +7435,16 @@ struct ApiServer::Impl {
                 page.unavailable = status.error.message;
             } else {
                 page.state = status.value;
+            }
+        }
+        if (page.unavailable.empty() && section == "data") {
+            // Storage does not need the workspace (docs/api/storage.md).
+            const ApiResult stores = unwrap(co_await workspace_call(
+                "list_stores", {{"customer_id", page.customer_id}}, context));
+            if (stores.ok) {
+                page.data["list_stores"] = stores.value;
+            } else if (page.error.empty()) {
+                page.error = stores.error.message;
             }
         }
         if (page.unavailable.empty() && page.state.value("ready", false)) {
@@ -7532,6 +7550,9 @@ struct ApiServer::Impl {
                     page.error = result.error.message;
                 }
             }
+        }
+        for (auto& [key, value] : extra.items()) {
+            page.data[key] = value;
         }
         co_return co_await send_text(route,
                                      boost::http::status::ok,
@@ -7833,6 +7854,54 @@ struct ApiServer::Impl {
                                              "no-store");
             }
             back = "/services?" + query;
+        } else if (action == "store_create") {
+            back = "/train/data?" + query;
+            // One choice of type and provider, "volume:cluster".
+            const std::string chosen = form_field(body, "store");
+            const std::size_t colon = chosen.find(':');
+            nlohmann::json input{
+                {"customer_id", customer_id},
+                {"type", colon == std::string::npos ? chosen : chosen.substr(0, colon)},
+                {"provider", colon == std::string::npos ? std::string() : chosen.substr(colon + 1)},
+                {"name", form_field(body, "name")}};
+            const std::string size = form_field(body, "size_gi");
+            int number = 0;
+            const auto [end, error] =
+                std::from_chars(size.data(), size.data() + size.size(), number);
+            if (!size.empty() && error == std::errc() && end == size.data() + size.size()) {
+                input["size_gi"] = number;
+            }
+            result = unwrap(co_await workspace_call("create_store", std::move(input), context));
+        } else if (action == "store_delete") {
+            back = "/train/data?" + query;
+            result = unwrap(co_await workspace_call("delete_store",
+                                                    {{"customer_id", customer_id},
+                                                     {"store_id", form_field(body, "store_id")},
+                                                     {"confirm", form_field(body, "confirm")}},
+                                                    context));
+        } else if (action == "store_connection") {
+            // Answered with the Data page itself, so the connection never rides in a URL and is
+            // never stored.
+            const std::string store_id = form_field(body, "store_id");
+            result = unwrap(
+                co_await workspace_call("store_connection",
+                                        {{"customer_id", customer_id}, {"store_id", store_id}},
+                                        context));
+            if (result.ok) {
+                const ApiResult listed = unwrap(co_await workspace_call(
+                    "list_stores", {{"customer_id", customer_id}}, context));
+                if (listed.ok) {
+                    for (const nlohmann::json& store :
+                         listed.value.value("stores", nlohmann::json::array())) {
+                        if (store.value("id", std::string()) == store_id) {
+                            result.value["name"] = store.value("name", std::string());
+                        }
+                    }
+                }
+                co_return co_await serve_workspace_page(
+                    route, "data", customer_id, {{"store_connection", std::move(result.value)}});
+            }
+            back = "/train/data?" + query;
         } else if (action == "connect_service") {
             back = "/train/data?" + query;
             result = unwrap(co_await workspace_call(
@@ -11479,7 +11548,7 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 27>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 30>{
              {{"/workspace/start", "start"},
               {"/train/dataset/promote", "dataset_promote"},
               {"/train/data/generate", "dataset_generate"},
@@ -11498,6 +11567,9 @@ bool ApiServer::start() {
               {"/services/create", "service_create"},
               {"/services/delete", "service_delete"},
               {"/services/connection", "service_connection"},
+              {"/train/data/store-create", "store_create"},
+              {"/train/data/store-delete", "store_delete"},
+              {"/train/data/store-connection", "store_connection"},
               {"/workspace/delete", "delete"},
               {"/train/data/connect", "connect"},
               {"/train/data/disconnect", "disconnect"},
