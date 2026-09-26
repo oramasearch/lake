@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "lake/api/pipeline.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -18,25 +19,12 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 18> workspace_reads = {"server_info",
-                                                              "list_projects",
-                                                              "get_project",
-                                                              "get_graph",
-                                                              "list_connections",
-                                                              "list_datasets",
-                                                              "get_dataset",
-                                                              "list_runs",
-                                                              "get_run",
-                                                              "get_run_report",
-                                                              "list_models",
-                                                              "get_model",
-                                                              "model_health",
-                                                              "list_indexes",
-                                                              "get_index",
-                                                              "search",
-                                                              "list_jobs",
-                                                              "get_job"};
-constexpr std::array<std::string_view, 18> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 20> workspace_reads = {
+    "server_info",   "list_projects", "get_project",  "get_graph",    "list_connections",
+    "list_datasets", "get_dataset",   "list_runs",    "get_run",      "get_run_report",
+    "list_models",   "get_model",     "model_health", "list_indexes", "get_index",
+    "search",        "list_jobs",     "get_job",      "get_trace",    "list_traces"};
+constexpr std::array<std::string_view, 23> workspace_actions = {"create_project",
                                                                 "capture_intent",
                                                                 "compile_intent",
                                                                 "approve_plan",
@@ -53,7 +41,12 @@ constexpr std::array<std::string_view, 18> workspace_actions = {"create_project"
                                                                 "expose_index",
                                                                 "unexpose_index",
                                                                 "score",
-                                                                "explain"};
+                                                                "explain",
+                                                                "save_graph",
+                                                                "deploy",
+                                                                "import_n8n",
+                                                                "compile_n8n",
+                                                                "compile_python"};
 
 template <std::size_t Size>
 bool listed(const std::array<std::string_view, Size>& names, std::string_view name) {
@@ -368,7 +361,100 @@ void register_service_capabilities(Registry& registry) {
 
 } // namespace
 
+// One validated pipeline edit (docs/design/zetta-parity.md): read the graph, apply the edit with
+// lake::api::pipeline, and save the whole graph back. The page's forms, REST and MCP all edit
+// through this, so no client has to build a save_graph body or can save a broken graph.
+void register_pipeline_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "edit_pipeline",
+        .title = "Edit a pipeline",
+        .description =
+            "Apply one edit to a pipeline in the customer's workspace and save it: `op` is "
+            "add_step (kind, name), rename_step (step, name), kind_step (step, kind), remove_step "
+            "(step), add_edge (from, to, kind data_flow|control), remove_edge (from, to) or rename "
+            "(name). The result must keep unique step ids, known kinds, edges between existing "
+            "steps "
+            "and no cycle. A saved pipeline is proposed again and must be re-approved to run.",
+        .input_schema = customer_input_schema({{"project", {{"type", "string"}}},
+                                               {"graph", {{"type", "string"}}},
+                                               {"op",
+                                                {{"type", "string"},
+                                                 {"enum",
+                                                  json::array({"add_step",
+                                                               "rename_step",
+                                                               "kind_step",
+                                                               "remove_step",
+                                                               "add_edge",
+                                                               "remove_edge",
+                                                               "rename"})}}},
+                                               {"step", {{"type", "string"}}},
+                                               {"kind", {{"type", "string"}}},
+                                               {"name", {{"type", "string"}}},
+                                               {"from", {{"type", "string"}}},
+                                               {"to", {{"type", "string"}}}},
+                                              json::array({"project", "graph", "op"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            const std::string project = input.at("project");
+            const std::string graph = input.at("graph");
+            set_audit(context, "pipeline.edit", input, "save_graph");
+            auto read = co_await context.workspaces->call(
+                customer, "get_graph", true, {{"project", project}, {"graph", graph}});
+            if (!read) {
+                co_return ApiResult::failure("store_unavailable", read.error().message);
+            }
+            if (!*read) {
+                co_return ApiResult::failure((*read).error().code, (*read).error().message);
+            }
+            auto current = pipeline::from_json(**read);
+            if (!current) {
+                co_return ApiResult::failure("store_error", current.error());
+            }
+            const std::size_t before = current->steps.size();
+            pipeline::Edit edit{.op = input.at("op"),
+                                .step = input.value("step", std::string()),
+                                .kind = input.value("kind", std::string()),
+                                .name = input.value("name", std::string()),
+                                .from = input.value("from", std::string()),
+                                .to = input.value("to", std::string())};
+            auto edited = pipeline::apply(*current, edit);
+            if (!edited) {
+                co_return ApiResult::failure("invalid_input", edited.error());
+            }
+            json save{{"project", project},
+                      {"graph", current->graph_id.empty() ? graph : current->graph_id},
+                      {"nodes", pipeline::steps_json(*edited)},
+                      {"edges", pipeline::edges_json(*edited)}};
+            if (edited->name != current->name) {
+                save["new_name"] = edited->name;
+            }
+            auto saved = co_await context.workspaces->call(customer, "save_graph", false, save);
+            if (!saved) {
+                co_return ApiResult::failure("store_unavailable", saved.error().message);
+            }
+            if (!*saved) {
+                co_return ApiResult::failure((*saved).error().code, (*saved).error().message);
+            }
+            json value = **saved;
+            value["name"] = edited->name;
+            if (edited->steps.size() > before) {
+                value["step"] = edited->steps.back().id;
+            }
+            co_return ApiResult::success(std::move(value));
+        }});
+}
+
 void register_workspace_capabilities(Registry& registry) {
+    register_pipeline_capabilities(registry);
     registry.add(Capability{
         .name = "workspace_status",
         .title = "Workspace status",
