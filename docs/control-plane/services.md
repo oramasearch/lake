@@ -126,6 +126,10 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
   customer at `LAKE_SERVICES_PER_CUSTOMER` live services (default 5).
 - The `/services` page lists every service of a customer with its phase and endpoint, creates and
   deletes them.
+- **`NOTIFY lake_services, '<service id>'`** in the same transaction as every `services` insert and
+  every withdrawal (`desired = 'absent'`), so it is delivered on commit. The operator `LISTEN`s and
+  reconciles the Lake at once instead of on its next poll (lake#197); the poll remains the
+  fallback, so a missed notification only delays.
 - Design, Train and Ship call the customer's default Zetta service at its `endpoint` with the token
   from `$LAKE_SERVICE_DIR/<slug>.json`, read per call and never stored.
 
