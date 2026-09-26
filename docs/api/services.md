@@ -88,7 +88,7 @@ one service at a time, instances 1, 1 GiB. Seconds from *Create*:
 
 | Kind | Operator saw it | Pods Ready | Operator Ready | Usable (`connected`) | `ready_seconds` | Before lake#197 |
 |---|---|---|---|---|---|---|
-| Zetta | 1.7 | 38.5 | 41.4 | 41.4 | 45 | — |
+| Zetta | 1.7 | 38.5 | 41.4 | 41.4 | 30 (Steve, 2026-09-26) | — |
 | Postgres | 1.7 | 40.2 | 43.7 | 43.7 | 45 | ~2 min |
 | SQLite | 1.7 | 21.5 | 24.0 | 24.0 | 25 | 52–123 |
 | DuckDB | 1.7 | 23.5 | 26.5 | 26.5 | 30 | 62–113 |
