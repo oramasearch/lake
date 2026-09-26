@@ -578,7 +578,7 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
                     html.find("</select>", html.find("<select name=\"kind\">")) -
                         html.find("<select name=\"kind\">"));
     EXPECT_NE(menu.find("<select name=\"kind\"><option value=\"zetta\" selected>Zetta — ready in "
-                        "about 45 seconds</option>"),
+                        "about 30 seconds</option>"),
               std::string::npos)
         << menu;
     std::size_t last = 0;
