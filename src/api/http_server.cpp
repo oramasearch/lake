@@ -6661,8 +6661,8 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call(
-            "revoke_session", {{"session_id", form_field(body, "session_id")}}, context);
+        const ApiResult result =
+            registry.call("revoke_session", {{"id", form_field(body, "session_id")}}, context);
         if (!result.ok) {
             co_return co_await send_text(
                 route,
