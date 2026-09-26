@@ -728,6 +728,92 @@ Result<void> InMemoryStore::set_service_status(const std::string& id,
     return std::unexpected(StoreError{"not_found", "no service " + id});
 }
 
+Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<ManagedStore> stores;
+    for (const ManagedStore& store : stores_) {
+        if (store.customer_id == customer_id &&
+            !(store.desired == "absent" && store.phase == "Deleted")) {
+            stores.push_back(store);
+        }
+    }
+    return stores;
+}
+
+Result<ManagedStore> InMemoryStore::get_store(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    for (const ManagedStore& store : stores_) {
+        if (store.id == id) {
+            return store;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no store " + id});
+}
+
+Result<ManagedStore> InMemoryStore::create_store(const NewManagedStore& in) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == in.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+    }
+    for (const ManagedStore& store : stores_) {
+        if (store.customer_id == in.customer_id && store.desired == "present" &&
+            store.name == in.name) {
+            return std::unexpected(
+                StoreError{"conflict", "a store named " + in.name + " already exists"});
+        }
+    }
+    ManagedStore store;
+    store.id = new_uuid_v4();
+    store.customer_id = in.customer_id;
+    store.type = in.type;
+    store.provider = in.provider;
+    store.name = in.name;
+    store.slug = managed_service_slug("st", store.id);
+    store.size_gi = in.size_gi;
+    store.region = in.region;
+    store.is_public = in.is_public;
+    store.desired = "present";
+    store.created_by_taap_id = in.created_by_taap_id;
+    store.created_at = store.updated_at = now_iso8601();
+    stores_.push_back(store);
+    return store;
+}
+
+Result<ManagedStore> InMemoryStore::withdraw_store(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    for (ManagedStore& store : stores_) {
+        if (store.id != id) {
+            continue;
+        }
+        if (store.desired != "present") {
+            return std::unexpected(StoreError{"conflict", "the store is already deleted"});
+        }
+        store.desired = "absent";
+        ++store.generation;
+        store.updated_at = now_iso8601();
+        return store;
+    }
+    return std::unexpected(StoreError{"not_found", "no store " + id});
+}
+
+Result<void> InMemoryStore::set_store_status(const std::string& id,
+                                             std::string phase,
+                                             std::string message,
+                                             std::string endpoint) {
+    std::lock_guard lock(mutex_);
+    for (ManagedStore& store : stores_) {
+        if (store.id == id) {
+            store.phase = std::move(phase);
+            store.message = std::move(message);
+            store.endpoint = std::move(endpoint);
+            store.observed_generation = store.generation;
+            return {};
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no store " + id});
+}
+
 Result<std::uint64_t> InMemoryStore::set_storage_quota(const std::string& customer_id,
                                                        std::uint64_t quota_bytes) {
     std::lock_guard lock(mutex_);

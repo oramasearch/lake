@@ -179,6 +179,15 @@ public:
                                     std::string phase,
                                     std::string message,
                                     std::string endpoint);
+    Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) override;
+    Result<ManagedStore> get_store(const std::string& id) override;
+    Result<ManagedStore> create_store(const NewManagedStore&) override;
+    Result<ManagedStore> withdraw_store(const std::string& id) override;
+    // What the operator writes to store_status; tests and local demos call it directly.
+    Result<void> set_store_status(const std::string& id,
+                                  std::string phase,
+                                  std::string message,
+                                  std::string endpoint);
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -402,6 +411,7 @@ private:
     std::vector<MeteringUsage> metering_usage_;
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
+    std::vector<ManagedStore> stores_;
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;

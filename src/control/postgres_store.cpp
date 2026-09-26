@@ -4025,6 +4025,129 @@ public:
         });
     }
 
+    static constexpr const char* store_columns =
+        "s.id::text, s.customer_id::text, s.type, s.provider, s.name, s.slug, "
+        "COALESCE((s.spec->>'size_gi')::int, 10), COALESCE(s.spec->>'region', ''), "
+        "COALESCE((s.spec->>'public')::boolean, false), "
+        "s.desired, s.generation, s.created_by_taap_id, "
+        "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
+        "COALESCE(st.observed_generation, 0)";
+
+    static ManagedStore store_from(const pqxx::row& row) {
+        ManagedStore store;
+        store.id = row[0].as<std::string>();
+        store.customer_id = row[1].as<std::string>();
+        store.type = row[2].as<std::string>();
+        store.provider = row[3].as<std::string>();
+        store.name = row[4].as<std::string>();
+        store.slug = row[5].as<std::string>();
+        store.size_gi = row[6].as<int>();
+        store.region = row[7].as<std::string>();
+        store.is_public = row[8].as<bool>();
+        store.desired = row[9].as<std::string>();
+        store.generation = row[10].as<std::int64_t>();
+        store.created_by_taap_id = row[11].as<std::string>();
+        store.created_at = row[12].as<std::string>();
+        store.updated_at = row[13].as<std::string>();
+        store.phase = row[14].as<std::string>();
+        store.message = row[15].as<std::string>();
+        store.endpoint = row[16].as<std::string>();
+        store.observed_generation = row[17].as<std::int64_t>();
+        return store;
+    }
+
+    static Result<ManagedStore> one_store(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows =
+            tx.exec_params(std::string("SELECT ") + store_columns +
+                               " FROM stores s LEFT JOIN store_status st ON st.store_id = s.id "
+                               "WHERE s.id = $1::uuid",
+                           id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no store " + id});
+        }
+        return store_from(rows[0]);
+    }
+
+    Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) override {
+        return with_tx<std::vector<ManagedStore>>(
+            [&](pqxx::work& tx) -> Result<std::vector<ManagedStore>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + store_columns +
+                        " FROM stores s LEFT JOIN store_status st ON st.store_id = s.id "
+                        "WHERE s.customer_id = $1::uuid AND NOT (s.desired = 'absent' AND "
+                        "COALESCE(st.phase, '') = 'Deleted') ORDER BY s.created_at, s.id",
+                    customer_id);
+                std::vector<ManagedStore> stores;
+                for (const pqxx::row& row : rows) {
+                    stores.push_back(store_from(row));
+                }
+                return stores;
+            });
+    }
+
+    Result<ManagedStore> get_store(const std::string& id) override {
+        return with_tx<ManagedStore>(
+            [&](pqxx::work& tx) -> Result<ManagedStore> { return one_store(tx, id); });
+    }
+
+    Result<ManagedStore> create_store(const NewManagedStore& in) override {
+        return with_tx<ManagedStore>([&](pqxx::work& tx) -> Result<ManagedStore> {
+            // One writer at a time per customer, so the name check holds.
+            const pqxx::result customers = tx.exec_params(
+                "SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", in.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+            }
+            const pqxx::result named = tx.exec_params(
+                "SELECT 1 FROM stores WHERE customer_id = $1::uuid AND name = $2 AND desired = "
+                "'present'",
+                in.customer_id,
+                in.name);
+            if (!named.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "a store named " + in.name + " already exists"});
+            }
+            const std::string id = new_uuid_v4();
+            const nlohmann::json spec{
+                {"size_gi", in.size_gi}, {"region", in.region}, {"public", in.is_public}};
+            tx.exec_params("INSERT INTO stores (id, customer_id, type, provider, name, slug, spec, "
+                           "created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, "
+                           "$7::jsonb, $8)",
+                           id,
+                           in.customer_id,
+                           in.type,
+                           in.provider,
+                           in.name,
+                           managed_service_slug("st", id),
+                           spec.dump(),
+                           in.created_by_taap_id);
+            // Same channel as services: the operator's listener wakes the Lake at once;
+            // delivered on commit.
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_store(tx, id);
+        });
+    }
+
+    Result<ManagedStore> withdraw_store(const std::string& id) override {
+        return with_tx<ManagedStore>([&](pqxx::work& tx) -> Result<ManagedStore> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE stores SET desired = 'absent', generation = generation + 1, "
+                "updated_at = now() WHERE id = $1::uuid AND desired = 'present' RETURNING id",
+                id);
+            if (rows.empty()) {
+                const Result<ManagedStore> existing = one_store(tx, id);
+                if (!existing) {
+                    return existing;
+                }
+                return std::unexpected(StoreError{"conflict", "the store is already deleted"});
+            }
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_store(tx, id);
+        });
+    }
+
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override {
         return with_tx<std::uint64_t>([&](pqxx::work& tx) -> Result<std::uint64_t> {

@@ -406,3 +406,12 @@ creates the new kinds is deployed.
 `0027_analytics_services` widens `service_kind_check` again for `duckdb` and `polars` (lake#195),
 each served by a wrapper service of ours. Idempotent; guard `analytics_services_guard`. The operator
 vendors it and selects that guard before a binary that offers the kinds is deployed.
+
+## Stores migration
+
+`0028_stores` adds `stores` (written by lake: type, provider, name, `st-` slug, `spec` as
+`{size_gi, region, public}`, desired and generation) and `store_status` (written by the operator),
+with one live name per customer (lake#196). Idempotent (`IF NOT EXISTS`); guard `stores_guard`.
+The operator vendors it (orama-operator#184) and selects that guard before a binary that offers
+storage is deployed. Contract: [`storage.md`](storage.md); capabilities and page:
+[`../api/storage.md`](../api/storage.md).

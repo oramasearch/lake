@@ -384,6 +384,246 @@ void register_service_capabilities(Registry& registry) {
         }});
 }
 
+void store_audit(ApiContext& context, std::string kind, const control::ManagedStore& store) {
+    context.audit_kind = std::move(kind);
+    context.audit_details = {{"customer_id", store.customer_id},
+                             {"store_id", store.id},
+                             {"store_type", store.type},
+                             {"store_provider", store.provider},
+                             {"store_name", store.name}};
+}
+
+// A read on the customer, checked in the handler as list_services does.
+std::optional<ApiResult> refuse_unless_reader(const json& input, ApiContext& context) {
+    const auto object = customer_object(input, context);
+    if (!object) {
+        return ApiResult::failure(object.error().code, object.error().message, object.error().path);
+    }
+    if (context.acting_identity != "admin") {
+        const auto decision = control::authorize(
+            *context.store, context.acting_identity, *object, "read", context.authorization_cache);
+        if (!decision) {
+            return store_failure(decision.error());
+        }
+        if (!decision->allowed) {
+            return ApiResult::failure("unauthorized",
+                                      "principal is not allowed to read the customer");
+        }
+    }
+    return std::nullopt;
+}
+
+json store_types_enum() {
+    json types = json::array();
+    for (const control::StoreProvider& entry : control::store_providers) {
+        if (std::find(types.begin(), types.end(), std::string(entry.type)) == types.end()) {
+            types.push_back(std::string(entry.type));
+        }
+    }
+    return types;
+}
+
+json store_providers_enum() {
+    json providers = json::array();
+    for (const control::StoreProvider& entry : control::store_providers) {
+        if (std::find(providers.begin(), providers.end(), std::string(entry.provider)) ==
+            providers.end()) {
+            providers.push_back(std::string(entry.provider));
+        }
+    }
+    return providers;
+}
+
+// Storage (docs/control-plane/storage.md, lake#196): the provider table and the customer's stores.
+void register_store_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "list_store_providers",
+        .title = "List store providers",
+        .description = "Every type × provider pair a store can be (object, filesystem, "
+                       "network_filesystem, volume on cluster, r2, s3, b2, azure, gcs, lake, "
+                       "zetta, nfs), whether this lake offers it, and why not when it does not.",
+        .input_schema = customer_input_schema(json::object(), json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        // Like every list_ capability it authorizes itself: read on the customer.
+        .authorizes_candidates = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (auto refused = refuse_unless_reader(input, context)) {
+                co_return std::move(*refused);
+            }
+            json providers = json::array();
+            for (const control::StoreProvider& entry : control::store_providers) {
+                json value{{"type", std::string(entry.type)},
+                           {"provider", std::string(entry.provider)},
+                           {"label", std::string(entry.label)},
+                           {"available", entry.available}};
+                if (!entry.available) {
+                    value["unavailable_reason"] = std::string(entry.unavailable_reason);
+                }
+                providers.push_back(std::move(value));
+            }
+            co_return ApiResult::success({{"providers", std::move(providers)}});
+        }});
+    registry.add(Capability{
+        .name = "list_stores",
+        .title = "List stores",
+        .description = "The customer's stores (buckets, filesystems, network filesystems and "
+                       "volumes) with the operator's phase, message and endpoint. Never includes "
+                       "credentials.",
+        .input_schema = customer_input_schema(json::object(), json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .authorizes_candidates = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (auto refused = refuse_unless_reader(input, context)) {
+                co_return std::move(*refused);
+            }
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto listed = context.workspaces->stores(input.at("customer_id"));
+            if (!listed) {
+                co_return store_failure(listed.error());
+            }
+            json stores = json::array();
+            for (const control::ManagedStore& store : *listed) {
+                json value = control::store_json(store);
+                // The operator writes the connection before Ready; the kubelet copies it into
+                // lake's mount up to a minute later.
+                value["connected"] = context.workspaces->store_connection(store).has_value();
+                stores.push_back(std::move(value));
+            }
+            co_return ApiResult::success({{"stores", std::move(stores)}});
+        }});
+    registry.add(Capability{
+        .name = "create_store",
+        .title = "Create a store",
+        .description = "Ask the operator for a new store: a `type` and `provider` pair that "
+                       "list_store_providers reports available (today volume on cluster), a "
+                       "`name`, and optionally `size_gi` 1-100 (default 10) and `region`. Private "
+                       "by default.",
+        .input_schema = customer_input_schema(
+            {{"type", {{"type", "string"}, {"enum", store_types_enum()}}},
+             {"provider", {{"type", "string"}, {"enum", store_providers_enum()}}},
+             {"name", {{"type", "string"}}},
+             {"size_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
+             {"region", {{"type", "string"}}}},
+            json::array({"type", "provider", "name"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            control::NewManagedStore store;
+            store.customer_id = input.at("customer_id");
+            store.type = input.at("type");
+            store.provider = input.at("provider");
+            store.name = input.at("name");
+            store.size_gi = input.value("size_gi", 10);
+            store.region = input.value("region", std::string());
+            store.created_by_taap_id = context.acting_identity;
+            if (!valid_service_name(store.name)) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "name must start with a letter and use lowercase letters, digits and '-', at "
+                    "most 31 characters",
+                    "/name");
+            }
+            if (store.size_gi < 1 || store.size_gi > 100) {
+                co_return ApiResult::failure("invalid_input", "size_gi must be 1-100", "/size_gi");
+            }
+            const auto created = context.workspaces->create_store(std::move(store));
+            if (!created) {
+                co_return store_failure(created.error());
+            }
+            store_audit(context, "store.create", *created);
+            co_return ApiResult::success(control::store_json(*created));
+        }});
+    registry.add(Capability{
+        .name = "delete_store",
+        .title = "Delete a store",
+        .description = "Delete one of the customer's stores. The operator removes it and its "
+                       "data, which cannot be recovered. `confirm` must be the store's name.",
+        .input_schema = customer_input_schema(
+            {{"store_id", {{"type", "string"}}}, {"confirm", {{"type", "string"}}}},
+            json::array({"store_id", "confirm"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto found =
+                context.workspaces->store(input.at("customer_id"), input.at("store_id"));
+            if (!found) {
+                co_return store_failure(found.error());
+            }
+            if (input.at("confirm") != found->name) {
+                co_return ApiResult::failure(
+                    "invalid_input", "confirm must be the store name " + found->name, "/confirm");
+            }
+            store_audit(context, "store.delete", *found);
+            const auto deleted =
+                context.workspaces->delete_store(input.at("customer_id"), input.at("store_id"));
+            if (!deleted) {
+                co_return store_failure(deleted.error());
+            }
+            co_return ApiResult::success(control::store_json(*deleted));
+        }});
+    registry.add(Capability{
+        .name = "store_connection",
+        .title = "Store connection",
+        .description = "How to reach a Ready store: what the operator delivered for its type and "
+                       "provider (for a cluster volume, the claim, namespace, size and storage "
+                       "class). Audited.",
+        .input_schema =
+            customer_input_schema({{"store_id", {{"type", "string"}}}}, json::array({"store_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const auto found =
+                context.workspaces->store(input.at("customer_id"), input.at("store_id"));
+            if (!found) {
+                co_return store_failure(found.error());
+            }
+            store_audit(context, "store.connection", *found);
+            const auto connection = context.workspaces->store_connection(*found);
+            if (found->desired != "present" || found->phase != "Ready" || !connection) {
+                co_return ApiResult::failure(
+                    "workspace_not_ready",
+                    found->desired == "present" && found->phase == "Ready"
+                        ? "the store is ready and its connection is still being delivered to "
+                          "lake; try again in a minute"
+                        : "the store is not ready");
+            }
+            co_return ApiResult::success(*connection);
+        }});
+}
+
 // One Zetta call in the customer's workspace, as an ApiResult.
 liquid::runtime::task<ApiResult>
 zetta(ApiContext& context, std::string customer, std::string capability, bool read, json input) {
@@ -1032,6 +1272,7 @@ void register_workspace_capabilities(Registry& registry) {
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);
     register_service_capabilities(registry);
+    register_store_capabilities(registry);
 }
 
 } // namespace lake::api

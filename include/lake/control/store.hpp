@@ -252,6 +252,63 @@ struct NewManagedService {
     int instances = 1, storage_gi = 10;
     std::size_t max_per_customer = 0; // live services per customer; 0 (the default) means no limit
 };
+// A customer's store (docs/control-plane/storage.md, lake#196): a bucket, filesystem, network
+// filesystem or volume. Two axes: the type (what a client gets) and the provider (what runs it).
+// lake writes the desired fields, the operator the status fields, as for services.
+struct ManagedStore {
+    std::string id, customer_id, type, provider, name, slug;
+    int size_gi = 10;
+    std::string region;
+    bool is_public = false; // private by default
+    std::string desired;    // present | absent
+    std::int64_t generation = 1;
+    std::string created_by_taap_id, created_at, updated_at;
+    std::string phase, message, endpoint; // empty until the operator reports
+    std::int64_t observed_generation = 0;
+};
+struct NewManagedStore {
+    std::string customer_id, type, provider, name, created_by_taap_id;
+    int size_gi = 10;
+    std::string region;
+    bool is_public = false;
+};
+// One valid type × provider pair and whether this lake offers it. Order: what is available first,
+// then by type. The schema's store_type_check and store_provider_check list the same keys.
+struct StoreProvider {
+    std::string_view type, provider, label;
+    bool available = false;
+    std::string_view unavailable_reason; // empty when available
+};
+inline constexpr std::string_view store_phase_two_reason =
+    "needs an Orama account or your own credentials (lake#196 phase 2)";
+inline constexpr StoreProvider store_providers[] = {
+    {"volume", "cluster", "Volume — cluster disk", true, ""},
+    {"object",
+     "r2",
+     "Bucket — Cloudflare R2",
+     false,
+     "needs R2 enabled on Orama's Cloudflare account and a token that can issue bucket keys"},
+    {"object", "s3", "Bucket — AWS S3", false, store_phase_two_reason},
+    {"object", "b2", "Bucket — Backblaze B2", false, store_phase_two_reason},
+    {"object", "azure", "Bucket — Azure Blob", false, store_phase_two_reason},
+    {"object", "gcs", "Bucket — Google Cloud Storage", false, store_phase_two_reason},
+    {"object", "lake", "Bucket — liquid repository", false, "phase 3"},
+    {"object", "zetta", "Bucket — Zetta large objects", false, "phase 3"},
+    {"filesystem", "lake", "Filesystem — Drive", false, "phase 3"},
+    {"filesystem", "zetta", "Filesystem — Zetta", false, "phase 3"},
+    {"network_filesystem", "nfs", "Network filesystem — NFS in the cluster", false, "phase 4"},
+    {"network_filesystem", "azure", "Network filesystem — Azure Files", false, "phase 4"},
+    {"network_filesystem", "s3", "Network filesystem — EFS", false, "phase 4"},
+    {"network_filesystem", "gcs", "Network filesystem — Filestore", false, "phase 4"},
+};
+inline const StoreProvider* find_store_provider(std::string_view type, std::string_view provider) {
+    for (const StoreProvider& entry : store_providers) {
+        if (entry.type == type && entry.provider == provider) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
 struct OAuthProvider {
     std::string pool_id, provider, issuer, client_id, client_secret;
     std::vector<std::string> scopes;
@@ -703,6 +760,14 @@ public:
     virtual Result<ManagedService> create_service(const NewManagedService&) = 0;
     // Marks a service absent so the operator deletes it. Refuses one already absent.
     virtual Result<ManagedService> withdraw_service(const std::string& id) = 0;
+    // Stores (docs/control-plane/storage.md). Lists the customer's stores, oldest first, leaving
+    // out deleted ones the operator has finished with.
+    virtual Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) = 0;
+    virtual Result<ManagedStore> get_store(const std::string& id) = 0;
+    // Creates a store; a live name is a conflict. The provider table is the caller's to check.
+    virtual Result<ManagedStore> create_store(const NewManagedStore&) = 0;
+    // Marks a store absent so the operator deletes it and its data. Refuses one already absent.
+    virtual Result<ManagedStore> withdraw_store(const std::string& id) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
 

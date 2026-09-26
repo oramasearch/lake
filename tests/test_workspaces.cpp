@@ -198,6 +198,56 @@ TEST(Workspaces, ServicesAreNamedPerCustomerAndCapped) {
     EXPECT_EQ(foreign.error().code, "not_found") << "another customer cannot see the service";
 }
 
+TEST(Workspaces, StoresAreNamedPerCustomerAndOnlyAvailablePairsAreCreated) {
+    Workspaces w;
+    ASSERT_NE(lake::control::find_store_provider("volume", "cluster"), nullptr);
+    EXPECT_TRUE(lake::control::find_store_provider("volume", "cluster")->available);
+    EXPECT_EQ(lake::control::store_providers[0].type, "volume") << "the available pair is first";
+    for (const lake::control::StoreProvider& entry : lake::control::store_providers) {
+        EXPECT_EQ(entry.available, entry.type == "volume" && entry.provider == "cluster")
+            << entry.type << "/" << entry.provider;
+        EXPECT_EQ(entry.unavailable_reason.empty(), entry.available);
+    }
+
+    lake::control::NewManagedStore volume{w.customer_id, "volume", "cluster", "uploads", "taap:x"};
+    volume.size_gi = 20;
+    const auto created = w.service->create_store(volume);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->slug, lake::control::managed_service_slug("st", created->id));
+    EXPECT_TRUE(created->slug.starts_with("st-"));
+    EXPECT_EQ(created->size_gi, 20);
+    EXPECT_FALSE(created->is_public) << "private by default";
+    EXPECT_EQ(created->desired, "present");
+    const auto duplicate = w.service->create_store(volume);
+    ASSERT_FALSE(duplicate);
+    EXPECT_EQ(duplicate.error().code, "conflict");
+
+    const auto r2 = w.service->create_store({w.customer_id, "object", "r2", "bucket", "taap:x"});
+    ASSERT_FALSE(r2);
+    EXPECT_EQ(r2.error().code, "invalid_input");
+    EXPECT_NE(r2.error().message.find("needs R2 enabled"), std::string::npos) << r2.error().message;
+    const auto nonsense = w.service->create_store({w.customer_id, "volume", "r2", "odd", "taap:x"});
+    ASSERT_FALSE(nonsense);
+    EXPECT_EQ(nonsense.error().code, "invalid_input");
+
+    const auto foreign =
+        w.service->delete_store("11111111-2222-3333-4444-555555555555", created->id);
+    ASSERT_FALSE(foreign);
+    EXPECT_EQ(foreign.error().code, "not_found") << "another customer cannot see the store";
+    const auto deleted = w.service->delete_store(w.customer_id, created->id);
+    ASSERT_TRUE(deleted);
+    EXPECT_EQ(deleted->desired, "absent");
+    EXPECT_EQ(deleted->generation, 2);
+    const auto again = w.service->delete_store(w.customer_id, created->id);
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().code, "conflict");
+    EXPECT_TRUE(w.service->create_store(volume)) << "a deleted store frees its name";
+    ASSERT_EQ(w.service->stores(w.customer_id)->size(), 2U)
+        << "a deleting store stays listed until the operator is done";
+    ASSERT_TRUE(w.store->set_store_status(created->id, "Deleted", "", ""));
+    EXPECT_EQ(w.service->stores(w.customer_id)->size(), 1U) << "a finished deletion is history";
+}
+
 TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     Workspaces w;
     auto refused = w.run(w.service->call(w.customer_id, "list_projects", true, {}));
@@ -404,6 +454,206 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
         *owner_principal, "delete_workspace", {{"customer_id", owner_customer}, {"confirm", slug}});
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
     EXPECT_EQ(deleted.value["requested"], false);
+}
+
+TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto other = store.sign_in_clerk(minted("other"));
+    ASSERT_TRUE(other);
+    const auto owner_principal = store.context_for(w.secret);
+    const auto other_principal = store.context_for(other->secret);
+    ASSERT_TRUE(owner_principal);
+    ASSERT_TRUE(other_principal);
+    const std::string owner = w.customer_id;
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call =
+        [&](const lake::control::Principal& principal, const std::string& name, json input) {
+            lake::api::ApiContext context;
+            context.store = &store;
+            context.workspaces = w.service.get();
+            context.authorized = true;
+            context.acting_user_id = principal.user_id;
+            context.acting_identity = principal.taap_id;
+            context.request_id = lake::control::new_uuid_v4();
+            auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+            EXPECT_TRUE(completed);
+            return std::move(*completed);
+        };
+
+    const auto providers = call(*owner_principal, "list_store_providers", {{"customer_id", owner}});
+    ASSERT_TRUE(providers.ok) << providers.error.message;
+    ASSERT_EQ(providers.value["providers"].size(), std::size(lake::control::store_providers));
+    EXPECT_EQ(providers.value["providers"][0]["type"], "volume");
+    EXPECT_EQ(providers.value["providers"][0]["available"], true);
+    EXPECT_NE(providers.value.dump().find("lake#196 phase 2"), std::string::npos);
+    EXPECT_FALSE(call(*other_principal, "list_store_providers", {{"customer_id", owner}}).ok);
+
+    const auto refused =
+        call(*owner_principal,
+             "create_store",
+             {{"customer_id", owner}, {"type", "object"}, {"provider", "s3"}, {"name", "bucket"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_NE(refused.error.message.find("your own credentials"), std::string::npos)
+        << refused.error.message;
+    EXPECT_FALSE(call(*owner_principal,
+                      "create_store",
+                      {{"customer_id", owner},
+                       {"type", "volume"},
+                       {"provider", "cluster"},
+                       {"name", "big"},
+                       {"size_gi", 101}})
+                     .ok)
+        << "size is 1-100";
+    EXPECT_FALSE(
+        call(*owner_principal,
+             "create_store",
+             {{"customer_id", owner}, {"type", "volume"}, {"provider", "cluster"}, {"name", "Bad"}})
+            .ok);
+    EXPECT_FALSE(call(*other_principal,
+                      "create_store",
+                      {{"customer_id", owner},
+                       {"type", "volume"},
+                       {"provider", "cluster"},
+                       {"name", "theirs"}})
+                     .ok);
+
+    const auto created = call(*owner_principal,
+                              "create_store",
+                              {{"customer_id", owner},
+                               {"type", "volume"},
+                               {"provider", "cluster"},
+                               {"name", "uploads"},
+                               {"size_gi", 5}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["size_gi"], 5);
+    EXPECT_EQ(created.value["public"], false);
+    const std::string store_id = created.value["id"];
+
+    const auto listed = call(*owner_principal, "list_stores", {{"customer_id", owner}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["stores"].size(), 1U);
+    EXPECT_EQ(listed.value["stores"][0]["connected"], false);
+    EXPECT_FALSE(call(*other_principal, "list_stores", {{"customer_id", owner}}).ok);
+
+    const auto early = call(
+        *owner_principal, "store_connection", {{"customer_id", owner}, {"store_id", store_id}});
+    ASSERT_FALSE(early.ok);
+    EXPECT_EQ(early.error.code, "workspace_not_ready");
+    ASSERT_TRUE(store.set_store_status(store_id, "Ready", "the claim binds on first use", ""));
+    const auto undelivered = call(
+        *owner_principal, "store_connection", {{"customer_id", owner}, {"store_id", store_id}});
+    ASSERT_FALSE(undelivered.ok) << "Ready, but the connection has not reached lake";
+    EXPECT_NE(undelivered.error.message.find("still being delivered"), std::string::npos);
+    const auto record = store.get_store(store_id);
+    ASSERT_TRUE(record);
+    std::ofstream(w.dir / (record->slug + ".json")) << json{{"type", "volume"},
+                                                            {"provider", "cluster"},
+                                                            {"claim", "prod-" + record->slug},
+                                                            {"namespace", "lake"},
+                                                            {"size_gi", 5},
+                                                            {"storage_class", "managed-csi"}}
+                                                           .dump();
+    const auto connection = call(
+        *owner_principal, "store_connection", {{"customer_id", owner}, {"store_id", store_id}});
+    ASSERT_TRUE(connection.ok) << connection.error.message;
+    EXPECT_EQ(connection.value["claim"], "prod-" + record->slug);
+    EXPECT_FALSE(
+        call(*other_principal, "store_connection", {{"customer_id", owner}, {"store_id", store_id}})
+            .ok);
+
+    const auto mismatch =
+        call(*owner_principal,
+             "delete_store",
+             {{"customer_id", owner}, {"store_id", store_id}, {"confirm", "yes"}});
+    ASSERT_FALSE(mismatch.ok);
+    EXPECT_EQ(mismatch.error.code, "invalid_input");
+    EXPECT_EQ(store.get_store(store_id)->desired, "present") << "nothing was deleted";
+    EXPECT_FALSE(call(*other_principal,
+                      "delete_store",
+                      {{"customer_id", owner}, {"store_id", store_id}, {"confirm", "uploads"}})
+                     .ok);
+    const auto deleted =
+        call(*owner_principal,
+             "delete_store",
+             {{"customer_id", owner}, {"store_id", store_id}, {"confirm", "uploads"}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["desired"], "absent");
+    EXPECT_FALSE(
+        call(*owner_principal, "store_connection", {{"customer_id", owner}, {"store_id", store_id}})
+            .ok)
+        << "a deleting store is not handed out";
+}
+
+TEST(Workspaces, DataPageShowsStorageWithTypedDeleteAndRefreshesWhileChanging) {
+    lake::api::WorkspacePage page;
+    page.section = "data";
+    page.customer_id = std::string(customer);
+    page.data["list_stores"] = {{"stores", json::array()}};
+    std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<h2>Storage</h2>"), std::string::npos)
+        << "storage shows before the workspace is ready";
+    EXPECT_NE(html.find("Start Your Workspace"), std::string::npos);
+    EXPECT_NE(html.find("No storage yet."), std::string::npos);
+    EXPECT_NE(html.find("<h3>New Storage</h3>"), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/data/store-create\""), std::string::npos);
+    EXPECT_NE(html.find("<option value=\"volume:cluster\" selected>Volume — cluster disk</option>"),
+              std::string::npos);
+    EXPECT_NE(html.find("<option value=\"object:r2\" disabled>Bucket — Cloudflare R2 — not yet: "
+                        "needs R2 enabled on Orama&#39;s Cloudflare account"),
+              std::string::npos)
+        << html;
+    EXPECT_NE(html.find("value=\"network_filesystem:nfs\" disabled"), std::string::npos);
+    EXPECT_NE(html.find("Filesystem — Drive — not yet: phase 3</option>"), std::string::npos);
+    EXPECT_NE(html.find("name=\"size_gi\""), std::string::npos);
+    EXPECT_EQ(html.find("content=\"3\""), std::string::npos) << "nothing is changing";
+
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["list_stores"]["stores"] = json::array({{{"id", "s1"},
+                                                       {"name", "uploads"},
+                                                       {"type", "volume"},
+                                                       {"provider", "cluster"},
+                                                       {"size_gi", 10},
+                                                       {"desired", "present"},
+                                                       {"phase", "Ready"},
+                                                       {"message", "claim binds on first use"},
+                                                       {"connected", true}}});
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<td>uploads</td><td>Volume</td><td>cluster disk</td><td>10 GiB</td>"
+                        "<td>Ready<br><span class=\"muted\">claim binds on first use</span>"),
+              std::string::npos)
+        << html;
+    EXPECT_NE(html.find("action=\"/train/data/store-connection\""), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/data/store-delete\""), std::string::npos);
+    EXPECT_NE(html.find("deletes the data in it"), std::string::npos);
+    EXPECT_NE(html.find("Type <code>uploads</code> to delete it<input name=\"confirm\" required"),
+              std::string::npos);
+    EXPECT_NE(html.find("name=\"customer_id\" value=\"" + std::string(customer) + "\""),
+              std::string::npos);
+    EXPECT_EQ(html.find("content=\"3\""), std::string::npos) << "a Ready store is settled";
+
+    page.data["list_stores"]["stores"][0]["phase"] = "";
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Waiting for the operator"), std::string::npos);
+    EXPECT_NE(html.find("<meta http-equiv=\"refresh\" content=\"3\">"), std::string::npos);
+    EXPECT_EQ(html.find("action=\"/train/data/store-connection\""), std::string::npos)
+        << "no connection before Ready";
+
+    page.data["list_stores"]["stores"][0]["phase"] = "Ready";
+    page.data["list_stores"]["stores"][0]["desired"] = "absent";
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<td>Deleting"), std::string::npos);
+    EXPECT_EQ(html.find("action=\"/train/data/store-delete\""), std::string::npos);
+    EXPECT_NE(html.find("content=\"3\""), std::string::npos);
+
+    page.data["store_connection"] = {
+        {"name", "uploads"}, {"claim", "prod-st-0123456789ab"}, {"namespace", "lake"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<h2>Connection to uploads</h2>"), std::string::npos);
+    EXPECT_NE(html.find("<code>prod-st-0123456789ab</code>"), std::string::npos);
 }
 
 TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
@@ -1076,22 +1326,13 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
     context.acting_user_id = principal->user_id;
     context.acting_identity = principal->taap_id;
 
-    const std::vector<std::string> features = {"workspace_status",
-                                               "start_workspace",
-                                               "delete_workspace",
-                                               "workspace_query",
-                                               "workspace_act",
-                                               "list_services",
-                                               "create_service",
-                                               "delete_service",
-                                               "service_connection",
-                                               "list_service_kinds",
-                                               "connect_service",
-                                               "search_index",
-                                               "edit_pipeline",
-                                               "get_pipeline",
-                                               "run_pipeline",
-                                               "create_pipeline"};
+    const std::vector<std::string> features = {
+        "workspace_status",   "start_workspace",    "delete_workspace",     "workspace_query",
+        "workspace_act",      "list_services",      "create_service",       "delete_service",
+        "service_connection", "list_service_kinds", "list_store_providers", "list_stores",
+        "create_store",       "delete_store",       "store_connection",     "connect_service",
+        "search_index",       "edit_pipeline",      "get_pipeline",         "run_pipeline",
+        "create_pipeline"};
     const json openapi = lake::api::openapi_document(registry, "test");
     const auto tools = json::parse(
         *liquid::runtime::block_on(lake::api::mcp_dispatch_async(
@@ -1142,6 +1383,14 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
 
     const json kinds = call("list_service_kinds", json::object());
     EXPECT_NE(kinds.dump().find("cassandra"), std::string::npos);
+
+    const json providers = call("list_store_providers", json::object());
+    EXPECT_NE(providers.dump().find("cluster disk"), std::string::npos);
+    const json created =
+        call("create_store", {{"type", "volume"}, {"provider", "cluster"}, {"name", "scratch"}});
+    EXPECT_EQ(created.value("isError", true), false) << created.dump();
+    const json stores = call("list_stores", json::object());
+    EXPECT_NE(stores.dump().find("scratch"), std::string::npos);
 }
 
 TEST(Workspaces, WorkspaceSqlRunsOnlyOneReadOnlyQuery) {

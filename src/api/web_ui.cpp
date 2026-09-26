@@ -2065,6 +2065,150 @@ std::string services_content(const WorkspacePage& page) {
     return out;
 }
 
+// "Volume" and "cluster disk" from the provider table's "Volume — cluster disk"; the raw keys for a
+// pair lake does not know.
+std::pair<std::string, std::string> store_kind_words(std::string_view type,
+                                                     std::string_view provider) {
+    const control::StoreProvider* known = control::find_store_provider(type, provider);
+    if (known == nullptr) {
+        return {std::string(type), std::string(provider)};
+    }
+    constexpr std::string_view dash = " — ";
+    const std::size_t at = known->label.find(dash);
+    if (at == std::string_view::npos) {
+        return {std::string(known->label), std::string(provider)};
+    }
+    return {std::string(known->label.substr(0, at)),
+            std::string(known->label.substr(at + dash.size()))};
+}
+
+std::string store_phase(const nlohmann::json& store) {
+    const std::string phase = json_text(store, "phase");
+    if (json_text(store, "desired") == "absent") {
+        return phase.empty() || phase == "Ready" ? "Deleting" : phase;
+    }
+    if (phase == "Ready" && !store.value("connected", true)) {
+        return "Connecting";
+    }
+    return phase.empty() ? "Waiting for the operator" : phase;
+}
+
+// Train → Data → Storage (docs/api/storage.md, lake#196): the customer's stores, how to reach a
+// Ready one, and a new one. Shown whether or not the workspace is ready; stores do not need it.
+std::string storage_content(const WorkspacePage& page) {
+    const nlohmann::json stores = page.data.value("list_stores", nlohmann::json::object())
+                                      .value("stores", nlohmann::json::array());
+    std::string out = "<section class=\"panel\" id=\"storage\"><h2>Storage</h2><p "
+                      "class=\"muted\">Buckets, filesystems and volumes for your services. "
+                      "Private to your space.</p>";
+    bool settling = false;
+    if (stores.empty()) {
+        out += "<p>No storage yet.</p>";
+    } else {
+        out += "<table><thead><tr><th>Name</th><th>Type</th><th>Provider</th><th>Size</th>"
+               "<th>Status</th><th>Endpoint</th><th></th></tr></thead><tbody>";
+        for (const nlohmann::json& store : stores) {
+            const std::string id = json_text(store, "id");
+            const std::string name = json_text(store, "name");
+            const std::string phase = store_phase(store);
+            const bool deleting = json_text(store, "desired") == "absent";
+            settling = settling || (phase != "Ready" && phase != "Failed");
+            const auto [type, provider] =
+                store_kind_words(json_text(store, "type"), json_text(store, "provider"));
+            std::string actions;
+            if (!deleting && phase == "Ready") {
+                actions +=
+                    std::format("<form method=\"post\" action=\"/train/data/store-connection\">{}{}"
+                                "<button type=\"submit\">Show connection</button></form>",
+                                hidden("customer_id", page.customer_id),
+                                hidden("store_id", id));
+            }
+            if (!deleting) {
+                actions += std::format(
+                    "<details><summary>Delete</summary><form class=\"stack\" method=\"post\" "
+                    "action=\"/train/data/store-delete\">{}{}<p class=\"notice "
+                    "status-warning\">Deleting a store deletes the data in it, which cannot be "
+                    "recovered.</p><label>Type <code>{}</code> to delete it<input "
+                    "name=\"confirm\" required autocomplete=\"off\"></label><button "
+                    "class=\"button button-danger\" type=\"submit\">Delete {}</button></form>"
+                    "</details>",
+                    hidden("customer_id", page.customer_id),
+                    hidden("store_id", id),
+                    web_ui_escape(name),
+                    web_ui_escape(name));
+            }
+            out += std::format(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{} GiB</td><td>{}{}</td><td><code>{}"
+                "</code></td><td>{}</td></tr>",
+                web_ui_escape(name),
+                web_ui_escape(type),
+                web_ui_escape(provider),
+                web_ui_escape(json_text(store, "size_gi")),
+                web_ui_escape(phase),
+                json_text(store, "message").empty()
+                    ? std::string()
+                    : "<br><span class=\"muted\">" + web_ui_escape(json_text(store, "message")) +
+                          "</span>",
+                web_ui_escape(json_text(store, "endpoint")),
+                actions);
+        }
+        out += "</tbody></table>";
+    }
+    if (settling) {
+        out += "<p class=\"muted\">This page checks again every 3 seconds while storage is "
+               "changing.</p><meta http-equiv=\"refresh\" content=\"3\">";
+    }
+    std::string options;
+    bool chosen = false;
+    for (const control::StoreProvider& entry : control::store_providers) {
+        const bool select = entry.available && !chosen;
+        chosen = chosen || select;
+        options +=
+            std::format("<option value=\"{}:{}\"{}{}>{}</option>",
+                        entry.type,
+                        entry.provider,
+                        entry.available ? "" : " disabled",
+                        select ? " selected" : "",
+                        web_ui_escape(entry.available ? std::string(entry.label)
+                                                      : std::string(entry.label) + " — not yet: " +
+                                                            std::string(entry.unavailable_reason)));
+    }
+    out += std::format(
+        "<h3>New Storage</h3><form class=\"stack\" method=\"post\" "
+        "action=\"/train/data/store-create\">{}<label>Type and provider<select "
+        "name=\"store\">{}</select></label><label>Name<input name=\"name\" required "
+        "pattern=\"[a-z][a-z0-9\\-]{{0,30}}\" placeholder=\"uploads\"></label><label>Size (GiB)"
+        "<input name=\"size_gi\" type=\"number\" min=\"1\" max=\"100\" value=\"10\"></label>"
+        "<button class=\"button button-primary\" type=\"submit\">Create storage</button></form>"
+        "</section>",
+        hidden("customer_id", page.customer_id),
+        options);
+    return out;
+}
+
+// How to reach one store, on the response to Show connection only; never stored.
+std::string store_connection_notice(const WorkspacePage& page) {
+    const auto connection = page.data.find("store_connection");
+    if (connection == page.data.end()) {
+        return {};
+    }
+    std::string rows = "<dl>";
+    for (const auto& [key, value] : connection->items()) {
+        if (key == "name") {
+            continue;
+        }
+        rows += "<dt>" + web_ui_escape(key) + "</dt><dd><code>" +
+                web_ui_escape(value.is_string() ? value.get<std::string>() : value.dump()) +
+                "</code></dd>";
+    }
+    return std::format(
+        "<section class=\"panel notice\" role=\"status\"><h2>Connection to {}</h2><p>What a "
+        "service in your space mounts or calls to use it. It is not shown again unless you "
+        "ask.</p>{}</dl></section>",
+        web_ui_escape(json_text(*connection, "name")),
+        rows);
+}
+
 // A value as table text: strings bare, numbers trimmed, everything else as compact JSON.
 std::string cell_text(const nlohmann::json& value) {
     if (value.is_string()) {
@@ -3222,8 +3366,14 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     } else if (page.section == "services") {
         content += services_content(page);
     } else if (!page.state.value("ready", false)) {
+        if (page.section == "data") {
+            content += store_connection_notice(page);
+        }
         content += workspace_gate(page, section);
     } else {
+        if (page.section == "data") {
+            content += store_connection_notice(page);
+        }
         content += workspace_content(page);
         if (page.section == "projects") {
             content += workspace_delete_form(
@@ -3234,6 +3384,9 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
                 "afterwards.",
                 "Delete workspace");
         }
+    }
+    if (page.unavailable.empty() && page.section == "data") {
+        content += storage_content(page);
     }
     return web_ui_shell("lake — " + title, workspace_trail(page, section), content, viewer);
 }

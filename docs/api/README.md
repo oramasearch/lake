@@ -58,6 +58,10 @@ environment/domain mutations, and Loki-compatible log reads.
 [`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
 routes and their exact-byte integration coverage.
 
+[`services.md`](services.md) defines a customer's managed services, and [`storage.md`](storage.md)
+a customer's stores (buckets, filesystems, network filesystems and volumes; a cluster volume in
+phase 1, lake#196), with their capabilities and the Train → Data → Storage panel.
+
 ## Operational routes
 
 | Route | Contract |
