@@ -264,15 +264,19 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
         "customer where you Design (projects and pipelines), Train (data, runs) and Ship "
         "(models, search indexes, services). Everything a person can do on the site is a "
         "capability in one registry, served as REST, OpenAPI and MCP.\n\n"
-        "## Connect\n\n{}\n"
+        "## Connect\n\n{0}\n"
+        "## The lake skill for Claude\n\n"
+        "Download [SKILL.md]({1}/skills/lake/SKILL.md) (public, no key needed) and install it:\n\n"
+        "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {1}/skills/lake/SKILL.md -o "
+        "~/.claude/skills/lake/SKILL.md\n```\n\n"
+        "It says how to connect, which tools to use for which task, the worked flows and the "
+        "rules.\n\n"
         "## Learn more\n\n"
-        "- [Every tool with its input schema]({}/llms-full.txt)\n"
-        "- [OpenAPI]({}/v1/openapi.json)\n"
-        "- [MCP setup, keys and the Claude skill]({}/developer/mcp)\n\n"
+        "- [Every tool with its input schema]({1}/llms-full.txt)\n"
+        "- [OpenAPI]({1}/v1/openapi.json)\n"
+        "- [MCP setup and keys]({1}/developer/mcp)\n\n"
         "## Tools\n\n",
         how_to_connect(origin),
-        origin,
-        origin,
         origin);
     for (const Group& group : tool_groups(registry)) {
         out += std::format("### {}\n\n{}\n\n", group.title, group.summary);
@@ -288,7 +292,10 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
 }
 
 std::string llms_full_txt(const Registry& registry, std::string_view origin) {
-    std::string out = std::format("# lake — every tool\n\n{}\n", how_to_connect(origin));
+    std::string out = std::format(
+        "# lake — every tool\n\n{}\nThe lake skill for Claude: {}/skills/lake/SKILL.md (public).\n\n",
+        how_to_connect(origin),
+        origin);
     for (const Group& group : tool_groups(registry)) {
         out += std::format("## {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
@@ -319,7 +326,8 @@ std::string skill_md(const Registry& registry, std::string_view origin) {
         "# lake\n\n"
         "## Connect\n\n{1}\n"
         "Check the connection with `server_info`, then `tools/list`. Full reference: "
-        "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema).\n\n"
+        "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema). The latest copy of this "
+        "skill is always at {0}/skills/lake/SKILL.md.\n\n"
         "## Which tools for which task\n\n",
         origin,
         how_to_connect(origin));

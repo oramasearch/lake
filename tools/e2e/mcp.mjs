@@ -69,7 +69,11 @@ try {
   const tools = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" });
   check("tools/list", (tools.body.result?.tools ?? []).length > 100, { tools: tools.body.result?.tools?.length });
 
-  const skill = await page.request.get(`${base}/developer/mcp/skill`);
+  // The skill as an agent finds it: linked from the public llms.txt, fetched with no credential.
+  const llms = await (await fetch(`${base}/llms.txt`)).text();
+  const skillUrl = (llms.match(/\((https?:\/\/[^)\s]+\/SKILL\.md)\)/) || [])[1];
+  check("skill-link", !!skillUrl, { url: skillUrl });
+  const skill = await page.request.get(skillUrl ?? `${base}/skills/lake/SKILL.md`, { headers: { cookie: "" } });
   const skillText = await skill.text();
   fs.writeFileSync(`${out}/SKILL.md`, skillText);
   check("skill", skill.status() === 200 && skillText.startsWith("---\nname: lake"),
