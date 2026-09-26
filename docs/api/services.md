@@ -83,8 +83,31 @@ reads the pods' Ready transition from Kubernetes, deletes the service, and print
 Ready), `connected` (lake reads the connection) — with the operator's messages, then the median and
 p90 per kind. `ready_seconds` is the median of `connected`.
 
-The table is filled from the first measurement after lake#197 is deployed; until then
-`ready_seconds` holds provisional values.
+Measured 2026-09-26 on lake.oramadev.net (`3dbbfcd`, operator `main-375debd`), one AKS node,
+one service at a time, instances 1, 1 GiB. Seconds from *Create*:
+
+| Kind | Operator saw it | Pods Ready | Operator Ready | Usable (`connected`) | `ready_seconds` | Before lake#197 |
+|---|---|---|---|---|---|---|
+| Zetta | 1.7 | 38.5 | 41.4 | 41.4 | 30 (Steve, 2026-09-26) | — |
+| Postgres | 1.7 | 40.2 | 43.7 | 43.7 | 45 | ~2 min |
+| SQLite | 1.7 | 21.5 | 24.0 | 24.0 | 25 | 52–123 |
+| DuckDB | 1.7 | 23.5 | 26.5 | 26.5 | 30 | 62–113 |
+| Polars | 1.7 | 32.2 | 34.0 | 34.0 | 35 | 123–124 |
+| Valkey | 1.7 | — | 40.6 | 41.9 | 45 | ~1.3 min |
+| Kafka | 2.4 | 86.6 | 90.2 | 90.2 | 95 | 2 min |
+| ClickHouse | 2.4 | — | 71.9 | 71.9 | 75 | 2.5 min |
+| TiDB | 1.9 | 98.4 | 101.4 | 101.4 | 105 | 3 min |
+| Cassandra | — | — | — | — | 420 (not yet measured) | 8 min |
+
+The operator now sees a new service within about 2 s (lake `NOTIFY`), and lake reads the
+connection as soon as the operator reports Ready (it makes kubelet refresh lake's mount), so what
+remains is the service's own start. The script finds pods by name prefix; Valkey's and
+ClickHouse's operators name theirs differently, so their pod column is empty.
+
+**One sample each.** Rounds 2 and 3 were stopped: the Cassandra run needed more than the one
+node had free, AKS added a node, and a scale-up is not a service's start time. Cassandra is left
+at 420 s until it is measured on a node with room for it. Re-measure (three runs, median) when the
+cluster is quiet, and whenever node size, images or operators change.
 
 ## Known limits
 
