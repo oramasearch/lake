@@ -136,6 +136,54 @@ try {
     note("run-report", { url: page.url(), error: await errorText() });
   }
 
+  // 4a. Search indexes (#187): upload a small CSV, index it, search, publish, call it from outside
+  // with a key scoped to search_index, unpublish, and check the outside call is refused.
+  {
+    const csv = "id,title,body\n1,Renewal risk,Accounts that may not renew this quarter\n2,Expansion,Accounts ready to grow seats\n3,Support load,Tickets per account over time\n";
+    const table = `e2e_docs_${Date.now().toString(36)}`;
+    await page.goto(`${base}/train/data`);
+    await page.locator("form[action='/train/data/upload']").evaluate((form) => { form.closest("details").open = true; });
+    await page.setInputFiles("form[action='/train/data/upload'] input[type=file]", { name: "docs.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
+    await page.fill("form[action='/train/data/upload'] input[name=table_name]", table);
+    await page.getByRole("button", { name: "Upload" }).click();
+    await page.waitForLoadState("load");
+    note("upload-dataset", { error: await errorText(), listed: (await text()).length > 0 });
+    await page.goto(`${base}/ship/indexes`);
+    if (await page.locator("form[action='/ship/indexes/create']").count()) {
+      const option = page.locator("form[action='/ship/indexes/create'] select[name=table] option", { hasText: table });
+      await page.selectOption("form[action='/ship/indexes/create'] select[name=table]", await option.first().getAttribute("value") ?? table).catch(() => {});
+      await page.getByRole("button", { name: "Create index" }).click();
+      await page.waitForLoadState("load");
+      const indexUrl = page.url();
+      note("create-index", { url: indexUrl, error: await errorText() });
+      await page.fill("form[action='/ship/index'] input[name=q]", "renewal");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await page.waitForLoadState("load");
+      await shot("index-search");
+      note("index-search", { hits: await page.locator("main table tbody tr").count(), error: await errorText() });
+      await page.getByRole("button", { name: "Publish" }).click();
+      await page.waitForLoadState("load");
+      await page.getByRole("button", { name: "Create a search key" }).click();
+      await page.waitForLoadState("load");
+      const key = ((await page.locator("p.notice code").first().innerText().catch(() => "")) || "").trim();
+      note("search-key", { issued: key.length > 20, url: page.url() });
+      const id = new URL(indexUrl).searchParams.get("id");
+      const customerId = new URL(indexUrl).searchParams.get("customer_id");
+      const outside = async () => {
+        const res = await fetch(`${base}/v1/search_index?customer_id=${customerId}&index=${id}&query=renewal`, { headers: { Authorization: `Bearer ${key}` } });
+        const body = await res.json().catch(() => ({}));
+        return { status: res.status, hits: body.value?.hits?.length ?? null, error: body.error?.message ?? "" };
+      };
+      note("outside-search", await outside());
+      const other = await fetch(`${base}/v1/list_services?customer_id=${customerId}`, { headers: { Authorization: `Bearer ${key}` } });
+      note("key-cannot-do-more", { status: other.status });
+      await page.goto(indexUrl);
+      await page.getByRole("button", { name: "Unpublish" }).click();
+      await page.waitForLoadState("load");
+      note("outside-search-after-unpublish", await outside());
+    }
+  }
+
   // 4b. Services: create a Postgres service, wait for Ready, show its connection, delete it.
   const service = `e2e-${Date.now().toString(36)}`;
   await page.goto(`${base}/services`);

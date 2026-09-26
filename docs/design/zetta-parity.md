@@ -71,9 +71,9 @@ Each Zetta capability, where it lives in lake, and the phase that delivers it. �
 | `expose_model`, `unexpose_model` | Ship → Models | ✅ |
 | `score`, `explain` | model page, *Score* and *Explain a row* | 3 |
 | `predict` | model page, *Try the endpoint* | 3 |
-| `list_indexes`, `get_index`, `create_index` | Ship → Search indexes, index page, *New index* | ✅ list; 3 |
-| `expose_index`, `unexpose_index` | Ship → Search indexes | 3 |
-| `search`, `serve_search` | index page, *Try a search* | 3 |
+| `list_indexes`, `get_index`, `create_index` | Ship → Search indexes, index page, *New index* | ✅ (#187) |
+| `expose_index`, `unexpose_index` | index page, *Publish* / *Unpublish* | ✅ (#187) |
+| `search`, `serve_search` | index page, *Try a search*; outside callers through lake's `search_index` with a key scoped to it (Zetta's `serve_search` stays inside the cluster) | ✅ (#187) |
 | `list_agents`, `get_agent`, `create_agent`, `update_agent`, `delete_agent` | Design → Agents | 4 |
 | `chat` | agent page, conversation | 4 |
 | `agent_run` | agent page, *Build and run a pipeline* | 4 |

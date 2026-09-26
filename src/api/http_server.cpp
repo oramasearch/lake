@@ -4664,6 +4664,9 @@ struct ApiServer::Impl {
             "/workspace/start",
             "/workspace/delete",
             "/design/pipeline",
+            "/ship/index",
+            "/ship/index/publish",
+            "/ship/indexes/create",
             "/design/pipeline/edit",
             "/design/pipeline/approve",
             "/design/pipeline/gate",
@@ -7276,9 +7279,13 @@ struct ApiServer::Impl {
         page.customer_id = std::move(selection.customer_id);
         if (section == "project") {
             page.subject = query_value(route, "name");
-        } else if (section == "run") {
+        } else if (section == "run" || section == "index") {
             page.subject = query_value(route, "id");
         }
+        page.origin =
+            options.external_origin.empty()
+                ? (options.public_host.empty() ? std::string() : "https://" + options.public_host)
+                : options.external_origin;
         if (page.customer_id.empty()) {
             page.unavailable = "You have no space to work in yet.";
         } else if (!options.workspaces) {
@@ -7323,7 +7330,24 @@ struct ApiServer::Impl {
             } else if (section == "models") {
                 reads = {{"list_models", nlohmann::json::object()}};
             } else if (section == "indexes") {
-                reads = {{"list_indexes", nlohmann::json::object()}};
+                reads = {{"list_indexes", nlohmann::json::object()},
+                         {"list_datasets", nlohmann::json::object()}};
+            } else if (section == "index") {
+                reads = {{"get_index", {{"index_id", page.subject}}}};
+                if (const std::string asked = query_value(route, "q"); !asked.empty()) {
+                    nlohmann::json search{{"target", page.subject}, {"query", asked}};
+                    page.data["search_query"] = asked;
+                    if (const std::string field = query_value(route, "field"); !field.empty()) {
+                        search["field"] = field;
+                        page.data["search_field"] = field;
+                    }
+                    const std::string top_k = query_value(route, "top_k");
+                    const int hits =
+                        top_k.empty() ? 10 : std::clamp(std::atoi(top_k.c_str()), 1, 100);
+                    search["top_k"] = hits;
+                    page.data["search_top_k"] = hits;
+                    reads.push_back({"search", std::move(search)});
+                }
             }
             for (std::size_t index = 0; index < reads.size(); ++index) {
                 auto& [capability, input] = reads[index];
@@ -7574,6 +7598,25 @@ struct ApiServer::Impl {
                                                  "no-store");
                 }
             }
+        } else if (action == "index_create") {
+            nlohmann::json input{{"table", form_field(body, "table")}};
+            nlohmann::json fields = nlohmann::json::array();
+            for (const std::string& field : comma_separated(form_field(body, "fields"))) {
+                fields.push_back(field);
+            }
+            if (!fields.empty()) {
+                input["fields"] = std::move(fields);
+            }
+            result = unwrap(co_await act("create_index", std::move(input)));
+            back = result.ok ? "/ship/index?" + query + "&id=" +
+                                   oauth_url_encode(result.value.value("index_id", std::string()))
+                             : "/ship/indexes?" + query;
+        } else if (action == "index_publish") {
+            const std::string index = form_field(body, "index");
+            back = "/ship/index?" + query + "&id=" + oauth_url_encode(index);
+            result = unwrap(
+                co_await act(form_field(body, "publish") == "1" ? "expose_index" : "unexpose_index",
+                             {{"index", index}}));
         } else if (action == "service_create") {
             back = "/services?" + query;
             nlohmann::json input{{"customer_id", customer_id},
@@ -11216,15 +11259,16 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 9>{{{"/design/projects", "projects"},
-                                                             {"/design/project", "project"},
-                                                             {"/design/pipeline", "pipeline"},
-                                                             {"/train/data", "data"},
-                                                             {"/train/runs", "runs"},
-                                                             {"/train/run", "run"},
-                                                             {"/ship/models", "models"},
-                                                             {"/ship/indexes", "indexes"},
-                                                             {"/services", "services"}}}) {
+         std::array<std::pair<const char*, const char*>, 10>{{{"/design/projects", "projects"},
+                                                              {"/design/project", "project"},
+                                                              {"/design/pipeline", "pipeline"},
+                                                              {"/train/data", "data"},
+                                                              {"/train/runs", "runs"},
+                                                              {"/train/run", "run"},
+                                                              {"/ship/models", "models"},
+                                                              {"/ship/indexes", "indexes"},
+                                                              {"/ship/index", "index"},
+                                                              {"/services", "services"}}}) {
         router.add(http::method::get,
                    path,
                    [&impl, path, section](http::route_params& route) -> http::route_task {
@@ -11232,8 +11276,10 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 22>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 24>{
              {{"/workspace/start", "start"},
+              {"/ship/indexes/create", "index_create"},
+              {"/ship/index/publish", "index_publish"},
               {"/design/pipeline/edit", "pipeline_edit"},
               {"/design/pipeline/approve", "pipeline_approve"},
               {"/design/pipeline/gate", "pipeline_gate"},
