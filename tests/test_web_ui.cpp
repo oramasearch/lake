@@ -259,7 +259,7 @@ TEST(WebUi, DrivePagesExposeBrowseMutationHistoryAndConflictControls) {
     EXPECT_NE(conflict.find("Suspicious merge proposal"), std::string::npos);
     EXPECT_NE(conflict.find("Both sides changed the same greeting."), std::string::npos);
     EXPECT_NE(conflict.find("The merged wording needs review."), std::string::npos);
-    EXPECT_NE(conflict.find("What differs"), std::string::npos);
+    EXPECT_NE(conflict.find("What Differs"), std::string::npos);
     EXPECT_NE(conflict.find("action=\"/drive/conflict/resolve\""), std::string::npos);
     EXPECT_NE(conflict.find("value=\"accept_proposal\""), std::string::npos);
     expect_theme_scripts(conflict);
@@ -277,7 +277,7 @@ TEST(WebUi, DriveSharingAnswersAccessExpiryAndRevocationQuestions) {
                               {"revoked_at", nullptr}};
     const std::string share =
         lake::api::web_ui_drive_share(repository, "main", "docs", {access}, {link}, "", "");
-    EXPECT_NE(share.find("Who can access this folder now"), std::string::npos);
+    EXPECT_NE(share.find("Who Can Access This Folder Now"), std::string::npos);
     EXPECT_NE(share.find("People"), std::string::npos);
     EXPECT_NE(share.find("Organization"), std::string::npos);
     EXPECT_NE(share.find("Anyone holding the link"), std::string::npos);
@@ -302,7 +302,7 @@ TEST(WebUi, DriveSharingAnswersAccessExpiryAndRevocationQuestions) {
                                 {"actions", {"read", "write"}},
                                 {"available", true}};
     const std::string shared_with_me = lake::api::web_ui_shared_with_me({folder}, "");
-    EXPECT_NE(shared_with_me.find("Shared with me"), std::string::npos);
+    EXPECT_NE(shared_with_me.find("Shared with Me"), std::string::npos);
     EXPECT_NE(shared_with_me.find("lake&lt;&amp;&gt;/docs"), std::string::npos);
     EXPECT_NE(shared_with_me.find("taap:1:ed25519:owner"), std::string::npos);
     EXPECT_EQ(shared_with_me.find("lake<&>"), std::string::npos);
@@ -375,7 +375,7 @@ TEST(WebUi, CustomerPagesDoNotAdvertiseImplementationOrOperatorCredentials) {
 
 TEST(WebUi, NavigationMatchesVisitorAccountAndOperatorAccess) {
     const std::string visitor = lake::api::web_ui_home();
-    EXPECT_NE(visitor.find("Public repositories"), std::string::npos);
+    EXPECT_NE(visitor.find("Public Repositories"), std::string::npos);
     EXPECT_NE(visitor.find("href=\"/sign-in\""), std::string::npos);
     EXPECT_NE(visitor.find("href=\"/sign-up\""), std::string::npos);
     for (const std::string_view path : {"/shared-with-me",
@@ -665,13 +665,13 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     const std::string home = lake::api::web_ui_repository(repo, &ada, data);
     EXPECT_NE(home.find("aria-label=\"Repository\""), std::string::npos);
     EXPECT_NE(home.find("Repository root"), std::string::npos);
-    EXPECT_NE(home.find("Recent changes"), std::string::npos);
+    EXPECT_NE(home.find("Recent Changes"), std::string::npos);
     EXPECT_NE(home.find("id=\"lake\""), std::string::npos);
     EXPECT_NE(home.find("Safe &lt;text&gt;"), std::string::npos);
-    EXPECT_NE(home.find("Clone and push"), std::string::npos);
+    EXPECT_NE(home.find("Clone and Push"), std::string::npos);
     EXPECT_NE(home.find("C++"), std::string::npos);
     EXPECT_NE(home.find("Markdown"), std::string::npos);
-    EXPECT_NE(home.find("Effective access"), std::string::npos);
+    EXPECT_NE(home.find("Effective Access"), std::string::npos);
 }
 
 TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
@@ -854,7 +854,7 @@ TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
     const lake::api::RepositoryArtifactFilter filter{
         .action = "action-1", .output = "build/app", .limit = 1};
     const std::string artifacts = lake::api::web_ui_artifacts(repository, page, filter, false);
-    EXPECT_NE(artifacts.find("Build results"), std::string::npos);
+    EXPECT_NE(artifacts.find("Build Results"), std::string::npos);
     EXPECT_NE(artifacts.find("href=\"/artifact?repository_id=r1&amp;id=result-1%3C%26\""),
               std::string::npos);
     EXPECT_NE(artifacts.find("Next page"), std::string::npos);
@@ -910,7 +910,7 @@ TEST(WebUi, IssueTrackerRendersFiltersDiscussionAndLinkedChangesSafely) {
               std::string::npos);
     EXPECT_NE(detail.find("Confirmed with <strong>tests</strong>. &lt;iframe&gt;x&lt;/iframe&gt;"),
               std::string::npos);
-    EXPECT_NE(detail.find("Linked changes"), std::string::npos);
+    EXPECT_NE(detail.find("Linked Changes"), std::string::npos);
     EXPECT_NE(detail.find("blake3:chang…3456789"), std::string::npos);
     EXPECT_EQ(detail.find("<script>x</script>"), std::string::npos);
     expect_theme_scripts(detail);
@@ -1002,7 +1002,7 @@ TEST(WebUi, ReleaseWebhookAndProtectionPagesRenderForgeEvidenceSafely) {
     EXPECT_NE(protection.find("fast-forward only"), std::string::npos);
     EXPECT_NE(protection.find("taap:1:maintainer"), std::string::npos);
     EXPECT_NE(protection.find("review &lt;required&gt;"), std::string::npos);
-    EXPECT_NE(protection.find("Refused updates"), std::string::npos);
+    EXPECT_NE(protection.find("Refused Updates"), std::string::npos);
     expect_theme_scripts(protection);
 }
 

@@ -344,7 +344,7 @@ TEST(Clerk, SignInPageMountsClerkAndExchangesTheLakeTemplateToken) {
 
     const std::string sign_up = lake::api::web_ui_clerk_sign_in(*config, "sign-up", "", false);
     EXPECT_NE(sign_up.find("mountSignUp"), std::string::npos);
-    EXPECT_NE(sign_up.find("Create your account"), std::string::npos);
+    EXPECT_NE(sign_up.find("Create Your Account"), std::string::npos);
 }
 
 TEST(Clerk, AccountMenuOmitsLakePasskeysUnderClerk) {

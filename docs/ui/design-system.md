@@ -98,6 +98,27 @@ scroll container so their identifiers cannot overlap neighboring forms.
 names. Accessible names stay on the surrounding link or button. Unknown names return an empty
 string so an unreviewed icon cannot silently enter the interface.
 
+## Capitalization
+
+Steve, 2026-09-26: nav items and headings are **Title Case** ("Search Indexes", not "Search
+indexes").
+
+| Where | Case | Examples |
+|---|---|---|
+| Sidebar links (`nav()`), sidebar section labels | Title Case | Projects, Search Indexes, Shared with Me, Public Repositories |
+| Page and section titles (`workspace_sections`), `<h1>`–`<h4>` | Title Case | API Tokens, Connect One of Your Services, Sign In with a Passkey, Who Can Access This Folder Now |
+| Body text, buttons, form labels, table headers, eyebrows, `<title>` | Sentence case | *Start your workspace* (button), *The decision it should improve* (label) |
+| A heading that is a full sentence ending in `.`, `?` or `!` | Sentence | *Design, train, and ship AI on your own data.* |
+
+Title Case here: capitalize every word except articles (*a, an, the*), coordinating conjunctions
+(*and, but, or, nor, for, so, yet*) and prepositions of four letters or fewer (*as, at, by, in, of,
+on, to, up, via, per, with, from, into, onto, over, off*); those stay lowercase unless they are the
+first or last word. Acronyms keep their letters ("API", "SSO", "TAAP"); hyphenated words capitalize
+each part ("Multi-Factor"); a verb's particle is capitalized ("Sign In", "Set Up"). Names a person
+typed (a project, a repository, a file path) are shown exactly as typed, never re-cased.
+
+Tests that look for a heading search for its Title Case text.
+
 ## Themes and responsive behavior
 
 The light theme is the default and `prefers-color-scheme` selects dark when there is no explicit

@@ -413,14 +413,14 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     page.customers = {{std::string(customer), "grand-lantern-42", true},
                       {"11111111-2222-3333-4444-555555555555", "acme", false}};
     std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Start your workspace"), std::string::npos);
+    EXPECT_NE(html.find("Start Your Workspace"), std::string::npos);
     EXPECT_NE(html.find("action=\"/workspace/start\""), std::string::npos);
     EXPECT_NE(html.find("grand-lantern-42 (your personal space)"), std::string::npos);
     EXPECT_NE(html.find("<p class=\"eyebrow\">Design</p>"), std::string::npos);
 
     page.state = {{"requested", true}, {"phase", "Provisioning"}, {"ready", false}};
     html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Preparing your workspace"), std::string::npos);
+    EXPECT_NE(html.find("Preparing Your Workspace"), std::string::npos);
     EXPECT_NE(html.find("http-equiv=\"refresh\""), std::string::npos);
 
     page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
@@ -502,7 +502,7 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     page.unavailable = "Design, Train and Ship are not available on this lake yet";
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("not available on this lake yet"), std::string::npos);
-    EXPECT_EQ(html.find("Start your workspace"), std::string::npos);
+    EXPECT_EQ(html.find("Start Your Workspace"), std::string::npos);
 }
 
 TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
@@ -514,7 +514,7 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
     EXPECT_NE(html.find("No services yet."), std::string::npos);
     EXPECT_NE(html.find("action=\"/services/create\""), std::string::npos);
     EXPECT_NE(html.find("may run 5 services"), std::string::npos);
-    EXPECT_EQ(html.find("Start your workspace"), std::string::npos)
+    EXPECT_EQ(html.find("Start Your Workspace"), std::string::npos)
         << "the Services page does not wait for the workspace";
 
     page.data["list_services"]["services"] =
@@ -780,9 +780,9 @@ TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
                                   {"ok", true},
                                   {"attributes", {{"run_id", "r1"}}}}})}}}};
     const std::string run = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(run.find("What the model leans on"), std::string::npos);
+    EXPECT_NE(run.find("What the Model Leans On"), std::string::npos);
     EXPECT_NE(run.find("failed_payments"), std::string::npos);
-    EXPECT_NE(run.find("Most at risk"), std::string::npos);
+    EXPECT_NE(run.find("Most at Risk"), std::string::npos);
     EXPECT_NE(run.find("mrr, seats"), std::string::npos);
     EXPECT_NE(run.find("<h2>Trace</h2>"), std::string::npos);
     EXPECT_NE(run.find("<h2>Log</h2>"), std::string::npos);
@@ -998,7 +998,7 @@ TEST(Workspaces, DataPageOffersTheSpacesServicesAndServicesWarnBeforeDeletingAUs
                                                  {"phase", "Ready"},
                                                  {"desired", "present"}}})}};
     std::string html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Connect one of your services"), std::string::npos);
+    EXPECT_NE(html.find("Connect One of Your Services"), std::string::npos);
     EXPECT_NE(html.find(">Refresh</button>"), std::string::npos) << "crm is already connected";
     EXPECT_NE(html.find("not supported yet: the workspace cannot read valkey"), std::string::npos);
     EXPECT_EQ(html.find(">workspace</td>"), std::string::npos)
@@ -1192,7 +1192,7 @@ TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
                    {"partitions", json::array({{{"partition_id", "p1"}}})}}},
                  {"sample", {{"rows", json::array({{{"id", 1}, {"plan", "pro"}}})}}}};
     html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("First rows"), std::string::npos);
+    EXPECT_NE(html.find("First Rows"), std::string::npos);
     EXPECT_NE(html.find(">pro<"), std::string::npos);
     EXPECT_NE(html.find("action=\"/train/dataset/promote\""), std::string::npos);
 

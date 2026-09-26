@@ -1384,7 +1384,7 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
     const std::string sessions =
         http_request(server.port(), "GET", "/sessions", "", "text/plain", cookie);
     EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
-    EXPECT_NE(sessions.find("Sessions and devices"), std::string::npos);
+    EXPECT_NE(sessions.find("Sessions and Devices"), std::string::npos);
     EXPECT_NE(sessions.find("browser"), std::string::npos);
 
     const std::string mfa_enrollment = http_request(server.port(),
@@ -1395,7 +1395,7 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
                                                     cookie);
     EXPECT_NE(mfa_enrollment.find(" 200 "), std::string::npos) << mfa_enrollment;
     EXPECT_NE(mfa_enrollment.find("otpauth://totp/lake:"), std::string::npos);
-    EXPECT_NE(mfa_enrollment.find("Recovery codes"), std::string::npos);
+    EXPECT_NE(mfa_enrollment.find("Recovery Codes"), std::string::npos);
     EXPECT_NE(mfa_enrollment.find("action=\"/identity/mfa/disable\""), std::string::npos);
 
     const std::string rest_signup = http_request(
@@ -3070,7 +3070,7 @@ TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
     EXPECT_NE(lfs_committed.find(" 200 "), std::string::npos) << lfs_committed;
     const std::string model_page =
         http_request(server.port(), "GET", "/models/ada/fixture-model", "", "text/html");
-    EXPECT_NE(model_page.find("Training provenance"), std::string::npos) << model_page;
+    EXPECT_NE(model_page.find("Training Provenance"), std::string::npos) << model_page;
     EXPECT_NE(model_page.find("weights.bin"), std::string::npos) << model_page;
 
     const std::string created = http_request(
@@ -3492,7 +3492,7 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     const std::string artifacts_page =
         http_get(server.port(), "/artifacts?repository_id=" + public_repository->id + "&limit=1");
     EXPECT_NE(artifacts_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(artifacts_page.find("Build results"), std::string::npos);
+    EXPECT_NE(artifacts_page.find("Build Results"), std::string::npos);
     EXPECT_NE(artifacts_page.find("Next page"), std::string::npos);
     const std::string artifact_page =
         http_get(server.port(),
