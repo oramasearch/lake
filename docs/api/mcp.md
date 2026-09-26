@@ -52,7 +52,8 @@ Developer → MCP):
   (`mcp.json` with `url` and `headers`), Claude Desktop (`mcp-remote` through `npx`), and plain
   JSON-RPC `curl` (`initialize`, `tools/list`). Each block has a **Copy** button: the page's one
   added script, `copy-buttons` (`navigator.clipboard.writeText` of the block's text).
-- **Teach Your Agent**: *Download the lake skill* (`GET /developer/mcp/skill`, `SKILL.md` as an
+- **Teach Your Agent**: *Download the lake skill* (`GET /skills/lake/SKILL.md`, **public** and linked
+  from `/llms.txt` with a one-line install command; `/developer/mcp/skill` serves the same; `SKILL.md` as an
   attachment, for `~/.claude/skills/lake/`), `/llms.txt`, `/llms-full.txt`, and OpenAPI.
 - **Worked Flows**: build and run a pipeline (`create_pipeline` → `edit_pipeline` →
   `get_pipeline` → `workspace_act` `approve_plan` → `run_pipeline`), stand up and connect a

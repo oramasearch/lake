@@ -582,8 +582,10 @@ TEST_P(HttpResponseIsolation, TheMcpPageMakesAKeyThatWorksOverMcp) {
     EXPECT_NE(write.find("credential does not grant create_token"), std::string::npos)
         << write.substr(0, 600);
 
-    const std::string skill = connection->request("GET", "/developer/mcp/skill", {}, cookie);
-    ASSERT_TRUE(skill.starts_with("HTTP/1.1 200"));
+    // The skill is linked from llms.txt and downloads with no credential.
+    EXPECT_NE(llms.find("(http://localhost/skills/lake/SKILL.md)"), std::string::npos);
+    const std::string skill = connection->request("GET", "/skills/lake/SKILL.md");
+    ASSERT_TRUE(skill.starts_with("HTTP/1.1 200")) << skill.substr(0, 200);
     EXPECT_EQ(response_header(skill, "content-disposition"), "attachment; filename=SKILL.md");
     EXPECT_NE(skill.find("name: lake"), std::string::npos);
     EXPECT_NE(skill.find("approve_plan"), std::string::npos);

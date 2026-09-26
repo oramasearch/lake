@@ -6442,7 +6442,7 @@ std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer) {
         copy_block("mcp-desktop", "Claude Desktop (claude_desktop_config.json)", desktop) +
         copy_block("mcp-curl", "Any client: JSON-RPC over HTTP", curl) + "</section>";
     content += "<section class=\"panel\"><h2>Teach Your Agent</h2><ul>"
-               "<li><a href=\"/developer/mcp/skill\" download=\"SKILL.md\">Download the lake "
+               "<li><a href=\"/skills/lake/SKILL.md\" download=\"SKILL.md\">Download the lake "
                "skill</a>: a Claude skill (<code>SKILL.md</code>) with the setup, which tools to "
                "use for what, the flows below and the rules. Put it in "
                "<code>~/.claude/skills/lake/</code>.</li>"

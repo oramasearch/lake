@@ -4742,6 +4742,7 @@ struct ApiServer::Impl {
             "/developer/mcp",
             "/developer/mcp/key",
             "/developer/mcp/skill",
+            "/skills/lake/SKILL.md",
             "/llms.txt",
             "/llms-full.txt",
             "/identity/sign-up",
@@ -6392,17 +6393,14 @@ struct ApiServer::Impl {
                                      "no-store");
     }
 
+    // Public, like llms.txt, which links it: the skill holds no one's data, only how to use lake.
     boost::http::route_task serve_mcp_skill(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
         route.res.set("content-disposition", "attachment; filename=SKILL.md");
         return send_text(route,
                          boost::http::status::ok,
                          agent_docs::skill_md(registry, public_origin(route)),
                          "text/markdown; charset=utf-8",
-                         "no-store");
+                         "public, max-age=300");
     }
 
     // Public: an agent learns lake from one URL (llmstxt.org).
@@ -11368,6 +11366,12 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/developer/mcp/skill", impl.serve_mcp_skill(route));
+               });
+    router.add(http::method::get,
+               "/skills/lake/SKILL.md",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/skills/lake/SKILL.md", impl.serve_mcp_skill(route));
                });
     router.add(
         http::method::get, "/llms.txt", [&impl](http::route_params& route) -> http::route_task {
