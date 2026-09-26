@@ -358,9 +358,10 @@ void register_service_capabilities(Registry& registry) {
             }
             // Everything the operator delivered for this kind (docs/control-plane/services.md,
             // The catalog), for example Kafka's bootstrap and SASL settings.
+            // Zetta was refused above; for every other kind the token, where there is one (SQLite),
+            // is the credential the customer asked for.
             json value = *connection;
             value.erase("kind");
-            value.erase("token");
             co_return ApiResult::success(std::move(value));
         }});
 }
