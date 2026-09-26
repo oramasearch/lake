@@ -30,31 +30,44 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - name: Check out source and submodules
-        uses: actions/checkout@v4
+      # Private repositories are read with one read-only deploy key each (secrets DEPLOY_KEY_*,
+      # docs/build/ci.md). The ssh agent maps each key to its repository by the key's comment and
+      # rewrites both git@ and https:// URLs of those repositories onto it.
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
         with:
-          submodules: recursive
-          token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
+          ssh-private-key: |
+            ${{ secrets.DEPLOY_KEY_COROSIO }}
+            ${{ secrets.DEPLOY_KEY_BEAST2 }}
+            ${{ secrets.DEPLOY_KEY_ORAMACORE_CPP }}
+            ${{ secrets.DEPLOY_KEY_AUTOMERGE_CPP }}
+            ${{ secrets.DEPLOY_KEY_LIQUID }}
+            ${{ secrets.DEPLOY_KEY_ZETTA }}
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Check out submodules
+        run: git submodule update --init --recursive --depth 1
 
       - name: Check out the Zetta client source
-        uses: actions/checkout@v4
-        with:
-          repository: oramasearch/zetta-bridge
-          ref: 5aba1ef333d969c1bfd45225936c596e537f4317
-          path: _external/zetta-bridge
-          submodules: recursive
-          token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
+        # Only Zetta's client headers and transport are compiled, so its own submodules are not
+        # needed. Bump this ref with the zetta-bridge pin lake is built against.
+        run: |
+          git init -q _external/zetta
+          git -C _external/zetta remote add origin git@github.com:oramasearch/zetta.git
+          git -C _external/zetta fetch -q --depth 1 origin acb61fed527515e63affb2e5264ce27f93c44954
+          git -C _external/zetta checkout -q FETCH_HEAD
 
       - name: Check out the liquid source
         # liquid is a sibling module of liquid-bridge, not a submodule of lake. The bridge holds
         # the one pin; bump this ref when the bridge bumps liquid.
-        uses: actions/checkout@v4
-        with:
-          repository: oramasearch/liquid
-          ref: aa60e8788b883f3e041706741650277fd5befdcb
-          path: _external/liquid
-          submodules: recursive
-          token: ${{ secrets.ORAMA_SUBMODULES_TOKEN }}
+        run: |
+          git init -q _external/liquid
+          git -C _external/liquid remote add origin git@github.com:oramasearch/liquid.git
+          git -C _external/liquid fetch -q --depth 1 origin aa60e8788b883f3e041706741650277fd5befdcb
+          git -C _external/liquid checkout -q FETCH_HEAD
+          git -C _external/liquid submodule update --init --recursive --depth 1
 
       - name: Restore FetchContent dependencies
         uses: actions/cache@v4
@@ -94,7 +107,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DLAKE_BUILD_TESTS=ON
           -DPython3_EXECUTABLE=/usr/bin/python3
-          -DLAKE_ZETTA_SOURCE_DIR=${{ github.workspace }}/_external/zetta-bridge/modules/zetta
+          -DLAKE_ZETTA_SOURCE_DIR=${{ github.workspace }}/_external/zetta
           -DLAKE_LIQUID_SOURCE_DIR=${{ github.workspace }}/_external/liquid
           -DCMAKE_C_COMPILER=clang-19
           -DCMAKE_CXX_COMPILER=clang++-19

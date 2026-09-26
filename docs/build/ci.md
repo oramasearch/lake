@@ -7,10 +7,10 @@ installer.
 
 ## Build and test workflow
 
-[`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It checks out all
-submodules recursively, checks out the pinned `oramasearch/zetta-bridge` source, starts a Postgres
-16 service, configures Release with `LAKE_BUILD_TESTS=ON` and
-`LAKE_ZETTA_SOURCE_DIR=<checkout>/modules/zetta`, builds with clang-19, applies `db/schema.sql`, then
+[`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It loads one read-only
+deploy key per private repository (below), checks out all submodules recursively, fetches the
+pinned `oramasearch/zetta` and `oramasearch/liquid` commits, starts a Postgres 16 service,
+configures Release with `LAKE_BUILD_TESTS=ON` and `LAKE_ZETTA_SOURCE_DIR=_external/zetta`, builds with clang-19, applies `db/schema.sql`, then
 runs:
 
 ```sh
@@ -57,8 +57,10 @@ consumer build. Its `LIQUID_BUILD_CLI` and `LIQUID_BUILD_TESTS` options stay off
 Zetta remains an external source dependency. `LAKE_ZETTA_SOURCE_DIR` must name the one authorized
 `zetta-bridge/modules/zetta` checkout. Lake builds a client-only `zetta-api` from that directory and
 links it to Lake's existing Boost.HTTP, Beast2, Capy, and Corosio targets, so the binary contains
-one networking stack. CI pins the bridge commit and the image workflow supplies the same directory
-as the `zetta_source` named build context.
+one networking stack. CI fetches only the pinned `oramasearch/zetta` commit (the one `zetta-bridge` pins), without
+its submodules, because only its client headers and transport are compiled; the image workflow
+supplies the same directory as the `zetta_source` named build context. Bump the ref in both
+workflows when the bridge bumps Zetta, and the liquid ref when liquid-bridge bumps liquid.
 
 Lake's plain environment-value check compiles libliquid's existing private detector source into
 `lake-core`. The detector has no exported shared-library API, so this keeps static and shared builds
@@ -99,8 +101,7 @@ The resulting OCI image labels are `org.opencontainers.image.revision` and
 record can therefore compare its source revision with one public API response. Images published
 before this change lack those fields and need a clearly marked manually maintained source record.
 
-The Linux/amd64 image is verified by this native CI worker or the AKS builder after
-`ORAMA_SUBMODULES_TOKEN` is available. Apple Silicon developer machines do not need to emulate the
+The Linux/amd64 image is verified by this native CI worker or the AKS builder. Apple Silicon developer machines do not need to emulate the
 amd64 image recipe; that emulation is not a release proof.
 
 The image link also verifies that the provider-bound audit implementation is compiled exactly once
@@ -115,19 +116,34 @@ gh workflow run image.yml --repo oramasearch/lake --ref <git-tag> -f tag=<git-ta
 
 Do not dispatch an already-published tag. Create and push a new Git tag for a new image.
 
-## Required credentials
+## Credentials
 
-Steve must create these Actions secrets before the workflows can complete their external work:
+**Private repositories: one read-only deploy key each** (set up 2026-09-25). CI reads six private
+repositories: lake's submodules `oramasearch/corosio`, `oramasearch/beast2` and
+`oramasearch/oramacore-cpp`, liquid's `oramasearch/automerge-cpp`, and `oramasearch/liquid` and
+`oramasearch/zetta` themselves. Each has a deploy key titled *lake CI (read-only)*; its private
+half is the lake Actions secret `DEPLOY_KEY_<REPO>` (`DEPLOY_KEY_COROSIO`, `DEPLOY_KEY_BEAST2`,
+`DEPLOY_KEY_ORAMACORE_CPP`, `DEPLOY_KEY_AUTOMERGE_CPP`, `DEPLOY_KEY_LIQUID`, `DEPLOY_KEY_ZETTA`).
+`webfactory/ssh-agent` (MIT, pinned by commit) loads them, maps each to its repository by the
+key's comment `git@github.com:oramasearch/<repo>.git`, and rewrites both `git@` and `https://`
+URLs of that repository onto it. A deploy key reads one repository and nothing else, which is why
+it is used instead of a personal token with organization-wide reach.
+
+To add a private dependency: `ssh-keygen -t ed25519 -N "" -C "git@github.com:oramasearch/<repo>.git"
+-f <repo>` in a scratch directory, `gh repo deploy-key add <repo>.pub --repo oramasearch/<repo>
+--title "lake CI (read-only)"`, `gh secret set DEPLOY_KEY_<REPO> --repo oramasearch/lake < <repo>`,
+add the secret to the `ssh-private-key` list in both workflows, and delete the local key files. To
+rotate one, delete its deploy key and repeat.
+
+**Docker Hub** (image workflow only):
 
 | Secret | Scope and use |
 |---|---|
-| `ORAMA_SUBMODULES_TOKEN` | Organization-level Actions secret available to `oramasearch/lake`; a fine-grained token with read access to the organization's private repositories, passed to recursive `actions/checkout`. |
 | `DOCKERHUB_USERNAME` | Repository Actions secret containing the Docker Hub account allowed to push `oramasearch/lake`. |
 | `DOCKERHUB_TOKEN` | Repository Actions secret containing that account's Docker Hub access token with push permission. |
 
-Until `ORAMA_SUBMODULES_TOKEN` exists, CI stops during checkout. Until the two Docker Hub secrets
-exist, a tag build cannot log in or publish. Neither secret is created by this repository or its
-workflows.
+Until the two Docker Hub secrets exist, a tag build cannot log in or publish; images are built on
+the cluster's BuildKit instead (`.claude/skills/liquid-dev` in liquid-bridge).
 
 ## Verify and change
 

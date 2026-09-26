@@ -321,8 +321,9 @@ that licence boundary.
   `libstdc++6 libpq5 ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot
   satisfy a `runAsNonRoot` pod security context).
 - GitHub Actions uses the same toolchain for pull-request builds and publishes the Dockerfile image
-  on a Git tag, only for `linux/amd64`. `ORAMA_SUBMODULES_TOKEN`, `DOCKERHUB_USERNAME` and
-  `DOCKERHUB_TOKEN` must be configured by Steve before the workflows can complete. See
+  on a Git tag, only for `linux/amd64`. Private repositories are read with one read-only deploy key each
+  (secrets `DEPLOY_KEY_*`); `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` must still be configured by
+  Steve before the image workflow can publish. See
   `docs/build/ci.md`.
 - Deployment images are CI-built immutable `oramasearch/lake:<tag>` images; the workflow also
   publishes `oramasearch/lake:sha-<short-sha>` and rejects `latest`. The Docker Hub repo is private;
