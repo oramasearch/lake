@@ -64,6 +64,20 @@ line or an empty state that should not be empty. The walkthrough creates a proje
 `e2e-<time>` in the tester's workspace each run and deletes it at the end; on a workspace image
 without Zetta's `delete_project` the delete step reports an error and the project stays.
 
+## 3c. Test the service catalog
+
+```sh
+node tools/e2e/services.mjs https://lake.oramadev.net /tmp/lake-ticket /tmp/lake-services            # every kind
+node tools/e2e/services.mjs https://lake.oramadev.net /tmp/lake-ticket /tmp/lake-services kafka sqlite # some
+```
+
+Each kind goes through the Services page: create (1 GiB), wait for Ready, compare the time with the
+kind's expected start time from the menu, *Show connection* (field names only, never values),
+delete, and wait until it is gone. `sqlite` also runs real SQL through a port-forward (create,
+insert, a batch that must roll back, select). `log.json` records every step and the exit code is
+non-zero on any failure. Run it after anything that touches a service kind: the lake-service skill
+(liquid-bridge `.claude/skills/lake-service`) requires it.
+
 ## What a failure usually means
 
 | Symptom | Where to look |

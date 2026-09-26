@@ -32,7 +32,7 @@ reached lake's mount, which the kubelet does up to a minute after the operator w
   | TiDB | 3 min | about 4 minutes |
   | Cassandra | 8 min | about 10 minutes |
   | Valkey | 1.3 min | about 2 minutes |
-  | SQLite | not yet measured | about 1 minute |
+  | SQLite | 52 s | about 1 minute |
 
   Re-measure and update the table when node size, images or operators change.
 - **New service:** kind (Valkey is marked *preview, not for production*: its upstream operator
