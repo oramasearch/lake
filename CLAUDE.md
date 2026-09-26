@@ -249,6 +249,14 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   and are the unit-tested surface. Every page has the two documented theme scripts; the two
   passkey pages each add one script required to call `navigator.credentials`. Data pages call
   capabilities through `Registry::call` and can never do what the API cannot.
+- **Nav items and headings are Title Case** — "Search Indexes", not "Search indexes": every
+  sidebar link and section label, page and section title (`workspace_sections`), and `<h1>`–`<h4>`.
+  Capitalize every word except articles, coordinating conjunctions and prepositions of four
+  letters or fewer (*a, an, the, and, but, or, for, as, at, by, in, of, on, to, via, with, from,
+  into, over*), which stay lowercase unless first or last; acronyms stay as written ("API Tokens");
+  phrasal verbs keep their particle ("Sign In"). Body text, buttons, form labels and eyebrows stay
+  sentence case; a heading written as a full sentence ending in punctuation stays a sentence. Rules
+  and examples: `docs/ui/design-system.md` → *Capitalization*.
 - IBM Plex Sans and Mono are self-hosted WOFF2 assets embedded into the binary and served below
   content-hashed `/fonts/` URLs with immutable cache headers. Pages use the content-hashed
   stylesheet URL; unhashed stylesheet and font aliases use `no-cache`. The browser never needs a

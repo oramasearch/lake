@@ -9895,7 +9895,7 @@ struct ApiServer::Impl {
                 route,
                 boost::http::status::not_found,
                 web_ui_shell(
-                    "lake — model", "not found", "<h1>Model not found</h1>", viewer_for(route)),
+                    "lake — model", "not found", "<h1>Model Not Found</h1>", viewer_for(route)),
                 "text/html; charset=utf-8",
                 "no-store");
         }
@@ -9907,7 +9907,7 @@ struct ApiServer::Impl {
                              boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
                              web_ui_shell("lake — model",
                                           "error",
-                                          "<h1>Model unavailable</h1><p class=\"error\">" +
+                                          "<h1>Model Unavailable</h1><p class=\"error\">" +
                                               web_ui_escape(result.error.message) + "</p>",
                                           viewer_for(context)),
                              "text/html; charset=utf-8",

@@ -583,8 +583,8 @@ TEST_F(PlatformFixture, RenderersAndDiscoveryExposePlatformSurface) {
     json environment = *platform->get_environment(repository.id, "production");
     const std::string detail_page = lake::api::web_ui_environment(
         repository, environment, *platform->list_deployments(repository.id, "production", 100));
-    EXPECT_NE(detail_page.find("Environment variables"), std::string::npos);
-    EXPECT_NE(detail_page.find("Deployment history"), std::string::npos);
+    EXPECT_NE(detail_page.find("Environment Variables"), std::string::npos);
+    EXPECT_NE(detail_page.find("Deployment History"), std::string::npos);
     EXPECT_NE(detail_page.find("platform/domain/create"), std::string::npos);
 
     const json logs{
