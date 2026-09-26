@@ -185,6 +185,17 @@ try {
   }
 
   // 4b. Services: create a Postgres service, wait for Ready, show its connection, delete it.
+  // First delete any e2e- service a crashed earlier run left behind.
+  await page.goto(`${base}/services`);
+  for (const leftover of await page.locator("tr:has(form[action='/services/delete'])").filter({ hasText: /^e2e-/ }).all()) {
+    const leftoverName = (await leftover.locator("td").first().innerText()).trim().split(/\s/)[0];
+    await leftover.locator("details summary").click();
+    await leftover.locator("input[name=confirm]").fill(leftoverName);
+    await leftover.getByRole("button", { name: `Delete ${leftoverName}` }).click();
+    await page.waitForLoadState("load");
+    note("cleanup-leftover-service", { name: leftoverName, error: await errorText() });
+    await page.goto(`${base}/services`);
+  }
   const service = `e2e-${Date.now().toString(36)}`;
   await page.goto(`${base}/services`);
   await page.selectOption("form[action='/services/create'] select[name=kind]", "postgres");
@@ -211,7 +222,9 @@ try {
     note("service-connection", { shown: (await page.locator("main").innerText()).includes("postgresql://"), url: page.url() });
   }
   // 4c. Connect the Postgres service from Train → Data (#188) and pull a dataset through it.
-  if (status.startsWith("Ready")) {
+  await page.goto(`${base}/services`);
+  const serviceReady = (await row().count()) && (await row().locator("td").nth(3).innerText()).startsWith("Ready");
+  if (serviceReady) {
     await page.goto(`${base}/train/data`);
     const connectRow = page.locator("tr", { hasText: service }).filter({ has: page.locator("form[action='/train/data/connect-service']") });
     if (await connectRow.count()) {
