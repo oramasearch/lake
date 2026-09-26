@@ -218,18 +218,21 @@ inline std::string managed_service_slug(std::string_view prefix, std::string_vie
 }
 // The service catalog (docs/control-plane/services.md, liquid-bridge decision 47), in menu
 // order. The schema's service_kind_check lists the same keys.
+// `ready_minutes` is how long a new service of the kind usually takes to become Ready, rounded up
+// from the times measured on lake.oramadev.net on 2026-09-26 (docs/api/services.md).
 struct ServiceKind {
     std::string_view key, label;
+    int ready_minutes = 2;
     bool preview = false; // upstream operator not yet production-ready
 };
 inline constexpr ServiceKind service_kinds[] = {
-    {"postgres", "Postgres"},
-    {"zetta", "Zetta"},
-    {"kafka", "Kafka"},
-    {"clickhouse", "ClickHouse"},
-    {"tidb", "TiDB"},
-    {"cassandra", "Cassandra"},
-    {"valkey", "Valkey", true},
+    {"postgres", "Postgres", 2},
+    {"zetta", "Zetta", 2},
+    {"kafka", "Kafka", 3},
+    {"clickhouse", "ClickHouse", 3},
+    {"tidb", "TiDB", 4},
+    {"cassandra", "Cassandra", 10},
+    {"valkey", "Valkey", 2, true},
 };
 inline const ServiceKind* find_service_kind(std::string_view key) {
     for (const ServiceKind& kind : service_kinds) {

@@ -17,6 +17,22 @@ customer's workspace is marked *(workspace)*. The page refreshes every 15 second
 is changing. A service the operator reports Ready shows *Connecting* until its connection has
 reached lake's mount, which the kubelet does up to a minute after the operator writes it.
 
+- **Expected start times.** The kind menu says how long each kind usually takes to become
+  Ready, and a starting service shows that time, how long ago it started, and a note once it has
+  taken more than twice as long. The times are `control::service_kinds[].ready_minutes`, rounded up
+  from what was measured on lake.oramadev.net on 2026-09-26 on one node:
+
+  | Kind | Measured | Shown |
+  |---|---|---|
+  | Postgres | ~2 min | about 2 minutes |
+  | Zetta | ~1–2 min | about 2 minutes |
+  | Kafka | 2 min | about 3 minutes |
+  | ClickHouse | 2.5 min | about 3 minutes |
+  | TiDB | 3 min | about 4 minutes |
+  | Cassandra | 8 min | about 10 minutes |
+  | Valkey | 1.3 min | about 2 minutes |
+
+  Re-measure and update the table when node size, images or operators change.
 - **New service:** kind (Valkey is marked *preview, not for production*: its upstream operator
   says so), name (lowercase letters, digits and `-`, starting with a letter), 1–3
   instances, 1–100 GiB of storage. The page shows how many services the space may run.
