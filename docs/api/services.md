@@ -41,7 +41,7 @@ reached lake's mount, which the kubelet does up to a minute after the operator w
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
   every field the operator delivered for that kind (a Postgres URI, Kafka's bootstrap and SASL
   settings, and so on) once. It is never put in a URL, a redirect or the list.
-- **Delete:** type the service's name. The operator deletes the cluster and its data, which cannot
+- **Delete:** type the service's name. When a Train → Data connection uses the service, the form says so. The operator deletes the cluster and its data, which cannot
   be recovered; the row shows *Deleting* until it is gone.
 
 ## Capabilities
