@@ -2039,8 +2039,7 @@ std::string services_content(const WorkspacePage& page) {
         "placeholder=\"crm\"></label><label>Instances<select name=\"instances\"><option>1"
         "</option><option>2</option><option>3</option></select></label><label>Storage (GiB)"
         "<input name=\"storage_gi\" type=\"number\" min=\"1\" max=\"100\" value=\"10\">"
-        "</label><p class=\"muted\">This space may run {} services at once. Each kind's "
-        "usual start time is next to it.</p><button "
+        "</label><p class=\"muted\">{}Each kind's usual start time is next to it.</p><button "
         "class=\"button button-primary\" type=\"submit\">Create service</button></form>"
         "</section>",
         hidden("customer_id", page.customer_id),
@@ -2055,8 +2054,14 @@ std::string services_content(const WorkspacePage& page) {
             }
             return options;
         }(),
-        web_ui_escape(
-            json_text(page.data.value("list_services", nlohmann::json::object()), "limit")));
+        [&] {
+            // No limit (0, the default) says nothing; a configured one is stated.
+            const std::string limit =
+                json_text(page.data.value("list_services", nlohmann::json::object()), "limit");
+            return limit.empty() || limit == "0"
+                       ? std::string()
+                       : "This space may run " + web_ui_escape(limit) + " services at once. ";
+        }());
     return out;
 }
 

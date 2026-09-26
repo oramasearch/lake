@@ -29,7 +29,8 @@ writes the connection (orama-operator#183), so this lasts seconds, not the minut
   node size, images or operators change.
 - **New service:** kind (Zetta first and preselected, then the rest by name; no kind is marked
   preview — decision 47), name (lowercase letters, digits and `-`, starting with a letter), 1–3
-  instances, 1–100 GiB of storage. The page shows how many services the space may run.
+  instances, 1–100 GiB of storage. A space may run any number of services unless the operator
+  of the lake sets `LAKE_SERVICES_PER_CUSTOMER`; the page states a limit only when one is set.
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
   every field the operator delivered for that kind (a Postgres URI, Kafka's bootstrap and SASL
   settings, and so on) once. It is never put in a URL, a redirect or the list.
@@ -57,7 +58,7 @@ service id, kind and name. `start_workspace` and `delete_workspace`
 | Variable | Set by | Meaning |
 |---|---|---|
 | `LAKE_SERVICE_DIR` | operator | The mounted Secret `lake-<lake>-services`, one `<slug>.json` per Ready service. Without it, Services, Design, Train and Ship say they are not available |
-| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, default 5; `0` means no limit |
+| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer; default `0`, no limit (Steve, 2026-09-26) |
 
 ## Verify
 

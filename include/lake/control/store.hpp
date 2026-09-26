@@ -249,7 +249,7 @@ struct NewManagedService {
     std::string customer_id, kind, name, created_by_taap_id;
     bool is_default = false;
     int instances = 1, storage_gi = 10;
-    std::size_t max_per_customer = 5; // live services per customer; 0 means no limit
+    std::size_t max_per_customer = 0; // live services per customer; 0 (the default) means no limit
 };
 struct OAuthProvider {
     std::string pool_id, provider, issuer, client_id, client_secret;
