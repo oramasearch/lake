@@ -360,7 +360,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view search[] = {"/search"};
     static constexpr std::string_view deployments[] = {"/deployments"};
     static constexpr std::string_view projects[] = {"/design"};
-    static constexpr std::string_view data[] = {"/train/data"};
+    static constexpr std::string_view data[] = {"/train/data", "/train/dataset", "/train/query"};
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
     static constexpr std::string_view models[] = {"/ship/models"};
     static constexpr std::string_view indexes[] = {"/ship/indexes", "/ship/index"};
@@ -1573,7 +1573,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 10> workspace_sections{{
+constexpr std::array<WorkspaceSection, 12> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1592,6 +1592,12 @@ constexpr std::array<WorkspaceSection, 10> workspace_sections{{
      "Data",
      "/train/data",
      "The connections and datasets your workspace trains on."},
+    {"dataset", "Train", "Dataset", "/train/data", ""},
+    {"query",
+     "Train",
+     "Query",
+     "/train/data",
+     "Read-only SQL over your workspace's data: one SELECT or WITH query at a time."},
     {"runs",
      "Train",
      "Runs",
@@ -2609,13 +2615,42 @@ std::string workspace_content(const WorkspacePage& page) {
                     "type=\"submit\">Remove</button></form></td></tr>",
                     web_ui_escape(json_text(connection, "name")),
                     web_ui_escape(json_text(connector, "type")),
-                    web_ui_escape(where),
+                    web_ui_escape(where) + " · " +
+                        row_link("/train/data?" + query +
+                                     "&browse=" + url_component(json_text(connection, "name")),
+                                 "Browse tables"),
                     from_service,
                     web_ui_escape(json_text(connection, "created")),
                     hidden("customer_id", page.customer_id),
                     hidden("name", json_text(connection, "name")));
             }
             out += "</tbody></table>";
+        }
+        // Browse one connection's tables (list_source_tables, lake#181).
+        if (const auto browsed = data.find("list_source_tables"); browsed != data.end()) {
+            out += std::format("<h3>Tables in {}</h3>", web_ui_escape(page.subject));
+            std::string rows;
+            for (const nlohmann::json& table : browsed->value("tables", nlohmann::json::array())) {
+                std::string columns;
+                for (const nlohmann::json& column :
+                     table.value("columns", nlohmann::json::array())) {
+                    columns += (columns.empty() ? "" : ", ") + json_text(column, "column") + " " +
+                               json_text(column, "type");
+                }
+                rows += std::format(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td class=\"muted\">{}</td></tr>",
+                    web_ui_escape(json_text(table, "schema")),
+                    web_ui_escape(json_text(table, "table")),
+                    web_ui_escape(json_text(table, "kind")),
+                    web_ui_escape(columns));
+            }
+            out += rows.empty()
+                       ? std::string("<p>No tables.</p>")
+                       : "<table><thead><tr><th>Schema</th><th>Table</th><th>Kind</th>"
+                         "<th>Columns</th></tr></thead><tbody>" +
+                             rows +
+                             "</tbody></table>"
+                             "<p class=\"muted\">Pull one with <em>Pull a dataset</em> below.</p>";
         }
         // Connect one of the space's own services (lake#188): one click, no password typed or
         // shown.
@@ -2685,12 +2720,26 @@ std::string workspace_content(const WorkspacePage& page) {
             "</details>",
             hidden("customer_id", page.customer_id));
         out += "</section><section class=\"panel\"><h2>Datasets</h2>";
-        out += datasets.empty() ? "<p>No datasets yet.</p>"
-                                : workspace_table(datasets,
-                                                  {{"name", "Name"},
-                                                   {"rows", "Rows"},
-                                                   {"size_bytes", "Bytes"},
-                                                   {"format", "Format"}});
+        if (datasets.empty()) {
+            out += "<p>No datasets yet.</p>";
+        } else {
+            out += "<table><thead><tr><th>Name</th><th>Rows</th><th>Bytes</th><th>Format</th></tr>"
+                   "</thead><tbody>";
+            for (const nlohmann::json& dataset : datasets) {
+                const std::string name = json_text(dataset, "name");
+                out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                                   row_link("/train/dataset?" + query + "&database=" +
+                                                url_component(json_text(dataset, "database")) +
+                                                "&name=" + url_component(name),
+                                            name),
+                                   web_ui_escape(json_text(dataset, "rows")),
+                                   web_ui_escape(json_text(dataset, "size_bytes")),
+                                   web_ui_escape(json_text(dataset, "format")));
+            }
+            out += "</tbody></table>";
+        }
+        out +=
+            std::format("<p>{}</p>", row_link("/train/query?" + query, "Query your data with SQL"));
         out += std::format(
             "<details><summary>Upload a file</summary><form class=\"stack\" method=\"post\" "
             "action=\"/train/data/upload\" enctype=\"multipart/form-data\">{}<label>File (CSV or "
@@ -2721,7 +2770,94 @@ std::string workspace_content(const WorkspacePage& page) {
                 hidden("customer_id", page.customer_id),
                 options);
         }
+        // Dataset generators (list_dataset_generators / generate_dataset, lake#181).
+        const nlohmann::json generators =
+            data.value("list_dataset_generators", nlohmann::json::object())
+                .value("generators", nlohmann::json::array());
+        if (!generators.empty()) {
+            std::string options;
+            for (const nlohmann::json& generator : generators) {
+                options += std::format("<option value=\"{}\">{}</option>",
+                                       web_ui_escape(json_text(generator, "kind")),
+                                       web_ui_escape(json_text(generator, "title").empty()
+                                                         ? json_text(generator, "kind")
+                                                         : json_text(generator, "title")));
+            }
+            out += std::format(
+                "<details><summary>Generate a dataset</summary><form class=\"stack\" "
+                "method=\"post\" "
+                "action=\"/train/data/generate\">{}<label>Generator<select "
+                "name=\"kind\">{}</select>"
+                "</label><label>Variants per subject<input name=\"variants_per_subject\" "
+                "type=\"number\" min=\"1\" max=\"50\" placeholder=\"4\"></label><button "
+                "class=\"button button-primary\" "
+                "type=\"submit\">Generate</button></form></details>",
+                hidden("customer_id", page.customer_id),
+                options);
+        }
         out += "</section>";
+    } else if (page.section == "dataset") {
+        const nlohmann::json dataset = data.value("get_dataset", nlohmann::json::object());
+        std::string columns;
+        for (const nlohmann::json& column : dataset.value("columns", nlohmann::json::array())) {
+            columns += (columns.empty() ? "" : ", ") + cell_text(column);
+        }
+        const nlohmann::json partitions = dataset.value("partitions", nlohmann::json::array());
+        const std::string database = json_text(dataset, "database").empty()
+                                         ? std::string("datasets")
+                                         : json_text(dataset, "database");
+        out += std::format(
+            "<section class=\"panel\"><dl><dt>Database</dt><dd>{}</dd><dt>Format</dt><dd>{}</dd>"
+            "<dt>Rows</dt><dd>{}</dd><dt>Columns</dt><dd>{}</dd><dt>Partitions</dt><dd>{}</dd>{}</"
+            "dl>"
+            "<form class=\"inline\" method=\"post\" "
+            "action=\"/train/dataset/promote\">{}{}{}<button "
+            "type=\"submit\">Keep durable</button></form> <span class=\"muted\">A dataset pulled "
+            "from a connection is a cache with one copy; this keeps more copies.</span> "
+            "{}</section>",
+            web_ui_escape(database),
+            web_ui_escape(json_text(dataset, "format")),
+            web_ui_escape(cell_text(dataset.value("expected_rows", nlohmann::json("")))),
+            web_ui_escape(columns),
+            partitions.size(),
+            dataset.value("degraded", false)
+                ? "<dt>Health</dt><dd class=\"error\">" +
+                      web_ui_escape(json_text(dataset, "degraded_reason")) + "</dd>"
+                : std::string(),
+            hidden("customer_id", page.customer_id),
+            hidden("database", database),
+            hidden("dataset", page.subject),
+            row_link(
+                "/train/query?" + query + "&statement=" +
+                    url_component("SELECT * FROM " + database + "." + page.subject + " LIMIT 100"),
+                "Query it"));
+        if (const auto sample = data.find("sample"); sample != data.end()) {
+            out += "<section class=\"panel\"><h2>First rows</h2>" +
+                   object_table(sample->value("rows", nlohmann::json::array())) + "</section>";
+        }
+        if (!partitions.empty()) {
+            out += "<section class=\"panel\"><h2>Partitions</h2>" + object_table(partitions) +
+                   "</section>";
+        }
+    } else if (page.section == "query") {
+        const std::string statement = json_text(data, "statement");
+        out += std::format(
+            "<section class=\"panel\"><form class=\"stack\" method=\"get\" "
+            "action=\"/train/query\">{}"
+            "<label>Query<textarea name=\"statement\" rows=\"5\" required placeholder=\"SELECT * "
+            "FROM datasets.accounts LIMIT 100\">{}</textarea></label><label>Database<input "
+            "name=\"database\" value=\"{}\" placeholder=\"datasets\"></label><button "
+            "class=\"button "
+            "button-primary\" type=\"submit\">Run</button></form></section>",
+            hidden("customer_id", page.customer_id),
+            web_ui_escape(statement),
+            web_ui_escape(json_text(data, "database")));
+        if (const auto result = data.find("workspace_sql"); result != data.end()) {
+            const nlohmann::json rows = result->value("rows", nlohmann::json::array());
+            out += std::format("<section class=\"panel\"><h2>{} rows</h2>{}</section>",
+                               rows.size(),
+                               rows.empty() ? std::string("<p>No rows.</p>") : object_table(rows));
+        }
     } else if (page.section == "runs") {
         const nlohmann::json runs = data.value("list_runs", nlohmann::json::object())
                                         .value("runs", nlohmann::json::array());
