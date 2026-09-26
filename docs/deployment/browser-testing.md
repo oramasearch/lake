@@ -86,6 +86,19 @@ each with an escape that must be refused (`<kind> queries` in `log.json`):
 non-zero on any failure. Run it after anything that touches a service kind: the lake-service skill
 (liquid-bridge `.claude/skills/lake-service`) requires it.
 
+### 3d. Developer → MCP
+
+```sh
+node tools/e2e/mcp.mjs https://lake.oramadev.net /tmp/lake-ticket /tmp/lake-mcp
+```
+
+Opens Developer → MCP from the sidebar, creates a read-only MCP key, clicks the Claude Code
+block's **Copy** and compares the clipboard with the block, runs `initialize` and `tools/list` with
+the key, downloads the lake skill, and runs a fresh `claude -p` session in an empty directory that
+holds only the skill and an MCP config with the key (one read call, `server_info`). It revokes the
+key on Tokens at the end and checks it is refused. The key is never printed or screenshotted.
+Run it after anything that changes the MCP page, `agent_docs`, or token issuance.
+
 ## What a failure usually means
 
 | Symptom | Where to look |
