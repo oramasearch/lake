@@ -216,6 +216,29 @@ inline std::string managed_service_slug(std::string_view prefix, std::string_vie
     }
     return hex.size() == 32 ? std::string(prefix) + "-" + hex.substr(0, 12) : std::string();
 }
+// The service catalog (docs/control-plane/services.md, liquid-bridge decision 47), in menu
+// order. The schema's service_kind_check lists the same keys.
+struct ServiceKind {
+    std::string_view key, label;
+    bool preview = false; // upstream operator not yet production-ready
+};
+inline constexpr ServiceKind service_kinds[] = {
+    {"postgres", "Postgres"},
+    {"zetta", "Zetta"},
+    {"kafka", "Kafka"},
+    {"clickhouse", "ClickHouse"},
+    {"tidb", "TiDB"},
+    {"cassandra", "Cassandra"},
+    {"valkey", "Valkey", true},
+};
+inline const ServiceKind* find_service_kind(std::string_view key) {
+    for (const ServiceKind& kind : service_kinds) {
+        if (kind.key == key) {
+            return &kind;
+        }
+    }
+    return nullptr;
+}
 struct NewManagedService {
     std::string customer_id, kind, name, created_by_taap_id;
     bool is_default = false;

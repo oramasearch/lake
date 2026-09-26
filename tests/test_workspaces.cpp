@@ -296,9 +296,24 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
              "create_service",
              {{"customer_id", owner_customer}, {"kind", "zetta"}, {"name", "Bad"}});
     EXPECT_FALSE(bad_name.ok);
+    for (const char* kind : {"kafka", "clickhouse", "tidb", "cassandra", "valkey"}) {
+        const auto catalog = call(
+            *owner_principal,
+            "create_service",
+            {{"customer_id", owner_customer}, {"kind", kind}, {"name", std::string("c-") + kind}});
+        ASSERT_TRUE(catalog.ok) << kind << ": " << catalog.error.message;
+        EXPECT_EQ(catalog.value["kind"], kind);
+        // Deleted at once, so the per-customer cap is not what this loop tests.
+        ASSERT_TRUE(store.withdraw_service(catalog.value["id"]));
+    }
+    EXPECT_FALSE(call(*owner_principal,
+                      "create_service",
+                      {{"customer_id", owner_customer}, {"kind", "sqlite"}, {"name", "s"}})
+                     .ok)
+        << "a kind outside the catalog is refused";
     const auto listed = call(*owner_principal, "list_services", {{"customer_id", owner_customer}});
     ASSERT_TRUE(listed.ok);
-    EXPECT_EQ(listed.value["services"].size(), 2U) << "the workspace and crm";
+    EXPECT_EQ(listed.value["services"].size(), 7U) << "the workspace, crm and five deleting";
     EXPECT_FALSE(call(*other_principal, "list_services", {{"customer_id", owner_customer}}).ok);
     EXPECT_FALSE(call(*other_principal,
                       "create_service",
@@ -320,6 +335,7 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     ASSERT_TRUE(connection.ok) << connection.error.message;
     EXPECT_EQ(connection.value["password"], "pw");
     EXPECT_EQ(listed.value.dump().find("pw"), std::string::npos);
+    EXPECT_FALSE(connection.value.contains("kind"));
     const auto workspace_token =
         call(*owner_principal,
              "service_connection",
@@ -508,6 +524,19 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
     page.data["service_connection"] = {{"name", "crm"}, {"uri", "postgresql://app:pw@host/app"}};
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("postgresql://app:pw@host/app"), std::string::npos);
+    page.data["service_connection"] = {{"name", "events"},
+                                       {"bootstrap", "prod-svc-1-kafka-bootstrap:9092"},
+                                       {"sasl_mechanism", "SCRAM-SHA-512"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<dt>bootstrap</dt>"), std::string::npos)
+        << "every kind's connection fields are shown";
+    for (const char* option : {"<option value=\"kafka\">Kafka</option>",
+                               "<option value=\"clickhouse\">ClickHouse</option>",
+                               "<option value=\"tidb\">TiDB</option>",
+                               "<option value=\"cassandra\">Cassandra</option>",
+                               "<option value=\"valkey\">Valkey (preview, not for production)"}) {
+        EXPECT_NE(html.find(option), std::string::npos) << option;
+    }
 }
 
 TEST(Workspaces, NavigationOffersDesignTrainAndShip) {

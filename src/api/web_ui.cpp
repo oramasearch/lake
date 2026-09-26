@@ -10,6 +10,7 @@
 
 #include <liquid/hash.hpp>
 
+#include "lake/control/store.hpp"
 #include "modules/frontends/common/syntax.hpp"
 
 namespace lake::api {
@@ -1738,9 +1739,21 @@ std::string services_content(const WorkspacePage& page) {
         out += std::format(
             "<section class=\"panel notice\" role=\"status\"><h2>Connection to {}</h2><p>Reachable "
             "inside the lake cluster, from your other services. Copy it now; it is not shown "
-            "again unless you ask.</p><p><code>{}</code></p></section>",
+            "again unless you ask.</p>{}</section>",
             web_ui_escape(json_text(*connection, "name")),
-            web_ui_escape(json_text(*connection, "uri")));
+            [&] {
+                std::string rows = "<dl>";
+                for (const auto& [key, value] : connection->items()) {
+                    if (key == "name") {
+                        continue;
+                    }
+                    rows +=
+                        "<dt>" + web_ui_escape(key) + "</dt><dd><code>" +
+                        web_ui_escape(value.is_string() ? value.get<std::string>() : value.dump()) +
+                        "</code></dd>";
+                }
+                return rows + "</dl>";
+            }());
     }
     if (services.empty()) {
         out += "<div class=\"panel empty\">No services yet.</div>";
@@ -1755,7 +1768,7 @@ std::string services_content(const WorkspacePage& page) {
             const bool deleting = json_text(service, "desired") == "absent";
             settling = settling || (phase != "Ready" && phase != "Failed");
             std::string actions;
-            if (!deleting && kind == "postgres" && phase == "Ready") {
+            if (!deleting && kind != "zetta" && phase == "Ready") {
                 actions += std::format("<form method=\"post\" action=\"/services/connection\">{}{}"
                                        "<button type=\"submit\">Show connection</button></form>",
                                        hidden("customer_id", page.customer_id),
@@ -1778,7 +1791,12 @@ std::string services_content(const WorkspacePage& page) {
                 "</td><td>{}</td></tr>",
                 web_ui_escape(name),
                 service.value("default", false) ? " <span class=\"muted\">(workspace)</span>" : "",
-                kind == "postgres" ? "Postgres" : "Zetta",
+                [&] {
+                    const control::ServiceKind* known = control::find_service_kind(kind);
+                    return known == nullptr
+                               ? web_ui_escape(kind)
+                               : std::string(known->label) + (known->preview ? " (preview)" : "");
+                }(),
                 web_ui_escape(json_text(service, "instances")),
                 web_ui_escape(json_text(service, "storage_gi")),
                 web_ui_escape(phase),
@@ -1797,8 +1815,7 @@ std::string services_content(const WorkspacePage& page) {
     }
     out += std::format(
         "<section class=\"panel\"><h2>New service</h2><form class=\"stack\" method=\"post\" "
-        "action=\"/services/create\">{}<label>Kind<select name=\"kind\"><option "
-        "value=\"postgres\">Postgres</option><option value=\"zetta\">Zetta</option></select>"
+        "action=\"/services/create\">{}<label>Kind<select name=\"kind\">{}</select>"
         "</label><label>Name<input name=\"name\" required pattern=\"[a-z][a-z0-9\\-]{{0,30}}\" "
         "placeholder=\"crm\"></label><label>Instances<select name=\"instances\"><option>1"
         "</option><option>2</option><option>3</option></select></label><label>Storage (GiB)"
@@ -1807,6 +1824,16 @@ std::string services_content(const WorkspacePage& page) {
         "class=\"button button-primary\" type=\"submit\">Create service</button></form>"
         "</section>",
         hidden("customer_id", page.customer_id),
+        [] {
+            std::string options;
+            for (const control::ServiceKind& kind : control::service_kinds) {
+                options += std::format("<option value=\"{}\">{}{}</option>",
+                                       kind.key,
+                                       kind.label,
+                                       kind.preview ? " (preview, not for production)" : "");
+            }
+            return options;
+        }(),
         web_ui_escape(
             json_text(page.data.value("list_services", nlohmann::json::object()), "limit")));
     return out;

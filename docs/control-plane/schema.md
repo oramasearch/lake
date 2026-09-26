@@ -311,7 +311,8 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    `identity_exit_guard`; token attenuation adds `0021_token_attenuation` and
    `token_attenuation_guard`; session lookup adds `0022_session_lookup` and
    `session_lookup_guard`; Clerk sign-in adds `0023_custodial_identities` and
-   `custodial_identity_guard`; managed services add `0024_services` and `services_guard`. The operator copy remains deferred to the single
+   `custodial_identity_guard`; managed services add `0024_services` and `services_guard`; the service catalog adds
+   `0025_service_catalog` and `service_catalog_guard`. The operator copy remains deferred to the single
    wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
@@ -325,8 +326,8 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services')" \
-  -c "SELECT to_regclass('services_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services', '0025_service_catalog')" \
+  -c "SELECT to_regclass('service_catalog_guard')"
 ```
 
 ## Token attenuation migration
@@ -391,3 +392,11 @@ The migration is additive and needs no backfill: an existing decision-45 workspa
 next time its customer starts it, and the operator adopts the cluster. The new deployment guard is
 `services_guard`. The operator must vendor this schema and select that guard before the binary that
 reads the tables is deployed.
+
+## Service catalog migration
+
+`0025_service_catalog` replaces `service_kind_check` so `services.kind` also accepts `kafka`,
+`clickhouse`, `tidb`, `cassandra` and `valkey` (liquid-bridge decision 47). Dropping and re-adding
+the constraint is idempotent, and every existing row satisfies the wider list. The guard is
+`service_catalog_guard`; the operator vendors this schema and selects it before a binary that
+creates the new kinds is deployed.
