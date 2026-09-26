@@ -98,7 +98,11 @@ jobs:
             --openssldir=/etc/ssl shared no-tests
           make -j "$(nproc)"
           sudo make install_sw
-          /opt/openssl/bin/openssl version
+          # As the Dockerfile: the build, the tests and this check use OpenSSL 3.6.3, not the
+          # runner's 3.0, so every later step gets the same library path.
+          LD_LIBRARY_PATH=/opt/openssl/lib64 /opt/openssl/bin/openssl version
+          echo "LD_LIBRARY_PATH=/opt/openssl/lib64" >> "$GITHUB_ENV"
+          echo "OPENSSL_MODULES=/opt/openssl/lib64/ossl-modules" >> "$GITHUB_ENV"
           cd "$GITHUB_WORKSPACE"
           wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-linux-x86_64.sh
           sudo sh /tmp/cmake.sh --skip-license --prefix=/usr/local
