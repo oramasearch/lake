@@ -493,63 +493,120 @@ std::string nav_link(std::string_view href,
                        label);
 }
 
+// One sidebar link: the group heading it sits under ("" for the top links), where it goes, its
+// label and icon, and the key navigation_is_current matches the page against.
+struct NavItem {
+    std::string_view group, href, label, icon, key;
+};
+
 // The sidebar follows docs/design/cloud.md: the viewer's repositories first, then the sections
 // that act on them. A section appears only when it has a page the viewer can open; Design and
 // Train join when their pages exist. Account pages live in the top-bar account menu.
-// Labels are Title Case (docs/ui/design-system.md, Capitalization).
-std::string nav(const WebUiViewer& viewer, std::string_view title) {
-    std::string out = "<nav class=\"primary-nav\" aria-label=\"Primary\">";
-    out += nav_link("/", "Home", "home", "home", viewer, title);
-    out += nav_link("/repositories",
-                    viewer.signed_in ? "Repositories" : "Public Repositories",
-                    "repository",
-                    "repositories",
-                    viewer,
-                    title);
+// Labels are Title Case (docs/ui/design-system.md, Capitalization). The breadcrumb reads the same
+// list (docs/ui/breadcrumb.md), so the two never disagree.
+std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
+    std::vector<NavItem> items{{"", "/", "Home", "home", "home"},
+                               {"",
+                                "/repositories",
+                                viewer.signed_in ? "Repositories" : "Public Repositories",
+                                "repository",
+                                "repositories"}};
     if (viewer.signed_in) {
         if (!viewer.administrator) {
-            out += nav_link(
-                "/shared-with-me", "Shared with Me", "repository", "shared with me", viewer, title);
+            items.push_back(
+                {"", "/shared-with-me", "Shared with Me", "repository", "shared with me"});
         }
-        out += nav_link("/search", "Search", "search", "search", viewer, title);
-        out += "<p class=\"nav-label\">Design</p>";
-        out += nav_link("/design/projects", "Projects", "audit", "projects", viewer, title);
-        out += "<p class=\"nav-label\">Train</p>";
-        out += nav_link("/train/data", "Data", "metering", "data", viewer, title);
-        out += nav_link("/train/runs", "Runs", "metering", "runs", viewer, title);
-        out += "<p class=\"nav-label\">Ship</p>";
-        out += nav_link("/ship/models", "Models", "api", "models", viewer, title);
-        out += nav_link("/ship/indexes", "Search Indexes", "search", "indexes", viewer, title);
-        out += nav_link("/ship/packages", "Packages", "repository", "packages", viewer, title);
-        out += nav_link("/deployments", "Deployments", "api", "deployments", viewer, title);
-        out += nav_link("/services", "Services", "api", "services", viewer, title);
+        items.push_back({"", "/search", "Search", "search", "search"});
+        items.push_back({"Design", "/design/projects", "Projects", "audit", "projects"});
+        items.push_back({"Train", "/train/data", "Data", "metering", "data"});
+        items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
+        items.push_back({"Ship", "/ship/models", "Models", "api", "models"});
+        items.push_back({"Ship", "/ship/indexes", "Search Indexes", "search", "indexes"});
+        items.push_back({"Ship", "/ship/packages", "Packages", "repository", "packages"});
+        items.push_back({"Ship", "/deployments", "Deployments", "api", "deployments"});
+        items.push_back({"Ship", "/services", "Services", "api", "services"});
     }
     // A signed-in account's own organizations, secrets, usage and activity. Operators reach the
     // instance-wide versions under Administration instead.
     if (viewer.signed_in && !viewer.administrator) {
-        out += "<p class=\"nav-label\">Organization</p>";
-        out += nav_link(
-            "/organizations", "Organizations", "organization", "organizations", viewer, title);
-        out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", viewer, title);
-        out += nav_link("/metering", "Usage", "metering", "metering", viewer, title);
-        out += nav_link("/activity", "Activity", "audit", "activity", viewer, title);
+        items.push_back(
+            {"Organization", "/organizations", "Organizations", "organization", "organizations"});
+        items.push_back({"Organization", "/secret-mounts", "Secrets", "secrets", "secret"});
+        items.push_back({"Organization", "/metering", "Usage", "metering", "metering"});
+        items.push_back({"Organization", "/activity", "Activity", "audit", "activity"});
     }
     if (viewer.administrator) {
-        out += "<p class=\"nav-label\">Administration</p>";
-        out += nav_link("/customers", "Customers", "customers", "customers", viewer, title);
-        out += nav_link(
-            "/organizations", "Organizations", "organization", "organizations", viewer, title);
-        out += nav_link("/applications", "Applications", "api", "applications", viewer, title);
-        out += nav_link("/metering", "Metering", "metering", "metering", viewer, title);
-        out += nav_link("/secret-mounts", "Secrets", "secrets", "secret", viewer, title);
-        out += nav_link("/audit", "Audit", "audit", "audit", viewer, title);
+        items.push_back({"Administration", "/customers", "Customers", "customers", "customers"});
+        items.push_back(
+            {"Administration", "/organizations", "Organizations", "organization", "organizations"});
+        items.push_back({"Administration", "/applications", "Applications", "api", "applications"});
+        items.push_back({"Administration", "/metering", "Metering", "metering", "metering"});
+        items.push_back({"Administration", "/secret-mounts", "Secrets", "secrets", "secret"});
+        items.push_back({"Administration", "/audit", "Audit", "audit", "audit"});
     }
     if (viewer.signed_in) {
-        out += "<p class=\"nav-label\">Developer</p>";
-        out += nav_link("/v1/openapi.json", "API", "api", "api", viewer, title);
+        items.push_back({"Developer", "/v1/openapi.json", "API", "api", "api"});
+    }
+    return items;
+}
+
+std::string nav(const WebUiViewer& viewer, std::string_view title) {
+    std::string out = "<nav class=\"primary-nav\" aria-label=\"Primary\">";
+    std::string_view group;
+    for (const NavItem& item : nav_items(viewer)) {
+        if (item.group != group && !item.group.empty()) {
+            out += std::format("<p class=\"nav-label\">{}</p>", item.group);
+        }
+        group = item.group;
+        out += nav_link(item.href, item.label, item.icon, item.key, viewer, title);
     }
     out += "</nav>";
     return out;
+}
+
+// The breadcrumb a page gets without building its own (docs/ui/breadcrumb.md): the sidebar item it
+// belongs to, under its group, then `meta` as the page's own level when it adds something. Account
+// pages (their `meta` is "identity") sit under Account. A page outside the sidebar shows `meta`
+// alone.
+std::vector<WebUiCrumb>
+default_trail(const WebUiViewer& viewer, std::string_view title, std::string_view meta) {
+    std::vector<WebUiCrumb> trail;
+    const std::vector<NavItem> items = nav_items(viewer);
+    for (const NavItem& item : items) {
+        if (!navigation_is_current(viewer, title, item.key)) {
+            continue;
+        }
+        if (!item.group.empty()) {
+            const auto first = std::ranges::find(items, item.group, &NavItem::group);
+            trail.push_back({std::string(item.group), std::string(first->href), {}});
+        }
+        trail.push_back({std::string(item.label), std::string(item.href), {}});
+        break;
+    }
+    const auto same = [](std::string_view a, std::string_view b) {
+        return std::ranges::equal(a, b, [](char x, char y) {
+            return std::tolower(static_cast<unsigned char>(x)) ==
+                   std::tolower(static_cast<unsigned char>(y));
+        });
+    };
+    if (meta == "identity" && viewer.signed_in && !viewer.administrator) {
+        trail.push_back({"Account", "/settings", {}});
+        constexpr std::string_view prefix = "lake — ";
+        if (title.starts_with(prefix)) {
+            std::string page(title.substr(prefix.size()));
+            if (!page.empty()) {
+                page[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(page[0])));
+            }
+            trail.push_back({page, {}, {}});
+        }
+        return trail;
+    }
+    if (!meta.empty() && meta != "identity" &&
+        (trail.empty() || (!same(meta, trail.back().label) &&
+                           !(trail.size() > 1 && same(meta, trail.front().label))))) {
+        trail.push_back(web_ui_entity_crumb(meta));
+    }
+    return trail;
 }
 
 // Signed out: sign in and create account. Signed in: an account menu that needs no script
@@ -1082,8 +1139,52 @@ std::string application_shell(const control::Application& application,
 
 } // namespace
 
+WebUiCrumb web_ui_entity_crumb(std::string_view value, std::string href) {
+    const bool hex_like = value.size() >= 16 && std::ranges::all_of(value, [](char c) {
+                              return std::isxdigit(static_cast<unsigned char>(c)) || c == '-';
+                          });
+    if (hex_like) {
+        return {std::string(value.substr(0, 8)) + "…", std::move(href), std::string(value)};
+    }
+    return {std::string(value), std::move(href), {}};
+}
+
+std::string web_ui_breadcrumb(const std::vector<WebUiCrumb>& trail) {
+    if (trail.empty()) {
+        return {};
+    }
+    std::string out = "<nav class=\"breadcrumbs topbar-trail\" aria-label=\"Breadcrumb\"><ol>";
+    for (std::size_t i = 0; i < trail.size(); ++i) {
+        const WebUiCrumb& crumb = trail[i];
+        const bool last = i + 1 == trail.size();
+        const std::string hover = crumb.full.empty()
+                                      ? std::string()
+                                      : std::format(" title=\"{}\"", web_ui_escape(crumb.full));
+        if (last) {
+            out += std::format("<li><span aria-current=\"page\"{}>{}</span></li>",
+                               hover,
+                               web_ui_escape(crumb.label));
+        } else if (crumb.href.empty()) {
+            out += std::format("<li><span{}>{}</span></li>", hover, web_ui_escape(crumb.label));
+        } else {
+            out += std::format("<li><a href=\"{}\"{}>{}</a></li>",
+                               web_ui_escape(crumb.href),
+                               hover,
+                               web_ui_escape(crumb.label));
+        }
+    }
+    return out + "</ol></nav>";
+}
+
 std::string web_ui_shell(std::string_view title,
                          std::string_view meta,
+                         std::string_view content,
+                         WebUiViewer viewer) {
+    return web_ui_shell(title, default_trail(viewer, title, meta), content, viewer);
+}
+
+std::string web_ui_shell(std::string_view title,
+                         const std::vector<WebUiCrumb>& trail,
                          std::string_view content,
                          WebUiViewer viewer) {
     return std::format(
@@ -1105,7 +1206,7 @@ std::string web_ui_shell(std::string_view title,
         stylesheet_link(),
         web_ui_icon("lake"),
         nav(viewer, title),
-        web_ui_escape(meta),
+        web_ui_breadcrumb(trail),
         web_ui_icon("theme"),
         session_control(viewer),
         content,
@@ -1567,6 +1668,20 @@ std::string platform_heading(const control::Repository& repository,
 } // namespace
 
 namespace {
+
+// A repository page's breadcrumb (docs/ui/breadcrumb.md): the sidebar's Repositories, the
+// repository (linking to its home), then what this page is.
+std::string repository_shell(std::string_view title,
+                             const control::Repository& repository,
+                             std::string_view page,
+                             std::string_view content,
+                             WebUiViewer viewer) {
+    std::vector<WebUiCrumb> trail = default_trail(viewer, title, "");
+    trail.push_back(web_ui_entity_crumb(repository_name(repository),
+                                        "/repository?id=" + url_component(repository.id)));
+    trail.push_back({std::string(page), {}, {}});
+    return web_ui_shell(title, trail, content, viewer);
+}
 
 struct WorkspaceSection {
     std::string_view key, verb, title, path, sub;
@@ -2986,6 +3101,57 @@ std::string workspace_content(const WorkspacePage& page) {
     return out;
 }
 
+// The Design, Train and Ship breadcrumb (docs/ui/breadcrumb.md): the stage, the list a page belongs
+// to, then the entities in the URL — a project and its pipeline, a dataset, a run, an index — by
+// name, or by abbreviated id when the URL carries only an id. Every level keeps the space.
+std::vector<WebUiCrumb> workspace_trail(const WorkspacePage& page,
+                                        const WorkspaceSection& section) {
+    const std::string space =
+        page.customer_id.empty() ? std::string() : customer_query(page.customer_id);
+    const auto link = [&](std::string_view path, std::string extra = {}) {
+        std::string query = space;
+        if (!extra.empty()) {
+            query += (query.empty() ? "" : "&") + extra;
+        }
+        return std::string(path) + (query.empty() ? "" : "?" + query);
+    };
+    const auto list_title = [](std::string_view path) -> std::string_view {
+        for (const WorkspaceSection& list : workspace_sections) {
+            if (list.path == path && !list.sub.empty() && list.key != "query" &&
+                list.key != "pipeline") {
+                return list.title;
+            }
+        }
+        return {};
+    };
+    std::vector<WebUiCrumb> trail;
+    const std::string_view stage_path = section.verb == "Design"  ? "/design/projects"
+                                        : section.verb == "Train" ? "/train/data"
+                                                                  : "/ship/models";
+    trail.push_back({std::string(section.verb), link(stage_path), {}});
+    const std::string_view list = list_title(section.path);
+    if (section.title == list) {
+        trail.push_back({std::string(list), link(section.path), {}});
+        if (section.key == "data" && !page.subject.empty()) {
+            trail.push_back(web_ui_entity_crumb(page.subject));
+        }
+        return trail;
+    }
+    trail.push_back({std::string(list), link(section.path), {}});
+    if (section.key == "pipeline") {
+        if (!page.project.empty()) {
+            trail.push_back(web_ui_entity_crumb(
+                page.project, link("/design/project", "name=" + url_component(page.project))));
+        }
+        trail.push_back(web_ui_entity_crumb(page.subject.empty() ? "Pipeline" : page.subject));
+    } else if (page.subject.empty()) {
+        trail.push_back({std::string(section.title), {}, {}});
+    } else {
+        trail.push_back(web_ui_entity_crumb(page.subject));
+    }
+    return trail;
+}
+
 } // namespace
 
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
@@ -3035,7 +3201,7 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
                 "Delete workspace");
         }
     }
-    return web_ui_shell("lake — " + title, std::string(section.verb), content, viewer);
+    return web_ui_shell("lake — " + title, workspace_trail(page, section), content, viewer);
 }
 
 std::string web_ui_packages(const nlohmann::json& catalog,
@@ -3339,7 +3505,7 @@ std::string web_ui_repository_tree(const control::Repository& repository,
         }
         content += "</ul></section>";
     }
-    return web_ui_shell("lake — tree", repository_name(repository), content, viewer);
+    return repository_shell("lake — tree", repository, "Code", content, viewer);
 }
 
 std::string web_ui_repository_file(const control::Repository& repository,
@@ -3400,7 +3566,7 @@ std::string web_ui_repository_log(const control::Repository& repository,
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell("lake — changes", repository_name(repository), content, viewer);
+    return repository_shell("lake — changes", repository, "Changes", content, viewer);
 }
 
 std::string web_ui_change(const control::Repository& repository,
@@ -3637,7 +3803,7 @@ std::string web_ui_change(const control::Repository& repository,
     }
     content +=
         R"(</section><script id="change-review-script">(()=>{const views=[...document.querySelectorAll('[data-diff-view]')];document.addEventListener('click',async event=>{const copy=event.target.closest('[data-copy]');if(copy){await navigator.clipboard.writeText(copy.dataset.copy);copy.textContent='Copied';return;}const toggle=event.target.closest('[data-view]');if(!toggle)return;views.forEach(view=>{view.hidden=view.dataset.diffView!==toggle.dataset.view;});document.querySelectorAll('[data-view]').forEach(button=>{button.setAttribute('aria-pressed',String(button===toggle));});});})();</script>)";
-    return web_ui_shell("lake — change", repository_name(repository), content, viewer);
+    return repository_shell("lake — change", repository, "Change", content, viewer);
 }
 
 std::string web_ui_change(const control::Repository& repository,
@@ -3705,7 +3871,7 @@ std::string web_ui_issues(const control::Repository& repository,
     if (visible == 0) {
         content += "<div class=\"panel empty\">No issues match these filters.</div>";
     }
-    return web_ui_shell("lake — issues", repository_name(repository), content, viewer);
+    return repository_shell("lake — issues", repository, "Issues", content, viewer);
 }
 
 std::string web_ui_issue(const control::Repository& repository,
@@ -3757,7 +3923,7 @@ std::string web_ui_issue(const control::Repository& repository,
                     assignees.empty() ? "<span class=\"muted\">Unassigned</span>"
                                       : identifier_list_markup(assignees),
                     references_markup);
-    return web_ui_shell("lake — issue", repository_name(repository), content, viewer);
+    return repository_shell("lake — issue", repository, "Issue", content, viewer);
 }
 
 std::string web_ui_releases(const control::Repository& repository,
@@ -3800,7 +3966,7 @@ std::string web_ui_releases(const control::Repository& repository,
         }
         content += "</article>";
     }
-    return web_ui_shell("lake — releases", repository_name(repository), content, viewer);
+    return repository_shell("lake — releases", repository, "Releases", content, viewer);
 }
 
 std::string web_ui_webhooks(const control::Repository& repository,
@@ -3858,7 +4024,7 @@ std::string web_ui_webhooks(const control::Repository& repository,
         }
         content += "</section>";
     }
-    return web_ui_shell("lake — webhooks", repository_name(repository), content, viewer);
+    return repository_shell("lake — webhooks", repository, "Webhooks", content, viewer);
 }
 
 std::string web_ui_branch_protection(const control::Repository& repository,
@@ -3913,7 +4079,7 @@ std::string web_ui_branch_protection(const control::Repository& repository,
         content += "<div class=\"panel empty\">No protected updates have been refused.</div>";
     }
     content += "</section>";
-    return web_ui_shell("lake — branch protection", repository_name(repository), content, viewer);
+    return repository_shell("lake — branch protection", repository, "Protection", content, viewer);
 }
 
 namespace {
@@ -4037,7 +4203,7 @@ std::string web_ui_repository_conflicts(const control::Repository& repository,
             content += "</article>";
         }
     }
-    return web_ui_shell("lake — conflicts", repository_name(repository), content, viewer);
+    return repository_shell("lake — conflicts", repository, "Conflicts", content, viewer);
 }
 
 std::string web_ui_artifacts(const control::Repository& repository,
@@ -4099,7 +4265,7 @@ std::string web_ui_artifacts(const control::Repository& repository,
     }
     content +=
         std::format("<p>{}</p>", row_link("/repository?id=" + repository.id, "Back to repository"));
-    return web_ui_shell("lake — artifacts", repository_name(repository), content, viewer);
+    return repository_shell("lake — artifacts", repository, "Artifacts", content, viewer);
 }
 
 std::string web_ui_artifact(const control::Repository& repository,
@@ -4220,7 +4386,7 @@ std::string web_ui_artifact(const control::Repository& repository,
     content += std::format("</section><p>{} · {}</p>",
                            row_link("/artifacts?repository_id=" + repository.id, "All artifacts"),
                            row_link("/repository?id=" + repository.id, "Back to repository"));
-    return web_ui_shell("lake — artifact", repository_name(repository), content, viewer);
+    return repository_shell("lake — artifact", repository, "Artifact", content, viewer);
 }
 
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations,
@@ -5525,7 +5691,7 @@ std::string web_ui_exports(const control::Repository& repository,
         content += "<tr><td colspan=\"3\" class=\"empty\">No exports requested.</td></tr>";
     }
     content += "</tbody></table>";
-    return web_ui_shell("lake — exports", repository_name(repository), content, viewer);
+    return repository_shell("lake — exports", repository, "Exports", content, viewer);
 }
 
 std::string web_ui_drive_folder(const control::Repository& repository,
@@ -5650,7 +5816,7 @@ std::string web_ui_drive_folder(const control::Repository& repository,
 })();
 </script>)html";
     }
-    return web_ui_shell("lake — drive", repository_name(repository), content, viewer);
+    return repository_shell("lake — drive", repository, "Files", content, viewer);
 }
 
 std::string web_ui_drive_preview(const control::Repository& repository,
@@ -5679,7 +5845,7 @@ std::string web_ui_drive_preview(const control::Repository& repository,
             web_ui_escape(download),
             web_ui_escape(drive_query(repository, ref, file.path)),
             preview.html);
-    return web_ui_shell("lake — preview", repository_name(repository), content, viewer);
+    return repository_shell("lake — preview", repository, "Files", content, viewer);
 }
 
 std::string web_ui_drive_history(const control::Repository& repository,
@@ -5763,7 +5929,7 @@ std::string web_ui_drive_history(const control::Repository& repository,
             ++version;
         }
     }
-    return web_ui_shell("lake — drive history", repository_name(repository), content, viewer);
+    return repository_shell("lake — drive history", repository, "File History", content, viewer);
 }
 
 std::string web_ui_drive_version_diff(const control::Repository& repository,
@@ -5788,7 +5954,8 @@ std::string web_ui_drive_version_diff(const control::Repository& repository,
                web_ui_escape(right_revision) + "</code><p>" + display_size(difference.right.size) +
                " · <code>" + web_ui_escape(difference.right.blob) + "</code></p></section></div>";
     content += drive_diff_markup(difference);
-    return web_ui_shell("lake — drive version diff", repository_name(repository), content, viewer);
+    return repository_shell(
+        "lake — drive version diff", repository, "Version Comparison", content, viewer);
 }
 
 std::string web_ui_drive_conflict(const control::Repository& repository,
@@ -5820,7 +5987,7 @@ std::string web_ui_drive_conflict(const control::Repository& repository,
     content += conflict_values_markup(conflict);
     content += conflict_resolution_markup(
         repository, ref, conflict, "/drive/conflict/resolve", viewer.signed_in);
-    return web_ui_shell("lake — drive conflict", repository_name(repository), content, viewer);
+    return repository_shell("lake — drive conflict", repository, "Conflict", content, viewer);
 }
 
 std::string web_ui_drive_share(const control::Repository& repository,
@@ -5923,7 +6090,7 @@ std::string web_ui_drive_share(const control::Repository& repository,
         content += "<tr><td colspan=\"4\" class=\"empty\">No links.</td></tr>";
     }
     content += "</tbody></table>";
-    return web_ui_shell("lake — drive sharing", repository_name(repository), content, viewer);
+    return repository_shell("lake — drive sharing", repository, "Sharing", content, viewer);
 }
 
 std::string web_ui_drive_share_link(const control::Repository& repository,
@@ -5960,7 +6127,7 @@ std::string web_ui_drive_share_link(const control::Repository& repository,
     }
     content +=
         row_link("/drive/share?" + drive_query(repository, ref, path), "Back to folder shares");
-    return web_ui_shell("lake — drive share link", repository_name(repository), content, viewer);
+    return repository_shell("lake — drive share link", repository, "Share Link", content, viewer);
 }
 
 std::string web_ui_shared_with_me(const std::vector<nlohmann::json>& folders,
