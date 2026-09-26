@@ -1,3 +1,4 @@
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -859,4 +860,41 @@ TEST(Workspaces, IndexPageSearchesPublishesAndShowsHowToCallIt) {
     EXPECT_NE(html.find("value=\"search_index\""), std::string::npos) << "a key scoped to search";
     EXPECT_NE(html.find("https://lake.example/v1/search_index?customer_id="), std::string::npos);
     EXPECT_NE(html.find("MCP tool <code>search_index</code>"), std::string::npos);
+}
+
+TEST(Workspaces, ASearchKeyFromAnOlderSessionLastsAsLongAsTheSession) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    ASSERT_TRUE(principal);
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.authorized = true;
+    context.session_credential = true;
+    context.acting_user_id = principal->user_id;
+    context.acting_identity = principal->taap_id;
+    context.credential_session_id = principal->session_id;
+    context.credential_kind = principal->kind;
+    context.pool_id = principal->pool_id;
+    context.scopes = {"*"};
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    context.credential_expires_at_unix = now + 10 * 24 * 60 * 60; // ten days left
+    context.request_id = lake::control::new_uuid_v4();
+
+    const auto capped =
+        registry.call("create_token",
+                      {{"name", "search docs"}, {"scopes", json::array({"search_index"})}},
+                      context);
+    ASSERT_TRUE(capped.ok) << capped.error.message;
+    context.request_id = lake::control::new_uuid_v4();
+    const auto too_long = registry.call("create_token",
+                                        {{"name", "search docs"},
+                                         {"scopes", json::array({"search_index"})},
+                                         {"expires_in_seconds", 30 * 24 * 60 * 60}},
+                                        context);
+    EXPECT_FALSE(too_long.ok) << "an explicit lifetime past the session is still refused";
 }

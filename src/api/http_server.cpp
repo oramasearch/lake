@@ -6702,16 +6702,17 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const std::string expiry = form_field(body, "expires_in_seconds");
-        const int expires_in_seconds = expiry.empty() ? 2592000 : std::atoi(expiry.c_str());
-        const ApiResult result =
-            registry.call("create_token",
-                          {{"name", form_field(body, "name")},
-                           {"scopes", comma_separated(form_field(body, "scopes"))},
-                           {"expires_in_seconds", expires_in_seconds},
-                           {"static", form_field(body, "static") == "true"},
-                           {"reason", form_field(body, "reason")}},
-                          context);
+        // No lifetime asked for means as long as the issuing credential allows (at most 30 days):
+        // a token may not outlive the session that made it, so a fixed 30-day request from an
+        // older session was refused.
+        nlohmann::json input{{"name", form_field(body, "name")},
+                             {"scopes", comma_separated(form_field(body, "scopes"))},
+                             {"static", form_field(body, "static") == "true"},
+                             {"reason", form_field(body, "reason")}};
+        if (const std::string expiry = form_field(body, "expires_in_seconds"); !expiry.empty()) {
+            input["expires_in_seconds"] = std::atoi(expiry.c_str());
+        }
+        const ApiResult result = registry.call("create_token", input, context);
         std::vector<control::Session> sessions;
         if (context.authorized && !context.operator_credential) {
             if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {

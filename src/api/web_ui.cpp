@@ -2436,7 +2436,8 @@ std::string index_content(const WorkspacePage& page) {
         "<li><p>From an AI agent, the same search is the MCP tool <code>search_index</code> at "
         "<code>{}/mcp</code>.</p></li></ol><p class=\"muted\">Unpublishing the index stops every "
         "outside call at once; the key keeps working for other published indexes until you revoke "
-        "it on <a href=\"/tokens\">Tokens</a>.</p></section>",
+        "it on <a href=\"/tokens\">Tokens</a>. A key lasts as long as the session that made "
+        "it, at most 30 days.</p></section>",
         hidden("name", "search " + json_text(index, "table")),
         hidden("scopes", "search_index"),
         web_ui_escape(url),
@@ -5261,7 +5262,7 @@ std::string web_ui_tokens(const std::vector<control::Session>& sessions,
     content +=
         R"html(<div class="panel"><form class="stack" method="post" action="/identity/token/create">
 <label>Name<input type="text" name="name" required></label><label>Capability scopes, comma separated<input type="text" name="scopes" required></label>
-<label>Expiry in seconds<input type="number" name="expires_in_seconds" min="1" value="2592000"></label>
+<label>Expiry in seconds (leave empty for as long as this session allows, at most 30 days)<input type="number" name="expires_in_seconds" min="1"></label>
 <label><span><input type="checkbox" name="static" value="true"> Static exception</span></label><label>Reason for a static token<input type="text" name="reason"></label>
 <button class="primary" type="submit">Create token</button></form></div><h2>Existing tokens</h2>
 <table><thead><tr><th>Name</th><th>Kind</th><th>Scopes</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>)html";
