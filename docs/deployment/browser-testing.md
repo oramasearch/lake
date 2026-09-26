@@ -99,6 +99,18 @@ holds only the skill and an MCP config with the key (one read call, `server_info
 key on Tokens at the end and checks it is refused. The key is never printed or screenshotted.
 Run it after anything that changes the MCP page, `agent_docs`, or token issuance.
 
+### 3e. Train → Data → Storage
+
+```sh
+node tools/e2e/storage.mjs https://lake.oramadev.net /tmp/lake-ticket /tmp/lake-storage
+```
+
+Checks that every unavailable type and provider is listed disabled with a reason, then for each
+available pair creates a 1 GiB store on the Data page, waits for Ready, shows its connection (field
+names only), checks the Kubernetes object (a volume's claim), deletes it with the typed
+confirmation, and waits until it is gone. Run it after anything that changes storage in lake or the
+operator.
+
 ## What a failure usually means
 
 | Symptom | Where to look |
