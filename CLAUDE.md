@@ -247,7 +247,8 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   placeholders until lake has a node to marshal onto.
 - Pages are **server-rendered and self-contained**; renderers in `web_ui.cpp` are pure functions
   and are the unit-tested surface. Every page has the two documented theme scripts; the two
-  passkey pages each add one script required to call `navigator.credentials`. Data pages call
+  passkey pages each add one script required to call `navigator.credentials`, and the MCP page
+  adds one (`copy-buttons`) for its Copy buttons (`docs/api/mcp.md`). Data pages call
   capabilities through `Registry::call` and can never do what the API cannot.
 - **Nav items and headings are Title Case** — "Search Indexes", not "Search indexes": every
   sidebar link and section label, page and section title (`workspace_sections`), and `<h1>`–`<h4>`.

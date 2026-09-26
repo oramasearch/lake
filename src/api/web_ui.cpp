@@ -383,6 +383,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view secrets[] = {
         "/secret-mounts", "/secrets", "/encryption-keys"};
     static constexpr std::string_view audit[] = {"/audit"};
+    static constexpr std::string_view mcp[] = {"/developer/mcp"};
     if (key == "home")
         return home;
     if (key == "repositories")
@@ -421,6 +422,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return secrets;
     if (key == "audit")
         return audit;
+    if (key == "mcp")
+        return mcp;
     return {};
 }
 
@@ -457,6 +460,9 @@ bool title_is_current(std::string_view title, std::string_view key) {
     if (key == "secret") {
         return title == "lake — secret mounts" || title == "lake — secrets" ||
                title == "lake — encryption keys";
+    }
+    if (key == "mcp") {
+        return title == "lake — MCP";
     }
     if (key == "applications") {
         return title == "lake — applications" || title == "lake — application users" ||
@@ -546,6 +552,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
     }
     if (viewer.signed_in) {
         items.push_back({"Developer", "/v1/openapi.json", "API", "api", "api"});
+        items.push_back({"Developer", "/developer/mcp", "MCP", "api", "mcp"});
     }
     return items;
 }
@@ -6321,6 +6328,132 @@ std::string web_ui_model(const nlohmann::json& model, WebUiViewer viewer) {
     }
     content += "</tbody></table>";
     return web_ui_shell("lake — model", model.value("modelId", ""), content, viewer);
+}
+
+namespace {
+
+// The MCP page's copy buttons (docs/api/mcp.md): the one script this page adds. Each button copies
+// the text of the element its data-copy names.
+constexpr std::string_view copy_script =
+    R"(<script id="copy-buttons">(()=>{for(const b of document.querySelectorAll('[data-copy]')){b.addEventListener('click',async()=>{const e=document.getElementById(b.dataset.copy);if(!e)return;try{await navigator.clipboard.writeText(e.textContent);b.textContent='Copied';setTimeout(()=>{b.textContent='Copy';},2000);}catch{b.textContent='Select and copy';}});}})();</script>)";
+
+std::string copy_block(std::string_view id, std::string_view heading, std::string_view text) {
+    return std::format("<div class=\"copy-block\"><div class=\"copy-head\"><h3>{}</h3>"
+                       "<button class=\"button\" type=\"button\" data-copy=\"{}\">Copy</button>"
+                       "</div><pre><code id=\"{}\">{}</code></pre></div>",
+                       web_ui_escape(heading),
+                       id,
+                       id,
+                       web_ui_escape(text));
+}
+
+} // namespace
+
+std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer) {
+    const std::string endpoint = page.origin + "/mcp";
+    const std::string key = page.key.empty() ? "$LAKE_KEY" : page.key;
+    std::string content =
+        "<p class=\"eyebrow\">Developer</p><h1>MCP</h1><p class=\"sub\">Connect an agent to lake. "
+        "Every capability on this site is an MCP tool at <code>" +
+        web_ui_escape(endpoint) +
+        "</code>, the same registry REST and OpenAPI serve, checked and audited as your own "
+        "calls.</p>";
+    if (!page.error.empty()) {
+        content += "<div class=\"panel notice status-danger\" role=\"alert\"><p>" +
+                   web_ui_escape(page.error) + "</p></div>";
+    }
+    if (!page.key.empty()) {
+        content += "<section class=\"panel notice\" role=\"status\"><h2>Your MCP Key</h2><p>Shown "
+                   "once. It is in every block below; copy what you need now. Revoke it on "
+                   "<a href=\"/tokens\">Tokens</a>.</p>" +
+                   copy_block("mcp-key", "Key", page.key) + "</section>";
+    } else {
+        content +=
+            "<section class=\"panel\"><h2>Create an MCP Key</h2><p>A lake API token for your "
+            "agent. It acts as you, and never outlives your sign-in.</p>"
+            "<form class=\"stack\" method=\"post\" action=\"/developer/mcp/key\">"
+            "<fieldset><legend>Access</legend>"
+            "<label><input type=\"radio\" name=\"access\" value=\"all\" checked> Every tool</label>"
+            "<label><input type=\"radio\" name=\"access\" value=\"read\"> Read-only tools</label>"
+            "</fieldset><label>Lifetime<select name=\"expires_in_seconds\">"
+            "<option value=\"\">As long as my sign-in allows (at most 30 days)</option>"
+            "<option value=\"86400\">1 day</option><option value=\"604800\">7 days</option>"
+            "</select></label><button class=\"button button-primary\" type=\"submit\">Create an "
+            "MCP key</button></form></section>";
+    }
+    const std::string claude_code =
+        std::format("claude mcp add --transport http lake {} --header \"Authorization: Bearer {}\"",
+                    endpoint,
+                    key);
+    const std::string cursor = std::format(
+        "{{\n  \"mcpServers\": {{\n    \"lake\": {{\n      \"url\": \"{}\",\n      \"headers\": "
+        "{{ \"Authorization\": \"Bearer {}\" }}\n    }}\n  }}\n}}",
+        endpoint,
+        key);
+    const std::string desktop = std::format(
+        "{{\n  \"mcpServers\": {{\n    \"lake\": {{\n      \"command\": \"npx\",\n      \"args\": "
+        "[\"-y\", \"mcp-remote\", \"{}\", \"--header\", \"Authorization: Bearer {}\"]\n    }}\n  "
+        "}}\n}}",
+        endpoint,
+        key);
+    const std::string curl = std::format(
+        "curl -s {0} -H \"Authorization: Bearer {1}\" -H 'Content-Type: application/json' \\\n"
+        "  -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":"
+        "{{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{{}},\"clientInfo\":"
+        "{{\"name\":\"curl\",\"version\":\"1\"}}}}}}'\n"
+        "curl -s {0} -H \"Authorization: Bearer {1}\" -H 'Content-Type: application/json' \\\n"
+        "  -d '{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}}'",
+        endpoint,
+        key);
+    content +=
+        "<section class=\"panel\"><h2>Set Up</h2>" +
+        std::string(page.key.empty() ? "<p class=\"muted\">Create a key above, or put yours in "
+                                       "<code>$LAKE_KEY</code>.</p>"
+                                     : "") +
+        copy_block("mcp-claude-code", "Claude Code", claude_code) +
+        copy_block("mcp-cursor", "Cursor (mcp.json)", cursor) +
+        copy_block("mcp-desktop", "Claude Desktop (claude_desktop_config.json)", desktop) +
+        copy_block("mcp-curl", "Any client: JSON-RPC over HTTP", curl) + "</section>";
+    content += "<section class=\"panel\"><h2>Teach Your Agent</h2><ul>"
+               "<li><a href=\"/developer/mcp/skill\" download=\"SKILL.md\">Download the lake "
+               "skill</a>: a Claude skill (<code>SKILL.md</code>) with the setup, which tools to "
+               "use for what, the flows below and the rules. Put it in "
+               "<code>~/.claude/skills/lake/</code>.</li>"
+               "<li><a href=\"/llms.txt\">llms.txt</a>: lake in one page for any agent.</li>"
+               "<li><a href=\"/llms-full.txt\">llms-full.txt</a>: every tool with its input "
+               "schema.</li>"
+               "<li><a href=\"/v1/openapi.json\">OpenAPI</a>: the same tools as REST, "
+               "<code>GET /v1/&lt;tool&gt;</code> for a read and <code>POST /v1/&lt;tool&gt;"
+               "</code> for an action.</li></ul></section>";
+    content += "<section class=\"panel\"><h2>Worked Flows</h2>";
+    for (const agent_docs::Flow& flow : agent_docs::flows()) {
+        content += "<h3>" + web_ui_escape(flow.title) + "</h3><p>" + web_ui_escape(flow.summary) +
+                   "</p><ol>";
+        for (const agent_docs::FlowStep& step : flow.steps) {
+            content += "<li><code>" + web_ui_escape(step.tool) +
+                       "</code>: " + web_ui_escape(step.note) + "</li>";
+        }
+        content += "</ol>";
+    }
+    content += "</section><section class=\"panel\"><h2>What the Tools Do</h2>";
+    for (const agent_docs::Group& group : page.groups) {
+        content += std::format("<details><summary>{} <span class=\"muted\">{} tools</span>"
+                               "</summary><p>{}</p><div class=\"table-wrap\"><table><thead><tr>"
+                               "<th>Tool</th><th>What it does</th><th>Access</th></tr></thead>"
+                               "<tbody>",
+                               web_ui_escape(group.title),
+                               group.tools.size(),
+                               web_ui_escape(group.summary));
+        for (const agent_docs::Tool& tool : group.tools) {
+            content += std::format("<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                                   web_ui_escape(tool.name),
+                                   web_ui_escape(tool.title),
+                                   tool.writes ? "write" : "read");
+        }
+        content += "</tbody></table></div></details>";
+    }
+    content += "</section>" + std::string(copy_script);
+    return web_ui_shell("lake — MCP", "", content, viewer);
 }
 
 } // namespace lake::api

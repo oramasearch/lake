@@ -68,6 +68,7 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 
+#include "lake/api/agent_docs.hpp"
 #include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
@@ -4738,6 +4739,11 @@ struct ApiServer::Impl {
             "/passkey-sign-in",
             "/sessions",
             "/tokens",
+            "/developer/mcp",
+            "/developer/mcp/key",
+            "/developer/mcp/skill",
+            "/llms.txt",
+            "/llms-full.txt",
             "/identity/sign-up",
             "/identity/sign-in",
             "/identity/clerk-session",
@@ -6313,6 +6319,100 @@ struct ApiServer::Impl {
                          web_ui_sessions(sessions, devices, error, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    // lake's public origin for copy-ready instructions: the configured external origin, else the
+    // public host, else the host this request came to.
+    std::string public_origin(const boost::http::route_params& route) const {
+        if (!options.external_origin.empty()) {
+            return options.external_origin;
+        }
+        if (!options.public_host.empty()) {
+            return "https://" + options.public_host;
+        }
+        const auto host = route.req.find(boost::http::field::host);
+        return host == route.req.end() ? std::string() : "http://" + std::string(host->value);
+    }
+
+    // Developer → MCP (docs/api/mcp.md).
+    boost::http::route_task serve_mcp_page(boost::http::route_params& route) {
+        const ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/sign-in");
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         web_ui_mcp({.origin = public_origin(route),
+                                     .groups = agent_docs::tool_groups(registry)},
+                                    viewer_for(context)),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    // Create an MCP key: a lake API token through create_token, the same capability /tokens uses,
+    // scoped to every tool or to the read tools, shown once on the page.
+    boost::http::route_task serve_mcp_key(boost::http::route_params& route) {
+        namespace http = boost::http;
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const bool read_only = form_field(body, "access") == "read";
+        nlohmann::json scopes = nlohmann::json::array();
+        if (read_only) {
+            for (const std::string& name : agent_docs::read_tool_names(registry)) {
+                scopes.push_back(name);
+            }
+        } else {
+            scopes.push_back("*");
+        }
+        nlohmann::json input{{"name", read_only ? "MCP key (read-only)" : "MCP key"},
+                             {"scopes", std::move(scopes)},
+                             {"static", false},
+                             {"reason", "created on Developer → MCP"}};
+        if (const std::string expiry = form_field(body, "expires_in_seconds"); !expiry.empty()) {
+            input["expires_in_seconds"] = std::atoi(expiry.c_str());
+        }
+        const ApiResult result = registry.call("create_token", input, context);
+        McpPage page{.origin = public_origin(route), .groups = agent_docs::tool_groups(registry)};
+        if (result.ok) {
+            page.key = result.value.value("secret", "");
+        } else {
+            page.error = result.error.message;
+        }
+        co_return co_await send_text(route,
+                                     result.ok ? http::status::ok
+                                               : http::int_to_status(rest_status(result)),
+                                     web_ui_mcp(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_mcp_skill(boost::http::route_params& route) {
+        const ApiContext context = context_for(route);
+        if (!context.authorized) {
+            return redirect(route, "/sign-in");
+        }
+        route.res.set("content-disposition", "attachment; filename=SKILL.md");
+        return send_text(route,
+                         boost::http::status::ok,
+                         agent_docs::skill_md(registry, public_origin(route)),
+                         "text/markdown; charset=utf-8",
+                         "no-store");
+    }
+
+    // Public: an agent learns lake from one URL (llmstxt.org).
+    boost::http::route_task serve_llms(boost::http::route_params& route, bool full) {
+        return send_text(route,
+                         boost::http::status::ok,
+                         full ? agent_docs::llms_full_txt(registry, public_origin(route))
+                              : agent_docs::llms_txt(registry, public_origin(route)),
+                         "text/plain; charset=utf-8",
+                         "public, max-age=300");
     }
 
     boost::http::route_task serve_tokens(boost::http::route_params& route) {
@@ -11252,6 +11352,33 @@ bool ApiServer::start() {
         http::method::get, "/tokens", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/tokens", impl.serve_tokens(route));
         });
+    router.add(http::method::get,
+               "/developer/mcp",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route, "/developer/mcp", impl.serve_mcp_page(route));
+               });
+    router.add(http::method::post,
+               "/developer/mcp/key",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/developer/mcp/key", impl.serve_mcp_key(route));
+               });
+    router.add(http::method::get,
+               "/developer/mcp/skill",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/developer/mcp/skill", impl.serve_mcp_skill(route));
+               });
+    router.add(
+        http::method::get, "/llms.txt", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/llms.txt", impl.serve_llms(route, false));
+        });
+    router.add(http::method::get,
+               "/llms-full.txt",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/llms-full.txt", impl.serve_llms(route, true));
+               });
     router.add(
         http::method::get, "/settings", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/settings", impl.serve_settings(route));
