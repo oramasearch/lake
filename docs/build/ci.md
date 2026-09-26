@@ -7,6 +7,16 @@ installer.
 
 ## Build and test workflow
 
+> **Disabled since 2026-09-26** (Steve), with `gh workflow disable ci --repo oramasearch/lake`. The
+> checkout, toolchain and timeout fixes below work: the first Linux runs built lake and ran all
+> 287 tests. 284 pass. The other three (`SharedLinkScenario.ExpiryAfterListingStopsPreviewAndDownload`,
+> `ModelSync.MultiGigabyteRevisionsDeduplicateAndResumePull`,
+> `PostgresForgeScenario.DripsReviewRebaseAndGraphEvidenceLandEndToEnd`) hang or fail on a lost read
+> in the HTTP client on Linux's epoll backend. The server answers 200 and the client never
+> receives the response. That needs liquid#317 (block_on waits for its coroutine) and very
+> likely an update of the `oramasearch/corosio` fork, 221 commits behind upstream `develop`.
+> Re-enable with `gh workflow enable ci --repo oramasearch/lake` once they pass.
+
 [`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It loads one read-only
 deploy key per private repository (below), checks out all submodules recursively, fetches the
 pinned `oramasearch/zetta` and `oramasearch/liquid` commits, starts a Postgres 16 service,
