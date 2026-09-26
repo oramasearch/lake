@@ -61,12 +61,12 @@ Each Zetta capability, where it lives in lake, and the phase that delivers it. �
 | `get_trace`, `list_traces` | run page *Trace* (spans naming the run); Train → Traces page in 5 | ✅ 1 |
 | `list_connections`, `create_connection`, `delete_connection` | Train → Data | ✅ |
 | `create_dataset_from_query`, `upload_dataset` | Train → Data | ✅ |
-| `list_source_tables` | Train → Data, *Browse a connection's tables* | 2 |
-| `list_datasets`, `get_dataset` | Train → Data, dataset page (schema, partitions, sample) | 2 |
+| `list_source_tables` | Train → Data, *Browse tables* | ✅ 2 |
+| `list_datasets`, `get_dataset` | Train → Data, dataset page (schema, partitions, sample) | ✅ 2 |
 | `add_dataset` | Train → Data (server-side file path; operators only) | 2 |
-| `list_dataset_generators`, `generate_dataset` | Train → Data, *Generate a dataset* | 2 |
-| `promote_dataset` | dataset page, *Keep durable* | 2 |
-| `sql` | Train → Data, *Query* (read-only SELECT over the workspace's own data) | 2 |
+| `list_dataset_generators`, `generate_dataset` | Train → Data, *Generate a dataset* | ✅ 2 |
+| `promote_dataset` | dataset page, *Keep durable* | ✅ 2 |
+| `sql` | Train → Query (lake's `workspace_sql`: one read-only SELECT/WITH) | ✅ 2 |
 | `list_models`, `get_model`, `model_health` | Ship → Models, model page | ✅ list; page 3 |
 | `expose_model`, `unexpose_model` | Ship → Models | ✅ |
 | `score`, `explain` | model page, *Score* and *Explain a row* | 3 |

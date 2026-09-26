@@ -1115,3 +1115,90 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
     const json kinds = call("list_service_kinds", json::object());
     EXPECT_NE(kinds.dump().find("cassandra"), std::string::npos);
 }
+
+TEST(Workspaces, WorkspaceSqlRunsOnlyOneReadOnlyQuery) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    w.caller->answers["sql"] = {{"columns", json::array({"one"})},
+                                {"rows", json::array({{{"one", 1}}})}};
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto sql = [&](const std::string& statement) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        auto completed = liquid::runtime::block_on(registry.call_async(
+            "workspace_sql", {{"customer_id", w.customer_id}, {"statement", statement}}, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    for (const char* allowed :
+         {"SELECT 1 AS one", "  with t as (select 1) select * from t;", "SELECT 'a;b' AS text"}) {
+        const auto ran = sql(allowed);
+        EXPECT_TRUE(ran.ok) << allowed << ": " << ran.error.message;
+    }
+    for (const char* refused : {"DROP TABLE datasets.accounts",
+                                "DELETE FROM x",
+                                "SELECT 1; DROP TABLE x",
+                                "CREATE USER eve",
+                                "insert into x values (1)"}) {
+        const std::size_t before = w.caller->calls.size();
+        const auto ran = sql(refused);
+        EXPECT_FALSE(ran.ok) << refused;
+        EXPECT_EQ(w.caller->calls.size(), before) << refused << " never reaches the workspace";
+    }
+}
+
+TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
+    lake::api::WorkspacePage page;
+    page.section = "data";
+    page.customer_id = std::string(customer);
+    page.subject = "crm";
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["list_connections"] = {
+        {"connections", json::array({{{"name", "crm"}, {"connector", {{"type", "postgres"}}}}})}};
+    page.data["list_datasets"] = {
+        {"datasets", json::array({{{"name", "accounts"}, {"database", "datasets"}}})}};
+    page.data["list_source_tables"] = {
+        {"tables",
+         json::array({{{"schema", "public"},
+                       {"table", "accounts"},
+                       {"kind", "BASE TABLE"},
+                       {"columns", json::array({{{"column", "id"}, {"type", "integer"}}})}}})}};
+    page.data["list_dataset_generators"] = {
+        {"generators", json::array({{{"kind", "base-agent"}, {"title", "Base agent"}}})}};
+    std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Tables in crm"), std::string::npos);
+    EXPECT_NE(html.find("id integer"), std::string::npos);
+    EXPECT_NE(html.find("Browse tables"), std::string::npos);
+    EXPECT_NE(html.find("/train/dataset?customer_id="), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/data/generate\""), std::string::npos);
+    EXPECT_EQ(html.find("name=\"path\""), std::string::npos) << "no writing files on the node";
+
+    page.section = "dataset";
+    page.subject = "accounts";
+    page.data = {{"get_dataset",
+                  {{"database", "datasets"},
+                   {"columns", json::array({"id", "plan"})},
+                   {"partitions", json::array({{{"partition_id", "p1"}}})}}},
+                 {"sample", {{"rows", json::array({{{"id", 1}, {"plan", "pro"}}})}}}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("First rows"), std::string::npos);
+    EXPECT_NE(html.find(">pro<"), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/dataset/promote\""), std::string::npos);
+
+    page.section = "query";
+    page.data = {{"statement", "SELECT 1"},
+                 {"workspace_sql", {{"rows", json::array({{{"one", 1}}})}}}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("1 rows"), std::string::npos);
+}

@@ -21,12 +21,29 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 20> workspace_reads = {
-    "server_info",   "list_projects", "get_project",  "get_graph",    "list_connections",
-    "list_datasets", "get_dataset",   "list_runs",    "get_run",      "get_run_report",
-    "list_models",   "get_model",     "model_health", "list_indexes", "get_index",
-    "search",        "list_jobs",     "get_job",      "get_trace",    "list_traces"};
-constexpr std::array<std::string_view, 23> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 22> workspace_reads = {"server_info",
+                                                              "list_projects",
+                                                              "get_project",
+                                                              "get_graph",
+                                                              "list_connections",
+                                                              "list_datasets",
+                                                              "get_dataset",
+                                                              "list_runs",
+                                                              "get_run",
+                                                              "get_run_report",
+                                                              "list_models",
+                                                              "get_model",
+                                                              "model_health",
+                                                              "list_indexes",
+                                                              "get_index",
+                                                              "search",
+                                                              "list_jobs",
+                                                              "get_job",
+                                                              "get_trace",
+                                                              "list_traces",
+                                                              "list_source_tables",
+                                                              "list_dataset_generators"};
+constexpr std::array<std::string_view, 25> workspace_actions = {"create_project",
                                                                 "capture_intent",
                                                                 "compile_intent",
                                                                 "approve_plan",
@@ -48,7 +65,9 @@ constexpr std::array<std::string_view, 23> workspace_actions = {"create_project"
                                                                 "deploy",
                                                                 "import_n8n",
                                                                 "compile_n8n",
-                                                                "compile_python"};
+                                                                "compile_python",
+                                                                "promote_dataset",
+                                                                "generate_dataset"};
 
 template <std::size_t Size>
 bool listed(const std::array<std::string_view, Size>& names, std::string_view name) {
@@ -839,7 +858,77 @@ void register_parity_capabilities(Registry& registry) {
             }});
 }
 
+// Empty when `statement` is one read-only query: a SELECT or WITH, with at most a trailing
+// semicolon. Otherwise why not. A coarse guard in front of Zetta's own SQL, which also runs DDL and
+// administration; the workspace is the customer's own cluster, so reading its data is fine.
+std::string read_only_statement_problem(std::string_view statement) {
+    std::string text(statement);
+    while (!text.empty() &&
+           (std::isspace(static_cast<unsigned char>(text.back())) != 0 || text.back() == ';')) {
+        text.pop_back();
+    }
+    std::size_t start = 0;
+    while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
+        ++start;
+    }
+    std::string head;
+    for (std::size_t index = start;
+         index < text.size() && std::isalpha(static_cast<unsigned char>(text[index])) != 0;
+         ++index) {
+        head += static_cast<char>(std::tolower(static_cast<unsigned char>(text[index])));
+    }
+    if (head != "select" && head != "with") {
+        return "only a SELECT or WITH query can run here";
+    }
+    bool quoted = false;
+    for (const char character : text) {
+        if (character == '\'') {
+            quoted = !quoted;
+        } else if (character == ';' && !quoted) {
+            return "run one statement at a time";
+        }
+    }
+    return {};
+}
+
+// Train → Data → Query (Zetta parity phase 2, lake#181): read-only SQL over the workspace's data.
+void register_sql_capability(Registry& registry) {
+    registry.add(Capability{
+        .name = "workspace_sql",
+        .title = "Query the workspace",
+        .description = "Run one read-only SQL query (SELECT or WITH) over the customer's workspace "
+                       "data and answer {columns, rows}. Anything else is refused; the workspace's "
+                       "administrative SQL is not reachable.",
+        .input_schema = customer_input_schema(
+            {{"statement", {{"type", "string"}}}, {"database", {{"type", "string"}}}},
+            json::array({"statement"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string statement = input.at("statement");
+            if (const std::string problem = read_only_statement_problem(statement);
+                !problem.empty()) {
+                co_return ApiResult::failure("invalid_input", problem, "/statement");
+            }
+            set_audit(context, "workspace.sql", input, "sql");
+            json query{{"statement", statement}};
+            if (const std::string database = input.value("database", std::string());
+                !database.empty()) {
+                query["database"] = database;
+            }
+            co_return take(co_await zetta(context, input.at("customer_id"), "sql", true, query));
+        }});
+}
+
 void register_workspace_capabilities(Registry& registry) {
+    register_sql_capability(registry);
     register_pipeline_capabilities(registry);
     register_parity_capabilities(registry);
     register_connect_capabilities(registry);

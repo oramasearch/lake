@@ -4665,6 +4665,10 @@ struct ApiServer::Impl {
             "/workspace/delete",
             "/design/pipeline",
             "/ship/index",
+            "/train/dataset",
+            "/train/dataset/promote",
+            "/train/query",
+            "/train/data/generate",
             "/ship/index/publish",
             "/ship/indexes/create",
             "/design/pipeline/edit",
@@ -7283,6 +7287,10 @@ struct ApiServer::Impl {
             page.subject = query_value(route, "name");
         } else if (section == "run" || section == "index") {
             page.subject = query_value(route, "id");
+        } else if (section == "dataset") {
+            page.subject = query_value(route, "name");
+        } else if (section == "data") {
+            page.subject = query_value(route, "browse");
         }
         page.origin =
             options.external_origin.empty()
@@ -7331,7 +7339,14 @@ struct ApiServer::Impl {
                 reads = {{"get_project", {{"name", page.subject}}}};
             } else if (section == "data") {
                 reads = {{"list_connections", nlohmann::json::object()},
-                         {"list_datasets", nlohmann::json::object()}};
+                         {"list_datasets", nlohmann::json::object()},
+                         {"list_dataset_generators", nlohmann::json::object()}};
+                if (!page.subject.empty()) {
+                    reads.push_back({"list_source_tables",
+                                     {{"connection", page.subject},
+                                      {"include_columns", true},
+                                      {"max_tables", 100}}});
+                }
                 const ApiResult services = unwrap(co_await workspace_call(
                     "list_services", {{"customer_id", page.customer_id}}, context));
                 if (services.ok) {
@@ -7346,6 +7361,40 @@ struct ApiServer::Impl {
                          {"list_traces", {{"limit", 500}}}};
             } else if (section == "models") {
                 reads = {{"list_models", nlohmann::json::object()}};
+            } else if (section == "dataset") {
+                const std::string database = query_value(route, "database");
+                reads = {{"get_dataset",
+                          {{"dataset", page.subject},
+                           {"database", database.empty() ? std::string("datasets") : database}}}};
+                const ApiResult sample = unwrap(co_await workspace_call(
+                    "workspace_sql",
+                    {{"customer_id", page.customer_id},
+                     {"statement",
+                      "SELECT * FROM " + (database.empty() ? std::string("datasets") : database) +
+                          "." + page.subject + " LIMIT 20"}},
+                    context));
+                if (sample.ok) {
+                    page.data["sample"] = sample.value;
+                }
+            } else if (section == "query") {
+                const std::string statement = query_value(route, "statement");
+                const std::string database = query_value(route, "database");
+                page.data["statement"] = statement;
+                page.data["database"] = database;
+                if (!statement.empty()) {
+                    nlohmann::json input{{"customer_id", page.customer_id},
+                                         {"statement", statement}};
+                    if (!database.empty()) {
+                        input["database"] = database;
+                    }
+                    const ApiResult ran =
+                        unwrap(co_await workspace_call("workspace_sql", std::move(input), context));
+                    if (ran.ok) {
+                        page.data["workspace_sql"] = ran.value;
+                    } else {
+                        page.error = ran.error.message;
+                    }
+                }
             } else if (section == "indexes") {
                 reads = {{"list_indexes", nlohmann::json::object()},
                          {"list_datasets", nlohmann::json::object()}};
@@ -7597,6 +7646,22 @@ struct ApiServer::Impl {
                                                  "no-store");
                 }
             }
+        } else if (action == "dataset_promote") {
+            back = "/train/dataset?" + query +
+                   "&database=" + oauth_url_encode(form_field(body, "database")) +
+                   "&name=" + oauth_url_encode(form_field(body, "dataset"));
+            result = unwrap(co_await act("promote_dataset",
+                                         {{"dataset", form_field(body, "dataset")},
+                                          {"database", form_field(body, "database")}}));
+        } else if (action == "dataset_generate") {
+            back = "/train/data?" + query;
+            // Never `path`: it would write a file on the workspace's node.
+            nlohmann::json input{{"kind", form_field(body, "kind")}};
+            if (const std::string variants = form_field(body, "variants_per_subject");
+                !variants.empty()) {
+                input["variants_per_subject"] = std::clamp(std::atoi(variants.c_str()), 1, 50);
+            }
+            result = unwrap(co_await act("generate_dataset", std::move(input)));
         } else if (action == "index_create") {
             nlohmann::json input{{"table", form_field(body, "table")}};
             nlohmann::json fields = nlohmann::json::array();
@@ -11264,10 +11329,12 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 10>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 12>{{{"/design/projects", "projects"},
                                                               {"/design/project", "project"},
                                                               {"/design/pipeline", "pipeline"},
                                                               {"/train/data", "data"},
+                                                              {"/train/dataset", "dataset"},
+                                                              {"/train/query", "query"},
                                                               {"/train/runs", "runs"},
                                                               {"/train/run", "run"},
                                                               {"/ship/models", "models"},
@@ -11281,8 +11348,10 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 25>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 27>{
              {{"/workspace/start", "start"},
+              {"/train/dataset/promote", "dataset_promote"},
+              {"/train/data/generate", "dataset_generate"},
               {"/train/data/connect-service", "connect_service"},
               {"/ship/indexes/create", "index_create"},
               {"/ship/index/publish", "index_publish"},
