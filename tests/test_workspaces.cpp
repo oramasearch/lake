@@ -344,6 +344,27 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     EXPECT_EQ(connection.value["password"], "pw");
     EXPECT_EQ(listed.value.dump().find("pw"), std::string::npos);
     EXPECT_FALSE(connection.value.contains("kind"));
+
+    // A SQLite service's credential is its bearer token.
+    const auto sqlite =
+        call(*owner_principal,
+             "create_service",
+             {{"customer_id", owner_customer}, {"kind", "sqlite"}, {"name", "notes"}});
+    ASSERT_TRUE(sqlite.ok) << sqlite.error.message;
+    const std::string sqlite_id = sqlite.value["id"];
+    ASSERT_TRUE(store.set_service_status(sqlite_id, "Ready", "", "http://notes:8080"));
+    w.deliver(*store.get_service(sqlite_id),
+              {{"kind", "sqlite"},
+               {"endpoint", "http://notes:8080"},
+               {"token", "t0k"},
+               {"database", "main"}});
+    const auto sqlite_connection =
+        call(*owner_principal,
+             "service_connection",
+             {{"customer_id", owner_customer}, {"service_id", sqlite_id}});
+    ASSERT_TRUE(sqlite_connection.ok) << sqlite_connection.error.message;
+    EXPECT_EQ(sqlite_connection.value["token"], "t0k");
+    ASSERT_TRUE(store.withdraw_service(sqlite_id));
     const auto workspace_token =
         call(*owner_principal,
              "service_connection",
