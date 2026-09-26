@@ -7541,65 +7541,47 @@ struct ApiServer::Impl {
                     shown["deploy"] = result.value;
                 }
             } else if (action == "pipeline_run") {
-                result = unwrap(co_await act("gate", {{"project", project}, {"graph", graph}}));
-                if (result.ok && result.value.value("block_deploy", false)) {
-                    shown["gate"] = result.value;
+                nlohmann::json input{
+                    {"customer_id", customer_id}, {"project", project}, {"graph", graph}};
+                if (const std::string path = form_field(body, "dataset_path"); !path.empty()) {
+                    input["dataset_path"] = path;
+                }
+                if (const std::string model = form_field(body, "model_name"); !model.empty()) {
+                    input["model_name"] = model;
+                }
+                if (const std::string holdout = form_field(body, "holdout_fraction");
+                    !holdout.empty()) {
+                    char* end = nullptr;
+                    const double fraction = std::strtod(holdout.c_str(), &end);
+                    if (end != holdout.c_str() && *end == '\0') {
+                        input["holdout_fraction"] = fraction;
+                    }
+                }
+                result = unwrap(co_await workspace_call("run_pipeline", std::move(input), context));
+                if (result.ok && result.value.contains("run")) {
+                    back = "/train/run?" + query + "&id=" +
+                           oauth_url_encode(result.value["run"].value("run_id", std::string()));
                 } else if (result.ok) {
-                    nlohmann::json input{{"project", project}, {"graph", graph}};
-                    if (const std::string path = form_field(body, "dataset_path"); !path.empty()) {
-                        input["dataset_path"] = path;
-                    }
-                    if (const std::string model = form_field(body, "model_name"); !model.empty()) {
-                        input["model_name"] = model;
-                    }
-                    if (const std::string holdout = form_field(body, "holdout_fraction");
-                        !holdout.empty()) {
-                        char* end = nullptr;
-                        const double fraction = std::strtod(holdout.c_str(), &end);
-                        if (end != holdout.c_str() && *end == '\0') {
-                            input["holdout_fraction"] = fraction;
-                        }
-                    }
-                    result = unwrap(co_await act("run", std::move(input)));
-                    if (result.ok) {
-                        back = "/train/run?" + query + "&id=" +
-                               oauth_url_encode(result.value.value("run_id", std::string()));
-                    }
+                    shown["gate"] = result.value["gate"];
                 }
             } else if (action == "pipeline_new" || action == "pipeline_n8n" ||
                        action == "pipeline_python") {
                 const std::string name = form_field(body, "name");
-                if (action == "pipeline_new") {
-                    // One connect step to start from; an empty graph has nothing to draw.
-                    result = unwrap(co_await act(
-                        "save_graph",
-                        {{"project", project},
-                         {"graph", name},
-                         {"nodes",
-                          nlohmann::json::array(
-                              {{{"id", "connect-1"}, {"kind", "connect"}, {"name", "Source"}}})},
-                         {"edges", nlohmann::json::array()}}));
-                } else if (action == "pipeline_n8n") {
-                    result = unwrap(co_await act(
-                        "import_n8n",
-                        {{"project", project}, {"content", form_field(body, "content")}}));
-                    if (result.ok) {
-                        nlohmann::json input{
-                            {"project", project},
-                            {"input_id", result.value.value("input_id", std::string())}};
-                        if (!name.empty()) {
-                            input["name"] = name;
-                        }
-                        result = unwrap(co_await act("compile_n8n", std::move(input)));
-                    }
-                } else {
-                    nlohmann::json input{{"project", project},
-                                         {"source", form_field(body, "source")}};
-                    if (!name.empty()) {
-                        input["name"] = name;
-                    }
-                    result = unwrap(co_await act("compile_python", std::move(input)));
+                nlohmann::json input{{"customer_id", customer_id},
+                                     {"project", project},
+                                     {"from",
+                                      action == "pipeline_new"   ? "empty"
+                                      : action == "pipeline_n8n" ? "n8n"
+                                                                 : "python"}};
+                if (!name.empty()) {
+                    input["name"] = name;
                 }
+                if (action != "pipeline_new") {
+                    input["content"] =
+                        form_field(body, action == "pipeline_n8n" ? "content" : "source");
+                }
+                result =
+                    unwrap(co_await workspace_call("create_pipeline", std::move(input), context));
                 back = result.ok
                            ? page_of(result.value.value("name", name), "")
                            : "/design/project?" + query + "&name=" + oauth_url_encode(project);

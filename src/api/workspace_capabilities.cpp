@@ -361,6 +361,25 @@ void register_service_capabilities(Registry& registry) {
         }});
 }
 
+// One Zetta call in the customer's workspace, as an ApiResult.
+liquid::runtime::task<ApiResult>
+zetta(ApiContext& context, std::string customer, std::string capability, bool read, json input) {
+    auto called =
+        co_await context.workspaces->call(customer, std::move(capability), read, std::move(input));
+    if (!called) {
+        co_return ApiResult::failure("store_unavailable", called.error().message);
+    }
+    if (!*called) {
+        co_return ApiResult::failure((*called).error().code, (*called).error().message);
+    }
+    co_return ApiResult::success(**called);
+}
+
+ApiResult take(std::expected<ApiResult, liquid::error> completed) {
+    return completed ? std::move(*completed)
+                     : ApiResult::failure("store_error", completed.error().message);
+}
+
 } // namespace
 
 // One validated pipeline edit (docs/design/zetta-parity.md): read the graph, apply the edit with
@@ -595,8 +614,234 @@ void register_connect_capabilities(Registry& registry) {
         }});
 }
 
+// What the pipeline page's forms chain together, as capabilities, so REST and MCP clients get the
+// same flows (lake#189): read a pipeline with its step status and runs, gate then run it, and
+// create one empty, from n8n or from Python. The catalog of service kinds is readable too.
+void register_parity_capabilities(Registry& registry) {
+    const json project_graph{{"project", {{"type", "string"}}}, {"graph", {{"type", "string"}}}};
+    registry.add(Capability{
+        .name = "get_pipeline",
+        .title = "Get a pipeline",
+        .description =
+            "One pipeline in the customer's workspace: its steps and edges, the approval "
+            "state, each step's status in the latest run, and the pipeline's runs, "
+            "newest first.",
+        .input_schema = customer_input_schema(project_graph, json::array({"project", "graph"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            ApiResult graph = take(
+                co_await zetta(context,
+                               customer,
+                               "get_graph",
+                               true,
+                               {{"project", input.at("project")}, {"graph", input.at("graph")}}));
+            if (!graph.ok) {
+                co_return graph;
+            }
+            json value = graph.value;
+            const std::string name = value.value("name", std::string());
+            const std::string id = value.value("graph_id", std::string());
+            json runs = json::array();
+            const ApiResult listed =
+                take(co_await zetta(context, customer, "list_runs", true, json::object()));
+            if (listed.ok) {
+                for (const json& run : listed.value.value("runs", json::array())) {
+                    const std::string of = run.value("graph", std::string());
+                    if (of == name || of == id) {
+                        runs.push_back(run);
+                    }
+                }
+            }
+            std::sort(runs.begin(), runs.end(), [](const json& a, const json& b) {
+                return a.value("created", std::string()) > b.value("created", std::string());
+            });
+            json status = json::object();
+            if (!runs.empty()) {
+                const ApiResult latest =
+                    take(co_await zetta(context,
+                                        customer,
+                                        "get_run",
+                                        true,
+                                        {{"run_id", runs.front().value("id", std::string())}}));
+                if (latest.ok) {
+                    for (const json& step : latest.value.value("lineage", json::object())
+                                                .value("steps", json::array())) {
+                        if (step.is_string()) {
+                            status[step.get<std::string>()] =
+                                latest.value.value("status", std::string());
+                        }
+                    }
+                }
+            }
+            value["step_status"] = std::move(status);
+            value["runs"] = std::move(runs);
+            co_return ApiResult::success(std::move(value));
+        }});
+    registry.add(Capability{
+        .name = "run_pipeline",
+        .title = "Check and run a pipeline",
+        .description =
+            "Run Zetta's correctness checks on an approved pipeline and, when they pass, "
+            "run it. Optional `dataset_path` (database.table), `holdout_fraction` and "
+            "`model_name`. Answers {gate, run}; a failing gate answers {gate} and runs "
+            "nothing.",
+        .input_schema = customer_input_schema(
+            {{"project", {{"type", "string"}}},
+             {"graph", {{"type", "string"}}},
+             {"dataset_path", {{"type", "string"}}},
+             {"holdout_fraction", {{"type", "number"}, {"minimum", 0}, {"maximum", 0.9}}},
+             {"model_name", {{"type", "string"}}}},
+            json::array({"project", "graph"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            set_audit(context, "pipeline.run", input, "run");
+            const json target{{"project", input.at("project")}, {"graph", input.at("graph")}};
+            const ApiResult gate = take(co_await zetta(context, customer, "gate", false, target));
+            if (!gate.ok) {
+                co_return gate;
+            }
+            if (gate.value.value("block_deploy", false)) {
+                co_return ApiResult::success({{"gate", gate.value}});
+            }
+            json run = target;
+            for (const char* key : {"dataset_path", "holdout_fraction", "model_name"}) {
+                if (input.contains(key)) {
+                    run[key] = input.at(key);
+                }
+            }
+            const ApiResult ran = take(co_await zetta(context, customer, "run", false, run));
+            if (!ran.ok) {
+                co_return ran;
+            }
+            co_return ApiResult::success({{"gate", gate.value}, {"run", ran.value}});
+        }});
+    registry.add(Capability{
+        .name = "create_pipeline",
+        .title = "Create a pipeline",
+        .description = "Create a pipeline in a project: `from` empty (one connect step to build "
+                       "on), n8n (`content` is an n8n workflow export) or python (`content` is a "
+                       "simulated-Python pipeline Zetta lowers without running it). The new "
+                       "pipeline is proposed and must be approved before it runs.",
+        .input_schema = customer_input_schema(
+            {{"project", {{"type", "string"}}},
+             {"name", {{"type", "string"}}},
+             {"from", {{"type", "string"}, {"enum", json::array({"empty", "n8n", "python"})}}},
+             {"content", {{"type", "string"}}}},
+            json::array({"project", "from"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            const std::string project = input.at("project");
+            const std::string from = input.at("from");
+            const std::string name = input.value("name", std::string());
+            set_audit(context,
+                      "pipeline.create",
+                      input,
+                      from == "empty" ? "save_graph" : "compile_" + from);
+            if (from == "empty") {
+                if (name.empty()) {
+                    co_return ApiResult::failure(
+                        "invalid_input", "an empty pipeline needs a name", "/name");
+                }
+                co_return take(co_await zetta(
+                    context,
+                    customer,
+                    "save_graph",
+                    false,
+                    {{"project", project},
+                     {"graph", name},
+                     {"nodes",
+                      json::array(
+                          {{{"id", "connect-1"}, {"kind", "connect"}, {"name", "Source"}}})},
+                     {"edges", json::array()}}));
+            }
+            const std::string content = input.value("content", std::string());
+            if (content.empty()) {
+                co_return ApiResult::failure("invalid_input", "content is required", "/content");
+            }
+            if (from == "n8n") {
+                const ApiResult imported =
+                    take(co_await zetta(context,
+                                        customer,
+                                        "import_n8n",
+                                        false,
+                                        {{"project", project}, {"content", content}}));
+                if (!imported.ok) {
+                    co_return imported;
+                }
+                json compile{{"project", project},
+                             {"input_id", imported.value.value("input_id", std::string())}};
+                if (!name.empty()) {
+                    compile["name"] = name;
+                }
+                co_return take(co_await zetta(context, customer, "compile_n8n", false, compile));
+            }
+            json compile{{"project", project}, {"source", content}};
+            if (!name.empty()) {
+                compile["name"] = name;
+            }
+            co_return take(co_await zetta(context, customer, "compile_python", false, compile));
+        }});
+    registry.add(Capability{
+        .name = "list_service_kinds",
+        .title = "List service kinds",
+        .description = "Every kind of service a customer can create: key, label and how long a new "
+                       "one usually takes to become ready.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "principal",
+        .action = "read",
+        .resolve_object = [](const json&,
+                             ApiContext& context) -> std::expected<std::string, ApiError> {
+            return "principal/" + context.acting_identity;
+        },
+        // The catalog is the same for everyone signed in; nothing to filter per caller.
+        .authorizes_candidates = true,
+        .handler =
+            [](const json&, ApiContext&) {
+                json kinds = json::array();
+                for (const control::ServiceKind& kind : control::service_kinds) {
+                    kinds.push_back({{"kind", std::string(kind.key)},
+                                     {"label", std::string(kind.label)},
+                                     {"ready_minutes", kind.ready_minutes},
+                                     {"preview", kind.preview}});
+                }
+                return ApiResult::success({{"kinds", std::move(kinds)}});
+            }});
+}
+
 void register_workspace_capabilities(Registry& registry) {
     register_pipeline_capabilities(registry);
+    register_parity_capabilities(registry);
     register_connect_capabilities(registry);
     register_search_capabilities(registry);
     registry.add(Capability{

@@ -36,7 +36,7 @@ which withdraws the request the same way.
 
 ## Capabilities
 
-All eight are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
+All eleven are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
 customer's policy object and is authorized by lake before anything reaches Zetta.
 
 | Capability | Kind | lake action on the customer | What it does |
@@ -45,6 +45,9 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `start_workspace` | action | `write` | Appends a `desired` event; repeating it appends nothing |
 | `delete_workspace` | action | `admin` | Needs `confirm` equal to the workspace id; marks the default service absent. Refused with `not_found` when no workspace is requested |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, rename): reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
+| `get_pipeline` | read | `read` | A pipeline's graph, approval, `step_status` from the latest run, and its `runs`, newest first — what the pipeline page shows |
+| `run_pipeline` | action | `write` | `gate`, then `run` when it passes, with optional `dataset_path`, `holdout_fraction`, `model_name`; answers `{gate, run}`, or `{gate}` alone when the checks fail. Audit kind `pipeline.run` |
+| `create_pipeline` | action | `write` | `from` `empty` (one connect step), `n8n` (`import_n8n` then `compile_n8n` over `content`) or `python` (`compile_python` over `content`). Audit kind `pipeline.create` |
 | `connect_service` | action | `write` | Create or refresh a Zetta connection to one of the customer's own Ready services from the connection the operator delivered (`service_id`, optional `name`, default the service's name). Postgres today (`sslmode=require` in the cluster); kinds Zetta cannot read yet are refused with `invalid_input`. The password reaches Zetta only, never the caller. Audit kind `service.connect` |
 | `search_index` | read | `read` | Search one **published** index (`index`, `query`, optional `field`, `top_k` ≤ 100): checks `get_index` says it is exposed, then calls Zetta's `search`. The outside-call path: `GET /v1/search_index?customer_id=&index=&query=` with a token scoped to `search_index`, which can do nothing else. Audit kind `index.search` |
 | `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job`, `get_trace`, `list_traces` |
@@ -70,6 +73,10 @@ Workspace clusters run without `--governance` (the operator sets no such flag), 
 query and audits it as `consent_bypassed`; lake's own `write` authorization on the customer is the
 gate. Should a workspace ever enforce consent, the page says an approval is needed that lake cannot
 give, instead of passing the challenge through.
+
+**Every page action is a capability.** The pipeline page's *Check and run* is `run_pipeline`, its
+three ways to start a pipeline are `create_pipeline`, and every edit is `edit_pipeline`, so a REST or
+MCP client does exactly what the page does (lake#189, `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp`).
 
 ## How lake finds and calls a workspace
 
