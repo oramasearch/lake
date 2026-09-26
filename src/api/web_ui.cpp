@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
 #include <format>
 #include <optional>
 #include <set>
@@ -1717,6 +1719,44 @@ std::string workspace_gate(const WorkspacePage& page, const WorkspaceSection& se
         hidden("return", section.path));
 }
 
+// Minutes since an ISO-8601 UTC timestamp ("2026-09-26T03:04:00Z", fractions ignored), or -1.
+long minutes_since(std::string_view timestamp) {
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    const std::string text(timestamp.substr(0, 19));
+    if (std::sscanf(
+            text.c_str(), "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6) {
+        return -1;
+    }
+    const std::chrono::sys_days date{std::chrono::year{year} / month / day};
+    const auto at = date + std::chrono::hours{hour} + std::chrono::minutes{minute} +
+                    std::chrono::seconds{second};
+    const auto elapsed =
+        std::chrono::floor<std::chrono::minutes>(std::chrono::system_clock::now() - at);
+    return elapsed.count() < 0 ? 0 : static_cast<long>(elapsed.count());
+}
+
+// What a starting service is waiting for and how long its kind usually takes, so nobody wonders
+// whether a Cassandra that has been provisioning for five minutes is stuck.
+std::string service_start_hint(const nlohmann::json& service, std::string_view phase) {
+    if (phase != "Waiting for the operator" && phase != "Provisioning" && phase != "Connecting") {
+        return {};
+    }
+    const control::ServiceKind* kind = control::find_service_kind(json_text(service, "kind"));
+    if (kind == nullptr) {
+        return {};
+    }
+    const long elapsed = minutes_since(json_text(service, "created_at"));
+    std::string hint = std::format("Usually ready in about {} minutes", kind->ready_minutes);
+    if (elapsed >= 0) {
+        hint += elapsed == 0 ? "; started just now" : std::format("; started {} min ago", elapsed);
+        if (elapsed > 2 * kind->ready_minutes) {
+            hint += ". This is taking longer than usual; the message above says what it is "
+                    "waiting for";
+        }
+    }
+    return "<br><span class=\"muted\">" + web_ui_escape(hint) + ".</span>";
+}
+
 std::string service_phase(const nlohmann::json& service) {
     const std::string phase = json_text(service, "phase");
     if (json_text(service, "desired") == "absent") {
@@ -1801,10 +1841,11 @@ std::string services_content(const WorkspacePage& page) {
                 web_ui_escape(json_text(service, "instances")),
                 web_ui_escape(json_text(service, "storage_gi")),
                 web_ui_escape(phase),
-                json_text(service, "message").empty()
-                    ? std::string()
-                    : "<br><span class=\"muted\">" + web_ui_escape(json_text(service, "message")) +
-                          "</span>",
+                (json_text(service, "message").empty()
+                     ? std::string()
+                     : "<br><span class=\"muted\">" + web_ui_escape(json_text(service, "message")) +
+                           "</span>") +
+                    (deleting ? std::string() : service_start_hint(service, phase)),
                 web_ui_escape(json_text(service, "endpoint")),
                 actions);
         }
@@ -1821,17 +1862,21 @@ std::string services_content(const WorkspacePage& page) {
         "placeholder=\"crm\"></label><label>Instances<select name=\"instances\"><option>1"
         "</option><option>2</option><option>3</option></select></label><label>Storage (GiB)"
         "<input name=\"storage_gi\" type=\"number\" min=\"1\" max=\"100\" value=\"10\">"
-        "</label><p class=\"muted\">This space may run {} services at once.</p><button "
+        "</label><p class=\"muted\">This space may run {} services at once. Most start in two to "
+        "four "
+        "minutes; Cassandra takes about ten.</p><button "
         "class=\"button button-primary\" type=\"submit\">Create service</button></form>"
         "</section>",
         hidden("customer_id", page.customer_id),
         [] {
             std::string options;
             for (const control::ServiceKind& kind : control::service_kinds) {
-                options += std::format("<option value=\"{}\">{}{}</option>",
-                                       kind.key,
-                                       kind.label,
-                                       kind.preview ? " (preview, not for production)" : "");
+                options +=
+                    std::format("<option value=\"{}\">{} — ready in about {} minutes{}</option>",
+                                kind.key,
+                                kind.label,
+                                kind.ready_minutes,
+                                kind.preview ? " (preview, not for production)" : "");
             }
             return options;
         }(),
