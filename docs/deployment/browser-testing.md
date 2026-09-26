@@ -73,8 +73,16 @@ node tools/e2e/services.mjs https://lake.oramadev.net /tmp/lake-ticket /tmp/lake
 
 Each kind goes through the Services page: create (1 GiB), wait for Ready, compare the time with the
 kind's expected start time from the menu, *Show connection* (field names only, never values),
-delete, and wait until it is gone. `sqlite` also runs real SQL through a port-forward (create,
-insert, a batch that must roll back, select). `log.json` records every step and the exit code is
+delete, and wait until it is gone. Our wrapper kinds also run real queries through a port-forward,
+each with an escape that must be refused (`<kind> queries` in `log.json`):
+
+| Kind | Queries | Must be refused |
+|---|---|---|
+| `sqlite` | create, insert, select | a batch with a failing statement rolls back whole (400) |
+| `duckdb` | create, insert, select | the same batch (400); `read_csv('/etc/passwd')` (403, the lockdown) |
+| `polars` | upload an NDJSON dataset, `count` and `sum` over it | `read_csv('/etc/passwd')` (400 `forbidden_sql`, the SQL allowlist) |
+
+`log.json` records every step and the exit code is
 non-zero on any failure. Run it after anything that touches a service kind: the lake-service skill
 (liquid-bridge `.claude/skills/lake-service`) requires it.
 
