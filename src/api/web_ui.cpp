@@ -2127,10 +2127,10 @@ std::string pipeline_content(const WorkspacePage& page) {
         row_link("/design/project?" + query + "&name=" + url_component(page.project), page.project),
         approved ? "status-success" : "status-warning",
         approved ? "approved" : "proposed — approve before it runs",
-        graph.approved_by.empty()
-            ? std::string()
-            : " by " + web_ui_escape(graph.approved_by) +
-                  (graph.approved_at.empty() ? "" : " at " + web_ui_escape(graph.approved_at)),
+        // approved_by is Zetta's principal id (lake's own key), meaningless to a person; lake's
+        // audit log says who approved. Show when.
+        graph.approved_at.empty() ? std::string()
+                                  : " " + web_ui_escape(graph.approved_at.substr(0, 16)) + " UTC",
         graph.steps.size(),
         graph.edges.size());
     if (const auto gate = page.data.find("gate"); gate != page.data.end()) {

@@ -267,8 +267,8 @@ std::string render_svg(const Graph& graph,
     const int height = top + rows * row_height;
 
     std::string svg = std::format(
-        "<svg class=\"pipeline-graph\" role=\"img\" viewBox=\"0 0 {} {}\" width=\"{}\" "
-        "height=\"{}\" xmlns=\"http://www.w3.org/2000/svg\"><title>{} — {} steps, {} "
+        "<svg class=\"pipeline-graph\" role=\"img\" viewBox=\"0 0 {} {}\" data-width=\"{}\" "
+        "data-height=\"{}\" xmlns=\"http://www.w3.org/2000/svg\"><title>{} — {} steps, {} "
         "edges</title><defs><marker id=\"arrow\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" "
         "markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 "
         "5 L 0 10 z\" fill=\"currentColor\"/></marker></defs>",
