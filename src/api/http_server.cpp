@@ -4682,6 +4682,7 @@ struct ApiServer::Impl {
             "/train/data/upload",
             "/design/project/delete",
             "/train/data/connect",
+            "/train/data/connect-service",
             "/train/data/disconnect",
             "/train/data/pull",
             "/environments",
@@ -7300,6 +7301,16 @@ struct ApiServer::Impl {
                 "list_services", {{"customer_id", page.customer_id}}, context));
             if (listed.ok) {
                 page.data["list_services"] = listed.value;
+                // Connections that use a service, so deleting one warns (lake#188).
+                const ApiResult connections =
+                    unwrap(co_await workspace_call("workspace_query",
+                                                   {{"customer_id", page.customer_id},
+                                                    {"capability", "list_connections"},
+                                                    {"input", nlohmann::json::object()}},
+                                                   context));
+                if (connections.ok) {
+                    page.data["list_connections"] = connections.value;
+                }
             } else {
                 page.unavailable = listed.error.message;
             }
@@ -7321,6 +7332,11 @@ struct ApiServer::Impl {
             } else if (section == "data") {
                 reads = {{"list_connections", nlohmann::json::object()},
                          {"list_datasets", nlohmann::json::object()}};
+                const ApiResult services = unwrap(co_await workspace_call(
+                    "list_services", {{"customer_id", page.customer_id}}, context));
+                if (services.ok) {
+                    page.data["list_services"] = services.value;
+                }
             } else if (section == "runs") {
                 reads = {{"list_runs", nlohmann::json::object()}};
             } else if (section == "run") {
@@ -7672,6 +7688,12 @@ struct ApiServer::Impl {
                                              "no-store");
             }
             back = "/services?" + query;
+        } else if (action == "connect_service") {
+            back = "/train/data?" + query;
+            result = unwrap(co_await workspace_call(
+                "connect_service",
+                {{"customer_id", customer_id}, {"service_id", form_field(body, "service_id")}},
+                context));
         } else if (action == "connect") {
             back = "/train/data?" + query;
             const std::string type = form_field(body, "type");
@@ -11277,8 +11299,9 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 24>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 25>{
              {{"/workspace/start", "start"},
+              {"/train/data/connect-service", "connect_service"},
               {"/ship/indexes/create", "index_create"},
               {"/ship/index/publish", "index_publish"},
               {"/design/pipeline/edit", "pipeline_edit"},

@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+#include <optional>
+
 #include "lake/api/pipeline.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
@@ -513,8 +515,89 @@ void register_search_capabilities(Registry& registry) {
         }});
 }
 
+// The Zetta connector for a service kind, from the service's delivered connection, or nothing when
+// Zetta cannot read that kind yet. Zetta's connectors today: postgres and snowflake.
+std::optional<json> zetta_connector(const control::ManagedService& service,
+                                    const json& connection) {
+    if (service.kind == "postgres") {
+        json connector{
+            {"type", "postgres"},
+            {"host", connection.value("host", std::string())},
+            {"port",
+             connection.contains("port")
+                 ? (connection.at("port").is_string() ? connection.at("port").get<std::string>()
+                                                      : connection.at("port").dump())
+                 : std::string("5432")},
+            {"user", connection.value("user", std::string())},
+            {"database", connection.value("database", std::string())},
+            {"token", connection.value("password", std::string())},
+            // CloudNativePG serves TLS in the cluster with its own CA.
+            {"sslmode", "require"}};
+        return connector;
+    }
+    return std::nullopt;
+}
+
+// Train → Data → Connect one of your services (lake#188): make a Zetta connection to one of the
+// customer's own Ready services from the connection the operator delivered, so nobody types or
+// sees its password. Saving under an existing name replaces it, which is how Refresh works.
+void register_connect_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "connect_service",
+        .title = "Connect a service to the workspace",
+        .description = "Create (or refresh) a Zetta connection in the customer's workspace to one "
+                       "of the customer's own Ready services, filled from the service's delivered "
+                       "connection. Postgres today; other kinds answer invalid_input until Zetta "
+                       "can read them. `name` defaults to the service's name.",
+        .input_schema = customer_input_schema(
+            {{"service_id", {{"type", "string"}}}, {"name", {{"type", "string"}}}},
+            json::array({"service_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            const auto found = context.workspaces->service(customer, input.at("service_id"));
+            if (!found) {
+                co_return store_failure(found.error());
+            }
+            service_audit(context, "service.connect", *found);
+            const auto connection = context.workspaces->connection(*found);
+            if (found->phase != "Ready" || !connection) {
+                co_return ApiResult::failure("workspace_not_ready", "the service is not ready yet");
+            }
+            const auto connector = zetta_connector(*found, *connection);
+            if (!connector) {
+                co_return ApiResult::failure("invalid_input",
+                                             "the workspace cannot read a " + found->kind +
+                                                 " service yet",
+                                             "/service_id");
+            }
+            const std::string name = input.value("name", found->name);
+            auto created = co_await context.workspaces->call(
+                customer, "create_connection", false, {{"name", name}, {"connector", *connector}});
+            if (!created) {
+                co_return ApiResult::failure("store_unavailable", created.error().message);
+            }
+            if (!*created) {
+                co_return ApiResult::failure((*created).error().code, (*created).error().message);
+            }
+            json value = **created;
+            value["service_id"] = found->id;
+            value["service_name"] = found->name;
+            co_return ApiResult::success(std::move(value));
+        }});
+}
+
 void register_workspace_capabilities(Registry& registry) {
     register_pipeline_capabilities(registry);
+    register_connect_capabilities(registry);
     register_search_capabilities(registry);
     registry.add(Capability{
         .name = "workspace_status",

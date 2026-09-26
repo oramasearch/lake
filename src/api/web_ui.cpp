@@ -1828,15 +1828,26 @@ std::string services_content(const WorkspacePage& page) {
                                        hidden("customer_id", page.customer_id),
                                        hidden("service_id", id));
             }
+            std::string used_by;
+            for (const nlohmann::json& connection :
+                 page.data.value("list_connections", nlohmann::json::object())
+                     .value("connections", nlohmann::json::array())) {
+                if (json_text(connection, "name") == name) {
+                    used_by =
+                        "<p class=\"notice status-warning\">Train → Data's connection <code>" +
+                        web_ui_escape(name) + "</code> uses it and stops working.</p>";
+                }
+            }
             if (!deleting) {
                 actions += std::format(
                     "<details><summary>Delete</summary><form class=\"stack\" method=\"post\" "
-                    "action=\"/services/delete\">{}{}<label>Type <code>{}</code> to delete it "
+                    "action=\"/services/delete\">{}{}{}<label>Type <code>{}</code> to delete it "
                     "and all of its data, which cannot be recovered<input name=\"confirm\" "
                     "required autocomplete=\"off\"></label><button class=\"button button-danger\" "
                     "type=\"submit\">Delete {}</button></form></details>",
                     hidden("customer_id", page.customer_id),
                     hidden("service_id", id),
+                    used_by,
                     web_ui_escape(name),
                     web_ui_escape(name));
             }
@@ -2573,8 +2584,8 @@ std::string workspace_content(const WorkspacePage& page) {
         if (connections.empty()) {
             out += "<p>No connections yet. Add the database your data lives in below.</p>";
         } else {
-            out += "<table><thead><tr><th>Name</th><th>Type</th><th>Where</th><th>Saved</th>"
-                   "<th></th></tr></thead><tbody>";
+            out += "<table><thead><tr><th>Name</th><th>Type</th><th>Where</th><th>From service"
+                   "</th><th>Saved</th><th></th></tr></thead><tbody>";
             for (const nlohmann::json& connection : connections) {
                 const nlohmann::json connector =
                     connection.value("connector", nlohmann::json::object());
@@ -2582,18 +2593,72 @@ std::string workspace_content(const WorkspacePage& page) {
                     json_text(connector, "type") == "postgres"
                         ? json_text(connector, "host") + "/" + json_text(connector, "database")
                         : json_text(connector, "account");
+                std::string from_service = "—";
+                for (const nlohmann::json& service :
+                     data.value("list_services", nlohmann::json::object())
+                         .value("services", nlohmann::json::array())) {
+                    if (json_text(service, "name") == json_text(connection, "name") &&
+                        !json_text(connector, "host").empty() &&
+                        json_text(service, "endpoint").starts_with(json_text(connector, "host"))) {
+                        from_service = row_link("/services?" + query, json_text(service, "name"));
+                    }
+                }
                 out += std::format(
-                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><form method=\"post\" "
-                    "action=\"/train/data/disconnect\">{}{}<button type=\"submit\">Remove"
-                    "</button></form></td></tr>",
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><form "
+                    "method=\"post\" action=\"/train/data/disconnect\">{}{}<button "
+                    "type=\"submit\">Remove</button></form></td></tr>",
                     web_ui_escape(json_text(connection, "name")),
                     web_ui_escape(json_text(connector, "type")),
                     web_ui_escape(where),
+                    from_service,
                     web_ui_escape(json_text(connection, "created")),
                     hidden("customer_id", page.customer_id),
                     hidden("name", json_text(connection, "name")));
             }
             out += "</tbody></table>";
+        }
+        // Connect one of the space's own services (lake#188): one click, no password typed or
+        // shown.
+        std::string service_rows;
+        std::set<std::string> connected_names;
+        for (const nlohmann::json& connection : connections) {
+            connected_names.insert(json_text(connection, "name"));
+        }
+        for (const nlohmann::json& service : data.value("list_services", nlohmann::json::object())
+                                                 .value("services", nlohmann::json::array())) {
+            const std::string kind = json_text(service, "kind");
+            if (json_text(service, "desired") == "absent" || service.value("default", false) ||
+                kind == "zetta") {
+                continue;
+            }
+            const std::string name = json_text(service, "name");
+            const bool ready =
+                json_text(service, "phase") == "Ready" && service.value("connected", true);
+            std::string action;
+            if (kind != "postgres") {
+                action = "<span class=\"muted\">not supported yet: the workspace cannot read " +
+                         web_ui_escape(kind) + "</span>";
+            } else if (!ready) {
+                action = "<span class=\"muted\">starting</span>";
+            } else {
+                action = std::format("<form class=\"inline\" method=\"post\" "
+                                     "action=\"/train/data/connect-service\">{}{}<button "
+                                     "type=\"submit\">{}</button></form>",
+                                     hidden("customer_id", page.customer_id),
+                                     hidden("service_id", json_text(service, "id")),
+                                     connected_names.contains(name) ? "Refresh" : "Connect");
+            }
+            service_rows += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                                        web_ui_escape(name),
+                                        web_ui_escape(kind),
+                                        action);
+        }
+        if (!service_rows.empty()) {
+            out += "<h3>Connect one of your services</h3><p class=\"muted\">The workspace reaches "
+                   "it inside the cluster, with the credential lake already holds; nothing to "
+                   "type.</p><table><thead><tr><th>Service</th><th>Kind</th><th></th></tr></thead>"
+                   "<tbody>" +
+                   service_rows + "</tbody></table>";
         }
         // The credential goes to the workspace, which stores it and never returns it; lake keeps
         // no copy, and the field is never filled back in.

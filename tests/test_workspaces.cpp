@@ -898,3 +898,115 @@ TEST(Workspaces, ASearchKeyFromAnOlderSessionLastsAsLongAsTheSession) {
                                         context);
     EXPECT_FALSE(too_long.ok) << "an explicit lifetime past the session is still refused";
 }
+
+TEST(Workspaces, ConnectServiceFillsTheConnectionFromTheServiceItself) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    const auto crm = w.service->create_service({w.customer_id, "postgres", "crm", ""});
+    ASSERT_TRUE(crm);
+    const auto cache = w.service->create_service({w.customer_id, "valkey", "cache", ""});
+    ASSERT_TRUE(cache);
+    w.caller->answers["create_connection"] = {{"name", "crm"}};
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto connect = [&](const std::string& customer_id, const std::string& service_id) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        auto completed = liquid::runtime::block_on(
+            registry.call_async("connect_service",
+                                {{"customer_id", customer_id}, {"service_id", service_id}},
+                                context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    const auto early = connect(w.customer_id, crm->id);
+    ASSERT_FALSE(early.ok);
+    EXPECT_EQ(early.error.code, "workspace_not_ready");
+
+    ASSERT_TRUE(store.set_service_status(
+        crm->id, "Ready", "", "prod-svc-1-rw.lake.svc.cluster.local:5432"));
+    w.deliver(*store.get_service(crm->id),
+              {{"kind", "postgres"},
+               {"host", "prod-svc-1-rw.lake.svc.cluster.local"},
+               {"port", 5432},
+               {"database", "app"},
+               {"user", "app"},
+               {"password", "s3cret"}});
+    const auto connected = connect(w.customer_id, crm->id);
+    ASSERT_TRUE(connected.ok) << connected.error.message;
+    EXPECT_EQ(connected.value["service_name"], "crm");
+    ASSERT_EQ(w.caller->calls.back().first, "create_connection");
+    const json sent = w.caller->calls.back().second;
+    EXPECT_EQ(sent["name"], "crm");
+    EXPECT_EQ(sent["connector"]["type"], "postgres");
+    EXPECT_EQ(sent["connector"]["host"], "prod-svc-1-rw.lake.svc.cluster.local");
+    EXPECT_EQ(sent["connector"]["port"], "5432");
+    EXPECT_EQ(sent["connector"]["token"], "s3cret") << "the password goes to Zetta, not to a form";
+    EXPECT_EQ(connected.value.dump().find("s3cret"), std::string::npos) << "and never back out";
+
+    ASSERT_TRUE(store.set_service_status(cache->id, "Ready", "", "valkey:6379"));
+    w.deliver(*store.get_service(cache->id), {{"kind", "valkey"}, {"host", "valkey"}});
+    const auto unsupported = connect(w.customer_id, cache->id);
+    ASSERT_FALSE(unsupported.ok);
+    EXPECT_NE(unsupported.error.message.find("cannot read a valkey"), std::string::npos);
+
+    const auto foreign = connect(w.customer_id, lake::control::new_uuid_v4());
+    EXPECT_FALSE(foreign.ok) << "a service that is not the customer's is not found";
+}
+
+TEST(Workspaces, DataPageOffersTheSpacesServicesAndServicesWarnBeforeDeletingAUsedOne) {
+    lake::api::WorkspacePage page;
+    page.section = "data";
+    page.customer_id = std::string(customer);
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["list_connections"] = {
+        {"connections",
+         json::array(
+             {{{"name", "crm"},
+               {"connector",
+                {{"type", "postgres"}, {"host", "prod-svc-1-rw"}, {"database", "app"}}}}})}};
+    page.data["list_services"] = {{"services",
+                                   json::array({{{"id", "a"},
+                                                 {"name", "crm"},
+                                                 {"kind", "postgres"},
+                                                 {"phase", "Ready"},
+                                                 {"desired", "present"},
+                                                 {"connected", true},
+                                                 {"endpoint", "prod-svc-1-rw:5432"}},
+                                                {{"id", "b"},
+                                                 {"name", "cache"},
+                                                 {"kind", "valkey"},
+                                                 {"phase", "Ready"},
+                                                 {"desired", "present"},
+                                                 {"connected", true}},
+                                                {{"id", "c"},
+                                                 {"name", "workspace"},
+                                                 {"kind", "zetta"},
+                                                 {"default", true},
+                                                 {"phase", "Ready"},
+                                                 {"desired", "present"}}})}};
+    std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Connect one of your services"), std::string::npos);
+    EXPECT_NE(html.find(">Refresh</button>"), std::string::npos) << "crm is already connected";
+    EXPECT_NE(html.find("not supported yet: the workspace cannot read valkey"), std::string::npos);
+    EXPECT_EQ(html.find(">workspace</td>"), std::string::npos)
+        << "the workspace itself is not offered";
+    EXPECT_NE(html.find("action=\"/train/data/connect-service\""), std::string::npos);
+    EXPECT_NE(html.find("<td><a href=\"/services?customer_id="), std::string::npos)
+        << "the connection shows the service it came from";
+
+    page.section = "services";
+    page.data["list_services"]["limit"] = 5;
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("connection <code>crm</code> uses it"), std::string::npos);
+}
