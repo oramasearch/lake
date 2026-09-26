@@ -1,5 +1,6 @@
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +29,8 @@ public:
     bool read = false;
     json input;
     json value = json::object();
+    std::map<std::string, json> answers; // per capability, when set; else `value`
+    std::vector<std::pair<std::string, json>> calls;
 
     liquid::runtime::task<ZettaControlResult<json>> call(std::string called_url,
                                                          std::string called_token,
@@ -39,7 +42,9 @@ public:
         capability = std::move(called_capability);
         read = called_read;
         input = std::move(called_input);
-        co_return ZettaControlResult<json>(value);
+        calls.emplace_back(capability, input);
+        const auto answer = answers.find(capability);
+        co_return ZettaControlResult<json>(answer == answers.end() ? value : answer->second);
     }
 };
 
@@ -631,4 +636,152 @@ TEST(Workspaces, PackagesPageListsTheRegistriesWithInstallCommands) {
                   .find("no registry storage configured"),
               std::string::npos);
     EXPECT_NE(lake::api::web_ui_home(true).find("href=\"/ship/packages\""), std::string::npos);
+}
+
+TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    ASSERT_TRUE(principal);
+    auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    w.caller->answers["get_graph"] = {
+        {"graph_id", "g-1"},
+        {"name", "churn"},
+        {"project", "retention"},
+        {"approval", "approved"},
+        {"nodes",
+         json::array({{{"id", "pull"}, {"kind", "connect"}, {"name", "Pull"}},
+                      {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
+        {"edges", json::array({{{"from", "pull"}, {"to", "train"}, {"kind", "data_flow"}}})}};
+    w.caller->answers["save_graph"] = {
+        {"graph_id", "g-1"}, {"name", "churn"}, {"approval", "proposed"}};
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = w.customer_id;
+        input["project"] = "retention";
+        input["graph"] = "churn";
+        auto completed =
+            liquid::runtime::block_on(registry.call_async("edit_pipeline", input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+
+    const auto added = call({{"op", "add_step"}, {"kind", "serve"}, {"name", "Rank"}});
+    ASSERT_TRUE(added.ok) << added.error.message;
+    EXPECT_EQ(added.value["step"], "serve-1");
+    ASSERT_EQ(w.caller->calls.back().first, "save_graph");
+    const json saved = w.caller->calls.back().second;
+    EXPECT_EQ(saved["graph"], "g-1") << "saved by id, so a rename cannot orphan it";
+    EXPECT_EQ(saved["nodes"].size(), 3U);
+    EXPECT_EQ(saved["edges"].size(), 1U);
+    EXPECT_FALSE(saved.contains("new_name"));
+
+    const std::size_t before = w.caller->calls.size();
+    const auto cycle = call({{"op", "add_edge"}, {"from", "train"}, {"to", "pull"}});
+    ASSERT_FALSE(cycle.ok);
+    EXPECT_EQ(cycle.error.code, "invalid_input");
+    EXPECT_NE(cycle.error.message.find("cycle"), std::string::npos);
+    EXPECT_EQ(w.caller->calls.size(), before + 1) << "read, refused, nothing saved";
+    EXPECT_EQ(w.caller->calls.back().first, "get_graph");
+
+    const auto renamed = call({{"op", "rename"}, {"name", "churn v2"}});
+    ASSERT_TRUE(renamed.ok) << renamed.error.message;
+    EXPECT_EQ(renamed.value["name"], "churn v2");
+    EXPECT_EQ(w.caller->calls.back().second["new_name"], "churn v2");
+    EXPECT_TRUE(registry.find("edit_pipeline") != nullptr) << "REST, OpenAPI and MCP render it";
+}
+
+TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
+    lake::api::WorkspacePage page;
+    page.section = "pipeline";
+    page.customer_id = std::string(customer);
+    page.project = "retention";
+    page.subject = "churn";
+    page.step = "train";
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["get_graph"] = {
+        {"graph_id", "g-1"},
+        {"name", "churn"},
+        {"project", "retention"},
+        {"approval", "proposed"},
+        {"nodes",
+         json::array({{{"id", "pull"}, {"kind", "connect"}, {"name", "Pull"}},
+                      {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
+        {"edges", json::array({{{"from", "pull"}, {"to", "train"}, {"kind", "data_flow"}}})}};
+    page.data["list_runs"] = {{"runs",
+                               json::array({{{"id", "r1"},
+                                             {"graph", "churn"},
+                                             {"project", "retention"},
+                                             {"status", "succeeded"},
+                                             {"created", "2026-09-26T10:00:00Z"}}})}};
+    page.data["latest_run"] = {{"status", "succeeded"},
+                               {"lineage", {{"steps", json::array({"pull", "train"})}}}};
+    page.data["list_datasets"] = {
+        {"datasets", json::array({{{"name", "accounts"}, {"database", "datasets"}}})}};
+    page.data["gate"] = {
+        {"verdict", "fail"},
+        {"block_deploy", true},
+        {"checks",
+         json::array({{{"name", "has_source"}, {"status", "fail"}, {"reason", "no data"}}})}};
+    const std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<svg class=\"pipeline-graph\""), std::string::npos);
+    EXPECT_NE(html.find("step-model status-succeeded selected"), std::string::npos);
+    EXPECT_NE(html.find("<h2>Step Train</h2>"), std::string::npos);
+    EXPECT_NE(html.find("proposed — approve before it runs"), std::string::npos);
+    EXPECT_NE(html.find("action=\"/design/pipeline/approve\""), std::string::npos);
+    EXPECT_NE(html.find("Check and run</button>"), std::string::npos);
+    EXPECT_NE(html.find(" disabled>Check and run"), std::string::npos) << "not approved yet";
+    EXPECT_NE(html.find("<option value=\"datasets.accounts\">"), std::string::npos);
+    EXPECT_NE(html.find("has_source"), std::string::npos) << "every gate check is shown";
+    EXPECT_NE(html.find("no data"), std::string::npos);
+    for (const char* op : {"rename_step",
+                           "kind_step",
+                           "remove_step",
+                           "add_step",
+                           "add_edge",
+                           "remove_edge",
+                           "rename"}) {
+        EXPECT_NE(html.find(std::string("name=\"op\" value=\"") + op + "\""), std::string::npos)
+            << op;
+    }
+    EXPECT_NE(html.find("/train/run?customer_id="), std::string::npos) << "its runs link out";
+
+    page.section = "run";
+    page.subject = "r1";
+    page.data = {{"get_run",
+                  {{"status", "succeeded"},
+                   {"graph", "churn"},
+                   {"project", "retention"},
+                   {"logs", json::array({{{"level", "info"}, {"message", "trained"}}})}}},
+                 {"get_run_report",
+                  {{"dataset", {{"accounts", 120}, {"features", json::array({"mrr", "seats"})}}},
+                   {"drivers", json::array({{{"feature", "failed_payments"}, {"weight", 26.4}}})},
+                   {"at_risk", json::array({{{"account", "acme"}, {"risk", 0.91}}})}}},
+                 {"list_traces",
+                  {{"spans",
+                    json::array({{{"name", "run"},
+                                  {"duration_ms", 12.5},
+                                  {"ok", true},
+                                  {"attributes", {{"run_id", "r1"}}}}})}}}};
+    const std::string run = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(run.find("What the model leans on"), std::string::npos);
+    EXPECT_NE(run.find("failed_payments"), std::string::npos);
+    EXPECT_NE(run.find("Most at risk"), std::string::npos);
+    EXPECT_NE(run.find("mrr, seats"), std::string::npos);
+    EXPECT_NE(run.find("<h2>Trace</h2>"), std::string::npos);
+    EXPECT_NE(run.find("<h2>Log</h2>"), std::string::npos);
+    EXPECT_NE(run.find("/design/pipeline?"), std::string::npos) << "a run links to its pipeline";
 }

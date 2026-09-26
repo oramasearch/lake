@@ -4663,6 +4663,15 @@ struct ApiServer::Impl {
             "/ship/packages",
             "/workspace/start",
             "/workspace/delete",
+            "/design/pipeline",
+            "/design/pipeline/edit",
+            "/design/pipeline/approve",
+            "/design/pipeline/gate",
+            "/design/pipeline/run",
+            "/design/pipeline/deploy",
+            "/design/project/new-pipeline",
+            "/design/project/n8n",
+            "/design/project/python",
             "/services",
             "/services/create",
             "/services/delete",
@@ -7157,11 +7166,107 @@ struct ApiServer::Impl {
         co_return unwrap(co_await registry.call_async(capability, input, context));
     }
 
+    // The pipeline page's data (docs/design/zetta-parity.md): the graph, this workspace's runs and
+    // datasets, and the latest run of this pipeline for step status. `extra` carries a gate or
+    // deploy answer to show on the page.
+    liquid::runtime::task<WorkspacePage> pipeline_page(ApiContext& context,
+                                                       std::string customer_id,
+                                                       std::string project,
+                                                       std::string graph,
+                                                       std::string step,
+                                                       nlohmann::json extra) {
+        WorkspacePage page;
+        page.section = "pipeline";
+        auto selection = workspace_selection(context, customer_id);
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        page.project = std::move(project);
+        page.subject = std::move(graph);
+        page.step = std::move(step);
+        if (page.customer_id.empty() || !options.workspaces) {
+            page.unavailable = "Design, Train and Ship are not available on this lake yet.";
+            co_return page;
+        }
+        const ApiResult status = unwrap(co_await workspace_call(
+            "workspace_status", {{"customer_id", page.customer_id}}, context));
+        if (!status.ok) {
+            page.unavailable = status.error.message;
+            co_return page;
+        }
+        page.state = status.value;
+        if (!page.state.value("ready", false)) {
+            co_return page;
+        }
+        const auto read = [&](std::string capability, nlohmann::json input) {
+            return workspace_call("workspace_query",
+                                  {{"customer_id", page.customer_id},
+                                   {"capability", std::move(capability)},
+                                   {"input", std::move(input)}},
+                                  context);
+        };
+        const ApiResult got = unwrap(
+            co_await read("get_graph", {{"project", page.project}, {"graph", page.subject}}));
+        if (!got.ok) {
+            page.error = got.error.message;
+            co_return page;
+        }
+        page.data["get_graph"] = got.value;
+        const ApiResult runs = unwrap(co_await read("list_runs", nlohmann::json::object()));
+        if (runs.ok) {
+            page.data["list_runs"] = runs.value;
+            std::string latest, latest_created;
+            for (const nlohmann::json& run : runs.value.value("runs", nlohmann::json::array())) {
+                const std::string of = run.value("graph", std::string());
+                const std::string created = run.value("created", std::string());
+                if ((of == page.subject || of == got.value.value("graph_id", std::string())) &&
+                    created >= latest_created) {
+                    latest = run.value("id", std::string());
+                    latest_created = created;
+                }
+            }
+            if (!latest.empty()) {
+                const ApiResult run = unwrap(co_await read("get_run", {{"run_id", latest}}));
+                if (run.ok) {
+                    page.data["latest_run"] = run.value;
+                }
+            }
+        }
+        const ApiResult datasets = unwrap(co_await read("list_datasets", nlohmann::json::object()));
+        if (datasets.ok) {
+            page.data["list_datasets"] = datasets.value;
+        }
+        for (auto& [key, value] : extra.items()) {
+            page.data[key] = value;
+        }
+        co_return page;
+    }
+
     boost::http::route_task serve_workspace_page(boost::http::route_params& route,
                                                  std::string section) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
             co_return co_await redirect(route, "/sign-in");
+        }
+        if (section == "pipeline") {
+            auto built = co_await pipeline_page(context,
+                                                query_value(route, "customer_id"),
+                                                query_value(route, "project"),
+                                                query_value(route, "graph"),
+                                                query_value(route, "step"),
+                                                nlohmann::json::object());
+            WorkspacePage page = built ? std::move(*built) : WorkspacePage{};
+            if (!built) {
+                page.section = "pipeline";
+                page.unavailable = built.error().message;
+            }
+            if (const std::string error = query_value(route, "error"); !error.empty()) {
+                page.error = error;
+            }
+            co_return co_await send_text(route,
+                                         boost::http::status::ok,
+                                         web_ui_workspace(page, viewer_for(context)),
+                                         "text/html; charset=utf-8",
+                                         "no-store");
         }
         WorkspacePage page;
         page.section = section;
@@ -7213,7 +7318,8 @@ struct ApiServer::Impl {
             } else if (section == "run") {
                 // The report is requested once the run has finished: asking a running run for
                 // its report makes the deployed Zetta drop the connection.
-                reads = {{"get_run", {{"run_id", page.subject}}}};
+                reads = {{"get_run", {{"run_id", page.subject}}},
+                         {"list_traces", {{"limit", 500}}}};
             } else if (section == "models") {
                 reads = {{"list_models", nlohmann::json::object()}};
             } else if (section == "indexes") {
@@ -7346,6 +7452,127 @@ struct ApiServer::Impl {
                 back = result.ok
                            ? "/design/projects?" + query
                            : "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            }
+        } else if (action.starts_with("pipeline_")) {
+            // The pipeline page's forms (docs/design/zetta-parity.md).
+            const std::string project = form_field(body, "project");
+            std::string graph = form_field(body, "graph");
+            const auto page_of = [&](const std::string& name, const std::string& step) {
+                return "/design/pipeline?" + query + "&project=" + oauth_url_encode(project) +
+                       "&graph=" + oauth_url_encode(name) +
+                       (step.empty() ? std::string() : "&step=" + oauth_url_encode(step));
+            };
+            back = page_of(graph, form_field(body, "step"));
+            nlohmann::json shown; // an answer the page shows (gate, deploy) instead of redirecting
+            if (action == "pipeline_edit") {
+                result = unwrap(co_await workspace_call("edit_pipeline",
+                                                        {{"customer_id", customer_id},
+                                                         {"project", project},
+                                                         {"graph", graph},
+                                                         {"op", form_field(body, "op")},
+                                                         {"step", form_field(body, "step")},
+                                                         {"kind", form_field(body, "kind")},
+                                                         {"name", form_field(body, "name")},
+                                                         {"from", form_field(body, "from")},
+                                                         {"to", form_field(body, "to")}},
+                                                        context));
+                if (result.ok) {
+                    const std::string op = form_field(body, "op");
+                    graph = result.value.value("name", graph);
+                    back = page_of(graph,
+                                   op == "remove_step" ? std::string()
+                                   : op == "add_step"  ? result.value.value("step", std::string())
+                                   : op == "add_edge"  ? form_field(body, "from")
+                                                       : form_field(body, "step"));
+                }
+            } else if (action == "pipeline_approve") {
+                result =
+                    unwrap(co_await act("approve_plan", {{"project", project}, {"graph", graph}}));
+            } else if (action == "pipeline_gate") {
+                result = unwrap(co_await act("gate", {{"project", project}, {"graph", graph}}));
+                if (result.ok) {
+                    shown["gate"] = result.value;
+                }
+            } else if (action == "pipeline_deploy") {
+                result = unwrap(co_await act(
+                    "deploy", {{"project", project}, {"graph", graph}, {"target", "local"}}));
+                if (result.ok) {
+                    shown["deploy"] = result.value;
+                }
+            } else if (action == "pipeline_run") {
+                result = unwrap(co_await act("gate", {{"project", project}, {"graph", graph}}));
+                if (result.ok && result.value.value("block_deploy", false)) {
+                    shown["gate"] = result.value;
+                } else if (result.ok) {
+                    nlohmann::json input{{"project", project}, {"graph", graph}};
+                    if (const std::string path = form_field(body, "dataset_path"); !path.empty()) {
+                        input["dataset_path"] = path;
+                    }
+                    if (const std::string model = form_field(body, "model_name"); !model.empty()) {
+                        input["model_name"] = model;
+                    }
+                    if (const std::string holdout = form_field(body, "holdout_fraction");
+                        !holdout.empty()) {
+                        char* end = nullptr;
+                        const double fraction = std::strtod(holdout.c_str(), &end);
+                        if (end != holdout.c_str() && *end == '\0') {
+                            input["holdout_fraction"] = fraction;
+                        }
+                    }
+                    result = unwrap(co_await act("run", std::move(input)));
+                    if (result.ok) {
+                        back = "/train/run?" + query + "&id=" +
+                               oauth_url_encode(result.value.value("run_id", std::string()));
+                    }
+                }
+            } else if (action == "pipeline_new" || action == "pipeline_n8n" ||
+                       action == "pipeline_python") {
+                const std::string name = form_field(body, "name");
+                if (action == "pipeline_new") {
+                    // One connect step to start from; an empty graph has nothing to draw.
+                    result = unwrap(co_await act(
+                        "save_graph",
+                        {{"project", project},
+                         {"graph", name},
+                         {"nodes",
+                          nlohmann::json::array(
+                              {{{"id", "connect-1"}, {"kind", "connect"}, {"name", "Source"}}})},
+                         {"edges", nlohmann::json::array()}}));
+                } else if (action == "pipeline_n8n") {
+                    result = unwrap(co_await act(
+                        "import_n8n",
+                        {{"project", project}, {"content", form_field(body, "content")}}));
+                    if (result.ok) {
+                        nlohmann::json input{
+                            {"project", project},
+                            {"input_id", result.value.value("input_id", std::string())}};
+                        if (!name.empty()) {
+                            input["name"] = name;
+                        }
+                        result = unwrap(co_await act("compile_n8n", std::move(input)));
+                    }
+                } else {
+                    nlohmann::json input{{"project", project},
+                                         {"source", form_field(body, "source")}};
+                    if (!name.empty()) {
+                        input["name"] = name;
+                    }
+                    result = unwrap(co_await act("compile_python", std::move(input)));
+                }
+                back = result.ok
+                           ? page_of(result.value.value("name", name), "")
+                           : "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            }
+            if (!shown.empty()) {
+                auto built = co_await pipeline_page(
+                    context, customer_id, project, graph, form_field(body, "step"), shown);
+                if (built) {
+                    co_return co_await send_text(route,
+                                                 boost::http::status::ok,
+                                                 web_ui_workspace(*built, viewer_for(context)),
+                                                 "text/html; charset=utf-8",
+                                                 "no-store");
+                }
             }
         } else if (action == "service_create") {
             back = "/services?" + query;
@@ -10989,8 +11216,9 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 8>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 9>{{{"/design/projects", "projects"},
                                                              {"/design/project", "project"},
+                                                             {"/design/pipeline", "pipeline"},
                                                              {"/train/data", "data"},
                                                              {"/train/runs", "runs"},
                                                              {"/train/run", "run"},
@@ -11004,8 +11232,16 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 14>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 22>{
              {{"/workspace/start", "start"},
+              {"/design/pipeline/edit", "pipeline_edit"},
+              {"/design/pipeline/approve", "pipeline_approve"},
+              {"/design/pipeline/gate", "pipeline_gate"},
+              {"/design/pipeline/run", "pipeline_run"},
+              {"/design/pipeline/deploy", "pipeline_deploy"},
+              {"/design/project/new-pipeline", "pipeline_new"},
+              {"/design/project/n8n", "pipeline_n8n"},
+              {"/design/project/python", "pipeline_python"},
               {"/design/project/delete", "delete_project"},
               {"/services/create", "service_create"},
               {"/services/delete", "service_delete"},

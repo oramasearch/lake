@@ -171,8 +171,10 @@ struct WorkspacePage {
     nlohmann::json state = nlohmann::json::object();
     std::string unavailable;
     nlohmann::json data = nlohmann::json::object();
-    std::string subject; // the project name or run id of a detail page
+    std::string subject; // the project name, run id or pipeline name of a detail page
     std::string error;
+    std::string project; // the pipeline page's project
+    std::string step;    // the pipeline page's selected step
 };
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
 

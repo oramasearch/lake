@@ -12,6 +12,7 @@
 
 #include <liquid/hash.hpp>
 
+#include "lake/api/pipeline.hpp"
 #include "lake/control/store.hpp"
 #include "modules/frontends/common/syntax.hpp"
 
@@ -1572,7 +1573,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 8> workspace_sections{{
+constexpr std::array<WorkspaceSection, 9> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1580,6 +1581,12 @@ constexpr std::array<WorkspaceSection, 8> workspace_sections{{
      "A project starts from the business question: the decision it should improve and how you "
      "will measure it. Its pipelines are built from that intent."},
     {"project", "Design", "Project", "/design/projects", ""},
+    {"pipeline",
+     "Design",
+     "Pipeline",
+     "/design/projects",
+     "The steps Zetta runs, how data flows between them, and what the last run did. Change it "
+     "here; a changed pipeline is approved again before it runs."},
     {"data",
      "Train",
      "Data",
@@ -1885,7 +1892,441 @@ std::string services_content(const WorkspacePage& page) {
     return out;
 }
 
+// A value as table text: strings bare, numbers trimmed, everything else as compact JSON.
+std::string cell_text(const nlohmann::json& value) {
+    if (value.is_string()) {
+        return value.get<std::string>();
+    }
+    if (value.is_number_float()) {
+        return std::format("{:.4g}", value.get<double>());
+    }
+    return value.is_null() ? std::string() : value.dump();
+}
+
+// A list of objects as a table, columns from the first row's keys.
+std::string object_table(const nlohmann::json& rows) {
+    if (!rows.is_array() || rows.empty()) {
+        return {};
+    }
+    if (!rows.front().is_object()) {
+        std::string out = "<ul>";
+        for (const nlohmann::json& row : rows) {
+            out += "<li>" + web_ui_escape(cell_text(row)) + "</li>";
+        }
+        return out + "</ul>";
+    }
+    std::vector<std::string> columns;
+    for (const auto& [key, value] : rows.front().items()) {
+        columns.push_back(key);
+    }
+    std::string out = "<table><thead><tr>";
+    for (const std::string& column : columns) {
+        out += "<th>" + web_ui_escape(column) + "</th>";
+    }
+    out += "</tr></thead><tbody>";
+    for (const nlohmann::json& row : rows) {
+        out += "<tr>";
+        for (const std::string& column : columns) {
+            out += "<td>" +
+                   web_ui_escape(row.is_object() && row.contains(column) ? cell_text(row.at(column))
+                                                                         : std::string()) +
+                   "</td>";
+        }
+        out += "</tr>";
+    }
+    return out + "</tbody></table>";
+}
+
+// get_run_report as a reader wants it: what the model learned from, what it leans on, who is at
+// risk, and what not to believe — the raw document stays one click away.
+std::string run_report_panel(const nlohmann::json& report) {
+    std::string out = "<section class=\"panel\"><h2>Report</h2>";
+    if (const auto dataset = report.find("dataset");
+        dataset != report.end() && dataset->is_object()) {
+        out += "<h3>What it learned from</h3><dl>";
+        for (const auto& [key, value] : dataset->items()) {
+            out += "<dt>" + web_ui_escape(key) + "</dt><dd>" +
+                   web_ui_escape(value.is_array()
+                                     ? [&] {
+                                           std::string joined;
+                                           for (const auto& item : value) {
+                                               joined += (joined.empty() ? "" : ", ") + cell_text(item);
+                                           }
+                                           return joined;
+                                       }()
+                                     : cell_text(value)) +
+                   "</dd>";
+        }
+        out += "</dl>";
+    }
+    const auto section = [&](const char* key, const char* heading, const char* note) {
+        const auto found = report.find(key);
+        if (found == report.end() || !found->is_array() || found->empty()) {
+            return std::string();
+        }
+        return std::format("<h3>{}</h3>{}{}",
+                           heading,
+                           note[0] ? std::format("<p class=\"muted\">{}</p>", note) : "",
+                           object_table(*found));
+    };
+    out += section(
+        "drivers", "What the model leans on", "A weight is what the model relied on, not a cause.");
+    out += section("at_risk", "Most at risk", "");
+    out += section("caveats", "Do not read these as results", "");
+    out += section("missing", "What this run cannot tell you", "");
+    return out + std::format("<details><summary>The raw report</summary><pre>{}</pre></details>"
+                             "</section>",
+                             web_ui_escape(report.dump(2)));
+}
+
+// get_run's logs, outputs and lineage, and the spans that mention the run.
+std::string run_details_panel(const nlohmann::json& run,
+                              const nlohmann::json& traces,
+                              std::string_view run_id) {
+    std::string out;
+    if (const auto lineage = run.find("lineage"); lineage != run.end() && lineage->is_object()) {
+        out += "<section class=\"panel\"><h2>Lineage</h2><dl>";
+        for (const auto& [key, value] : lineage->items()) {
+            std::string text;
+            if (value.is_array()) {
+                for (const auto& item : value) {
+                    text += (text.empty() ? "" : " → ") + cell_text(item);
+                }
+            } else {
+                text = cell_text(value);
+            }
+            out += "<dt>" + web_ui_escape(key) + "</dt><dd>" + web_ui_escape(text) + "</dd>";
+        }
+        out += "</dl></section>";
+    }
+    if (const auto outputs = run.find("outputs"); outputs != run.end() && !outputs->empty()) {
+        out += "<section class=\"panel\"><h2>Outputs</h2>" + object_table(*outputs) + "</section>";
+    }
+    if (const auto logs = run.find("logs"); logs != run.end() && !logs->empty()) {
+        out += "<section class=\"panel\"><h2>Log</h2>" + object_table(*logs) + "</section>";
+    }
+    // The trace: spans whose attributes name this run, longest bar scaled to the widest.
+    std::vector<nlohmann::json> spans;
+    double longest = 0;
+    for (const nlohmann::json& span : traces.value("spans", nlohmann::json::array())) {
+        bool mentions = false;
+        for (const auto& [key, value] :
+             span.value("attributes", nlohmann::json::object()).items()) {
+            mentions = mentions || (value.is_string() && value.get<std::string>() == run_id);
+        }
+        if (mentions) {
+            spans.push_back(span);
+            longest = std::max(longest, span.value("duration_ms", 0.0));
+        }
+    }
+    if (!spans.empty()) {
+        out += "<section class=\"panel\"><h2>Trace</h2><table><thead><tr><th>Span</th><th>Time"
+               "</th><th></th></tr></thead><tbody>";
+        for (const nlohmann::json& span : spans) {
+            const double duration = span.value("duration_ms", 0.0);
+            out +=
+                std::format("<tr><td>{}</td><td>{:.1f} ms</td><td><span class=\"waterfall-bar{}\" "
+                            "style=\"width:{}px\"></span></td></tr>",
+                            web_ui_escape(json_text(span, "name")),
+                            duration,
+                            span.value("ok", true) ? "" : " failed",
+                            longest > 0 ? static_cast<int>(4 + 240 * duration / longest) : 4);
+        }
+        out += "</tbody></table></section>";
+    }
+    return out;
+}
+
+std::string select_options(std::span<const std::string_view> values, std::string_view chosen) {
+    std::string out;
+    for (const std::string_view value : values) {
+        out += std::format(
+            "<option value=\"{}\"{}>{}</option>", value, value == chosen ? " selected" : "", value);
+    }
+    return out;
+}
+
+// Gate checks, from gate or from deploy's gate: every check with its status and reason.
+std::string gate_panel(const nlohmann::json& gate, std::string_view heading) {
+    const std::string verdict = json_text(gate, "verdict");
+    const bool blocked = gate.value("block_deploy", false);
+    std::string out =
+        std::format("<section class=\"panel notice{}\" role=\"status\"><h2>{}</h2><p><span "
+                    "class=\"badge {}\">{}</span> {}</p>",
+                    blocked ? " status-danger" : "",
+                    web_ui_escape(heading),
+                    verdict == "pass"   ? "status-success"
+                    : verdict == "warn" ? "status-warning"
+                                        : "status-danger",
+                    web_ui_escape(verdict.empty() ? (blocked ? "fail" : "pass") : verdict),
+                    blocked ? "It cannot run or deploy until the failing checks pass."
+                            : "It may run and deploy.");
+    const nlohmann::json checks = gate.value("checks", nlohmann::json::array());
+    if (!checks.empty()) {
+        out += "<table class=\"gate-checks\"><thead><tr><th>Check</th><th>Status</th><th>Why"
+               "</th></tr></thead><tbody>";
+        for (const nlohmann::json& check : checks) {
+            const std::string status = json_text(check, "status");
+            out += std::format(
+                "<tr><td>{}</td><td><span class=\"badge {}\">{}</span></td><td>{}</td></tr>",
+                web_ui_escape(json_text(check, "name")),
+                status == "pass"   ? "status-success"
+                : status == "warn" ? "status-warning"
+                                   : "status-danger",
+                web_ui_escape(status),
+                web_ui_escape(json_text(check, "reason")));
+        }
+        out += "</tbody></table>";
+    }
+    return out + "</section>";
+}
+
+// The pipeline page (docs/design/zetta-parity.md): see, inspect, change, govern and follow one
+// Zetta execution graph.
+std::string pipeline_content(const WorkspacePage& page) {
+    namespace pl = lake::api::pipeline;
+    const std::string query = customer_query(page.customer_id);
+    const auto parsed = pl::from_json(page.data.value("get_graph", nlohmann::json::object()));
+    if (!parsed || !page.data.contains("get_graph")) {
+        return "<div class=\"panel empty\">This pipeline could not be read from the workspace."
+               "</div>";
+    }
+    const pl::Graph& graph = *parsed;
+    const std::string base = "/design/pipeline?" + query +
+                             "&project=" + url_component(page.project) +
+                             "&graph=" + url_component(graph.name);
+    const auto common = [&] {
+        return hidden("customer_id", page.customer_id) + hidden("project", page.project) +
+               hidden("graph", graph.name);
+    };
+
+    // This pipeline's runs, newest first, and what the latest one did to each step.
+    std::vector<nlohmann::json> runs;
+    for (const nlohmann::json& run : page.data.value("list_runs", nlohmann::json::object())
+                                         .value("runs", nlohmann::json::array())) {
+        if (json_text(run, "graph") == graph.name || json_text(run, "graph") == graph.graph_id) {
+            runs.push_back(run);
+        }
+    }
+    std::ranges::sort(runs, [](const nlohmann::json& a, const nlohmann::json& b) {
+        return json_text(a, "created") > json_text(b, "created");
+    });
+    std::map<std::string, std::string> status;
+    const nlohmann::json latest = page.data.value("latest_run", nlohmann::json::object());
+    for (const nlohmann::json& step : latest.value("lineage", nlohmann::json::object())
+                                          .value("steps", nlohmann::json::array())) {
+        if (step.is_string()) {
+            status[step.get<std::string>()] = json_text(latest, "status");
+        }
+    }
+
+    const bool approved = graph.approval == "approved";
+    std::string out = std::format(
+        "<p class=\"sub\">Project {} · <span class=\"badge {}\">{}</span>{} · {} steps · {} "
+        "edges</p>",
+        row_link("/design/project?" + query + "&name=" + url_component(page.project), page.project),
+        approved ? "status-success" : "status-warning",
+        approved ? "approved" : "proposed — approve before it runs",
+        graph.approved_by.empty()
+            ? std::string()
+            : " by " + web_ui_escape(graph.approved_by) +
+                  (graph.approved_at.empty() ? "" : " at " + web_ui_escape(graph.approved_at)),
+        graph.steps.size(),
+        graph.edges.size());
+    if (const auto gate = page.data.find("gate"); gate != page.data.end()) {
+        out += gate_panel(*gate, "Checks");
+    }
+    if (const auto deployed = page.data.find("deploy"); deployed != page.data.end()) {
+        out += std::format("<section class=\"panel notice\" role=\"status\"><h2>Deployed</h2>"
+                           "<p>Deployment <code>{}</code> to <code>{}</code>.</p></section>",
+                           web_ui_escape(json_text(*deployed, "deployment_id")),
+                           web_ui_escape(json_text(*deployed, "target")));
+        out += gate_panel(deployed->value("gate", nlohmann::json::object()), "Its checks");
+    }
+
+    // See it.
+    out += "<section class=\"panel\"><h2>Graph</h2>";
+    out += graph.steps.empty()
+               ? std::string("<p>No steps yet. Add the first one below.</p>")
+               : "<div class=\"pipeline-canvas\">" +
+                     pl::render_svg(graph, status, page.step, base + "&step=") + "</div>";
+    out += "<p class=\"muted\">Solid arrows carry data; dashed arrows only order steps. Select a "
+           "step to inspect or change it.</p></section>";
+
+    // Inspect and change the selected step.
+    if (const pl::Step* step = graph.step(page.step); step != nullptr) {
+        std::string incoming, outgoing;
+        for (const pl::Edge& edge : graph.edges) {
+            if (edge.to == step->id)
+                incoming += "<li>" +
+                            row_link(base + "&step=" + url_component(edge.from), edge.from) +
+                            " <span class=\"muted\">" + web_ui_escape(edge.kind) + "</span></li>";
+            if (edge.from == step->id)
+                outgoing += "<li>" + row_link(base + "&step=" + url_component(edge.to), edge.to) +
+                            " <span class=\"muted\">" + web_ui_escape(edge.kind) + "</span></li>";
+        }
+        std::string targets;
+        for (const pl::Step& other : graph.steps) {
+            if (other.id != step->id)
+                targets += std::format("<option value=\"{}\">{} ({})</option>",
+                                       web_ui_escape(other.id),
+                                       web_ui_escape(other.name),
+                                       web_ui_escape(other.id));
+        }
+        out += std::format(
+            "<section class=\"panel\"><h2>Step {}</h2><dl><dt>Id</dt><dd><code>{}</code></dd>"
+            "<dt>Kind</dt><dd>{}</dd><dt>Last run</dt><dd>{}</dd><dt>From</dt><dd><ul>{}</ul></dd>"
+            "<dt>To</dt><dd><ul>{}</ul></dd></dl><div class=\"pipeline-edit\">"
+            "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}{}<label>"
+            "Name<input name=\"name\" required value=\"{}\"></label><button type=\"submit\">"
+            "Rename step</button></form>"
+            "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}{}<label>"
+            "Kind<select name=\"kind\">{}</select></label><button type=\"submit\">Change kind"
+            "</button></form>"
+            "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}{}<label>"
+            "Then<select name=\"to\">{}</select></label><label>Carrying<select name=\"kind\">{}"
+            "</select></label><button type=\"submit\">Connect</button></form>"
+            "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}{}<p>"
+            "Removing a step removes its edges too.</p><button class=\"button button-danger\" "
+            "type=\"submit\">Remove step</button></form></div></section>",
+            web_ui_escape(step->name),
+            web_ui_escape(step->id),
+            web_ui_escape(step->kind),
+            web_ui_escape(status.contains(step->id) ? status.at(step->id) : "not in the last run"),
+            incoming.empty() ? "<li class=\"muted\">nothing</li>" : incoming,
+            outgoing.empty() ? "<li class=\"muted\">nothing</li>" : outgoing,
+            common(),
+            hidden("op", "rename_step"),
+            hidden("step", step->id),
+            web_ui_escape(step->name),
+            common(),
+            hidden("op", "kind_step"),
+            hidden("step", step->id),
+            select_options(pl::step_kinds, step->kind),
+            common(),
+            hidden("op", "add_edge"),
+            hidden("from", step->id),
+            targets,
+            select_options(pl::edge_kinds, "data_flow"),
+            common(),
+            hidden("op", "remove_step"),
+            hidden("step", step->id));
+    }
+
+    // Change the pipeline as a whole.
+    std::string step_options;
+    for (const pl::Step& step : graph.steps) {
+        step_options += std::format("<option value=\"{}\">{} ({})</option>",
+                                    web_ui_escape(step.id),
+                                    web_ui_escape(step.name),
+                                    web_ui_escape(step.id));
+    }
+    std::string edge_rows;
+    for (const pl::Edge& edge : graph.edges) {
+        edge_rows += std::format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td><form class=\"inline\" method=\"post\" "
+            "action=\"/design/pipeline/edit\">{}{}{}{}<button type=\"submit\">Remove</button>"
+            "</form></td></tr>",
+            row_link(base + "&step=" + url_component(edge.from), edge.from),
+            row_link(base + "&step=" + url_component(edge.to), edge.to),
+            web_ui_escape(edge.kind),
+            common(),
+            hidden("op", "remove_edge"),
+            hidden("from", edge.from),
+            hidden("to", edge.to));
+    }
+    out += std::format(
+        "<section class=\"panel\"><h2>Change the pipeline</h2><div class=\"pipeline-edit\">"
+        "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}<label>Kind"
+        "<select name=\"kind\">{}</select></label><label>Name<input name=\"name\" "
+        "placeholder=\"Score accounts\"></label><button class=\"button button-primary\" "
+        "type=\"submit\">Add step</button></form>"
+        "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}<label>From"
+        "<select name=\"from\">{}</select></label><label>To<select name=\"to\">{}</select>"
+        "</label><label>Carrying<select name=\"kind\">{}</select></label><button "
+        "type=\"submit\">Add edge</button></form>"
+        "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}<label>Name"
+        "<input name=\"name\" required value=\"{}\"></label><button type=\"submit\">Rename "
+        "pipeline</button></form></div>{}</section>",
+        common(),
+        hidden("op", "add_step"),
+        select_options(pl::step_kinds, "model"),
+        common(),
+        hidden("op", "add_edge"),
+        step_options,
+        step_options,
+        select_options(pl::edge_kinds, "data_flow"),
+        common(),
+        hidden("op", "rename"),
+        web_ui_escape(graph.name),
+        edge_rows.empty() ? std::string()
+                          : "<h3>Edges</h3><table><thead><tr><th>From</th><th>To</th><th>Carrying"
+                            "</th><th></th></tr></thead><tbody>" +
+                                edge_rows + "</tbody></table>");
+
+    // Govern it: approve, check, run, deploy.
+    std::string datasets;
+    for (const nlohmann::json& dataset : page.data.value("list_datasets", nlohmann::json::object())
+                                             .value("datasets", nlohmann::json::array())) {
+        const std::string name = json_text(dataset, "name");
+        const std::string database = json_text(dataset, "database");
+        const std::string path = database.empty() ? name : database + "." + name;
+        datasets += std::format(
+            "<option value=\"{}\">{}</option>", web_ui_escape(path), web_ui_escape(path));
+    }
+    out += std::format(
+        "<section class=\"panel\"><h2>Approve, check, run and deploy</h2><div "
+        "class=\"pipeline-edit\">{}"
+        "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/gate\">{}<p>Run Zetta's "
+        "correctness checks without running anything.</p><button type=\"submit\">Check</button>"
+        "</form>"
+        "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/run\">{}<label>Train on"
+        "<select name=\"dataset_path\"><option value=\"\">the pipeline's own source</option>{}"
+        "</select></label><label>Hold out for measuring<input name=\"holdout_fraction\" "
+        "type=\"number\" min=\"0\" max=\"0.9\" step=\"0.05\" placeholder=\"0.2\"></label>"
+        "<label>Model name<input name=\"model_name\" placeholder=\"churn_model\"></label><button "
+        "class=\"button button-primary\" type=\"submit\"{}>Check and run</button></form>"
+        "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/deploy\">{}<p>Place it "
+        "in the workspace behind its checks.</p><button type=\"submit\"{}>Deploy</button></form>"
+        "</div></section>",
+        approved ? std::string()
+                 : std::format("<form class=\"stack\" method=\"post\" "
+                               "action=\"/design/pipeline/approve\">{}<p>Zetta verifies and runs "
+                               "only an approved pipeline.</p><button class=\"button "
+                               "button-primary\" type=\"submit\">Approve</button></form>",
+                               common()),
+        common(),
+        common(),
+        datasets,
+        approved ? "" : " disabled",
+        common(),
+        approved ? "" : " disabled");
+
+    // Follow it.
+    out += "<section class=\"panel\"><h2>Runs</h2>";
+    if (runs.empty()) {
+        out += "<p>No runs of this pipeline yet.</p>";
+    } else {
+        out += "<table><thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Outputs</th>"
+               "</tr></thead><tbody>";
+        for (const nlohmann::json& run : runs) {
+            const std::string id = json_text(run, "id");
+            out += std::format("<tr><td>{}</td><td><span class=\"badge\">{}</span></td><td>{}"
+                               "</td><td>{}</td></tr>",
+                               row_link("/train/run?" + query + "&id=" + url_component(id), id),
+                               web_ui_escape(json_text(run, "status")),
+                               web_ui_escape(json_text(run, "created")),
+                               web_ui_escape(json_text(run, "output_count")));
+        }
+        out += "</tbody></table>";
+    }
+    return out + "</section>";
+}
+
 std::string workspace_content(const WorkspacePage& page) {
+    if (page.section == "pipeline") {
+        return pipeline_content(page);
+    }
     const nlohmann::json& data = page.data;
     const std::string query = customer_query(page.customer_id);
     std::string out;
@@ -1933,10 +2374,15 @@ std::string workspace_content(const WorkspacePage& page) {
                 const std::string id = json_text(graph, "id");
                 // Zetta verifies and runs only an approved plan; a person approves it here first.
                 const bool approved = json_text(graph, "approval") == "approved";
+                const std::string graph_name =
+                    json_text(graph, "name").empty() ? id : json_text(graph, "name");
                 out += std::format(
                     "<tr><td>{}</td><td>{}</td><td><form method=\"post\" action=\"{}\">{}{}{}"
                     "<button type=\"submit\">{}</button></form></td></tr>",
-                    web_ui_escape(json_text(graph, "name").empty() ? id : json_text(graph, "name")),
+                    row_link("/design/pipeline?" + query +
+                                 "&project=" + url_component(page.subject) +
+                                 "&graph=" + url_component(graph_name),
+                             graph_name),
                     web_ui_escape(json_text(graph, "approval")),
                     approved ? "/design/project/run" : "/design/project/approve",
                     hidden("customer_id", page.customer_id),
@@ -1953,6 +2399,29 @@ std::string workspace_content(const WorkspacePage& page) {
             "accounts will churn in the next 90 days, with the reasons\"></textarea></label>"
             "<button class=\"button button-primary\" type=\"submit\">Build pipeline</button>"
             "</form></section>",
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject));
+        // Other ways to make a pipeline (docs/design/zetta-parity.md).
+        out += std::format(
+            "<section class=\"panel\"><h2>Other ways to start a pipeline</h2><div "
+            "class=\"pipeline-edit\">"
+            "<form class=\"stack\" method=\"post\" action=\"/design/project/new-pipeline\">{}{}"
+            "<label>Name<input name=\"name\" required placeholder=\"weekly-retention\"></label>"
+            "<p class=\"muted\">An empty pipeline you build step by step.</p><button "
+            "type=\"submit\">Create</button></form>"
+            "<form class=\"stack\" method=\"post\" action=\"/design/project/n8n\">{}{}<label>"
+            "Name<input name=\"name\" placeholder=\"n8n workflow\"></label><label>n8n workflow "
+            "export (JSON)<textarea name=\"content\" rows=\"5\" required></textarea></label>"
+            "<button type=\"submit\">Import from n8n</button></form>"
+            "<form class=\"stack\" method=\"post\" action=\"/design/project/python\">{}{}<label>"
+            "Name<input name=\"name\" placeholder=\"python program\"></label><label>Python "
+            "pipeline<textarea name=\"source\" rows=\"5\" required></textarea></label><p "
+            "class=\"muted\">Zetta reads it and lowers it to a pipeline; the code never runs."
+            "</p><button type=\"submit\">Build from Python</button></form></div></section>",
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject),
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject),
             hidden("customer_id", page.customer_id),
             hidden("project", page.subject));
         out += std::format(
@@ -2085,9 +2554,21 @@ std::string workspace_content(const WorkspacePage& page) {
         const std::string status = json_text(run, "status");
         out += std::format("<p>Status: <span class=\"badge\">{}</span></p>",
                            web_ui_escape(status.empty() ? "unknown" : status));
+        if (!json_text(run, "graph").empty()) {
+            out += std::format("<p class=\"sub\">Pipeline {} in project {}</p>",
+                               row_link("/design/pipeline?" + query +
+                                            "&project=" + url_component(json_text(run, "project")) +
+                                            "&graph=" + url_component(json_text(run, "graph")),
+                                        json_text(run, "graph")),
+                               web_ui_escape(json_text(run, "project")));
+        }
         if (data.contains("get_run_report")) {
-            out += std::format("<section class=\"panel\"><h2>Report</h2><pre>{}</pre></section>",
-                               web_ui_escape(data.at("get_run_report").dump(2)));
+            out += run_report_panel(data.at("get_run_report"));
+        }
+        out += run_details_panel(
+            run, data.value("list_traces", nlohmann::json::object()), page.subject);
+        if (data.contains("get_run_report")) {
+            // nothing more: the report is shown
         } else if (status == "running" || status == "queued" || status == "pending") {
             out += "<div class=\"panel\" role=\"status\">The report appears when the run "
                    "finishes. This page checks again every 15 seconds.<meta "

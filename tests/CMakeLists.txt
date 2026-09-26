@@ -19,6 +19,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp
   test_oauth.cpp
   test_clerk.cpp
   test_workspaces.cpp
+  test_pipeline.cpp
   test_sso.cpp
   test_webauthn.cpp
   test_search.cpp

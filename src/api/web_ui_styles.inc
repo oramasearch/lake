@@ -1424,4 +1424,81 @@ dd {
     transition-duration: 0.01ms !important;
   }
 }
+/* Pipeline graph (docs/design/zetta-parity.md): server-rendered SVG, one lane per stage. */
+.pipeline-canvas {
+  overflow-x: auto;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  border-radius: var(--lake-radius-control);
+  padding: var(--lake-space-3);
+  background: var(--lake-surface);
+}
+.pipeline-graph {
+  display: block;
+  max-width: none;
+  color: var(--lake-text-tertiary);
+  font-family: var(--lake-font-sans);
+}
+.pipeline-graph .lane {
+  fill: var(--lake-text-tertiary);
+  font-size: var(--lake-text-11);
+  font-weight: var(--lake-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pipeline-graph .edge {
+  stroke: var(--lake-border-strong);
+  stroke-width: 1.5;
+}
+.pipeline-graph .edge-control {
+  stroke-dasharray: 5 4;
+}
+.pipeline-graph .step rect {
+  fill: var(--lake-layer);
+  stroke: var(--lake-border-strong);
+  stroke-width: 1;
+}
+.pipeline-graph a:hover .step rect,
+.pipeline-graph .step.selected rect {
+  stroke: var(--lake-action);
+  stroke-width: 2;
+}
+.pipeline-graph .step.status-succeeded rect {
+  fill: var(--lake-success-soft);
+  stroke: var(--lake-success);
+}
+.pipeline-graph .step.status-failed rect {
+  fill: var(--lake-danger-soft);
+  stroke: var(--lake-danger);
+}
+.pipeline-graph .step.status-running rect {
+  fill: var(--lake-warning-soft);
+  stroke: var(--lake-warning);
+}
+.pipeline-graph .step-name {
+  fill: var(--lake-text-primary);
+  font-size: var(--lake-text-12);
+  font-weight: var(--lake-weight-semibold);
+}
+.pipeline-graph .step-meta {
+  fill: var(--lake-text-secondary);
+  font-family: var(--lake-font-mono);
+  font-size: var(--lake-text-11);
+}
+.pipeline-edit {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--lake-space-4);
+}
+.gate-checks td:first-child {
+  font-family: var(--lake-font-mono);
+}
+.waterfall-bar {
+  display: inline-block;
+  height: 0.5rem;
+  border-radius: 2px;
+  background: var(--lake-action);
+}
+.waterfall-bar.failed {
+  background: var(--lake-danger);
+}
 )lake_styles"

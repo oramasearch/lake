@@ -52,13 +52,13 @@ Each Zetta capability, where it lives in lake, and the phase that delivers it. �
 | `list_projects`, `get_project`, `create_project`, `delete_project` | Design → Projects, project page | ✅ |
 | `capture_intent`, `compile_intent` | project page, *Build a pipeline* | ✅ |
 | `approve_plan`, `gate`, `run` | pipeline row buttons | ✅ (becomes the pipeline page, 1) |
-| `get_graph` | **pipeline page: the graph, steps, edges** | 1 |
-| `save_graph` | **pipeline page: every edit** | 1 |
-| `deploy` | pipeline page, *Deploy*, with its gate checks | 1 |
-| `compile_n8n`, `import_n8n` | project page, *Import an n8n workflow* | 1 |
-| `compile_python` | project page, *From Python* | 1 |
-| `list_runs`, `get_run`, `get_run_report` | Train → Runs, run page | ✅ (report as tables, 1) |
-| `get_trace`, `list_traces` | run page *Trace*; Train → Traces | 1 |
+| `get_graph` | **pipeline page: the graph, steps, edges** | ✅ 1 |
+| `save_graph` | **pipeline page: every edit**, through lake's `edit_pipeline` | ✅ 1 |
+| `deploy` | pipeline page, *Deploy*, with its gate checks | ✅ 1 |
+| `compile_n8n`, `import_n8n` | project page, *Import from n8n* | ✅ 1 |
+| `compile_python` | project page, *Build from Python* | ✅ 1 |
+| `list_runs`, `get_run`, `get_run_report` | Train → Runs, run page (report as tables, lineage, outputs, log) | ✅ |
+| `get_trace`, `list_traces` | run page *Trace* (spans naming the run); Train → Traces page in 5 | ✅ 1 |
 | `list_connections`, `create_connection`, `delete_connection` | Train → Data | ✅ |
 | `create_dataset_from_query`, `upload_dataset` | Train → Data | ✅ |
 | `list_source_tables` | Train → Data, *Browse a connection's tables* | 2 |

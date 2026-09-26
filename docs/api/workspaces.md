@@ -12,8 +12,9 @@ with the operator is [`../control-plane/services.md`](../control-plane/services.
 | Section | Page | Zetta capabilities behind it |
 |---|---|---|
 | Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `delete_project` (typed confirmation; the project's runs and models stay listed), `capture_intent` then `compile_intent` (build a pipeline from what the project should predict), `approve_plan` (approve a proposed pipeline), `gate` then `run` (check and run an approved pipeline) |
+| Design | `/design/pipeline?project=&graph=&step=` | **The pipeline page** (docs/design/zetta-parity.md): `get_graph` drawn as SVG in stage lanes with each step coloured by the latest run; a step inspector; every edit through `edit_pipeline`; `approve_plan`; *Check* (`gate`, every check with its reason); *Check and run* (`gate` then `run` with a chosen dataset, holdout and model name); *Deploy* (`deploy`, with its gate); the pipeline's runs. The project page adds an empty pipeline (`save_graph`), *Import from n8n* (`import_n8n` → `compile_n8n`) and *Build from Python* (`compile_python`) |
 | Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB, posted as `multipart/form-data` to `/train/data/upload`) |
-| Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run_report` |
+| Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run` (lineage, outputs, log), `get_run_report` rendered as tables (what it learned from, what it leans on, most at risk, caveats, what it cannot tell), and the run's spans from `list_traces` as a waterfall |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |
 | Ship | `/ship/indexes` | `list_indexes` |
 | Ship | `/ship/packages` | lake's own registries, not the workspace (`docs/api/registry.md`) |
@@ -34,7 +35,7 @@ which withdraws the request the same way.
 
 ## Capabilities
 
-All five are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
+All six are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
 customer's policy object and is authorized by lake before anything reaches Zetta.
 
 | Capability | Kind | lake action on the customer | What it does |
@@ -42,8 +43,9 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `workspace_status` | read | `read` | `{workspace, requested, phase, message, ready}` |
 | `start_workspace` | action | `write` | Appends a `desired` event; repeating it appends nothing |
 | `delete_workspace` | action | `admin` | Needs `confirm` equal to the workspace id; marks the default service absent. Refused with `not_found` when no workspace is requested |
-| `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job` |
-| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `upload_dataset`, `delete_project`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain` |
+| `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, rename): reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
+| `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job`, `get_trace`, `list_traces` |
+| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `upload_dataset`, `delete_project`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain`, `save_graph`, `deploy`, `import_n8n`, `compile_n8n`, `compile_python` |
 
 Input for the last two is `{customer_id, capability, input}`, where `input` is the Zetta
 capability's own input. Anything off the lists is refused with `invalid_input`, so nothing reaches

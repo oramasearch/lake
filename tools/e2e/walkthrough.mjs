@@ -75,6 +75,36 @@ try {
       await page.waitForLoadState("load");
       await shot("pipeline");
       note("build-pipeline", { error: await errorText(), pipelines: await page.locator("form[action='/design/project/run'], form[action='/design/project/approve']").count() });
+      // The pipeline page: draw it, add a step and an edge, then approve and check.
+      const pipelineLink = page.locator("main table a[href*='/design/pipeline?']").first();
+      if (await pipelineLink.count()) {
+        await pipelineLink.click();
+        await page.waitForLoadState("load");
+        await shot("pipeline-page");
+        note("pipeline-page", { svg: await page.locator("svg.pipeline-graph").count(), steps: await page.locator("svg.pipeline-graph g.step").count(), error: await errorText() });
+        const addStep = page.locator("form[action='/design/pipeline/edit']:has(input[name=op][value=add_step])");
+        await addStep.locator("select[name=kind]").selectOption("act");
+        await addStep.locator("input[name=name]").fill("Notify the team");
+        await addStep.getByRole("button", { name: "Add step" }).click();
+        await page.waitForLoadState("load");
+        note("pipeline-add-step", { url: page.url(), error: await errorText(), steps: await page.locator("svg.pipeline-graph g.step").count() });
+        const connect = page.locator("form[action='/design/pipeline/edit']:has(input[name=op][value=add_edge]):has(input[name=from])").first();
+        if (await connect.count()) {
+          await connect.getByRole("button", { name: "Connect" }).click().catch(() => {});
+          await page.waitForLoadState("load");
+        }
+        await shot("pipeline-edited");
+        note("pipeline-edited", { error: await errorText(), edges: await page.locator("svg.pipeline-graph line.edge").count() });
+        if (await page.locator("form[action='/design/pipeline/approve']").count()) {
+          await page.getByRole("button", { name: "Approve" }).first().click();
+          await page.waitForLoadState("load");
+        }
+        await page.locator("form[action='/design/pipeline/gate']").getByRole("button", { name: "Check" }).click();
+        await page.waitForLoadState("load");
+        await shot("pipeline-checked");
+        note("pipeline-check", { checks: await page.locator("table.gate-checks tbody tr").count(), error: await errorText() });
+        await page.goto(`${base}/design/project?name=${project}`);
+      }
       if (await page.locator("form[action='/design/project/approve']").count()) {
         await page.getByRole("button", { name: "Approve" }).first().click();
         await page.waitForLoadState("load");
