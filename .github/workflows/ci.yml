@@ -15,6 +15,9 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       LAKE_INSTANCE_KEK: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
       LAKE_TEST_DB_URI: postgresql://postgres:postgres@127.0.0.1:5432/lake_test
+      # The Dockerfile's OpenSSL, so CI and the image link the same library; bump both together.
+      OPENSSL_VERSION: 3.6.3
+      OPENSSL_SHA256: 243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1
     services:
       postgres:
         image: postgres:16
