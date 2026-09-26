@@ -513,7 +513,11 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
     std::string html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("No services yet."), std::string::npos);
     EXPECT_NE(html.find("action=\"/services/create\""), std::string::npos);
-    EXPECT_NE(html.find("may run 5 services"), std::string::npos);
+    EXPECT_NE(html.find("may run 5 services"), std::string::npos) << "a configured limit is stated";
+    page.data["list_services"]["limit"] = 0;
+    EXPECT_EQ(lake::api::web_ui_workspace(page, true).find("may run"), std::string::npos)
+        << "no limit (the default) says nothing";
+    page.data["list_services"]["limit"] = 5;
     EXPECT_EQ(html.find("Start Your Workspace"), std::string::npos)
         << "the Services page does not wait for the workspace";
 

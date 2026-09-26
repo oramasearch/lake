@@ -40,13 +40,19 @@ def api(method, capability, body=None, query=None):
     if query:
         url += "?" + urllib.parse.urlencode(query)
     data = json.dumps(body).encode() if body is not None else None
+    # An explicit User-Agent: the edge in front of lake refuses Python's default one.
     request = urllib.request.Request(url, data=data, method=method, headers={
-        "Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        "Authorization": f"Bearer {token}", "Content-Type": "application/json",
+        "User-Agent": "lake-start-times/1"})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
+            body, status = response.read(), response.status
     except urllib.error.HTTPError as error:
-        return json.load(error)
+        body, status = error.read(), error.code
+    try:
+        return json.loads(body)
+    except ValueError:
+        return {"ok": False, "error": {"status": status, "body": body[:200].decode(errors="replace")}}
 
 
 def pods_ready_at(prefix):

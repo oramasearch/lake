@@ -80,7 +80,7 @@ int usage() {
     std::println(
         "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
     std::println(
-        "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 5, 0 = none)");
+        "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }

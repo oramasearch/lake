@@ -109,7 +109,7 @@ Zetta's own error message through.
 | Variable | Set by | Meaning |
 |---|---|---|
 | `LAKE_SERVICE_DIR` | operator | Mounted service connections, including the workspace's token |
-| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, the workspace included (default 5) |
+| `LAKE_SERVICES_PER_CUSTOMER` | optional | Live services per customer, the workspace included (default `0`: no limit) |
 
 Without `LAKE_SERVICE_DIR`, the pages say Design, Train and Ship are not available on this lake,
 and the capabilities answer `store_unavailable`. `LAKE_DATA_PLANE_*`, `LAKE_WORKSPACE_DIR` and

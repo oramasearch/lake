@@ -21,7 +21,7 @@ namespace lake::control {
 // (docs/api/workspaces.md), is its default Zetta service.
 struct WorkspaceConfig {
     std::string service_dir;          // LAKE_SERVICE_DIR
-    std::size_t max_per_customer = 5; // LAKE_SERVICES_PER_CUSTOMER; 0 means no limit
+    std::size_t max_per_customer = 0; // LAKE_SERVICES_PER_CUSTOMER; 0 (the default) means no limit
 
     bool configured() const {
         return !service_dir.empty();

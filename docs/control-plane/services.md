@@ -123,7 +123,8 @@ labels, before writing `Deleted`. Only the Orama operator's own resources are ev
 - Capabilities `list_services`, `create_service`, `delete_service` and `service_connection`
   (every kind but Zetta, whose admin token lake never hands out)
   ([`../api/services.md`](../api/services.md)), authorized on the customer. lake caps each
-  customer at `LAKE_SERVICES_PER_CUSTOMER` live services (default 5).
+  customer at `LAKE_SERVICES_PER_CUSTOMER` live services when it is set; the default, `0`, is no
+  limit.
 - The `/services` page lists every service of a customer with its phase and endpoint, creates and
   deletes them.
 - **`NOTIFY lake_services, '<service id>'`** in the same transaction as every `services` insert and
