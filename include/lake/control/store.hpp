@@ -219,23 +219,24 @@ inline std::string managed_service_slug(std::string_view prefix, std::string_vie
 // The service catalog (docs/control-plane/services.md, liquid-bridge decision 47), in menu
 // order. The schema's service_kind_check lists the same keys.
 // `ready_seconds` is how long a new service of the kind usually takes from Create to Ready on
-// lake's Services page: the median of tools/e2e/start-times.sh runs (docs/api/services.md, lake#197).
+// lake's Services page, measured with tools/e2e/start-times.py and rounded up to 5 s
+// (docs/api/services.md, lake#197).
 // The order is the menu's: Zetta first, as the default, then the rest by label.
 struct ServiceKind {
     std::string_view key, label;
     int ready_seconds = 60;
 };
 inline constexpr ServiceKind service_kinds[] = {
-    {"zetta", "Zetta", 90},
-    {"cassandra", "Cassandra", 420},
-    {"clickhouse", "ClickHouse", 120},
+    {"zetta", "Zetta", 45},
+    {"cassandra", "Cassandra", 420}, // not yet measured without a node scale-up (lake#197)
+    {"clickhouse", "ClickHouse", 75},
     {"duckdb", "DuckDB", 30},
-    {"kafka", "Kafka", 120},
-    {"polars", "Polars", 30},
-    {"postgres", "Postgres", 60},
-    {"sqlite", "SQLite", 30},
-    {"tidb", "TiDB", 180},
-    {"valkey", "Valkey", 60},
+    {"kafka", "Kafka", 95},
+    {"polars", "Polars", 35},
+    {"postgres", "Postgres", 45},
+    {"sqlite", "SQLite", 25},
+    {"tidb", "TiDB", 105},
+    {"valkey", "Valkey", 45},
 };
 inline const ServiceKind* find_service_kind(std::string_view key) {
     for (const ServiceKind& kind : service_kinds) {
