@@ -57,9 +57,30 @@ std::string web_ui_icon(std::string_view name);
 // A self-hosted IBM Plex WOFF2 face embedded in the binary. Unknown names return an empty view.
 std::string_view web_ui_font(std::string_view name);
 
-// The page frame uses the resolved viewer for navigation and session controls.
+// One level of the top bar's breadcrumb (docs/ui/breadcrumb.md). `href` empty means the level is
+// the current page (or has no page of its own). `full` is the unabbreviated text, shown on hover
+// when `label` is an abbreviated id.
+struct WebUiCrumb {
+    std::string label;
+    std::string href;
+    std::string full;
+};
+// The breadcrumb as a <nav>: every level but the last is a link when it has an href; the last is
+// the current page.
+std::string web_ui_breadcrumb(const std::vector<WebUiCrumb>& trail);
+// An entity's text for a breadcrumb: an id-like value (a UUID, or 16+ hex characters) becomes its
+// first eight characters and an ellipsis, with the whole value in `full`; a name is kept as typed.
+WebUiCrumb web_ui_entity_crumb(std::string_view value, std::string href = {});
+
+// The page frame uses the resolved viewer for navigation and session controls. The breadcrumb is
+// the sidebar item the page belongs to (with its group), then `meta` as the page's own level.
 std::string web_ui_shell(std::string_view title,
                          std::string_view meta,
+                         std::string_view content,
+                         WebUiViewer viewer = false);
+// The same frame with an explicit breadcrumb, for pages that know their entities' names.
+std::string web_ui_shell(std::string_view title,
+                         const std::vector<WebUiCrumb>& trail,
                          std::string_view content,
                          WebUiViewer viewer = false);
 

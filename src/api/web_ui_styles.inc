@@ -542,6 +542,39 @@ table + .panel,
 .breadcrumbs a {
   color: inherit;
 }
+.topbar-trail {
+  margin: 0;
+}
+.topbar-trail ol {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.topbar-trail li {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-trail li + li::before {
+  content: '\203A';
+  margin: 0 var(--lake-space-2);
+  color: var(--lake-text-secondary);
+}
+.topbar-trail a {
+  color: var(--lake-text-secondary);
+  text-decoration: none;
+}
+.topbar-trail a:hover {
+  color: var(--lake-action);
+  text-decoration: underline;
+}
+.topbar-trail [aria-current='page'] {
+  color: var(--lake-text-primary);
+}
 
 .table-wrap {
   max-width: 100%;
@@ -1388,7 +1421,7 @@ dd {
     padding-right: var(--lake-page-gutter-compact);
     padding-left: var(--lake-page-gutter-compact);
   }
-  .topbar-context {
+  .topbar-trail li:not(:nth-last-child(-n + 2)) {
     display: none;
   }
   h1 {

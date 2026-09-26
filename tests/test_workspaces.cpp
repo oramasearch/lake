@@ -1202,3 +1202,55 @@ TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("1 rows"), std::string::npos);
 }
+
+// The top bar's breadcrumb mirrors the URL (docs/ui/breadcrumb.md): stage, list, then the
+// entities by name, or by abbreviated id; every level but the current one is a link that keeps the
+// space.
+TEST(Workspaces, BreadcrumbMirrorsTheUrlWithNamesAndAbbreviatedIds) {
+    const auto trail = [](const std::string& html) {
+        const auto start = html.find("<nav class=\"breadcrumbs topbar-trail\"");
+        return start == std::string::npos ? std::string()
+                                          : html.substr(start, html.find("</nav>", start) - start);
+    };
+    const std::string space = "customer_id=" + std::string(customer);
+    lake::api::WorkspacePage page;
+    page.customer_id = std::string(customer);
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+
+    page.section = "projects";
+    std::string crumbs = trail(lake::api::web_ui_workspace(page, true));
+    EXPECT_NE(crumbs.find("<a href=\"/design/projects?" + space + "\">Design</a>"),
+              std::string::npos)
+        << crumbs;
+    EXPECT_NE(crumbs.find("<span aria-current=\"page\">Projects</span>"), std::string::npos)
+        << crumbs;
+
+    page.section = "pipeline";
+    page.project = "retention";
+    page.subject = "churn";
+    crumbs = trail(lake::api::web_ui_workspace(page, true));
+    EXPECT_NE(crumbs.find(">Design</a>"), std::string::npos) << crumbs;
+    EXPECT_NE(crumbs.find(">Projects</a>"), std::string::npos) << crumbs;
+    EXPECT_NE(
+        crumbs.find("<a href=\"/design/project?" + space + "&amp;name=retention\">retention</a>"),
+        std::string::npos)
+        << crumbs;
+    EXPECT_NE(crumbs.find("<span aria-current=\"page\">churn</span>"), std::string::npos) << crumbs;
+
+    page.section = "run";
+    page.project.clear();
+    page.subject = "3c9e1a2b-7f00-4d2e-9b1a-0c5d6e7f8a9b";
+    crumbs = trail(lake::api::web_ui_workspace(page, true));
+    EXPECT_NE(crumbs.find(">Train</a>"), std::string::npos) << crumbs;
+    EXPECT_NE(crumbs.find("<a href=\"/train/runs?" + space + "\">Runs</a>"), std::string::npos)
+        << crumbs;
+    EXPECT_NE(crumbs.find("title=\"3c9e1a2b-7f00-4d2e-9b1a-0c5d6e7f8a9b\">3c9e1a2b…</span>"),
+              std::string::npos)
+        << crumbs;
+
+    page.section = "query";
+    page.subject.clear();
+    crumbs = trail(lake::api::web_ui_workspace(page, true));
+    EXPECT_NE(crumbs.find(">Data</a>"), std::string::npos) << crumbs;
+    EXPECT_NE(crumbs.find("<span aria-current=\"page\">Query</span>"), std::string::npos) << crumbs;
+}

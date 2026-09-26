@@ -373,6 +373,38 @@ TEST(WebUi, CustomerPagesDoNotAdvertiseImplementationOrOperatorCredentials) {
     }
 }
 
+// The breadcrumb renderer: escaped labels, links for every level but the current one, and the full
+// id on hover for an abbreviated one (docs/ui/breadcrumb.md).
+TEST(WebUi, BreadcrumbLinksEveryLevelButTheCurrentOne) {
+    using lake::api::WebUiCrumb;
+    const std::string html = lake::api::web_ui_breadcrumb(
+        {{"Ship", "/ship/models", {}},
+         {"Search Indexes", "/ship/indexes?a=1&b=2", {}},
+         lake::api::web_ui_entity_crumb("5b42a297-cc49-429c-8f42-7acf0685bf96"),
+         {"<b>", {}, {}}});
+    EXPECT_NE(html.find("aria-label=\"Breadcrumb\""), std::string::npos);
+    EXPECT_NE(html.find("<a href=\"/ship/models\">Ship</a>"), std::string::npos) << html;
+    EXPECT_NE(html.find("<a href=\"/ship/indexes?a=1&amp;b=2\">Search Indexes</a>"),
+              std::string::npos)
+        << html;
+    EXPECT_NE(html.find("title=\"5b42a297-cc49-429c-8f42-7acf0685bf96\">5b42a297…"),
+              std::string::npos)
+        << html;
+    EXPECT_NE(html.find("<span aria-current=\"page\">&lt;b&gt;</span>"), std::string::npos) << html;
+    EXPECT_EQ(lake::api::web_ui_breadcrumb({}), "");
+    EXPECT_EQ(lake::api::web_ui_entity_crumb("retention-review").label, "retention-review");
+    EXPECT_TRUE(lake::api::web_ui_entity_crumb("retention-review").full.empty());
+
+    // Without its own trail a page sits under its sidebar item and group, then its own level.
+    lake::api::WebUiViewer viewer(true);
+    viewer.path = "/organizations";
+    const std::string page =
+        lake::api::web_ui_shell("lake — organization settings", "Acme", "<p>x</p>", viewer);
+    EXPECT_NE(page.find("<a href=\"/organizations\">Organization</a>"), std::string::npos);
+    EXPECT_NE(page.find("<a href=\"/organizations\">Organizations</a>"), std::string::npos);
+    EXPECT_NE(page.find("<span aria-current=\"page\">Acme</span>"), std::string::npos);
+}
+
 TEST(WebUi, NavigationMatchesVisitorAccountAndOperatorAccess) {
     const std::string visitor = lake::api::web_ui_home();
     EXPECT_NE(visitor.find("Public Repositories"), std::string::npos);
@@ -1183,7 +1215,11 @@ TEST(WebUi, NavigationFollowsTheRequestPath) {
     EXPECT_NE(deployments.find("href=\"/deployments\" aria-current=\"page\""), std::string::npos);
     EXPECT_EQ(deployments.find("href=\"/repositories\" aria-current=\"page\""), std::string::npos);
     viewer.path = "/drivers";
-    EXPECT_EQ(lake::api::web_ui_home(viewer).find("aria-current=\"page\""), std::string::npos);
+    // No sidebar item owns the path (the breadcrumb still marks its own current level).
+    const std::string unowned = lake::api::web_ui_home(viewer);
+    const std::string sidebar = unowned.substr(
+        unowned.find("primary-nav"), unowned.find("</nav>") - unowned.find("primary-nav"));
+    EXPECT_EQ(sidebar.find("aria-current=\"page\""), std::string::npos);
     viewer.path = "/";
     EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/\" aria-current=\"page\""),
               std::string::npos);
