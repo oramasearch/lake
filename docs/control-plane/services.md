@@ -20,7 +20,7 @@ Zetta.
 |---|---|
 | `id` | uuid, the service's identity everywhere (label `orama.cloud/service-id`) |
 | `customer_id` | the owning customer |
-| `kind` | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra` or `valkey` (migration `0025_service_catalog`) |
+| `kind` | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra`, `valkey` (migration `0025_service_catalog`) or `sqlite` (migration `0026_sqlite_services`) |
 | `name` | the customer's name for it, `^[a-z][a-z0-9-]{0,30}$`, unique per customer among live services |
 | `slug` | Kubernetes suffix, `svc-<12 hex of id>`, or `ws-<12 hex of customer id>` for a default workspace; never reused |
 | `is_default` | the customer's workspace (Zetta only; at most one live per customer) |
@@ -93,12 +93,18 @@ database itself. `instances` is 1–3 and `storage_gi` 1–100 for every kind.
 | `tidb` | PingCAP TiDB Operator v1.6.6 (`pingcap/tidb-operator`, stable 1.x; its CRDs applied from the v1.6.6 release first) | `pingcap.com/v1alpha1 TidbCluster`: PD, TiKV and TiDB with `instances` replicas each, TiKV and PD storage of `storage_gi`, `tidb.initializer` with `createPassword`, which reads the root password from the Secret `<name>-init` (key `root`) the Orama operator creates, and `pvReclaimPolicy: Delete` | replicas of each component | PD, TiKV and TiDB report `Normal` and all their members ready | `host, port` (4000), `user` (`root`), `password`, `uri` (`mysql://…`) | `<name>-tidb.<ns>.svc.cluster.local:4000` |
 | `cassandra` | K8ssandra Operator 1.33.0 (`k8ssandra/k8ssandra-operator`, cluster-scoped, needs cert-manager v1.21.2) | `k8ssandra.io/v1alpha1 K8ssandraCluster`, one datacenter of `instances` nodes with `storage_gi` (its datacenter object and Cassandra cluster are named after the slug so two services never collide; the Cassandra datacenter name is `dc1`), Apache Cassandra images only | nodes | the datacenter is `Ready` | `host, port` (9042), `datacenter` (`dc1`), `user, password` (K8ssandra's superuser Secret) | `<slug>-<slug>-service.<ns>.svc.cluster.local:9042` |
 | `valkey` **preview** | valkey-io/valkey-operator 0.6.0 (`valkey/valkey-operator`; its README says *not ready for production*, `v1alpha1`) | `valkey.io/v1alpha1 ValkeyCluster`: 3 shards (cluster mode needs three), `instances - 1` replicas per shard, `storage_gi` per node, an ACL user `app` with a generated password, and the built-in `default` user disabled (left alone it accepts unauthenticated clients) | replicas per shard + 1 | the `ValkeyCluster` `Ready` condition | `host, port` (6379), `user, password`, `cluster` (`true`) | the cluster's client service on 6379 |
+| `sqlite` | the Orama operator itself, image `oramasearch/lake-sqlite` (orama-operator `cmd/lake-sqlite`) | a `StatefulSet` of one `lake-sqlite` pod with a `storage_gi` volume holding one SQLite database in WAL mode, a `Service`, and a Secret `<name>-credentials` holding a generated bearer token. `instances` must be 1: SQLite has one writer | 1 (always) | the pod is Ready (its `/healthz` opens the database) | `token`, `database` (`main`) | `http://<name>.<ns>.svc.cluster.local:8080` |
 
 Exact field names follow each operator's pinned CRD; where the table and the CRD disagree, the CRD
 wins and `docs/lake/services.md` in the operator says what was chosen. Every credential also carries
 `endpoint`. Each resource's `app.kubernetes.io/instance` label is its own name, not the Lake's:
-TiDB builds its pod selectors from that label. **SQLite is not a kind:** it
-has no operator and no replication, so it needs its own design (decision 47).
+TiDB builds its pod selectors from that label. SQLite has no upstream
+operator, so the Orama operator runs it directly behind `lake-sqlite`, a small web service we wrote
+(decision 47, amended). Its API: `POST /v1/query` `{sql, params}` answers `{columns, rows}`;
+`POST /v1/exec` answers `{rows_affected, last_insert_id}`; `POST /v1/batch` `{statements: [{sql,
+params}]}` runs them in one transaction; `GET /healthz`. Every call but `/healthz` needs
+`Authorization: Bearer <token>`. There is no replication; the volume is the only copy until
+backups exist.
 
 Deletion deletes the resource and, for kinds whose volumes the upstream operator does not own
 (Kafka, TiDB, Cassandra and Valkey keep their PVCs by default), the PVCs carrying that resource's

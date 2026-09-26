@@ -264,6 +264,10 @@ void register_service_capabilities(Registry& registry) {
                     "most 31 characters",
                     "/name");
             }
+            if (service.kind == "sqlite" && service.instances != 1) {
+                co_return ApiResult::failure(
+                    "invalid_input", "a SQLite service has exactly one instance", "/instances");
+            }
             if (service.instances < 1 || service.instances > 3 || service.storage_gi < 1 ||
                 service.storage_gi > 100) {
                 co_return ApiResult::failure("invalid_input",

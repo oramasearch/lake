@@ -296,7 +296,15 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
              "create_service",
              {{"customer_id", owner_customer}, {"kind", "zetta"}, {"name", "Bad"}});
     EXPECT_FALSE(bad_name.ok);
-    for (const char* kind : {"kafka", "clickhouse", "tidb", "cassandra", "valkey"}) {
+    EXPECT_FALSE(call(*owner_principal,
+                      "create_service",
+                      {{"customer_id", owner_customer},
+                       {"kind", "sqlite"},
+                       {"name", "notes"},
+                       {"instances", 2}})
+                     .ok)
+        << "SQLite has one writer";
+    for (const char* kind : {"kafka", "clickhouse", "tidb", "cassandra", "valkey", "sqlite"}) {
         const auto catalog = call(
             *owner_principal,
             "create_service",
@@ -308,12 +316,12 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     }
     EXPECT_FALSE(call(*owner_principal,
                       "create_service",
-                      {{"customer_id", owner_customer}, {"kind", "sqlite"}, {"name", "s"}})
+                      {{"customer_id", owner_customer}, {"kind", "mongodb"}, {"name", "s"}})
                      .ok)
         << "a kind outside the catalog is refused";
     const auto listed = call(*owner_principal, "list_services", {{"customer_id", owner_customer}});
     ASSERT_TRUE(listed.ok);
-    EXPECT_EQ(listed.value["services"].size(), 7U) << "the workspace, crm and five deleting";
+    EXPECT_EQ(listed.value["services"].size(), 8U) << "the workspace, crm and six deleting";
     EXPECT_FALSE(call(*other_principal, "list_services", {{"customer_id", owner_customer}}).ok);
     EXPECT_FALSE(call(*other_principal,
                       "create_service",
