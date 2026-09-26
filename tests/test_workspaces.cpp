@@ -10,7 +10,9 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/memory_store.hpp"
@@ -1009,4 +1011,107 @@ TEST(Workspaces, DataPageOffersTheSpacesServicesAndServicesWarnBeforeDeletingAUs
     page.data["list_services"]["limit"] = 5;
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("connection <code>crm</code> uses it"), std::string::npos);
+}
+
+TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    w.caller->answers["get_graph"] = {
+        {"graph_id", "g-1"},
+        {"name", "churn"},
+        {"project", "retention"},
+        {"approval", "approved"},
+        {"nodes", json::array({{{"id", "pull"}, {"kind", "connect"}, {"name", "Pull"}}})},
+        {"edges", json::array()}};
+    w.caller->answers["list_runs"] = {{"runs",
+                                       json::array({{{"id", "r1"},
+                                                     {"graph", "churn"},
+                                                     {"status", "succeeded"},
+                                                     {"created", "2026-09-26T10:00:00Z"}}})}};
+    w.caller->answers["get_run"] = {{"status", "succeeded"},
+                                    {"lineage", {{"steps", json::array({"pull"})}}}};
+    w.caller->answers["gate"] = {{"block_deploy", true}, {"verdict", "fail"}};
+    w.caller->answers["import_n8n"] = {{"input_id", "in-1"}};
+    w.caller->answers["compile_n8n"] = {{"name", "n8n workflow"}, {"approval", "proposed"}};
+
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.workspaces = w.service.get();
+    context.authorized = true;
+    context.acting_user_id = principal->user_id;
+    context.acting_identity = principal->taap_id;
+
+    const std::vector<std::string> features = {"workspace_status",
+                                               "start_workspace",
+                                               "delete_workspace",
+                                               "workspace_query",
+                                               "workspace_act",
+                                               "list_services",
+                                               "create_service",
+                                               "delete_service",
+                                               "service_connection",
+                                               "list_service_kinds",
+                                               "connect_service",
+                                               "search_index",
+                                               "edit_pipeline",
+                                               "get_pipeline",
+                                               "run_pipeline",
+                                               "create_pipeline"};
+    const json openapi = lake::api::openapi_document(registry, "test");
+    const auto tools = json::parse(
+        *liquid::runtime::block_on(lake::api::mcp_dispatch_async(
+                                       registry,
+                                       {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}},
+                                       context,
+                                       "test"))
+             .value());
+    for (const std::string& feature : features) {
+        EXPECT_TRUE(openapi["paths"].contains("/v1/" + feature)) << feature << " is not in OpenAPI";
+        EXPECT_TRUE(std::ranges::any_of(
+            tools["result"]["tools"],
+            [&](const json& tool) { return tool.value("name", "") == feature; }))
+            << feature << " is not an MCP tool";
+    }
+
+    const auto call = [&](const std::string& name, json arguments) {
+        context.request_id = lake::control::new_uuid_v4();
+        if (name != "list_service_kinds") {
+            arguments["customer_id"] = w.customer_id;
+        }
+        const auto response = liquid::runtime::block_on(
+            lake::api::mcp_dispatch_async(registry,
+                                          {{"jsonrpc", "2.0"},
+                                           {"id", 2},
+                                           {"method", "tools/call"},
+                                           {"params", {{"name", name}, {"arguments", arguments}}}},
+                                          context,
+                                          "test"));
+        EXPECT_TRUE(response && *response);
+        return json::parse(**response)["result"];
+    };
+    const json pipeline = call("get_pipeline", {{"project", "retention"}, {"graph", "churn"}});
+    const json value =
+        json::parse(pipeline.at("content").at(0).at("text").get<std::string>()).at("value");
+    EXPECT_EQ(value["step_status"]["pull"], "succeeded");
+    EXPECT_EQ(value["runs"].size(), 1U);
+
+    const json blocked = call("run_pipeline", {{"project", "retention"}, {"graph", "churn"}});
+    EXPECT_NE(blocked.dump().find("block_deploy"), std::string::npos);
+    EXPECT_NE(w.caller->calls.back().first, "run") << "a failing gate runs nothing";
+
+    call("create_pipeline", {{"project", "retention"}, {"from", "n8n"}, {"content", "{}"}});
+    ASSERT_GE(w.caller->calls.size(), 2U);
+    EXPECT_EQ(w.caller->calls[w.caller->calls.size() - 2].first, "import_n8n");
+    EXPECT_EQ(w.caller->calls.back().first, "compile_n8n");
+    EXPECT_EQ(w.caller->calls.back().second["input_id"], "in-1");
+
+    const json kinds = call("list_service_kinds", json::object());
+    EXPECT_NE(kinds.dump().find("cassandra"), std::string::npos);
 }
