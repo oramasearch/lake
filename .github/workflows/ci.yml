@@ -11,6 +11,7 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     env:
       DEBIAN_FRONTEND: noninteractive
       LAKE_INSTANCE_KEK: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
@@ -133,4 +134,5 @@ jobs:
         run: psql "$LAKE_TEST_DB_URI" --set ON_ERROR_STOP=1 --file db/schema.sql
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        # A hung test fails by name after ten minutes instead of holding the job for six hours.
+        run: ctest --test-dir build --output-on-failure --timeout 600
