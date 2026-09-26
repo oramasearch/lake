@@ -1434,7 +1434,9 @@ dd {
 }
 .pipeline-graph {
   display: block;
-  max-width: none;
+  width: 100%;
+  min-width: 48rem;
+  height: auto;
   color: var(--lake-text-tertiary);
   font-family: var(--lake-font-sans);
 }
@@ -1488,6 +1490,16 @@ dd {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
   gap: var(--lake-space-4);
+  align-items: start;
+}
+.pipeline-edit > form {
+  min-width: 0;
+}
+.pipeline-edit select,
+.pipeline-edit input,
+.pipeline-edit textarea {
+  width: 100%;
+  min-width: 0;
 }
 .gate-checks td:first-child {
   font-family: var(--lake-font-mono);
