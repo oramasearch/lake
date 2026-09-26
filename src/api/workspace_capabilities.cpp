@@ -855,8 +855,7 @@ void register_parity_capabilities(Registry& registry) {
                 for (const control::ServiceKind& kind : control::service_kinds) {
                     kinds.push_back({{"kind", std::string(kind.key)},
                                      {"label", std::string(kind.label)},
-                                     {"ready_minutes", kind.ready_minutes},
-                                     {"preview", kind.preview}});
+                                     {"ready_seconds", kind.ready_seconds}});
                 }
                 return ApiResult::success({{"kinds", std::move(kinds)}});
             }});

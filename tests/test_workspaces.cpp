@@ -567,15 +567,29 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("<dt>bootstrap</dt>"), std::string::npos)
         << "every kind's connection fields are shown";
-    for (const char* option :
-         {"<option value=\"kafka\">Kafka — ready in about 3 minutes</option>",
-          "<option value=\"clickhouse\">ClickHouse — ready in about 3 minutes</option>",
-          "<option value=\"tidb\">TiDB — ready in about 4 minutes</option>",
-          "<option value=\"cassandra\">Cassandra — ready in about 10 minutes</option>",
-          "<option value=\"valkey\">Valkey — ready in about 2 minutes (preview, not for "
-          "production)"}) {
-        EXPECT_NE(html.find(option), std::string::npos) << option;
+    // The menu: Zetta first and selected, then every other kind by label; each with its usual
+    // start time; no kind is labelled preview (lake#197).
+    const std::string menu =
+        html.substr(html.find("<select name=\"kind\">"),
+                    html.find("</select>", html.find("<select name=\"kind\">")) -
+                        html.find("<select name=\"kind\">"));
+    EXPECT_NE(menu.find("<select name=\"kind\"><option value=\"zetta\" selected>Zetta — ready in "
+                        "about 2 minutes</option>"),
+              std::string::npos)
+        << menu;
+    std::size_t last = 0;
+    for (const char* key : {"cassandra", "clickhouse", "duckdb", "kafka", "polars", "postgres",
+                            "sqlite", "tidb", "valkey"}) {
+        const std::size_t at = menu.find(std::string("<option value=\"") + key + "\">");
+        EXPECT_NE(at, std::string::npos) << key;
+        EXPECT_GT(at, last) << key << " is out of order";
+        last = at;
     }
+    EXPECT_NE(menu.find("<option value=\"duckdb\">DuckDB — ready in about 30 seconds</option>"),
+              std::string::npos);
+    EXPECT_NE(menu.find("<option value=\"cassandra\">Cassandra — ready in about 7 minutes</option>"),
+              std::string::npos);
+    EXPECT_EQ(menu.find("preview"), std::string::npos);
     // A starting service says how long its kind usually takes and how long it has been going.
     page.data["list_services"]["services"] =
         json::array({{{"id", "d"},
@@ -586,7 +600,7 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
                       {"desired", "present"},
                       {"phase", "Provisioning"},
                       {"message", "waiting for the Cassandra datacenter"},
-                      {"created_at", "2020-01-01T00:00:00Z"}},
+                      {"created_at", "2020-01-01 00:00:00.12+00"}},
                      {{"id", "e"},
                       {"name", "cache"},
                       {"kind", "valkey"},
@@ -597,11 +611,21 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
                       {"connected", true}}});
     page.data.erase("service_connection");
     html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("Usually ready in about 10 minutes; started "), std::string::npos);
+    EXPECT_NE(html.find("Usually ready in about 7 minutes; started "), std::string::npos)
+        << "Postgres' own timestamp text is read";
     EXPECT_NE(html.find("taking longer than usual"), std::string::npos)
         << "a service far past its usual time says so";
-    EXPECT_EQ(html.find("Usually ready in about 2 minutes"), std::string::npos)
+    EXPECT_EQ(html.find("Usually ready in about 60 seconds"), std::string::npos)
         << "a Ready service shows no start hint";
+    EXPECT_NE(html.find("every 3 seconds"), std::string::npos)
+        << "a starting service keeps the page refreshing fast";
+
+    // Zetta services are listed first.
+    page.data["list_services"]["services"] = json::array(
+        {{{"id", "p"}, {"name", "crm"}, {"kind", "postgres"}, {"desired", "present"}, {"phase", "Ready"}},
+         {{"id", "z"}, {"name", "workspace"}, {"kind", "zetta"}, {"desired", "present"}, {"phase", "Ready"}}});
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_LT(html.find(">workspace<"), html.find(">crm<"));
 }
 
 TEST(Workspaces, NavigationOffersDesignTrainAndShip) {

@@ -13,30 +13,22 @@ adoption — is [`../control-plane/services.md`](../control-plane/services.md).
 ## What a person sees
 
 **Ship → Services** (`/services`) lists every service of the selected space: name, kind, size
-(instances × storage), the operator's phase and message, and the in-cluster address. The
-customer's workspace is marked *(workspace)*. The page refreshes every 15 seconds while a service
-is changing. A service the operator reports Ready shows *Connecting* until its connection has
-reached lake's mount, which the kubelet does up to a minute after the operator writes it.
+(instances × storage), the operator's phase and message, and the in-cluster address. Zetta
+services come first; the customer's workspace is marked *(workspace)*. The page refreshes every 3
+seconds while a service is changing. A service the operator reports Ready shows *Connecting* until
+its connection has reached lake's mount; the operator makes kubelet refresh the mount as soon as it
+writes the connection (orama-operator#183), so this lasts seconds, not the minute it used to.
 
-- **Expected start times.** The kind menu says how long each kind usually takes to become
-  Ready, and a starting service shows that time, how long ago it started, and a note once it has
-  taken more than twice as long. The times are `control::service_kinds[].ready_minutes`, rounded up
-  from what was measured on lake.oramadev.net on 2026-09-26 on one node:
-
-  | Kind | Measured | Shown |
-  |---|---|---|
-  | Postgres | ~2 min | about 2 minutes |
-  | Zetta | ~1–2 min | about 2 minutes |
-  | Kafka | 2 min | about 3 minutes |
-  | ClickHouse | 2.5 min | about 3 minutes |
-  | TiDB | 3 min | about 4 minutes |
-  | Cassandra | 8 min | about 10 minutes |
-  | Valkey | 1.3 min | about 2 minutes |
-  | SQLite | 52 s | about 1 minute |
-
-  Re-measure and update the table when node size, images or operators change.
-- **New service:** kind (Valkey is marked *preview, not for production*: its upstream operator
-  says so), name (lowercase letters, digits and `-`, starting with a letter), 1–3
+- **Expected start times.** The kind menu says how long each kind usually takes, from *Create*
+  to usable, and a starting service shows that time, the operator's current step (*waiting for the
+  Postgres instances*, *delivering the connection*, …), how long ago it started, and a note once it
+  has taken more than twice as long. The times are `control::service_kinds[].ready_seconds`: the
+  median of `tools/e2e/start-times.py` runs (lake#197), which follows each phase: the operator
+  noticing the row (lake `NOTIFY`s it), the pods' own Ready transition, the operator's Ready, and
+  lake reading the connection. The measured table is below under *Start times*; re-measure when
+  node size, images or operators change.
+- **New service:** kind (Zetta first and preselected, then the rest by name; no kind is marked
+  preview — decision 47), name (lowercase letters, digits and `-`, starting with a letter), 1–3
   instances, 1–100 GiB of storage. The page shows how many services the space may run.
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
   every field the operator delivered for that kind (a Postgres URI, Kafka's bootstrap and SASL
@@ -50,7 +42,7 @@ All are in lake's registry (REST, OpenAPI, MCP) and authorized on the customer's
 
 | Capability | Kind | Action on the customer | What it does |
 |---|---|---|---|
-| `list_service_kinds` | read | the caller | The catalog: each kind's key, label, `ready_minutes` and `preview` |
+| `list_service_kinds` | read | the caller | The catalog, Zetta first: each kind's key, label and `ready_seconds` |
 | `list_services` | read | `read` (checked by the handler, as every `list_` capability) | `{services: [...], limit}`; each service carries `id, kind, name, slug, default, instances, storage_gi, desired, generation, phase, message, endpoint, observed_generation, created_at` and never a credential |
 | `create_service` | action | `write` | `{kind, name, instances?, storage_gi?}`, `kind` one of `postgres, zetta, kafka, clickhouse, tidb, cassandra, valkey, sqlite` (a SQLite service has exactly one instance); `conflict` for a live name, `quota_exceeded` at `LAKE_SERVICES_PER_CUSTOMER` |
 | `delete_service` | action | `admin` | `{service_id, confirm}`, `confirm` equal to the service name; marks it absent |
@@ -80,6 +72,18 @@ page. `PostgresServices.CreateListAndWithdrawFollowTheContract` runs the store a
 database: the default created once, the `ws-` slug for the first workspace and never reused, and
 withdrawal bumping the generation. On a deployment: create a Postgres service on `/services`, wait
 for Ready, and **Show connection**.
+
+## Start times
+
+Measured with `tools/e2e/start-times.py <base-url> <token-file> <customer-id> <runs> <kind…>`
+(kubectl and lake's API, no browser): it creates each kind, follows `list_services` every second,
+reads the pods' Ready transition from Kubernetes, deletes the service, and prints each phase from
+*Create* — `seen` (the operator's first status), `pods` (last pod Ready), `ready` (the operator's
+Ready), `connected` (lake reads the connection) — with the operator's messages, then the median and
+p90 per kind. `ready_seconds` is the median of `connected`.
+
+The table is filled from the first measurement after lake#197 is deployed; until then
+`ready_seconds` holds provisional values.
 
 ## Known limits
 

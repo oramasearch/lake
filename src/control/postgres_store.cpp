@@ -4000,6 +4000,9 @@ public:
                            in.is_default,
                            spec.dump(),
                            in.created_by_taap_id);
+            // The operator LISTENs and reconciles at once instead of on its next poll (lake#197);
+            // delivered on commit.
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
             return one_service(tx, id);
         });
     }
@@ -4017,6 +4020,7 @@ public:
                 }
                 return std::unexpected(StoreError{"conflict", "the service is already deleted"});
             }
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
             return one_service(tx, id);
         });
     }
