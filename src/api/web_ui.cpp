@@ -1603,8 +1603,9 @@ constexpr std::array<WorkspaceSection, 8> workspace_sections{{
      "Ship",
      "Services",
      "/services",
-     "The Zetta and Postgres clusters this space runs on lake, each its own, with its data kept "
-     "apart from every other customer's. Your workspace is the one Design, Train and Ship use."},
+     "The databases, streams and engines this space runs on lake: Postgres, Zetta, Kafka, "
+     "ClickHouse, TiDB, Cassandra and Valkey, each its own, with its data kept apart from every "
+     "other customer's. Your workspace is the Zetta that Design, Train and Ship use."},
 }};
 
 const WorkspaceSection& workspace_section(std::string_view key) {
