@@ -185,6 +185,17 @@ try {
   }
 
   // 4b. Services: create a Postgres service, wait for Ready, show its connection, delete it.
+  // First delete any e2e- service a crashed earlier run left behind.
+  await page.goto(`${base}/services`);
+  for (const leftover of await page.locator("tr:has(form[action='/services/delete'])").filter({ hasText: /^e2e-/ }).all()) {
+    const leftoverName = (await leftover.locator("td").first().innerText()).trim().split(/\s/)[0];
+    await leftover.locator("details summary").click();
+    await leftover.locator("input[name=confirm]").fill(leftoverName);
+    await leftover.getByRole("button", { name: `Delete ${leftoverName}` }).click();
+    await page.waitForLoadState("load");
+    note("cleanup-leftover-service", { name: leftoverName, error: await errorText() });
+    await page.goto(`${base}/services`);
+  }
   const service = `e2e-${Date.now().toString(36)}`;
   await page.goto(`${base}/services`);
   await page.selectOption("form[action='/services/create'] select[name=kind]", "postgres");
@@ -209,6 +220,33 @@ try {
     await shot("service-connection");
     // The URI carries a password: record only that it was shown, never its value.
     note("service-connection", { shown: (await page.locator("main").innerText()).includes("postgresql://"), url: page.url() });
+  }
+  // 4c. Connect the Postgres service from Train → Data (#188) and pull a dataset through it.
+  await page.goto(`${base}/services`);
+  const serviceReady = (await row().count()) && (await row().locator("td").nth(3).innerText()).startsWith("Ready");
+  if (serviceReady) {
+    await page.goto(`${base}/train/data`);
+    const connectRow = page.locator("tr", { hasText: service }).filter({ has: page.locator("form[action='/train/data/connect-service']") });
+    if (await connectRow.count()) {
+      await connectRow.getByRole("button").click();
+      await page.waitForLoadState("load");
+      note("connect-service", { error: await errorText(), listed: (await page.locator("main table", { hasText: service }).count()) > 0 });
+      const pull = page.locator("form[action='/train/data/pull']");
+      if (await pull.count()) {
+        await pull.evaluate((form) => { form.closest("details").open = true; });
+        await pull.locator("select[name=connection]").selectOption(service);
+        await pull.locator("textarea[name=query]").fill("SELECT 1 AS one, 'lake' AS source");
+        await pull.locator("input[name=table_name]").fill(`e2e_from_${Date.now().toString(36)}`);
+        await page.getByRole("button", { name: "Pull dataset" }).click();
+        await page.waitForLoadState("load");
+        await shot("pulled-from-service");
+        note("pull-from-service", { error: await errorText() });
+      }
+      const disconnect = page.locator("tr", { hasText: service }).locator("form[action='/train/data/disconnect']");
+      if (await disconnect.count()) { await disconnect.getByRole("button").click(); await page.waitForLoadState("load"); }
+    } else {
+      note("connect-service", { error: "no Connect button for the service" });
+    }
   }
   await page.goto(`${base}/services`);
   if (await row().count()) {

@@ -13,7 +13,11 @@ with the operator is [`../control-plane/services.md`](../control-plane/services.
 |---|---|---|
 | Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `delete_project` (typed confirmation; the project's runs and models stay listed), `capture_intent` then `compile_intent` (build a pipeline from what the project should predict), `approve_plan` (approve a proposed pipeline), `gate` then `run` (check and run an approved pipeline) |
 | Design | `/design/pipeline?project=&graph=&step=` | **The pipeline page** (docs/design/zetta-parity.md): `get_graph` drawn as SVG in stage lanes with each step coloured by the latest run; a step inspector; every edit through `edit_pipeline`; `approve_plan`; *Check* (`gate`, every check with its reason); *Check and run* (`gate` then `run` with a chosen dataset, holdout and model name); *Deploy* (`deploy`, with its gate); the pipeline's runs. The project page adds an empty pipeline (`save_graph`), *Import from n8n* (`import_n8n` → `compile_n8n`) and *Build from Python* (`compile_python`) |
-| Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB, posted as `multipart/form-data` to `/train/data/upload`) |
+| Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB, posted as `multipart/form-data` to `/train/data/upload`), **Connect one of your services** (`connect_service`: the space's own Ready Postgres services in one click, no password typed or shown; other kinds say *not supported yet*), and each connection's *From service* |
+| Train | `/train/data?browse=<connection>` | *Browse tables* on a connection: `list_source_tables` with columns, without pulling anything |
+| Train | `/train/dataset?database=&name=` | `get_dataset` (columns, partitions, health), its first 20 rows (`workspace_sql`), *Keep durable* (`promote_dataset`), *Query it* |
+| Train | `/train/query?statement=&database=` | Read-only SQL over the workspace's data (`workspace_sql`) |
+| Train | `/train/data`, *Generate a dataset* | `list_dataset_generators`, `generate_dataset` (never its `path`, which writes a file on the node) |
 | Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run` (lineage, outputs, log), `get_run_report` rendered as tables (what it learned from, what it leans on, most at risk, caveats, what it cannot tell), and the run's spans from `list_traces` as a waterfall |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |
 | Ship | `/ship/indexes` | `list_indexes`, *New index* (`create_index` over a dataset, BM25F full-text) |
@@ -36,7 +40,7 @@ which withdraws the request the same way.
 
 ## Capabilities
 
-All seven are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
+All twelve are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
 customer's policy object and is authorized by lake before anything reaches Zetta.
 
 | Capability | Kind | lake action on the customer | What it does |
@@ -45,9 +49,14 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `start_workspace` | action | `write` | Appends a `desired` event; repeating it appends nothing |
 | `delete_workspace` | action | `admin` | Needs `confirm` equal to the workspace id; marks the default service absent. Refused with `not_found` when no workspace is requested |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, rename): reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
+| `workspace_sql` | read | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`) through Zetta's `sql`; DDL, writes, users and several statements are refused before anything reaches the workspace. Audit kind `workspace.sql` |
+| `get_pipeline` | read | `read` | A pipeline's graph, approval, `step_status` from the latest run, and its `runs`, newest first — what the pipeline page shows |
+| `run_pipeline` | action | `write` | `gate`, then `run` when it passes, with optional `dataset_path`, `holdout_fraction`, `model_name`; answers `{gate, run}`, or `{gate}` alone when the checks fail. Audit kind `pipeline.run` |
+| `create_pipeline` | action | `write` | `from` `empty` (one connect step), `n8n` (`import_n8n` then `compile_n8n` over `content`) or `python` (`compile_python` over `content`). Audit kind `pipeline.create` |
+| `connect_service` | action | `write` | Create or refresh a Zetta connection to one of the customer's own Ready services from the connection the operator delivered (`service_id`, optional `name`, default the service's name). Postgres today (`sslmode=require` in the cluster); kinds Zetta cannot read yet are refused with `invalid_input`. The password reaches Zetta only, never the caller. Audit kind `service.connect` |
 | `search_index` | read | `read` | Search one **published** index (`index`, `query`, optional `field`, `top_k` ≤ 100): checks `get_index` says it is exposed, then calls Zetta's `search`. The outside-call path: `GET /v1/search_index?customer_id=&index=&query=` with a token scoped to `search_index`, which can do nothing else. Audit kind `index.search` |
-| `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job`, `get_trace`, `list_traces` |
-| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `upload_dataset`, `delete_project`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain`, `save_graph`, `deploy`, `import_n8n`, `compile_n8n`, `compile_python` |
+| `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job`, `get_trace`, `list_traces`, `list_source_tables`, `list_dataset_generators` |
+| `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `upload_dataset`, `delete_project`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain`, `save_graph`, `deploy`, `import_n8n`, `compile_n8n`, `compile_python`, `promote_dataset`, `generate_dataset` |
 
 Input for the last two is `{customer_id, capability, input}`, where `input` is the Zetta
 capability's own input. Anything off the lists is refused with `invalid_input`, so nothing reaches
@@ -69,6 +78,10 @@ Workspace clusters run without `--governance` (the operator sets no such flag), 
 query and audits it as `consent_bypassed`; lake's own `write` authorization on the customer is the
 gate. Should a workspace ever enforce consent, the page says an approval is needed that lake cannot
 give, instead of passing the challenge through.
+
+**Every page action is a capability.** The pipeline page's *Check and run* is `run_pipeline`, its
+three ways to start a pipeline are `create_pipeline`, and every edit is `edit_pipeline`, so a REST or
+MCP client does exactly what the page does (lake#189, `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp`).
 
 ## How lake finds and calls a workspace
 

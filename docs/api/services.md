@@ -41,7 +41,7 @@ reached lake's mount, which the kubelet does up to a minute after the operator w
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
   every field the operator delivered for that kind (a Postgres URI, Kafka's bootstrap and SASL
   settings, and so on) once. It is never put in a URL, a redirect or the list.
-- **Delete:** type the service's name. The operator deletes the cluster and its data, which cannot
+- **Delete:** type the service's name. When a Train → Data connection uses the service, the form says so. The operator deletes the cluster and its data, which cannot
   be recovered; the row shows *Deleting* until it is gone.
 
 ## Capabilities
@@ -50,6 +50,7 @@ All are in lake's registry (REST, OpenAPI, MCP) and authorized on the customer's
 
 | Capability | Kind | Action on the customer | What it does |
 |---|---|---|---|
+| `list_service_kinds` | read | the caller | The catalog: each kind's key, label, `ready_minutes` and `preview` |
 | `list_services` | read | `read` (checked by the handler, as every `list_` capability) | `{services: [...], limit}`; each service carries `id, kind, name, slug, default, instances, storage_gi, desired, generation, phase, message, endpoint, observed_generation, created_at` and never a credential |
 | `create_service` | action | `write` | `{kind, name, instances?, storage_gi?}`, `kind` one of `postgres, zetta, kafka, clickhouse, tidb, cassandra, valkey, sqlite` (a SQLite service has exactly one instance); `conflict` for a live name, `quota_exceeded` at `LAKE_SERVICES_PER_CUSTOMER` |
 | `delete_service` | action | `admin` | `{service_id, confirm}`, `confirm` equal to the service name; marks it absent |
