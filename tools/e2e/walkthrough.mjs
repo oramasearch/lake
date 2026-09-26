@@ -1,6 +1,7 @@
 // End-to-end browser walkthrough of lake (docs/deployment/browser-testing.md): Clerk sign-in with a
 // one-time ticket, then every Design, Train and Ship page, with a screenshot per step and a
-// log.json. It creates one project in the signed-in customer's workspace and deletes it again.
+// log.json. It creates one project and one Postgres service in the signed-in customer's space and
+// deletes both again, with any e2e- projects an earlier run left behind.
 //
 //   node tools/e2e/walkthrough.mjs <base-url> <ticket-file> <output-dir>
 //
@@ -89,15 +90,6 @@ try {
     }
   }
 
-  // 3b. Delete the project again, so the tester's workspace does not fill up (#164).
-  if (await page.goto(`${base}/design/project?name=${project}`).then(() => page.locator("form[action='/design/project/delete']").count())) {
-    await page.locator("form[action='/design/project/delete']").evaluate((form) => form.closest("details").open = true);
-    await page.fill("form[action='/design/project/delete'] input[name=confirm]", project);
-    await page.getByRole("button", { name: "Delete project" }).click();
-    await page.waitForLoadState("load");
-    note("delete-project", { url: page.url(), error: await errorText(), gone: !(await text()).includes(project) });
-  }
-
   // 4. Every remaining page.
   for (const [path, name] of [["/train/data", "data"], ["/train/runs", "runs"], ["/ship/models", "models"],
                               ["/ship/indexes", "indexes"], ["/deployments", "deployments"], ["/services", "services"],
@@ -112,6 +104,68 @@ try {
     await page.waitForLoadState("load");
     await shot("run-report");
     note("run-report", { url: page.url(), error: await errorText() });
+  }
+
+  // 4b. Services: create a Postgres service, wait for Ready, show its connection, delete it.
+  const service = `e2e-${Date.now().toString(36)}`;
+  await page.goto(`${base}/services`);
+  await page.selectOption("form[action='/services/create'] select[name=kind]", "postgres");
+  await page.fill("form[action='/services/create'] input[name=name]", service);
+  await page.fill("form[action='/services/create'] input[name=storage_gi]", "1");
+  await page.getByRole("button", { name: "Create service" }).click();
+  await page.waitForLoadState("load");
+  note("create-service", { error: await errorText(), listed: (await text()).includes(service) });
+  const row = () => page.locator("tr", { hasText: service });
+  const serviceDeadline = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < serviceDeadline) {
+    await page.goto(`${base}/services`);
+    const status = (await row().count()) ? await row().locator("td").nth(3).innerText() : "";
+    if (status.startsWith("Ready") || status.startsWith("Failed")) break;
+    await page.waitForTimeout(10000);
+  }
+  await shot("service-ready");
+  note("service-status", { status: (await row().count()) ? (await row().innerText()).replace(/\s+/g, " ") : "missing" });
+  if (await row().locator("form[action='/services/connection']").count()) {
+    await row().getByRole("button", { name: "Show connection" }).click();
+    await page.waitForLoadState("load");
+    await shot("service-connection");
+    // The URI carries a password: record only that it was shown, never its value.
+    note("service-connection", { shown: (await page.locator("main").innerText()).includes("postgresql://"), url: page.url() });
+  }
+  await page.goto(`${base}/services`);
+  if (await row().count()) {
+    await row().locator("details summary").click();
+    await row().locator("input[name=confirm]").fill(service);
+    await row().getByRole("button", { name: `Delete ${service}` }).click();
+    await page.waitForLoadState("load");
+    const deleteDeadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deleteDeadline && (await row().count())) {
+      await page.waitForTimeout(10000);
+      await page.goto(`${base}/services`);
+    }
+    await shot("service-deleted");
+    note("service-delete", { gone: (await row().count()) === 0, error: await errorText() });
+  }
+
+  // 4c. Delete this run's project and any earlier e2e- projects, once their runs have finished,
+  // so the tester's workspace does not fill up (#164).
+  await page.goto(`${base}/design/projects`);
+  const projects = (await page.locator("main table a").allInnerTexts()).filter((name) => name.startsWith("e2e-"));
+  for (const name of projects) {
+    const cleanupDeadline = Date.now() + 5 * 60 * 1000;
+    let error = "";
+    while (Date.now() < cleanupDeadline) {
+      await page.goto(`${base}/design/project?name=${encodeURIComponent(name)}`);
+      if (!(await page.locator("form[action='/design/project/delete']").count())) break;
+      await page.locator("form[action='/design/project/delete']").evaluate((form) => { form.closest("details").open = true; });
+      await page.fill("form[action='/design/project/delete'] input[name=confirm]", name);
+      await page.getByRole("button", { name: "Delete project" }).click();
+      await page.waitForLoadState("load");
+      error = await errorText();
+      if (!error.includes("pending or running")) break;
+      await page.waitForTimeout(15000);
+    }
+    note("delete-project", { name, error });
   }
 
   // 5. Account menu and sign out (signs out of Clerk too).

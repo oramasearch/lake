@@ -498,6 +498,12 @@ TEST(Workspaces, ServicesPageListsEveryServiceWithoutCredentials) {
     EXPECT_NE(html.find(">Delete crm</button>"), std::string::npos);
     EXPECT_EQ(html.find(">Delete old</button>"), std::string::npos);
     EXPECT_NE(html.find("http-equiv=\"refresh\""), std::string::npos) << "one is still changing";
+    page.data["list_services"]["services"][1]["connected"] = false;
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find(">Connecting<"), std::string::npos)
+        << "Ready but not yet delivered to lake's mount";
+    EXPECT_EQ(html.find("action=\"/services/connection\""), std::string::npos);
+    page.data["list_services"]["services"][1]["connected"] = true;
 
     page.data["service_connection"] = {{"name", "crm"}, {"uri", "postgresql://app:pw@host/app"}};
     html = lake::api::web_ui_workspace(page, true);

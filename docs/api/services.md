@@ -11,7 +11,8 @@ adoption — is [`../control-plane/services.md`](../control-plane/services.md).
 **Ship → Services** (`/services`) lists every service of the selected space: name, kind, size
 (instances × storage), the operator's phase and message, and the in-cluster address. The
 customer's workspace is marked *(workspace)*. The page refreshes every 15 seconds while a service
-is changing.
+is changing. A service the operator reports Ready shows *Connecting* until its connection has
+reached lake's mount, which the kubelet does up to a minute after the operator writes it.
 
 - **New service:** kind, name (lowercase letters, digits and `-`, starting with a letter), 1–3
   instances, 1–100 GiB of storage. The page shows how many services the space may run.
