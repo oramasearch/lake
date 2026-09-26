@@ -363,7 +363,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view data[] = {"/train/data"};
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
     static constexpr std::string_view models[] = {"/ship/models"};
-    static constexpr std::string_view indexes[] = {"/ship/indexes"};
+    static constexpr std::string_view indexes[] = {"/ship/indexes", "/ship/index"};
     static constexpr std::string_view packages[] = {"/ship/packages"};
     static constexpr std::string_view services[] = {"/services"};
     static constexpr std::string_view activity[] = {"/activity"};
@@ -1573,7 +1573,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 9> workspace_sections{{
+constexpr std::array<WorkspaceSection, 10> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1608,6 +1608,12 @@ constexpr std::array<WorkspaceSection, 9> workspace_sections{{
      "Search indexes",
      "/ship/indexes",
      "Search indexes over your data, and whether each is published for queries."},
+    {"index",
+     "Ship",
+     "Search index",
+     "/ship/indexes",
+     "Search it here, publish it, and call it from your own code with a key that can only "
+     "search."},
     {"services",
      "Ship",
      "Services",
@@ -2323,9 +2329,131 @@ std::string pipeline_content(const WorkspacePage& page) {
     return out + "</section>";
 }
 
+// One search index (#187): what it covers, a search box, publish and unpublish, and how to call it
+// from outside with a key scoped to search_index.
+std::string index_content(const WorkspacePage& page) {
+    const std::string query = customer_query(page.customer_id);
+    const nlohmann::json index = page.data.value("get_index", nlohmann::json::object());
+    if (index.empty()) {
+        return "<div class=\"panel empty\">This index could not be read from the workspace.</div>";
+    }
+    const bool published = index.value("exposed", false);
+    std::string fields, field_options = "<option value=\"\">all fields</option>";
+    for (const nlohmann::json& field : index.value("fields", nlohmann::json::array())) {
+        fields += (fields.empty() ? "" : ", ") + cell_text(field);
+        field_options +=
+            std::format("<option{}>{}</option>",
+                        cell_text(field) == json_text(page.data, "search_field") ? " selected" : "",
+                        web_ui_escape(cell_text(field)));
+    }
+    std::string out = std::format(
+        "<section class=\"panel\"><dl><dt>Table</dt><dd>{}</dd><dt>Kind</dt><dd>{}</dd><dt>Backend"
+        "</dt><dd>{}</dd><dt>Fields</dt><dd>{}</dd><dt>Created</dt><dd>{}</dd><dt>Published</"
+        "dt><dd>"
+        "<span class=\"badge {}\">{}</span></dd></dl><form class=\"inline\" method=\"post\" "
+        "action=\"/ship/index/publish\">{}{}{}<button type=\"submit\"{}>{}</button></form>"
+        "</section>",
+        web_ui_escape(json_text(index, "table")),
+        web_ui_escape(json_text(index, "kind")),
+        web_ui_escape(json_text(index, "backend")),
+        web_ui_escape(fields),
+        web_ui_escape(json_text(index, "created")),
+        published ? "status-success" : "",
+        published ? "published" : "not published",
+        hidden("customer_id", page.customer_id),
+        hidden("index", page.subject),
+        hidden("publish", published ? "0" : "1"),
+        published ? "" : " class=\"button button-primary\"",
+        published ? "Unpublish" : "Publish");
+
+    // Try a search.
+    const std::string asked = json_text(page.data, "search_query");
+    out += std::format(
+        "<section class=\"panel\"><h2>Try a search</h2><form class=\"stack\" method=\"get\" "
+        "action=\"/ship/index\">{}{}<label>Search for<input name=\"q\" required value=\"{}\" "
+        "placeholder=\"renewal risk\"></label><label>In<select name=\"field\">{}</select>"
+        "</label><label>Hits<input name=\"top_k\" type=\"number\" min=\"1\" max=\"100\" "
+        "value=\"{}\"></label><button class=\"button button-primary\" type=\"submit\">Search"
+        "</button></form>",
+        hidden("customer_id", page.customer_id),
+        hidden("id", page.subject),
+        web_ui_escape(asked),
+        field_options,
+        page.data.contains("search_top_k") ? cell_text(page.data.at("search_top_k"))
+                                           : std::string("10"));
+    if (const auto results = page.data.find("search"); results != page.data.end()) {
+        const nlohmann::json hits = results->value("hits", nlohmann::json::array());
+        out += std::format("<p class=\"muted\">{} hits in {} ms.</p>",
+                           hits.size(),
+                           cell_text(results->value("duration_ms", nlohmann::json(0))));
+        out += hits.empty() ? std::string("<p>Nothing matched.</p>")
+                            : "<table><thead><tr><th>#</th><th>Document</th><th>Score</th></tr>"
+                              "</thead><tbody>" +
+                                  [&] {
+                                      std::string rows;
+                                      int rank = 0;
+                                      for (const nlohmann::json& hit : hits) {
+                                          rows += std::format(
+                                              "<tr><td>{}</td><td><code>{}</code></td><td>{}</td>"
+                                              "</tr>",
+                                              ++rank,
+                                              web_ui_escape(json_text(hit, "id")),
+                                              cell_text(hit.value("score", nlohmann::json(0))));
+                                      }
+                                      return rows;
+                                  }() +
+                                  "</tbody></table>";
+    }
+    out += "</section>";
+
+    // Call it from outside.
+    const std::string origin = page.origin.empty() ? "https://lake.oramadev.net" : page.origin;
+    const std::string url = std::format("{}/v1/search_index?customer_id={}&index={}&query=",
+                                        origin,
+                                        url_component(page.customer_id),
+                                        url_component(page.subject));
+    if (!published) {
+        out += "<section class=\"panel\"><h2>Call it from your code</h2><p>Publish the index "
+               "first: only published indexes answer outside calls.</p></section>";
+        return out;
+    }
+    out += std::format(
+        "<section class=\"panel\"><h2>Call it from your code</h2><ol><li><p>Create a key that "
+        "can only search published indexes, and copy it; it is shown once.</p><form "
+        "class=\"inline\" method=\"post\" action=\"/identity/token/create\">{}{}<button "
+        "type=\"submit\">Create a search key</button></form></li><li><p>Call lake with it. The "
+        "search runs in your own workspace; lake checks the key and records every "
+        "query.</p><pre><code>curl -s -H \"Authorization: Bearer $LAKE_SEARCH_KEY\" \\\n  "
+        "\"{}renewal%20risk&amp;top_k=10\"</code></pre><pre><code>// JavaScript\nconst res = await "
+        "fetch(\"{}\" + encodeURIComponent(\"renewal risk\"), {{\n  headers: {{ Authorization: "
+        "`Bearer ${{process.env.LAKE_SEARCH_KEY}}` }},\n}});\nconst {{ value }} = await "
+        "res.json(); "
+        "// value.hits: [{{ id, score }}]</code></pre><pre><code># Python\nimport os, requests\n"
+        "r = requests.get(\"{}/v1/search_index\", params={{\"customer_id\": \"{}\", \"index\": "
+        "\"{}\", \"query\": \"renewal risk\"}},\n    headers={{\"Authorization\": f\"Bearer "
+        "{{os.environ['LAKE_SEARCH_KEY']}}\"}})\nhits = "
+        "r.json()[\"value\"][\"hits\"]</code></pre></li>"
+        "<li><p>From an AI agent, the same search is the MCP tool <code>search_index</code> at "
+        "<code>{}/mcp</code>.</p></li></ol><p class=\"muted\">Unpublishing the index stops every "
+        "outside call at once; the key keeps working for other published indexes until you revoke "
+        "it on <a href=\"/tokens\">Tokens</a>.</p></section>",
+        hidden("name", "search " + json_text(index, "table")),
+        hidden("scopes", "search_index"),
+        web_ui_escape(url),
+        web_ui_escape(url),
+        web_ui_escape(origin),
+        web_ui_escape(page.customer_id),
+        web_ui_escape(page.subject),
+        web_ui_escape(origin));
+    return out;
+}
+
 std::string workspace_content(const WorkspacePage& page) {
     if (page.section == "pipeline") {
         return pipeline_content(page);
+    }
+    if (page.section == "index") {
+        return index_content(page);
     }
     const nlohmann::json& data = page.data;
     const std::string query = customer_query(page.customer_id);
@@ -2610,13 +2738,47 @@ std::string workspace_content(const WorkspacePage& page) {
     } else if (page.section == "indexes") {
         const nlohmann::json indexes = data.value("list_indexes", nlohmann::json::object())
                                            .value("indexes", nlohmann::json::array());
-        out += indexes.empty() ? "<div class=\"panel empty\">No search indexes yet.</div>"
-                               : workspace_table(indexes,
-                                                 {{"id", "Index"},
-                                                  {"table", "Table"},
-                                                  {"kind", "Kind"},
-                                                  {"backend", "Backend"},
-                                                  {"created", "Created"}});
+        if (indexes.empty()) {
+            out += "<div class=\"panel empty\">No search indexes yet.</div>";
+        } else {
+            out += "<table><thead><tr><th>Index</th><th>Table</th><th>Kind</th><th>Fields</th>"
+                   "<th>Created</th><th></th></tr></thead><tbody>";
+            for (const nlohmann::json& index : indexes) {
+                const std::string id = json_text(index, "id");
+                std::string fields;
+                for (const nlohmann::json& field : index.value("fields", nlohmann::json::array())) {
+                    fields += (fields.empty() ? "" : ", ") + cell_text(field);
+                }
+                out += std::format(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    row_link("/ship/index?" + query + "&id=" + url_component(id), id),
+                    web_ui_escape(json_text(index, "table")),
+                    web_ui_escape(json_text(index, "kind")),
+                    web_ui_escape(fields),
+                    web_ui_escape(json_text(index, "created")),
+                    row_link("/ship/index?" + query + "&id=" + url_component(id), "Search"));
+            }
+            out += "</tbody></table><p class=\"muted\">Open an index to search it, publish it, "
+                   "and call it from your own code.</p>";
+        }
+        std::string tables;
+        for (const nlohmann::json& dataset : data.value("list_datasets", nlohmann::json::object())
+                                                 .value("datasets", nlohmann::json::array())) {
+            tables += std::format("<option>{}</option>", web_ui_escape(json_text(dataset, "name")));
+        }
+        out += tables.empty()
+                   ? std::string("<p class=\"muted\">To make an index, first add a dataset on "
+                                 "<a href=\"/train/data\">Data</a>.</p>")
+                   : std::format(
+                         "<section class=\"panel\"><h2>New index</h2><form class=\"stack\" "
+                         "method=\"post\" action=\"/ship/indexes/create\">{}<label>Dataset"
+                         "<select name=\"table\">{}</select></label><label>Fields to search, "
+                         "comma separated<input name=\"fields\" placeholder=\"all columns\">"
+                         "</label><p class=\"muted\">A full-text (BM25F) index over the dataset."
+                         "</p><button class=\"button button-primary\" type=\"submit\">Create "
+                         "index</button></form></section>",
+                         hidden("customer_id", page.customer_id),
+                         tables);
     }
     return out;
 }

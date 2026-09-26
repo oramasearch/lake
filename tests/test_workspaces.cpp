@@ -785,3 +785,78 @@ TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
     EXPECT_NE(run.find("<h2>Log</h2>"), std::string::npos);
     EXPECT_NE(run.find("/design/pipeline?"), std::string::npos) << "a run links to its pipeline";
 }
+
+TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    w.caller->answers["get_index"] = {{"id", "i-1"}, {"table", "docs"}, {"exposed", false}};
+    w.caller->answers["search"] = {{"hits", json::array({{{"id", "doc-7"}, {"score", 2.5}}})}};
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto search = [&](json extra) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        json input{{"customer_id", w.customer_id}, {"index", "i-1"}, {"query", "renewal"}};
+        input.update(extra);
+        auto completed =
+            liquid::runtime::block_on(registry.call_async("search_index", input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    const auto refused = search(json::object());
+    ASSERT_FALSE(refused.ok);
+    EXPECT_NE(refused.error.message.find("not published"), std::string::npos);
+    EXPECT_NE(w.caller->calls.back().first, "search") << "nothing reaches search";
+
+    w.caller->answers["get_index"]["exposed"] = true;
+    const auto found = search({{"field", "body"}, {"top_k", 3}});
+    ASSERT_TRUE(found.ok) << found.error.message;
+    EXPECT_EQ(found.value["hits"][0]["id"], "doc-7");
+    EXPECT_EQ(w.caller->calls.back().first, "search");
+    EXPECT_EQ(w.caller->calls.back().second["target"], "i-1");
+    EXPECT_EQ(w.caller->calls.back().second["field"], "body");
+    EXPECT_EQ(w.caller->calls.back().second["top_k"], 3);
+    EXPECT_EQ(registry.find("search_index")->kind, lake::api::CapabilityKind::Read)
+        << "GET /v1/search_index for outside callers";
+}
+
+TEST(Workspaces, IndexPageSearchesPublishesAndShowsHowToCallIt) {
+    lake::api::WorkspacePage page;
+    page.section = "index";
+    page.customer_id = std::string(customer);
+    page.subject = "i-1";
+    page.origin = "https://lake.example";
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["get_index"] = {{"id", "i-1"},
+                              {"table", "docs"},
+                              {"kind", "search"},
+                              {"fields", json::array({"title", "body"})},
+                              {"exposed", false}};
+    std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find(">Publish</button>"), std::string::npos);
+    EXPECT_NE(html.find("Publish the index first"), std::string::npos);
+    EXPECT_EQ(html.find("Create a search key"), std::string::npos);
+    EXPECT_NE(html.find("<option>body</option>"), std::string::npos);
+
+    page.data["get_index"]["exposed"] = true;
+    page.data["search_query"] = "renewal";
+    page.data["search"] = {{"hits", json::array({{{"id", "doc-7"}, {"score", 2.5}}})},
+                           {"duration_ms", 1.2}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find(">Unpublish</button>"), std::string::npos);
+    EXPECT_NE(html.find("doc-7"), std::string::npos);
+    EXPECT_NE(html.find("1 hits"), std::string::npos);
+    EXPECT_NE(html.find("value=\"search_index\""), std::string::npos) << "a key scoped to search";
+    EXPECT_NE(html.find("https://lake.example/v1/search_index?customer_id="), std::string::npos);
+    EXPECT_NE(html.find("MCP tool <code>search_index</code>"), std::string::npos);
+}

@@ -453,8 +453,69 @@ void register_pipeline_capabilities(Registry& registry) {
         }});
 }
 
+// Search one published index of the customer's workspace (#187). The key an outside caller holds
+// is a lake API token scoped to search_index alone: it can query published indexes and nothing
+// else, and never sees the workspace's admin token. An unpublished index is refused.
+void register_search_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "search_index",
+        .title = "Search a published index",
+        .description = "Search one published search index in the customer's workspace. `query` is "
+                       "the text, `field` optionally limits it to one indexed field, `top_k` caps "
+                       "the hits (default 10). Answers hits as {id, score}. An index that is not "
+                       "published is refused; publish it with workspace_act expose_index.",
+        .input_schema = customer_input_schema(
+            {{"index", {{"type", "string"}}},
+             {"query", {{"type", "string"}}},
+             {"field", {{"type", "string"}}},
+             {"top_k", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
+            json::array({"index", "query"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            const std::string index = input.at("index");
+            set_audit(context, "index.search", input, "search");
+            auto described = co_await context.workspaces->call(
+                customer, "get_index", true, {{"index_id", index}});
+            if (!described) {
+                co_return ApiResult::failure("store_unavailable", described.error().message);
+            }
+            if (!*described) {
+                co_return ApiResult::failure((*described).error().code,
+                                             (*described).error().message);
+            }
+            if (!(**described).value("exposed", false)) {
+                co_return ApiResult::failure(
+                    "invalid_input", "index " + index + " is not published", "/index");
+            }
+            json search{{"target", index},
+                        {"query", input.at("query")},
+                        {"top_k", input.value("top_k", 10)}};
+            if (const std::string field = input.value("field", std::string()); !field.empty()) {
+                search["field"] = field;
+            }
+            auto found = co_await context.workspaces->call(customer, "search", true, search);
+            if (!found) {
+                co_return ApiResult::failure("store_unavailable", found.error().message);
+            }
+            if (!*found) {
+                co_return ApiResult::failure((*found).error().code, (*found).error().message);
+            }
+            co_return ApiResult::success(**found);
+        }});
+}
+
 void register_workspace_capabilities(Registry& registry) {
     register_pipeline_capabilities(registry);
+    register_search_capabilities(registry);
     registry.add(Capability{
         .name = "workspace_status",
         .title = "Workspace status",

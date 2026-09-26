@@ -175,6 +175,7 @@ struct WorkspacePage {
     std::string error;
     std::string project; // the pipeline page's project
     std::string step;    // the pipeline page's selected step
+    std::string origin;  // lake's public origin, for copy-ready external calls
 };
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
 

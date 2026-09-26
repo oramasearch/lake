@@ -16,7 +16,8 @@ with the operator is [`../control-plane/services.md`](../control-plane/services.
 | Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB, posted as `multipart/form-data` to `/train/data/upload`) |
 | Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run` (lineage, outputs, log), `get_run_report` rendered as tables (what it learned from, what it leans on, most at risk, caveats, what it cannot tell), and the run's spans from `list_traces` as a waterfall |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |
-| Ship | `/ship/indexes` | `list_indexes` |
+| Ship | `/ship/indexes` | `list_indexes`, *New index* (`create_index` over a dataset, BM25F full-text) |
+| Ship | `/ship/index?id=&q=&field=&top_k=` | `get_index`; *Try a search* (`search`); *Publish* / *Unpublish* (`expose_index` / `unexpose_index`); and, once published, **Call it from your code**: *Create a search key* (a lake API token scoped to `search_index` only) and copy-ready `curl`, JavaScript and Python calls to `GET /v1/search_index`, plus the MCP tool of the same name |
 | Ship | `/ship/packages` | lake's own registries, not the workspace (`docs/api/registry.md`) |
 | Ship | `/deployments` | lake's own platform deployments (`docs/api/platform.md`) |
 
@@ -35,7 +36,7 @@ which withdraws the request the same way.
 
 ## Capabilities
 
-All six are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
+All seven are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
 customer's policy object and is authorized by lake before anything reaches Zetta.
 
 | Capability | Kind | lake action on the customer | What it does |
@@ -44,6 +45,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `start_workspace` | action | `write` | Appends a `desired` event; repeating it appends nothing |
 | `delete_workspace` | action | `admin` | Needs `confirm` equal to the workspace id; marks the default service absent. Refused with `not_found` when no workspace is requested |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, rename): reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
+| `search_index` | read | `read` | Search one **published** index (`index`, `query`, optional `field`, `top_k` ≤ 100): checks `get_index` says it is exposed, then calls Zetta's `search`. The outside-call path: `GET /v1/search_index?customer_id=&index=&query=` with a token scoped to `search_index`, which can do nothing else. Audit kind `index.search` |
 | `workspace_query` | action | `read` | Calls an allowed Zetta read: `server_info`, `list_projects`, `get_project`, `get_graph`, `list_connections`, `list_datasets`, `get_dataset`, `list_runs`, `get_run`, `get_run_report`, `list_models`, `get_model`, `model_health`, `list_indexes`, `get_index`, `search`, `list_jobs`, `get_job`, `get_trace`, `list_traces` |
 | `workspace_act` | action | `write` | Calls an allowed Zetta action: `create_project`, `capture_intent`, `compile_intent`, `approve_plan`, `gate`, `run`, `create_connection`, `delete_connection`, `create_dataset_from_query`, `upload_dataset`, `delete_project`, `create_index`, `expose_model`, `unexpose_model`, `expose_index`, `unexpose_index`, `score`, `explain`, `save_graph`, `deploy`, `import_n8n`, `compile_n8n`, `compile_python` |
 
