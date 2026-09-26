@@ -20,7 +20,7 @@ Zetta.
 |---|---|
 | `id` | uuid, the service's identity everywhere (label `orama.cloud/service-id`) |
 | `customer_id` | the owning customer |
-| `kind` | `zetta` or `postgres` |
+| `kind` | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra` or `valkey` (migration `0025_service_catalog`) |
 | `name` | the customer's name for it, `^[a-z][a-z0-9-]{0,30}$`, unique per customer among live services |
 | `slug` | Kubernetes suffix, `svc-<12 hex of id>`, or `ws-<12 hex of customer id>` for a default workspace; never reused |
 | `is_default` | the customer's workspace (Zetta only; at most one live per customer) |
@@ -77,9 +77,37 @@ For each `Lake` with `spec.services.enabled` (or the deprecated `spec.workspaces
    `Failed` / `service quota reached (<n>)` and starts once there is room. Existing services are
    never refused.
 
+## The catalog (decision 47)
+
+Each kind is run by one upstream operator, installed from the operator's `helmfile.yaml` and
+watching every namespace. The Orama operator writes that operator's resource, named
+`<lake>-<slug>` in the Lake's namespace with the labels and ownership above, and never runs the
+database itself. `instances` is 1–3 and `storage_gi` 1–100 for every kind.
+
+| Kind | Upstream operator (chart, pinned) | Resource the Orama operator writes | `instances` means | Ready when | Credential (`<slug>.json`, besides `kind` and `endpoint`) | `endpoint` |
+|---|---|---|---|---|---|---|
+| `zetta` | the Orama operator itself | `OramaZettaCluster` | nodes | cluster Ready | `token` | `http://<name>-zetta.<ns>.svc.cluster.local:4800` |
+| `postgres` | CloudNativePG (`cnpg/cloudnative-pg`) | `postgresql.cnpg.io/v1 Cluster`, `initdb` database `app` owned by `app` | instances | ready instances = instances | `host, port, database, user, password, uri` | `<name>-rw.<ns>.svc.cluster.local:5432` |
+| `kafka` | Strimzi 1.2.0 (`strimzi/strimzi-kafka-operator`) | `kafka.strimzi.io` `Kafka` in KRaft mode with one `KafkaNodePool` (roles controller and broker, `instances` replicas, persistent-claim `storage_gi`), an internal SCRAM-SHA-512 listener on 9092, the entity operator, and a `KafkaUser` `<name>-app` with SCRAM-SHA-512 (the user's name is its login and must be unique in the namespace) | brokers | the `Kafka` `Ready` condition and the `KafkaUser` Secret exists | `bootstrap, username, password, sasl_mechanism` (`SCRAM-SHA-512`), `security_protocol` (`SASL_PLAINTEXT`) | `<name>-kafka-bootstrap.<ns>.svc.cluster.local:9092` |
+| `clickhouse` | Altinity 0.27.4 (`altinity/altinity-clickhouse-operator`) | `clickhouse.altinity.com/v1 ClickHouseInstallation`: one shard of `instances` replicas, a volume claim template of `storage_gi`, user `app` with a generated password (SHA-256 in the spec, the plain password only in the credential), and, when `instances` > 1, a `ClickHouseKeeperInstallation` of one node the installation points at | replicas | the installation's status is `Completed` | `host, http_port` (8123), `native_port` (9000), `user, password, database` (`default`) | `clickhouse-<name>.<ns>.svc.cluster.local:8123` (the installation's own service); Ready also waits for the Keeper when there is one |
+| `tidb` | PingCAP TiDB Operator v1.6.6 (`pingcap/tidb-operator`, stable 1.x; its CRDs applied from the v1.6.6 release first) | `pingcap.com/v1alpha1 TidbCluster`: PD, TiKV and TiDB with `instances` replicas each, TiKV and PD storage of `storage_gi`, `tidb.initializer` with `createPassword`, which reads the root password from the Secret `<name>-init` (key `root`) the Orama operator creates, and `pvReclaimPolicy: Delete` | replicas of each component | PD, TiKV and TiDB report `Normal` and all their members ready | `host, port` (4000), `user` (`root`), `password`, `uri` (`mysql://…`) | `<name>-tidb.<ns>.svc.cluster.local:4000` |
+| `cassandra` | K8ssandra Operator 1.33.0 (`k8ssandra/k8ssandra-operator`, cluster-scoped, needs cert-manager v1.21.2) | `k8ssandra.io/v1alpha1 K8ssandraCluster`, one datacenter of `instances` nodes with `storage_gi` (its datacenter object and Cassandra cluster are named after the slug so two services never collide; the Cassandra datacenter name is `dc1`), Apache Cassandra images only | nodes | the datacenter is `Ready` | `host, port` (9042), `datacenter` (`dc1`), `user, password` (K8ssandra's superuser Secret) | `<slug>-<slug>-service.<ns>.svc.cluster.local:9042` |
+| `valkey` **preview** | valkey-io/valkey-operator 0.6.0 (`valkey/valkey-operator`; its README says *not ready for production*, `v1alpha1`) | `valkey.io/v1alpha1 ValkeyCluster`: 3 shards (cluster mode needs three), `instances - 1` replicas per shard, `storage_gi` per node, an ACL user `app` with a generated password, and the built-in `default` user disabled (left alone it accepts unauthenticated clients) | replicas per shard + 1 | the `ValkeyCluster` `Ready` condition | `host, port` (6379), `user, password`, `cluster` (`true`) | the cluster's client service on 6379 |
+
+Exact field names follow each operator's pinned CRD; where the table and the CRD disagree, the CRD
+wins and `docs/lake/services.md` in the operator says what was chosen. Every credential also carries
+`endpoint`. Each resource's `app.kubernetes.io/instance` label is its own name, not the Lake's:
+TiDB builds its pod selectors from that label. **SQLite is not a kind:** it
+has no operator and no replication, so it needs its own design (decision 47).
+
+Deletion deletes the resource and, for kinds whose volumes the upstream operator does not own
+(Kafka, TiDB, Cassandra and Valkey keep their PVCs by default), the PVCs carrying that resource's
+labels, before writing `Deleted`. Only the Orama operator's own resources are ever touched.
+
 ## What lake does
 
 - Capabilities `list_services`, `create_service`, `delete_service` and `service_connection`
+  (every kind but Zetta, whose admin token lake never hands out)
   ([`../api/services.md`](../api/services.md)), authorized on the customer. lake caps each
   customer at `LAKE_SERVICES_PER_CUSTOMER` live services (default 5).
 - The `/services` page lists every service of a customer with its phase and endpoint, creates and

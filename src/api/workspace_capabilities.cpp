@@ -218,10 +218,20 @@ void register_service_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_service",
         .title = "Create a service",
-        .description = "Ask the operator for a new Zetta or Postgres cluster for the customer. "
+        .description = "Ask the operator for a new service from the catalog (Postgres, Zetta, "
+                       "Kafka, ClickHouse, TiDB, Cassandra, Valkey as a preview). "
                        "`instances` is 1-3 (default 1), `storage_gi` 1-100 (default 10).",
         .input_schema = customer_input_schema(
-            {{"kind", {{"type", "string"}, {"enum", json::array({"zetta", "postgres"})}}},
+            {{"kind",
+              {{"type", "string"},
+               {"enum",
+                [] {
+                    json keys = json::array();
+                    for (const control::ServiceKind& kind : control::service_kinds) {
+                        keys.push_back(std::string(kind.key));
+                    }
+                    return keys;
+                }()}}},
              {"name", {{"type", "string"}}},
              {"instances", {{"type", "integer"}, {"minimum", 1}, {"maximum", 3}}},
              {"storage_gi", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
@@ -243,9 +253,9 @@ void register_service_capabilities(Registry& registry) {
             service.instances = input.value("instances", 1);
             service.storage_gi = input.value("storage_gi", 10);
             service.created_by_taap_id = context.acting_identity;
-            if (service.kind != "zetta" && service.kind != "postgres") {
+            if (control::find_service_kind(service.kind) == nullptr) {
                 co_return ApiResult::failure(
-                    "invalid_input", "kind must be zetta or postgres", "/kind");
+                    "invalid_input", "kind is not in the service catalog", "/kind");
             }
             if (!valid_service_name(service.name)) {
                 co_return ApiResult::failure(
@@ -305,10 +315,10 @@ void register_service_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "service_connection",
         .title = "Service connection",
-        .description = "The connection details of a Ready Postgres service, including its "
-                       "password. Audited. A Zetta service's admin token is never returned: lake "
-                       "calls it on the customer's behalf through workspace_query and "
-                       "workspace_act.",
+        .description = "The connection details of a Ready service, including its password: "
+                       "what the operator delivered for its kind. Audited. A Zetta service's "
+                       "admin token is never returned: lake calls it on the customer's behalf "
+                       "through workspace_query and workspace_act.",
         .input_schema = customer_input_schema({{"service_id", {{"type", "string"}}}},
                                               json::array({"service_id"})),
         .output_schema = {{"type", "object"}},
@@ -327,9 +337,10 @@ void register_service_capabilities(Registry& registry) {
                 co_return store_failure(found.error());
             }
             service_audit(context, "service.connection", *found);
-            if (found->kind != "postgres") {
+            if (found->kind == "zetta") {
                 co_return ApiResult::failure("invalid_input",
-                                             "only a Postgres service has connection details",
+                                             "a Zetta service's admin token is never handed out; "
+                                             "lake calls it for you",
                                              "/service_id");
             }
             const auto connection = context.workspaces->connection(*found);
@@ -341,12 +352,11 @@ void register_service_capabilities(Registry& registry) {
                           "lake; try again in a minute"
                         : "the service is not ready yet");
             }
-            json value = json::object();
-            for (const char* key : {"host", "port", "database", "user", "password", "uri"}) {
-                if (connection->contains(key)) {
-                    value[key] = connection->at(key);
-                }
-            }
+            // Everything the operator delivered for this kind (docs/control-plane/services.md,
+            // The catalog), for example Kafka's bootstrap and SASL settings.
+            json value = *connection;
+            value.erase("kind");
+            value.erase("token");
             co_return ApiResult::success(std::move(value));
         }});
 }
