@@ -278,9 +278,13 @@ void register_service_capabilities(Registry& registry) {
                     "most 31 characters",
                     "/name");
             }
-            if (service.kind == "sqlite" && service.instances != 1) {
+            if ((service.kind == "sqlite" || service.kind == "duckdb") && service.instances != 1) {
                 co_return ApiResult::failure(
-                    "invalid_input", "a SQLite service has exactly one instance", "/instances");
+                    "invalid_input",
+                    "a " + std::string(service.kind == "sqlite" ? "SQLite" : "DuckDB") +
+                        " service has exactly one instance: one process "
+                        "owns its database file",
+                    "/instances");
             }
             if (service.instances < 1 || service.instances > 3 || service.storage_gi < 1 ||
                 service.storage_gi > 100) {

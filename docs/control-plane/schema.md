@@ -400,3 +400,9 @@ reads the tables is deployed.
 the constraint is idempotent, and every existing row satisfies the wider list. The guard is
 `service_catalog_guard`; the operator vendors this schema and selects it before a binary that
 creates the new kinds is deployed.
+
+## Analytics services migration
+
+`0027_analytics_services` widens `service_kind_check` again for `duckdb` and `polars` (lake#195),
+each served by a wrapper service of ours. Idempotent; guard `analytics_services_guard`. The operator
+vendors it and selects that guard before a binary that offers the kinds is deployed.
