@@ -1,4 +1,5 @@
 #pragma once
+
 #include <map>
 #include <optional>
 #include <span>
@@ -7,6 +8,8 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "lake/api/agent_docs.hpp"
 
 #include "lake/api/clerk.hpp"
 #include "lake/api/drive.hpp"
@@ -83,6 +86,17 @@ std::string web_ui_shell(std::string_view title,
                          const std::vector<WebUiCrumb>& trail,
                          std::string_view content,
                          WebUiViewer viewer = false);
+
+// Developer → MCP (docs/api/mcp.md): create a key, copy-ready setup for Claude Code, Cursor,
+// Claude Desktop and plain JSON-RPC, the skill and llms.txt, the worked flows, and every tool by
+// group. `key` is shown once, right after it is created.
+struct McpPage {
+    std::string origin;
+    std::string key;
+    std::string error;
+    std::vector<agent_docs::Group> groups;
+};
+std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer = true);
 
 std::string web_ui_home(WebUiViewer viewer = false);
 std::string web_ui_login(std::string_view error, WebUiViewer viewer = false);

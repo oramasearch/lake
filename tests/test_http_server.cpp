@@ -522,6 +522,73 @@ TEST_P(HttpResponseIsolation, TheTokensPageIssuesAndRevokesAToken) {
     EXPECT_FALSE(after.starts_with("HTTP/1.1 200")) << "a revoked token no longer authenticates";
 }
 
+// Developer → MCP (docs/api/mcp.md): llms.txt is public and names every tool; a read-only MCP key
+// made on the page lists tools over /mcp, may read and may not write; the skill downloads.
+TEST_P(HttpResponseIsolation, TheMcpPageMakesAKeyThatWorksOverMcp) {
+    auto connection = connect();
+    const auto body_of = [](const std::string& response) {
+        return response.substr(response.find("\r\n\r\n") + 4);
+    };
+    const std::string llms = connection->request("GET", "/llms.txt");
+    ASSERT_TRUE(llms.starts_with("HTTP/1.1 200")) << llms.substr(0, 300);
+    EXPECT_NE(llms.find("http://localhost/mcp"), std::string::npos);
+    EXPECT_NE(llms.find("`create_pipeline` (write)"), std::string::npos);
+    const std::string full = body_of(connection->request("GET", "/llms-full.txt"));
+    EXPECT_TRUE(connection->request("GET", "/developer/mcp").starts_with("HTTP/1.1 302"));
+
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string page = connection->request("GET", "/developer/mcp", {}, cookie);
+    ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
+    EXPECT_NE(page.find("Create an MCP Key"), std::string::npos);
+    const std::string created =
+        connection->request("POST", "/developer/mcp/key", "access=read", cookie);
+    ASSERT_TRUE(created.starts_with("HTTP/1.1 200")) << created.substr(0, 300);
+    const std::string marker = "<code id=\"mcp-key\">";
+    const auto start = created.find(marker);
+    ASSERT_NE(start, std::string::npos);
+    const std::string key = created.substr(start + marker.size(),
+                                           created.find("</code>", start) - start - marker.size());
+    EXPECT_NE(created.find("claude mcp add --transport http lake http://localhost/mcp "
+                           "--header &quot;Authorization: Bearer " +
+                           key + "&quot;"),
+              std::string::npos);
+
+    const std::string key_cookie = "lake_session=" + key;
+    const std::string tools = connection->request(
+        "POST", "/mcp", R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})", key_cookie);
+    ASSERT_TRUE(tools.starts_with("HTTP/1.1 200")) << tools.substr(0, 300);
+    EXPECT_NE(tools.find("\"server_info\""), std::string::npos);
+    // llms-full.txt documents every MCP tool.
+    const auto listed = nlohmann::json::parse(body_of(tools));
+    for (const auto& tool : listed.at("result").at("tools")) {
+        const std::string name = tool.at("name");
+        EXPECT_NE(full.find("### `" + name + "`"), std::string::npos) << name;
+    }
+    const std::string read = connection->request(
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_sessions","arguments":{}}})",
+        key_cookie);
+    EXPECT_NE(read.find("\"isError\":false"), std::string::npos) << read.substr(0, 600);
+    const std::string write = connection->request(
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_token","arguments":{"name":"x","scopes":["*"]}}})",
+        key_cookie);
+    EXPECT_NE(write.find("credential does not grant create_token"), std::string::npos)
+        << write.substr(0, 600);
+
+    const std::string skill = connection->request("GET", "/developer/mcp/skill", {}, cookie);
+    ASSERT_TRUE(skill.starts_with("HTTP/1.1 200"));
+    EXPECT_EQ(response_header(skill, "content-disposition"), "attachment; filename=SKILL.md");
+    EXPECT_NE(skill.find("name: lake"), std::string::npos);
+    EXPECT_NE(skill.find("approve_plan"), std::string::npos);
+}
+
 TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {
     for (const std::string_view path :
          {"/", "/sign-up", "/sign-in", "/v1/server_info", "/v1/openapi.json"}) {

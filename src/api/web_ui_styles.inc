@@ -542,6 +542,23 @@ table + .panel,
 .breadcrumbs a {
   color: inherit;
 }
+.copy-block {
+  margin: var(--lake-space-3) 0;
+}
+.copy-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lake-space-2);
+}
+.copy-head h3 {
+  margin: 0;
+}
+.copy-block pre {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre;
+}
 .topbar-trail {
   margin: 0;
 }

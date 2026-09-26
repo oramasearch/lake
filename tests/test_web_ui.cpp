@@ -405,6 +405,37 @@ TEST(WebUi, BreadcrumbLinksEveryLevelButTheCurrentOne) {
     EXPECT_NE(page.find("<span aria-current=\"page\">Acme</span>"), std::string::npos);
 }
 
+// The MCP page: a key form until a key exists, then the key once and in every setup block; one
+// Copy button per block; the tools by group (docs/api/mcp.md).
+TEST(WebUi, McpPageShowsTheKeyOnceInEveryBlockAndTheToolsByGroup) {
+    lake::api::McpPage page{.origin = "https://lake.example"};
+    page.groups.push_back(
+        {"Services", "Databases.", {{"create_service", "Create a service", "", true, true}}});
+    std::string html = lake::api::web_ui_mcp(page, true);
+    EXPECT_NE(html.find("action=\"/developer/mcp/key\""), std::string::npos);
+    EXPECT_NE(html.find("Bearer $LAKE_KEY"), std::string::npos);
+    EXPECT_NE(html.find("<code>create_service</code></td><td>Create a service</td><td>write"),
+              std::string::npos);
+    EXPECT_NE(html.find("href=\"/developer/mcp\" aria-current=\"page\""), std::string::npos)
+        << "Developer → MCP is in the sidebar";
+    EXPECT_NE(html.find("id=\"copy-buttons\""), std::string::npos);
+
+    page.key = "lake_tok_abc";
+    html = lake::api::web_ui_mcp(page, true);
+    EXPECT_EQ(html.find("action=\"/developer/mcp/key\""), std::string::npos);
+    EXPECT_NE(html.find("<code id=\"mcp-key\">lake_tok_abc</code>"), std::string::npos);
+    EXPECT_NE(html.find("claude mcp add --transport http lake https://lake.example/mcp --header "
+                        "&quot;Authorization: Bearer lake_tok_abc&quot;"),
+              std::string::npos);
+    EXPECT_EQ(html.find("$LAKE_KEY"), std::string::npos);
+    std::size_t buttons = 0;
+    for (auto at = html.find("data-copy=\""); at != std::string::npos;
+         at = html.find("data-copy=\"", at + 1)) {
+        ++buttons;
+    }
+    EXPECT_EQ(buttons, 5u) << "the key, Claude Code, Cursor, Claude Desktop and curl";
+}
+
 TEST(WebUi, NavigationMatchesVisitorAccountAndOperatorAccess) {
     const std::string visitor = lake::api::web_ui_home();
     EXPECT_NE(visitor.find("Public Repositories"), std::string::npos);
