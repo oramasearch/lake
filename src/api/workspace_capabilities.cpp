@@ -205,7 +205,11 @@ void register_service_capabilities(Registry& registry) {
             }
             json services = json::array();
             for (const control::ManagedService& service : *listed) {
-                services.push_back(control::service_json(service));
+                json value = control::service_json(service);
+                // The operator reports Ready once it has written the Secret; the kubelet copies
+                // it into lake's mount up to a minute later. Until then lake cannot connect.
+                value["connected"] = context.workspaces->connection(service).has_value();
+                services.push_back(std::move(value));
             }
             co_return ApiResult::success(
                 {{"services", std::move(services)},
@@ -330,7 +334,12 @@ void register_service_capabilities(Registry& registry) {
             }
             const auto connection = context.workspaces->connection(*found);
             if (found->phase != "Ready" || !connection) {
-                co_return ApiResult::failure("workspace_not_ready", "the service is not ready yet");
+                co_return ApiResult::failure(
+                    "workspace_not_ready",
+                    found->phase == "Ready"
+                        ? "the service is ready and its connection is still being delivered to "
+                          "lake; try again in a minute"
+                        : "the service is not ready yet");
             }
             json value = json::object();
             for (const char* key : {"host", "port", "database", "user", "password", "uri"}) {

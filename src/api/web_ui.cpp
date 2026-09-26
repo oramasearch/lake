@@ -1720,6 +1720,9 @@ std::string service_phase(const nlohmann::json& service) {
     if (json_text(service, "desired") == "absent") {
         return phase.empty() || phase == "Ready" ? "Deleting" : phase;
     }
+    if (phase == "Ready" && !service.value("connected", true)) {
+        return "Connecting";
+    }
     return phase.empty() ? "Waiting for the operator" : phase;
 }
 

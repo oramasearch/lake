@@ -51,7 +51,8 @@ the person to Clerk; lake creates their account the first time they sign in.
    `/sessions` page lists the browser session.
 
 Accounts created so far: `steve@orama.com` (linked to the existing lake account, 2026-09-25) and
-`steve.sperandeo@gmail.com` (Clerk user `user_3JpUKQFkOXWBelPZAiFWshP0OUH`, 2026-09-25).
+`steve.sperandeo@gmail.com` (Clerk user `user_3JpUKQFkOXWBelPZAiFWshP0OUH`, 2026-09-25) and
+`juan@orama.com` (Clerk user `user_3JqKCeuPkKnFflV5QNH6WFQi1kQ`, 2026-09-25).
 
 ### Letting anyone sign up (not the current setting)
 
