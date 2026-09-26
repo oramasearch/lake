@@ -20,7 +20,7 @@ Zetta.
 |---|---|
 | `id` | uuid, the service's identity everywhere (label `orama.cloud/service-id`) |
 | `customer_id` | the owning customer |
-| `kind` | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra`, `valkey` (migration `0025_service_catalog`) or `sqlite` (migration `0026_sqlite_services`) |
+| `kind` | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra`, `valkey` (migration `0025_service_catalog`) `sqlite` (migration `0026_sqlite_services`), `duckdb` or `polars` (migration `0027_analytics_services`) |
 | `name` | the customer's name for it, `^[a-z][a-z0-9-]{0,30}$`, unique per customer among live services |
 | `slug` | Kubernetes suffix, `svc-<12 hex of id>`, or `ws-<12 hex of customer id>` for a default workspace; never reused |
 | `is_default` | the customer's workspace (Zetta only; at most one live per customer) |
@@ -94,12 +94,20 @@ database itself. `instances` is 1–3 and `storage_gi` 1–100 for every kind.
 | `cassandra` | K8ssandra Operator 1.33.0 (`k8ssandra/k8ssandra-operator`, cluster-scoped, needs cert-manager v1.21.2) | `k8ssandra.io/v1alpha1 K8ssandraCluster`, one datacenter of `instances` nodes with `storage_gi` (its datacenter object and Cassandra cluster are named after the slug so two services never collide; the Cassandra datacenter name is `dc1`), Apache Cassandra images only | nodes | the datacenter is `Ready` | `host, port` (9042), `datacenter` (`dc1`), `user, password` (K8ssandra's superuser Secret) | `<slug>-<slug>-service.<ns>.svc.cluster.local:9042` |
 | `valkey` **preview** | valkey-io/valkey-operator 0.6.0 (`valkey/valkey-operator`; its README says *not ready for production*, `v1alpha1`) | `valkey.io/v1alpha1 ValkeyCluster`: 3 shards (cluster mode needs three), `instances - 1` replicas per shard, `storage_gi` per node, an ACL user `app` with a generated password, and the built-in `default` user disabled (left alone it accepts unauthenticated clients) | replicas per shard + 1 | the `ValkeyCluster` `Ready` condition | `host, port` (6379), `user, password`, `cluster` (`true`) | the cluster's client service on 6379 |
 | `sqlite` | the Orama operator itself, image `oramasearch/lake-sqlite` (orama-operator `cmd/lake-sqlite`) | a `StatefulSet` of one `lake-sqlite` pod with a `storage_gi` volume holding one SQLite database in WAL mode, a `Service`, and a Secret `<name>-credentials` holding a generated bearer token. `instances` must be 1: SQLite has one writer | 1 (always) | the pod is Ready (its `/healthz` opens the database) | `token`, `database` (`main`) | `http://<name>.<ns>.svc.cluster.local:8080` |
+| `duckdb` | the Orama operator itself, image `oramasearch/lake-duckdb` (private repo `oramasearch/lake-duckdb`) | a `StatefulSet` of one `lake-duckdb` pod owning one DuckDB file on a `storage_gi` volume, a `Service`, and a Secret `<name>-credentials` holding a generated bearer token. The engine is locked down: `enable_external_access=false`, no extension install or autoload, `lock_configuration=true`, memory and thread limits, a statement timeout | 1 (always) | the pod is Ready (`/healthz` runs `SELECT 1`) | `token`, `database` (`main`) | `http://<name>.<ns>.svc.cluster.local:8080` |
+| `polars` | the Orama operator itself, image `oramasearch/lake-polars` (private repo `oramasearch/lake-polars`, Rust, the open-source `polars` crate) | a `StatefulSet` of `instances` `lake-polars` workers sharing nothing, each with a `storage_gi` volume of Parquet datasets, a `Service`, and a Secret `<name>-credentials` holding a generated bearer token | workers (1–3); datasets are per worker in v1, so 1 is the useful value until shared storage (lake#196) | every worker Ready | `token` | `http://<name>.<ns>.svc.cluster.local:8080` |
 
 Exact field names follow each operator's pinned CRD; where the table and the CRD disagree, the CRD
 wins and `docs/lake/services.md` in the operator says what was chosen. Every credential also carries
 `endpoint`. Each resource's `app.kubernetes.io/instance` label is its own name, not the Lake's:
-TiDB builds its pod selectors from that label. SQLite has no upstream
-operator, so the Orama operator runs it directly behind `lake-sqlite`, a small web service we wrote
+TiDB builds its pod selectors from that label. SQLite, DuckDB and Polars have no
+upstream operator we would use (lake `.claude/skills` → liquid-bridge `/lake-service`, step 1), so
+the Orama operator runs each directly behind a small web service of ours in its own private repo:
+`lake-sqlite`, `lake-duckdb`, `lake-polars`. `lake-duckdb` has the same API as `lake-sqlite` below.
+`lake-polars` is analytics compute, not a database: `POST /v1/datasets/<name>` uploads CSV, JSONL
+or Parquet (stored as Parquet), `GET /v1/datasets` lists them, `DELETE /v1/datasets/<name>` removes
+one, and `POST /v1/query` `{sql}` runs Polars SQL over them (row cap, timeout, memory limit) and
+answers `{columns, rows}`. For `lake-sqlite`, a small web service we wrote
 (decision 47, amended). Its API: `POST /v1/query` `{sql, params}` answers `{columns, rows}`;
 `POST /v1/exec` answers `{rows_affected, last_insert_id}`; `POST /v1/batch` `{statements: [{sql,
 params}]}` runs them in one transaction; `GET /healthz`. Every call but `/healthz` needs

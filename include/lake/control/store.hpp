@@ -234,6 +234,8 @@ inline constexpr ServiceKind service_kinds[] = {
     {"cassandra", "Cassandra", 10},
     {"valkey", "Valkey", 2, true},
     {"sqlite", "SQLite", 1},
+    {"duckdb", "DuckDB", 1},
+    {"polars", "Polars", 1},
 };
 inline const ServiceKind* find_service_kind(std::string_view key) {
     for (const ServiceKind& kind : service_kinds) {
