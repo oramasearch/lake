@@ -2562,8 +2562,10 @@ void register_agent_run_capabilities(Registry& registry) {
                 scopes.push_back("get_agent_task");
                 body["lake_token"] = "{{credential}}";
                 body["lake_url"] = config.internal_url;
+                // The agents that read the person's workspace get lake's read-only path to it.
                 if (agent == "agent-project" || agent == "agent-autosuggest" ||
-                    agent == "agent-creator") {
+                    agent == "agent-creator" || agent == "agent-eval-generator" ||
+                    agent == "agent-project-corpus") {
                     body["zetta_base_url"] =
                         config.internal_url + "/workspaces/" + customer_id + "/zetta";
                     body["zetta_token"] = "{{credential}}";
@@ -2590,6 +2592,9 @@ void register_agent_run_capabilities(Registry& registry) {
                         }
                         handed["pipeline"] = std::move(*graph);
                     }
+                } else if (agent == "agent-eval-generator" || agent == "agent-autosuggest-corpus" ||
+                           agent == "agent-project-corpus") {
+                    body["request"] = message;
                 } else if (agent == "agent-autosuggest") {
                     // Auto-Suggest builds the workspace profile itself, with the task's
                     // read-only credential; lake reads nothing inside the request.

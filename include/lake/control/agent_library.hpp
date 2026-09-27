@@ -51,24 +51,25 @@ inline constexpr std::array<LibraryAgent, 7> agent_library{{
      true},
     {"agent-eval-generator",
      "Eval Generator",
-     "Writes realistic test cases for agents: a role, its problem and real-looking data, which "
-     "Orama's agents are scored against.",
-     "Used by Orama to measure its agents; not yet available to chat",
-     "offline",
-     false},
+     "Writes a realistic test case on request: a role, the problem they face and real-looking "
+     "data for it, the way Orama tests its own agents. It publishes nothing.",
+     "Ask Orama → Talk to Eval Generator, or ask Ask Orama for a test case",
+     "service",
+     true},
     {"agent-autosuggest-corpus",
      "Auto-Suggest Corpus Generator",
-     "Writes the examples Auto-Suggest learns from, kept apart from the test cases.",
-     "Used by Orama to train Auto-Suggest; not yet available to chat",
-     "offline",
-     false},
+     "Writes one example of what is worth building for a business situation you describe, "
+     "checked against the test cases so it never repeats one.",
+     "Ask Orama → Talk to Auto-Suggest Corpus Generator",
+     "service",
+     true},
     {"agent-project-corpus",
      "Project Corpus Generator",
-     "Records worked examples of building pipelines on real data, which the Project Agent learns "
-     "from.",
-     "Used by Orama to train the Project Agent; not yet available to chat",
-     "offline",
-     false},
+     "Records a worked example of building (or changing) a pipeline on your own data, every "
+     "step checked against what your workspace really returns. It changes nothing.",
+     "Ask Orama → Talk to Project Corpus Generator",
+     "service",
+     true},
 }};
 
 const LibraryAgent* library_agent(std::string_view key);

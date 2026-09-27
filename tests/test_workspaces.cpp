@@ -1771,8 +1771,12 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     EXPECT_EQ(agents[0].at("name"), "Ask Orama");
     EXPECT_EQ(agents[0].at("status"), "Available");
     EXPECT_EQ(agents[2].at("status"), "Not running on this lake");
-    EXPECT_EQ(agents[4].at("status"), "Offline tool");
-    EXPECT_FALSE(agents[4].at("chat").get<bool>());
+    // Every library agent is one you can talk to (lake#263): the generators too.
+    EXPECT_EQ(agents[4].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[4].at("runs_as"), "service");
+    for (const auto& agent : agents) {
+        EXPECT_TRUE(agent.at("chat").get<bool>()) << agent.at("key");
+    }
 }
 
 TEST(Workspaces, AgentsPageShowsYourAgentsTheStudioFormAndTheAgentLibrary) {

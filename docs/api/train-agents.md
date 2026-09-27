@@ -50,9 +50,9 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 | `agent-project` | Project Agent | Design: Create a Solution and revised plans; Ask Orama's subagent | its own service |
 | `agent-autosuggest` | Auto-Suggest | Design: Discover Opportunities; Ask Orama's subagent | its own service |
 | `agent-creator` | AgentCreator | Train: Agents, Create with the Agent Factory | `agent-runtime` |
-| `agent-eval-generator` | Eval Generator | Offline: how Orama measures its agents | offline |
-| `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | Offline: training data for Auto-Suggest | offline |
-| `agent-project-corpus` | Project Corpus Generator | Offline: training data for the Project Agent | offline |
+| `agent-eval-generator` | Eval Generator | A realistic test case on request (a role, their problem, real-looking data), read against your workspace; publishes nothing (lake#263) | service |
+| `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | One example of what is worth building for a situation you describe, checked against the test cases; writes nothing to the corpus (lake#263) | service |
+| `agent-project-corpus` | Project Corpus Generator | A worked example of building or changing a pipeline on your own data, replayed against your workspace; changes nothing (lake#263) | service |
 
 Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS`, *Not running on
 this lake* otherwise, and *Offline tool* for the three agents that produce evaluations and
@@ -60,7 +60,7 @@ training data rather than serving people. People do not create or delete library
 
 The page (2026-09-27, the UX review) says what each agent does for the person and where to use it,
 in plain words: *Agent · What it does for you · Where to use it* and a badge (*Available*, *Not
-available here*, *Not yet available to chat* for the offline three). The create form's fields are
+available here*). Every library agent can be talked to (lake#263: the three generators were offline tools until 2026-09-27). The create form's fields are
 *What it's for*, *Where it works*, **Instructions** (stored as the record's `manifesto`), *What
 success looks like* (`goal`), *What it may do* (`skills`), *Model* and *Runs on its own*
 (`trigger`).
