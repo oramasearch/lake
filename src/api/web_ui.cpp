@@ -3280,7 +3280,7 @@ std::string discover_content(const WorkspacePage& page) {
                 "<article class=\"panel ask-proposal\"><label class=\"opportunity-pick\"><input "
                 "type=\"checkbox\" name=\"pick\" value=\"{}\"> <span>{}</span></label><p "
                 "class=\"sub\">{}{}</p>"
-                "<p>{}</p>{}<p><button type=\"submit\" formaction=\"/design/opportunities/dismiss\" "
+                "{}{}<p><button type=\"submit\" formaction=\"/design/opportunities/dismiss\" "
                 "formnovalidate name=\"opportunity_id\" value=\"{}\">Dismiss</button></p></article>",
                 web_ui_escape(id),
                 web_ui_escape(json_text(row, "intent")),
@@ -3288,11 +3288,12 @@ std::string discover_content(const WorkspacePage& page) {
                     ? std::string()
                     : "Catalogue solution " + web_ui_escape(json_text(row, "solution")) + " · ",
                 web_ui_escape(json_text(row, "methodology")),
-                web_ui_escape(json_text(row, "why")),
+                // Auto-Suggest writes inline markdown (`table` names); the renderer escapes first.
+                markdown_to_html(json_text(row, "why")),
                 json_text(detail, "business_action").empty()
                     ? std::string()
-                    : "<p><strong>What it changes:</strong> " +
-                          web_ui_escape(json_text(detail, "business_action")) + "</p>",
+                    : markdown_to_html("**What it changes:** " +
+                                       json_text(detail, "business_action")),
                 web_ui_escape(id));
         } else if (state == "project") {
             made += "<li>" + web_ui_escape(json_text(row, "intent")) + " → " +
