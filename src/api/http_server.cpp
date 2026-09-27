@@ -4830,6 +4830,21 @@ struct ApiServer::Impl {
         return "unmatched";
     }
 
+    // The library agent a bus credential belongs to, or empty. Every token is compared, so the
+    // time taken does not say which one was close.
+    std::string bus_agent_for(const std::string& bearer) const {
+        std::string found;
+        if (bearer.empty() || !options.workspaces) {
+            return found;
+        }
+        for (const auto& [agent, token] : options.workspaces->config().agent_bus_tokens) {
+            if (constant_time_equal(bearer, token)) {
+                found = agent;
+            }
+        }
+        return found;
+    }
+
     ApiContext context_for(const boost::http::route_params& route) const {
         ApiContext ctx;
         ctx.request_path = std::string(route.url.path());
@@ -4901,14 +4916,13 @@ struct ApiServer::Impl {
             ctx.authorized = true;
             ctx.acting_identity = "admin";
             ctx.operator_credential = true;
-        } else if (!bearer.empty() && options.workspaces &&
-                   !options.workspaces->config().agent_service_token.empty() &&
-                   constant_time_equal(bearer, options.workspaces->config().agent_service_token)) {
-            // A library agent's service (docs/api/agent-bus.md): it may only reach the agent
-            // bus's capabilities, which check for this kind themselves.
+        } else if (const std::string agent = bus_agent_for(bearer); !agent.empty()) {
+            // A library agent on the agent bus (docs/api/agent-bus.md): it may only reach the
+            // bus's capabilities, which check for this kind and this agent themselves.
             ctx.authorized = true;
-            ctx.acting_identity = "agent-service";
+            ctx.acting_identity = "agent-service:" + agent;
             ctx.credential_kind = "agent_service";
+            ctx.agent_service = agent;
         } else if (!bearer.empty() && options.store) {
             if (auto principal = options.store->context_for(bearer)) {
                 ctx.authorized = true;

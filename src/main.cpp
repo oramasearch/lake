@@ -275,6 +275,8 @@ int main(int argc, char** argv) {
     }
     workspace_config.internal_url = env_or("LAKE_INTERNAL_URL", "");
     workspace_config.agent_service_token = env_or("LAKE_AGENT_SERVICE_TOKEN", "");
+    workspace_config.agent_bus_tokens =
+        lake::control::read_agent_bus_tokens(env_or("LAKE_AGENT_BUS_DIR", ""));
     if (const std::string limit = env_or("LAKE_SERVICES_PER_CUSTOMER", ""); !limit.empty()) {
         std::size_t parsed = 0;
         const auto [end, error] =

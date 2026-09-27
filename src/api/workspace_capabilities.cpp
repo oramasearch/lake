@@ -2526,11 +2526,13 @@ json workspace_openapi(const json& document, std::string_view base) {
 }
 
 // Agent traffic over Zetta pub/sub (docs/api/agent-bus.md, lake#269). The first three are the
-// library agents' side, authenticated with the agent service token; receive_agent_events is for
-// anyone who may read the task.
+// library agents' side, each agent authenticated by its own bus credential; receive_agent_events
+// is for anyone who may read the task.
 namespace {
-bool agent_service(const ApiContext& context) {
-    return context.credential_kind == "agent_service";
+// True when the caller is that library agent, by its own bus credential.
+bool agent_service(const ApiContext& context, const json& input) {
+    return context.credential_kind == "agent_service" && !context.agent_service.empty() &&
+           input.value("agent", std::string()) == context.agent_service;
 }
 
 // The bus's agent side is authorized by the service token, not by policy; this names the
@@ -2540,7 +2542,8 @@ std::expected<std::string, ApiError> agent_bus_object(const json&, ApiContext&) 
 }
 
 ApiResult not_agent_service() {
-    return ApiResult::failure("unauthorized", "only a library agent's service may call this");
+    return ApiResult::failure("unauthorized",
+                              "only that library agent, with its own bus credential, may call this");
 }
 
 // Replaces every "{{credential}}" string in a task body.
@@ -2570,7 +2573,7 @@ void register_agent_bus_capabilities(Registry& registry) {
             "A library agent's inbox (topic agent-tasks.<agent> on lake's Zetta pub/sub): the "
             "tasks published for it from `from_sequence` on, oldest first, without those "
             "already claimed. Long-polls up to `wait_ms`. Pass the returned `next_sequence` to "
-            "continue. Only a library agent's service may call it (its service token).",
+            "continue. Only that agent may call it, with its own bus credential.",
         .input_schema = {{"type", "object"},
                          {"required", json::array({"agent"})},
                          {"additionalProperties", false},
@@ -2586,7 +2589,7 @@ void register_agent_bus_capabilities(Registry& registry) {
         .resolve_object = agent_bus_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            if (!agent_service(context)) {
+            if (!agent_service(context, input)) {
                 co_return not_agent_service();
             }
             if (context.agent_bus == nullptr || context.store == nullptr) {
@@ -2626,8 +2629,8 @@ void register_agent_bus_capabilities(Registry& registry) {
         .description =
             "A library agent takes one task it received: exactly one claim succeeds (another is "
             "a conflict). Answers the task's body with the task's own credential in it, handed "
-            "over this once; lake keeps only its SHA-256. Only a library agent's service may "
-            "call it.",
+            "over this once; lake keeps only its SHA-256. Only that agent may call it, with "
+            "its own bus credential.",
         .input_schema = {{"type", "object"},
                          {"required", json::array({"task_id", "agent"})},
                          {"additionalProperties", false},
@@ -2640,7 +2643,7 @@ void register_agent_bus_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = agent_bus_object,
         .handler = [](const json& input, ApiContext& context) {
-            if (!agent_service(context)) {
+            if (!agent_service(context, input)) {
                 return not_agent_service();
             }
             if (context.store == nullptr) {
@@ -2672,8 +2675,8 @@ void register_agent_bus_capabilities(Registry& registry) {
         .description =
             "A library agent reports on a task it claimed, on topic agent-events: `progress` "
             "(a message while it works), `result` (its answer, which finishes the task) or "
-            "`failed`. Lake applies it to the task. Only a library agent's service may call it, "
-            "and only for a task it claimed that has not finished.",
+            "`failed`. Lake applies it to the task. Only that agent may call it, with its own "
+            "bus credential, and only for a task it claimed that has not finished.",
         .input_schema = {{"type", "object"},
                          {"required", json::array({"task_id", "agent", "type"})},
                          {"additionalProperties", false},
@@ -2693,7 +2696,7 @@ void register_agent_bus_capabilities(Registry& registry) {
         .resolve_object = agent_bus_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            if (!agent_service(context)) {
+            if (!agent_service(context, input)) {
                 co_return not_agent_service();
             }
             if (context.agent_bus == nullptr || context.store == nullptr) {

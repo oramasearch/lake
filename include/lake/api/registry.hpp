@@ -133,6 +133,8 @@ struct ApiContext {
     control::AgentCaller* agent_caller = nullptr;
     // Agent traffic over Zetta pub/sub (docs/api/agent-bus.md); null when not configured.
     control::AgentTaskBus* agent_bus = nullptr;
+    // The library agent whose bus credential authenticated the call (LAKE_AGENT_BUS_DIR), or empty.
+    std::string agent_service;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS: the instance-wide switch over every customer's opt-in
     // to keys and tokens that never expire (lake#234).
     bool non_expiring_credentials_allowed = true;

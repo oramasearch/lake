@@ -44,14 +44,20 @@ claim, and the credential is handed over once and never stored.
 
 | Capability | Kind | Who | What |
 |---|---|---|---|
-| `receive_agent_tasks {agent, from_sequence?, wait_ms?}` | read | a library agent's service | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; `next_sequence` continues |
-| `claim_agent_task {task_id, agent}` | action | a library agent's service | take the task; the body with its credential. A second claim, or a claim by another agent, is a `conflict` |
-| `publish_agent_event {task_id, agent, type, message?, result?}` | action | a library agent's service | publish on `agent-events`, only for a task that agent claimed and that has not finished |
+| `receive_agent_tasks {agent, from_sequence?, wait_ms?}` | read | that library agent | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; `next_sequence` continues |
+| `claim_agent_task {task_id, agent}` | action | that library agent | take the task; the body with its credential. A second claim, or a claim by another agent, is a `conflict` |
+| `publish_agent_event {task_id, agent, type, message?, result?}` | action | that library agent | publish on `agent-events`, only for a task that agent claimed and that has not finished |
 | `receive_agent_events {customer_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | the task's events from `from_sequence`, and the task as it stands |
 
-A library agent's service authenticates with `LAKE_AGENT_SERVICE_TOKEN` (the operator mounts the same
-secret into every library agent as `AGENT_SERVICE_TOKEN`, and `LAKE_URL`). That credential reaches
-only the first three. Long polls wait at most 10 seconds (`wait_ms`).
+**Each library agent has its own bus credential.** The operator keeps one Secret,
+`lake-<name>-agent-bus`, with a random token per library agent. It mounts the whole Secret into
+lake (`LAKE_AGENT_BUS_DIR`, one file per agent) and only that agent's token into each agent
+(`AGENT_BUS_TOKEN`, with `LAKE_URL`). A bus credential reaches only the first three capabilities,
+and only with its own agent's name.
+
+The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential: user-created agents on
+agent-runtime hold it too, and customer code must not be able to take another person's task. Long
+polls wait at most 10 seconds (`wait_ms`).
 
 ## What the bus loses, the store recovers
 
@@ -77,7 +83,7 @@ Through lake a `receive_events` long poll waits at most 10 seconds.
 |---|---|
 | `LAKE_DATA_PLANE_URL`, `LAKE_DATA_PLANE_TOKEN` | lake's own Zetta, the bus. It needs an image with pub/sub (zetta `dev` from f8ad170) |
 | `LAKE_AGENT_ENDPOINTS` | the library agents; one `agent-tasks.<agent>` topic each |
-| `LAKE_AGENT_SERVICE_TOKEN` | what a library agent's service presents to lake |
+| `LAKE_AGENT_BUS_DIR` | the library agents' bus credentials, a file per agent named by its key (mounted from `lake-<name>-agent-bus`) |
 
 Without the bus, a library agent's turn answers `store_unavailable`. A lake run with
 `--memory-store` uses an in-memory bus. The startup line reports `agent_bus`: `zetta`, `memory` or
@@ -85,7 +91,5 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 
 ## Not yet
 
-- One service token is shared by the library agents. Per-agent credentials would let lake tell
-  them apart beyond the `agent` they name.
 - Custom Python agents on `agent-runtime` still answer within the call.
 - Streaming subscriptions (SSE) replace the long poll when Zetta ships them.

@@ -1927,14 +1927,18 @@ struct AgentRuns {
         return std::move(*completed);
     }
     // A call as a library agent's service: the agent service token (docs/api/agent-bus.md).
-    lake::api::ApiResult as_agent(const std::string& name, json input, bool service = true) {
+    lake::api::ApiResult as_agent(const std::string& name,
+                                  json input,
+                                  bool service = true,
+                                  const std::string& agent = "agent-ask-orama") {
         lake::api::ApiContext context;
         context.store = &store;
         context.workspaces = w.service.get();
         context.agent_bus = agent_bus.get();
         context.authorized = true;
-        context.acting_identity = service ? "agent-service" : principal.taap_id;
+        context.acting_identity = service ? "agent-service:" + agent : principal.taap_id;
         context.credential_kind = service ? "agent_service" : "session";
+        context.agent_service = service ? agent : "";
         context.request_id = lake::control::new_uuid_v4();
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
@@ -2188,7 +2192,12 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
     // Only a library agent's service reaches the bus's agent side.
     EXPECT_EQ(r.as_agent("receive_agent_tasks", {{"agent", "agent-ask-orama"}}, false).error.code,
               "unauthorized");
-    EXPECT_EQ(r.as_agent("receive_agent_tasks", {{"agent", "agent-nope"}}).error.code, "not_found");
+    EXPECT_EQ(r.as_agent("receive_agent_tasks", {{"agent", "agent-project"}}).error.code,
+              "unauthorized")
+        << "an agent reaches only its own inbox";
+    EXPECT_EQ(
+        r.as_agent("receive_agent_tasks", {{"agent", "agent-nope"}}, true, "agent-nope").error.code,
+        "not_found");
     const auto inbox = r.as_agent("receive_agent_tasks", {{"agent", "agent-ask-orama"}});
     ASSERT_TRUE(inbox.ok) << inbox.error.message;
     ASSERT_EQ(inbox.value["tasks"].size(), 1U);
@@ -2196,7 +2205,10 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
     EXPECT_EQ(inbox.value["next_sequence"], 2);
 
     // One claim, by the task's own agent; the body arrives with a fresh credential.
-    EXPECT_EQ(r.as_agent("claim_agent_task", {{"task_id", task_id}, {"agent", "agent-project"}})
+    EXPECT_EQ(r.as_agent("claim_agent_task",
+                         {{"task_id", task_id}, {"agent", "agent-project"}},
+                         true,
+                         "agent-project")
                   .error.code,
               "conflict");
     const auto claimed =
@@ -2229,7 +2241,9 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
     EXPECT_EQ(live.value["task"]["status"], "running");
     EXPECT_EQ(live.value["task"]["message"], "Reading your datasets");
     EXPECT_EQ(r.as_agent("publish_agent_event",
-                         {{"task_id", task_id}, {"agent", "agent-project"}, {"type", "failed"}})
+                         {{"task_id", task_id}, {"agent", "agent-project"}, {"type", "failed"}},
+                         true,
+                         "agent-project")
                   .error.code,
               "conflict")
         << "only the agent that claimed it reports on it";
@@ -2389,4 +2403,19 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     ASSERT_EQ(r.agents.turns.size(), before + 1);
     EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-1:8080");
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
+}
+
+TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {
+    const auto dir = lake::test::fixture_path("agent-bus-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "agent-project") << "project-token\n";
+    std::ofstream(dir / "agent-ask-orama") << "ask-token";
+    std::ofstream(dir / "empty") << "\n";
+    std::filesystem::create_directories(dir / "..data");
+    const auto tokens = lake::control::read_agent_bus_tokens(dir.string());
+    EXPECT_EQ(tokens.size(), 2U) << "an empty file and the mount's own entries are skipped";
+    EXPECT_EQ(tokens.at("agent-project"), "project-token");
+    EXPECT_EQ(tokens.at("agent-ask-orama"), "ask-token");
+    EXPECT_TRUE(lake::control::read_agent_bus_tokens("").empty());
+    std::filesystem::remove_all(dir);
 }

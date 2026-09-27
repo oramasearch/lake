@@ -345,7 +345,10 @@ protected:
                                             {"agent-autosuggest", "http://suggest:8080"},
                                             {"agent-creator", "http://creator:8080"}};
         workspace_config.internal_url = "http://lake.internal";
-        workspace_config.agent_service_token = agent_service_token_;
+        workspace_config.agent_service_token = "the-service-token";
+        for (const auto& [agent, endpoint] : workspace_config.agent_endpoints) {
+            workspace_config.agent_bus_tokens[agent] = "bus-token-" + agent;
+        }
         std::vector<std::string> bus_agents;
         for (const auto& [agent, endpoint] : workspace_config.agent_endpoints) {
             bus_agents.push_back(agent);
@@ -389,11 +392,16 @@ protected:
                               const nlohmann::json& body) {
             const std::string response =
                 connection.request(method, path, method == "GET" ? "" : body.dump(), "",
-                                    "HTTP/1.1", agent_service_token_, "application/json");
+                                    "HTTP/1.1", "bus-token-" + task->agent, "application/json");
             const auto at = response.find("\r\n\r\n");
             return nlohmann::json::parse(
                 at == std::string::npos ? std::string() : response.substr(at + 4), nullptr, false);
         };
+        const std::string shared = connection.request(
+            "GET", "/v1/receive_agent_tasks?agent=" + task->agent, "", "", "HTTP/1.1",
+            "the-service-token");
+        EXPECT_NE(shared.find("\"unauthorized\""), std::string::npos)
+            << "the service token user-created agents also hold never reaches the bus";
         const nlohmann::json inbox =
             call("GET", "/v1/receive_agent_tasks?agent=" + task->agent, nullptr);
         EXPECT_EQ(inbox["ok"], true) << inbox.dump();
@@ -464,7 +472,6 @@ protected:
     std::shared_ptr<lake::control::Store> store_;
     std::shared_ptr<RecordingWorkspace> workspace_caller_ = std::make_shared<RecordingWorkspace>();
     std::shared_ptr<ScriptedAgents> agents_ = std::make_shared<ScriptedAgents>();
-    std::string agent_service_token_ = "agent-service-token";
     std::shared_ptr<lake::control::MemoryAgentBus> bus_ =
         std::make_shared<lake::control::MemoryAgentBus>();
     std::shared_ptr<lake::control::AgentTaskBus> agent_bus_;
