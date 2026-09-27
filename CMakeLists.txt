@@ -155,6 +155,7 @@ add_library(lake-core STATIC
   src/control/platform.cpp
   src/control/zetta_control.cpp
   src/control/agent_library.cpp
+  src/control/agent_runs.cpp
   src/control/zetta_workspace.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp

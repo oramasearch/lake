@@ -425,3 +425,13 @@ reads back as `expires_at: "never"`. Idempotent (`ADD COLUMN IF NOT EXISTS`); gu
 `credentials_guard`. The operator vendors it and selects that guard before a binary that offers
 never-expiring credentials is deployed. Capabilities: [`../api/agents.md`](../api/agents.md) and
 [`../api/identity.md`](../api/identity.md).
+
+## Agent launches migration
+
+`0030_agent_launches` adds `agent_launches` (written by lake: agent, mode, input, scopes, `al-`
+slug, desired, trigger, who launched it), `agent_launch_status` (written by the operator: phase,
+message, endpoint, exit code, result and the **SHA-256** of the pod's credential, never the
+credential), `agent_schedules` (one per agent, its next run) and `ask_messages` (Ask Orama
+conversations, read back only by the person who had them). Idempotent; guard `agents_guard`. The
+operator vendors it and selects that guard before a binary that launches agents is deployed.
+Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md).

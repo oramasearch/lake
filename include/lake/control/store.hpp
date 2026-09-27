@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -265,6 +266,69 @@ struct ManagedStore {
     std::string created_by_taap_id, created_at, updated_at;
     std::string phase, message, endpoint; // empty until the operator reports
     std::int64_t observed_generation = 0;
+};
+// A launch credential is `lal.<launch id>.<secret>`: the Orama operator generates it for the pod
+// and writes its SHA-256 into agent_launch_status; lake compares digests and never stores it.
+inline constexpr std::string_view agent_launch_credential_prefix = "lal.";
+inline std::optional<std::pair<std::string, std::string>>
+parse_agent_launch_credential(std::string_view secret) {
+    if (!secret.starts_with(agent_launch_credential_prefix)) {
+        return std::nullopt;
+    }
+    secret.remove_prefix(agent_launch_credential_prefix.size());
+    const std::size_t dot = secret.find('.');
+    if (dot != 36 || secret.size() < dot + 33) {
+        return std::nullopt;
+    }
+    return std::pair<std::string, std::string>{std::string(secret.substr(0, dot)),
+                                               std::string(secret.substr(dot + 1))};
+}
+inline bool constant_time_hex_equal(std::string_view left, std::string_view right) {
+    if (left.size() != right.size() || left.empty()) {
+        return false;
+    }
+    unsigned char difference = 0;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        difference |= static_cast<unsigned char>(left[index] ^ right[index]);
+    }
+    return difference == 0;
+}
+
+// A run of a user-created Python agent on agent-runtime (docs/api/agent-launches.md, lake#231):
+// lake writes the desired launch, the Orama operator runs it (a Job for `job`, a Deployment for
+// `service`) and writes the status. The pod authenticates with a credential the operator
+// generates; lake keeps only its SHA-256 (`credential_sha256`, in the status the operator writes).
+struct AgentLaunch {
+    std::string id, customer_id, agent_id, agent_name, mode, slug, desired, trigger;
+    nlohmann::json input = nullptr;
+    std::vector<std::string> scopes;
+    std::int64_t generation = 1;
+    std::string created_by_user_id, created_by_taap_id, created_at, updated_at;
+    std::string phase, message, endpoint; // empty until the operator reports
+    std::optional<int> exit_code;
+    nlohmann::json result = nullptr;
+    std::string credential_sha256;
+    std::int64_t observed_generation = 0;
+};
+struct NewAgentLaunch {
+    std::string customer_id, agent_id, agent_name, mode, trigger;
+    nlohmann::json input = nullptr;
+    std::vector<std::string> scopes;
+    std::string created_by_user_id, created_by_taap_id;
+};
+// An agent's trigger or schedule as lake runs it (docs/api/agent-launches.md): the next time it is
+// due, in Unix seconds, and who set it (the launch acts as them).
+struct AgentSchedule {
+    std::string customer_id, agent_id, agent_name, trigger;
+    std::int64_t next_run_unix = 0, last_run_unix = 0;
+    std::string created_by_user_id, created_by_taap_id;
+};
+// One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). Kept in lake because
+// the panel renders from any replica.
+struct AskMessage {
+    std::string id, conversation_id, customer_id, user_id, role, content;
+    nlohmann::json payload = nullptr; // proposals, reads and delegations of an assistant message
+    std::string created_at;
 };
 struct NewManagedStore {
     std::string customer_id, type, provider, name, created_by_taap_id;
@@ -773,6 +837,24 @@ public:
     virtual Result<ManagedStore> create_store(const NewManagedStore&) = 0;
     // Marks a store absent so the operator deletes it and its data. Refuses one already absent.
     virtual Result<ManagedStore> withdraw_store(const std::string& id) = 0;
+    // Agent launches (lake#231). Writing one NOTIFYs lake_services, as services and stores do.
+    virtual Result<AgentLaunch> create_agent_launch(const NewAgentLaunch&) = 0;
+    virtual Result<AgentLaunch> get_agent_launch(const std::string& id) = 0;
+    // Newest first; an empty agent_id lists every launch of the customer.
+    virtual Result<std::vector<AgentLaunch>>
+    list_agent_launches(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
+    virtual Result<AgentLaunch> withdraw_agent_launch(const std::string& id) = 0;
+    // Schedules: one per (customer, agent); an empty trigger removes it.
+    virtual Result<void> put_agent_schedule(const AgentSchedule&) = 0;
+    virtual Result<std::vector<AgentSchedule>> due_agent_schedules(std::int64_t now_unix) = 0;
+    virtual Result<void> mark_agent_schedule_run(const std::string& customer_id,
+                                                 const std::string& agent_id,
+                                                 std::int64_t ran_unix,
+                                                 std::int64_t next_run_unix) = 0;
+    // Ask Orama conversations (lake#236), only ever read back by the person who had them.
+    virtual Result<AskMessage> append_ask_message(const AskMessage&) = 0;
+    virtual Result<std::vector<AskMessage>>
+    ask_conversation(const std::string& conversation_id, const std::string& user_id, int limit) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
 

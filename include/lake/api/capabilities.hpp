@@ -23,6 +23,9 @@ void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
+// Running and talking to agents (docs/api/agent-launches.md): launch_agent, list_agent_launches,
+// stop_agent_launch, schedule_agent, agent_turn. Registered by register_workspace_capabilities.
+void register_agent_run_capabilities(Registry& registry);
 
 // The Zetta capabilities a lake caller may reach on a workspace: reads through GET, actions
 // through POST (docs/api/workspaces.md). The agent path /workspaces/<customer>/zetta/v1/ and

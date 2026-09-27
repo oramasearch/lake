@@ -768,6 +768,8 @@ TEST_P(HttpResponseIsolation, CreateAnAgentBuildsANativeOrAPythonAgentFromStudio
     ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
     std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
     workspace_caller_->answers["create_agent"] = {{"id", "a-1"}, {"name", "Renewal watcher"}};
+    workspace_caller_->answers["get_agent"] = {
+        {"id", "a-1"}, {"name", "Renewal watcher"}, {"runtime", "python"}};
 
     const std::string boxes = "customer_id=" + customer_id +
                               "&name=Renewal+watcher&purpose=Flag+renewals&work_area=project"
@@ -777,7 +779,13 @@ TEST_P(HttpResponseIsolation, CreateAnAgentBuildsANativeOrAPythonAgentFromStudio
         connection->request("POST", "/train/agents/create", boxes + "&model=frontier", cookie);
     ASSERT_TRUE(frontier.starts_with("HTTP/1.1 302")) << frontier.substr(0, 300);
     EXPECT_NE(response_header(frontier, "location").find("/train/agent?"), std::string::npos);
-    const auto& [python_name, python_read, python] = workspace_caller_->calls.back();
+    const auto created_call = [&] {
+        const auto found = std::ranges::find_if(
+            workspace_caller_->calls | std::views::reverse,
+            [](const auto& call) { return std::get<0>(call) == "create_agent"; });
+        return *found;
+    };
+    const auto [python_name, python_read, python] = created_call();
     EXPECT_EQ(python_name, "create_agent");
     EXPECT_FALSE(python_read);
     EXPECT_EQ(python["runtime"], "python");
@@ -792,7 +800,7 @@ TEST_P(HttpResponseIsolation, CreateAnAgentBuildsANativeOrAPythonAgentFromStudio
     const std::string native =
         connection->request("POST", "/train/agents/create", boxes + "&model=base", cookie);
     ASSERT_TRUE(native.starts_with("HTTP/1.1 302")) << native.substr(0, 300);
-    const nlohmann::json& base = std::get<2>(workspace_caller_->calls.back());
+    const nlohmann::json base = std::get<2>(created_call());
     EXPECT_EQ(base["runtime"], "native");
     EXPECT_EQ(base["model"], "/var/lib/zetta/models/base-agent");
     EXPECT_EQ(base["model_name"], "Orama base model");

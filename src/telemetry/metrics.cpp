@@ -641,6 +641,45 @@ public:
     create_agent_session(const control::NewAgentSession& value) override {
         return call("create_agent_session", [&] { return store_->create_agent_session(value); });
     }
+    control::Result<control::AgentLaunch>
+    create_agent_launch(const control::NewAgentLaunch& value) override {
+        return call("create_agent_launch", [&] { return store_->create_agent_launch(value); });
+    }
+    control::Result<control::AgentLaunch> get_agent_launch(const std::string& id) override {
+        return call("get_agent_launch", [&] { return store_->get_agent_launch(id); });
+    }
+    control::Result<std::vector<control::AgentLaunch>> list_agent_launches(
+        const std::string& customer_id, const std::string& agent_id, int limit) override {
+        return call("list_agent_launches",
+                    [&] { return store_->list_agent_launches(customer_id, agent_id, limit); });
+    }
+    control::Result<control::AgentLaunch> withdraw_agent_launch(const std::string& id) override {
+        return call("withdraw_agent_launch", [&] { return store_->withdraw_agent_launch(id); });
+    }
+    control::Result<void> put_agent_schedule(const control::AgentSchedule& value) override {
+        return call("put_agent_schedule", [&] { return store_->put_agent_schedule(value); });
+    }
+    control::Result<std::vector<control::AgentSchedule>>
+    due_agent_schedules(std::int64_t now_unix) override {
+        return call("due_agent_schedules", [&] { return store_->due_agent_schedules(now_unix); });
+    }
+    control::Result<void> mark_agent_schedule_run(const std::string& customer_id,
+                                                  const std::string& agent_id,
+                                                  std::int64_t ran_unix,
+                                                  std::int64_t next_run_unix) override {
+        return call("mark_agent_schedule_run", [&] {
+            return store_->mark_agent_schedule_run(customer_id, agent_id, ran_unix, next_run_unix);
+        });
+    }
+    control::Result<control::AskMessage>
+    append_ask_message(const control::AskMessage& value) override {
+        return call("append_ask_message", [&] { return store_->append_ask_message(value); });
+    }
+    control::Result<std::vector<control::AskMessage>> ask_conversation(
+        const std::string& conversation_id, const std::string& user_id, int limit) override {
+        return call("ask_conversation",
+                    [&] { return store_->ask_conversation(conversation_id, user_id, limit); });
+    }
     control::Result<control::AgentSession> revoke_agent_session(const std::string& customer_id,
                                                                 const std::string& id) override {
         return call("revoke_agent_session",

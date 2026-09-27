@@ -30,9 +30,13 @@ struct GroupRule {
 constexpr std::array group_rules{
     GroupRule{"Agents",
               "The Agent Library of specialized agents Orama ships, and the agents you build in "
-              "Train > Agents (list, create, chat and run them through workspace_query and "
-              "workspace_act).",
-              [](std::string_view n) { return n == "list_agent_library"; }},
+              "Train > Agents: create them through workspace_act, talk to any of them with "
+              "agent_turn, run and schedule Python agents with launch_agent and schedule_agent.",
+              [](std::string_view n) {
+                  return n == "list_agent_library" || n == "launch_agent" ||
+                         n == "list_agent_launches" || n == "stop_agent_launch" ||
+                         n == "schedule_agent" || n == "agent_turn";
+              }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your Zetta workspace: projects and pipelines, data, runs, models and search "
               "indexes. workspace_query and workspace_act reach every allowed Zetta capability.",

@@ -4161,6 +4161,288 @@ public:
         });
     }
 
+    static constexpr const char* launch_columns =
+        "l.id::text, l.customer_id::text, l.agent_id, l.agent_name, l.mode, l.slug, l.desired, "
+        "l.trigger, l.input::text, array_to_json(l.scopes)::text, l.generation, "
+        "COALESCE(l.created_by_user_id::text, ''), l.created_by_taap_id, "
+        "to_char(l.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(l.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(ls.phase, ''), COALESCE(ls.message, ''), COALESCE(ls.endpoint, ''), "
+        "ls.exit_code, COALESCE(ls.result, 'null'::jsonb)::text, "
+        "COALESCE(ls.credential_sha256, ''), COALESCE(ls.observed_generation, 0)";
+
+    static AgentLaunch launch_from(const pqxx::row& row) {
+        AgentLaunch launch;
+        launch.id = row[0].as<std::string>();
+        launch.customer_id = row[1].as<std::string>();
+        launch.agent_id = row[2].as<std::string>();
+        launch.agent_name = row[3].as<std::string>();
+        launch.mode = row[4].as<std::string>();
+        launch.slug = row[5].as<std::string>();
+        launch.desired = row[6].as<std::string>();
+        launch.trigger = row[7].as<std::string>();
+        launch.input = nlohmann::json::parse(row[8].as<std::string>(), nullptr, false);
+        launch.scopes =
+            nlohmann::json::parse(row[9].as<std::string>()).get<std::vector<std::string>>();
+        launch.generation = row[10].as<std::int64_t>();
+        launch.created_by_user_id = row[11].as<std::string>();
+        launch.created_by_taap_id = row[12].as<std::string>();
+        launch.created_at = row[13].as<std::string>();
+        launch.updated_at = row[14].as<std::string>();
+        launch.phase = row[15].as<std::string>();
+        launch.message = row[16].as<std::string>();
+        launch.endpoint = row[17].as<std::string>();
+        if (!row[18].is_null()) {
+            launch.exit_code = row[18].as<int>();
+        }
+        launch.result = nlohmann::json::parse(row[19].as<std::string>(), nullptr, false);
+        launch.credential_sha256 = row[20].as<std::string>();
+        launch.observed_generation = row[21].as<std::int64_t>();
+        return launch;
+    }
+
+    static Result<AgentLaunch> one_launch(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + launch_columns +
+                " FROM agent_launches l LEFT JOIN agent_launch_status ls ON ls.launch_id = l.id "
+                "WHERE l.id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no agent launch " + id});
+        }
+        return launch_from(rows[0]);
+    }
+
+    // A launch credential (lake#231): the launch must be present, the operator must have written
+    // the credential's digest, and the digests must match. It acts as the person who launched.
+    Result<Principal> launch_principal(const std::string& secret) {
+        const auto parsed = parse_agent_launch_credential(secret);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT COALESCE(ls.credential_sha256, ''), array_to_json(l.scopes)::text, "
+                "COALESCE(users.id::text, ''), COALESCE(users.taap_id, '') FROM agent_launches l "
+                "LEFT JOIN agent_launch_status ls ON ls.launch_id = l.id LEFT JOIN users ON "
+                "users.id = l.created_by_user_id WHERE l.id = $1::uuid AND l.desired = 'present'",
+                parsed->first);
+            if (rows.empty() || !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                                         rows[0][0].as<std::string>())) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            if (rows[0][3].as<std::string>().empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "launch identity is unavailable"});
+            }
+            return Principal{
+                rows[0][2].as<std::string>(),
+                rows[0][3].as<std::string>(),
+                "launch:" + parsed->first,
+                "",
+                "lake",
+                "agent_launch",
+                nlohmann::json::parse(rows[0][1].as<std::string>()).get<std::vector<std::string>>(),
+                std::nullopt};
+        });
+    }
+
+    Result<AgentLaunch> create_agent_launch(const NewAgentLaunch& in) override {
+        if ((in.mode != "job" && in.mode != "service") || in.agent_id.empty() ||
+            in.scopes.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "agent launch is invalid"});
+        }
+        return with_tx<AgentLaunch>([&](pqxx::work& tx) -> Result<AgentLaunch> {
+            const pqxx::result customers =
+                tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", in.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+            }
+            const std::string id = new_uuid_v4();
+            tx.exec_params(
+                "INSERT INTO agent_launches (id, customer_id, agent_id, agent_name, mode, input, "
+                "scopes, slug, trigger, created_by_user_id, created_by_taap_id) VALUES "
+                "($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, "
+                "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, $9, "
+                "NULLIF($10, '')::uuid, $11)",
+                id,
+                in.customer_id,
+                in.agent_id,
+                in.agent_name,
+                in.mode,
+                in.input.dump(),
+                nlohmann::json(in.scopes).dump(),
+                managed_service_slug("al", id),
+                in.trigger.empty() ? std::string("manual") : in.trigger,
+                in.created_by_user_id,
+                in.created_by_taap_id);
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_launch(tx, id);
+        });
+    }
+
+    Result<AgentLaunch> get_agent_launch(const std::string& id) override {
+        return with_tx<AgentLaunch>(
+            [&](pqxx::work& tx) -> Result<AgentLaunch> { return one_launch(tx, id); });
+    }
+
+    Result<std::vector<AgentLaunch>> list_agent_launches(const std::string& customer_id,
+                                                         const std::string& agent_id,
+                                                         int limit) override {
+        return with_tx<std::vector<AgentLaunch>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AgentLaunch>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + launch_columns +
+                        " FROM agent_launches l LEFT JOIN agent_launch_status ls ON "
+                        "ls.launch_id = l.id WHERE l.customer_id = $1::uuid AND ($2 = '' OR "
+                        "l.agent_id = $2) ORDER BY l.created_at DESC, l.id LIMIT $3",
+                    customer_id,
+                    agent_id,
+                    limit > 0 ? limit : 100);
+                std::vector<AgentLaunch> launches;
+                for (const pqxx::row& row : rows) {
+                    launches.push_back(launch_from(row));
+                }
+                return launches;
+            });
+    }
+
+    Result<AgentLaunch> withdraw_agent_launch(const std::string& id) override {
+        return with_tx<AgentLaunch>([&](pqxx::work& tx) -> Result<AgentLaunch> {
+            tx.exec_params("UPDATE agent_launches SET desired = 'absent', generation = "
+                           "generation + 1, updated_at = now() WHERE id = $1::uuid AND "
+                           "desired = 'present'",
+                           id);
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_launch(tx, id);
+        });
+    }
+
+    Result<void> put_agent_schedule(const AgentSchedule& schedule) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            if (schedule.trigger.empty()) {
+                tx.exec_params("DELETE FROM agent_schedules WHERE customer_id = $1::uuid AND "
+                               "agent_id = $2",
+                               schedule.customer_id,
+                               schedule.agent_id);
+                return {};
+            }
+            tx.exec_params(
+                "INSERT INTO agent_schedules (customer_id, agent_id, agent_name, trigger, "
+                "next_run_at, created_by_user_id, created_by_taap_id) VALUES ($1::uuid, $2, $3, "
+                "$4, to_timestamp($5), NULLIF($6, '')::uuid, $7) ON CONFLICT (customer_id, "
+                "agent_id) DO UPDATE SET agent_name = EXCLUDED.agent_name, trigger = "
+                "EXCLUDED.trigger, next_run_at = EXCLUDED.next_run_at, created_by_user_id = "
+                "EXCLUDED.created_by_user_id, created_by_taap_id = EXCLUDED.created_by_taap_id",
+                schedule.customer_id,
+                schedule.agent_id,
+                schedule.agent_name,
+                schedule.trigger,
+                schedule.next_run_unix,
+                schedule.created_by_user_id,
+                schedule.created_by_taap_id);
+            return {};
+        });
+    }
+
+    Result<std::vector<AgentSchedule>> due_agent_schedules(std::int64_t now_unix) override {
+        return with_tx<std::vector<AgentSchedule>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AgentSchedule>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT customer_id::text, agent_id, agent_name, trigger, "
+                    "floor(extract(epoch FROM next_run_at))::bigint, "
+                    "COALESCE(floor(extract(epoch FROM last_run_at))::bigint, 0), "
+                    "COALESCE(created_by_user_id::text, ''), created_by_taap_id FROM "
+                    "agent_schedules WHERE next_run_at <= to_timestamp($1) ORDER BY next_run_at",
+                    now_unix);
+                std::vector<AgentSchedule> due;
+                for (const pqxx::row& row : rows) {
+                    due.push_back(AgentSchedule{row[0].as<std::string>(),
+                                                row[1].as<std::string>(),
+                                                row[2].as<std::string>(),
+                                                row[3].as<std::string>(),
+                                                row[4].as<std::int64_t>(),
+                                                row[5].as<std::int64_t>(),
+                                                row[6].as<std::string>(),
+                                                row[7].as<std::string>()});
+                }
+                return due;
+            });
+    }
+
+    Result<void> mark_agent_schedule_run(const std::string& customer_id,
+                                         const std::string& agent_id,
+                                         std::int64_t ran_unix,
+                                         std::int64_t next_run_unix) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE agent_schedules SET last_run_at = to_timestamp($3), next_run_at = "
+                "to_timestamp($4) WHERE customer_id = $1::uuid AND agent_id = $2 RETURNING 1",
+                customer_id,
+                agent_id,
+                ran_unix,
+                next_run_unix);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no schedule for " + agent_id});
+            }
+            return {};
+        });
+    }
+
+    Result<AskMessage> append_ask_message(const AskMessage& message) override {
+        if (message.conversation_id.empty() || message.user_id.empty() ||
+            (message.role != "user" && message.role != "assistant")) {
+            return std::unexpected(StoreError{"invalid_input", "ask message is invalid"});
+        }
+        return with_tx<AskMessage>([&](pqxx::work& tx) -> Result<AskMessage> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO ask_messages (conversation_id, customer_id, user_id, role, content, "
+                "payload) VALUES ($1::uuid, NULLIF($2, '')::uuid, $3::uuid, $4, $5, $6::jsonb) "
+                "RETURNING id::text, to_char(created_at AT TIME ZONE 'UTC', "
+                "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+                message.conversation_id,
+                message.customer_id,
+                message.user_id,
+                message.role,
+                message.content,
+                message.payload.dump());
+            AskMessage stored = message;
+            stored.id = rows[0][0].as<std::string>();
+            stored.created_at = rows[0][1].as<std::string>();
+            return stored;
+        });
+    }
+
+    Result<std::vector<AskMessage>> ask_conversation(const std::string& conversation_id,
+                                                     const std::string& user_id,
+                                                     int limit) override {
+        return with_tx<std::vector<AskMessage>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AskMessage>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT id::text, conversation_id::text, COALESCE(customer_id::text, ''), "
+                    "user_id::text, role, content, payload::text, to_char(created_at AT TIME "
+                    "ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM (SELECT * FROM "
+                    "ask_messages WHERE conversation_id = $1::uuid AND user_id = $2::uuid "
+                    "ORDER BY created_at DESC, id DESC LIMIT $3) newest ORDER BY created_at, id",
+                    conversation_id,
+                    user_id,
+                    limit > 0 ? limit : 200);
+                std::vector<AskMessage> messages;
+                for (const pqxx::row& row : rows) {
+                    messages.push_back(
+                        AskMessage{row[0].as<std::string>(),
+                                   row[1].as<std::string>(),
+                                   row[2].as<std::string>(),
+                                   row[3].as<std::string>(),
+                                   row[4].as<std::string>(),
+                                   row[5].as<std::string>(),
+                                   nlohmann::json::parse(row[6].as<std::string>(), nullptr, false),
+                                   row[7].as<std::string>()});
+                }
+                return messages;
+            });
+    }
+
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override {
         return with_tx<std::uint64_t>([&](pqxx::work& tx) -> Result<std::uint64_t> {
@@ -4911,6 +5193,9 @@ public:
         });
     }
     Result<Principal> context_for(const std::string& secret) override {
+        if (secret.starts_with(agent_launch_credential_prefix)) {
+            return launch_principal(secret);
+        }
         const auto lookup_id = session_lookup_id(secret);
         if (!lookup_id) {
             return std::unexpected(StoreError{"not_found", "session is not active"});

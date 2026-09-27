@@ -47,6 +47,7 @@ the exact commands and outputs.
 | Transparency and replication | Yes | Yes | Configuration and public routes listed in observed OpenAPI | `transparency_log_configuration` | [transparency](../api/transparency.md), [replication](../api/replication.md) |
 | Application and agent services | Yes | Yes | Public routes listed in observed OpenAPI | No | [applications](../api/apps.md), [agents](../api/agents.md) |
 | Server-rendered UI | Yes | Yes | Not assessed by the 2026-09-08 API observations | No | [UI](../ui/README.md) |
+| Agent launches, schedules and turns (`agent_turn`) | Yes | Yes | No | No | [agent-launches](../api/agent-launches.md) |
 | Never-expiring agent keys and tokens (opt-in) | Yes | Yes | No | No | [agents](../api/agents.md#keys-that-never-expire-lake234), [identity](../api/identity.md) |
 | Train → Agents and the Agent Library | Yes | Yes | No | No | [train-agents](../api/train-agents.md) |
 | Agents reach Zetta through lake (`/workspaces/<customer>/zetta/v1/`) | Yes | Yes | No | No | [workspaces](../api/workspaces.md#agents-reach-zetta-through-lake) |

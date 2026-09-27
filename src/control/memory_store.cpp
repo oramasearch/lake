@@ -797,6 +797,161 @@ Result<ManagedStore> InMemoryStore::withdraw_store(const std::string& id) {
     return std::unexpected(StoreError{"not_found", "no store " + id});
 }
 
+Result<AgentLaunch> InMemoryStore::create_agent_launch(const NewAgentLaunch& in) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& value) { return value.id == in.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+    }
+    if ((in.mode != "job" && in.mode != "service") || in.agent_id.empty() || in.scopes.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "agent launch is invalid"});
+    }
+    AgentLaunch launch;
+    launch.id = new_uuid_v4();
+    launch.customer_id = in.customer_id;
+    launch.agent_id = in.agent_id;
+    launch.agent_name = in.agent_name;
+    launch.mode = in.mode;
+    launch.trigger = in.trigger.empty() ? "manual" : in.trigger;
+    launch.input = in.input;
+    launch.scopes = in.scopes;
+    launch.slug = managed_service_slug("al", launch.id);
+    launch.desired = "present";
+    launch.created_by_user_id = in.created_by_user_id;
+    launch.created_by_taap_id = in.created_by_taap_id;
+    launch.created_at = launch.updated_at = std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    agent_launches_.push_back(launch);
+    return launch;
+}
+
+Result<AgentLaunch> InMemoryStore::get_agent_launch(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_launches_, id, &AgentLaunch::id);
+    if (found == agent_launches_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent launch " + id});
+    }
+    return *found;
+}
+
+Result<std::vector<AgentLaunch>> InMemoryStore::list_agent_launches(const std::string& customer_id,
+                                                                    const std::string& agent_id,
+                                                                    int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<AgentLaunch> launches;
+    for (auto it = agent_launches_.rbegin(); it != agent_launches_.rend(); ++it) {
+        if (it->customer_id == customer_id && (agent_id.empty() || it->agent_id == agent_id)) {
+            launches.push_back(*it);
+        }
+        if (limit > 0 && static_cast<int>(launches.size()) >= limit) {
+            break;
+        }
+    }
+    return launches;
+}
+
+Result<AgentLaunch> InMemoryStore::withdraw_agent_launch(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_launches_, id, &AgentLaunch::id);
+    if (found == agent_launches_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent launch " + id});
+    }
+    if (found->desired != "absent") {
+        found->desired = "absent";
+        ++found->generation;
+    }
+    return *found;
+}
+
+Result<void> InMemoryStore::set_agent_launch_status(const std::string& id,
+                                                    std::string phase,
+                                                    std::string message,
+                                                    std::string endpoint,
+                                                    std::string credential_sha256,
+                                                    std::optional<int> exit_code,
+                                                    nlohmann::json result) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_launches_, id, &AgentLaunch::id);
+    if (found == agent_launches_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent launch " + id});
+    }
+    found->phase = std::move(phase);
+    found->message = std::move(message);
+    found->endpoint = std::move(endpoint);
+    found->credential_sha256 = std::move(credential_sha256);
+    found->exit_code = exit_code;
+    found->result = std::move(result);
+    found->observed_generation = found->generation;
+    return {};
+}
+
+Result<void> InMemoryStore::put_agent_schedule(const AgentSchedule& schedule) {
+    std::lock_guard lock(mutex_);
+    std::erase_if(agent_schedules_, [&](const AgentSchedule& value) {
+        return value.customer_id == schedule.customer_id && value.agent_id == schedule.agent_id;
+    });
+    if (!schedule.trigger.empty()) {
+        agent_schedules_.push_back(schedule);
+    }
+    return {};
+}
+
+Result<std::vector<AgentSchedule>> InMemoryStore::due_agent_schedules(std::int64_t now_unix) {
+    std::lock_guard lock(mutex_);
+    std::vector<AgentSchedule> due;
+    for (const AgentSchedule& schedule : agent_schedules_) {
+        if (schedule.next_run_unix > 0 && schedule.next_run_unix <= now_unix) {
+            due.push_back(schedule);
+        }
+    }
+    return due;
+}
+
+Result<void> InMemoryStore::mark_agent_schedule_run(const std::string& customer_id,
+                                                    const std::string& agent_id,
+                                                    std::int64_t ran_unix,
+                                                    std::int64_t next_run_unix) {
+    std::lock_guard lock(mutex_);
+    for (AgentSchedule& schedule : agent_schedules_) {
+        if (schedule.customer_id == customer_id && schedule.agent_id == agent_id) {
+            schedule.last_run_unix = ran_unix;
+            schedule.next_run_unix = next_run_unix;
+            return {};
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no schedule for agent " + agent_id});
+}
+
+Result<AskMessage> InMemoryStore::append_ask_message(const AskMessage& message) {
+    std::lock_guard lock(mutex_);
+    if (message.conversation_id.empty() || message.user_id.empty() ||
+        (message.role != "user" && message.role != "assistant")) {
+        return std::unexpected(StoreError{"invalid_input", "ask message is invalid"});
+    }
+    AskMessage stored = message;
+    stored.id = new_uuid_v4();
+    stored.created_at = std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    ask_messages_.push_back(stored);
+    return stored;
+}
+
+Result<std::vector<AskMessage>> InMemoryStore::ask_conversation(const std::string& conversation_id,
+                                                                const std::string& user_id,
+                                                                int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<AskMessage> messages;
+    for (const AskMessage& message : ask_messages_) {
+        if (message.conversation_id == conversation_id && message.user_id == user_id) {
+            messages.push_back(message);
+        }
+    }
+    if (limit > 0 && static_cast<int>(messages.size()) > limit) {
+        messages.erase(messages.begin(), messages.end() - limit);
+    }
+    return messages;
+}
+
 Result<void> InMemoryStore::set_store_status(const std::string& id,
                                              std::string phase,
                                              std::string message,
@@ -1877,6 +2032,32 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
+    if (secret.starts_with(agent_launch_credential_prefix)) {
+        const auto parsed = parse_agent_launch_credential(secret);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto launch = std::ranges::find(agent_launches_, parsed->first, &AgentLaunch::id);
+        if (launch == agent_launches_.end() || launch->desired != "present" ||
+            launch->credential_sha256.empty() ||
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                     launch->credential_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto user = std::ranges::find_if(
+            users_, [&](const User& row) { return row.id == launch->created_by_user_id; });
+        if (user == users_.end() || user->taap_id.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "launch identity is unavailable"});
+        }
+        return Principal{user->id,
+                         user->taap_id,
+                         "launch:" + launch->id,
+                         "",
+                         "lake",
+                         "agent_launch",
+                         launch->scopes,
+                         std::nullopt};
+    }
     for (auto& session : sessions_) {
         if (!session.revoked_at.empty() ||
             !identity_crypto::verify_secret(session_hash(session), secret))

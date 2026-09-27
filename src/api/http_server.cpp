@@ -4827,6 +4827,7 @@ struct ApiServer::Impl {
         ctx.platform = options.platform.get();
         ctx.workspaces = options.workspaces.get();
         ctx.non_expiring_credentials_allowed = options.allow_non_expiring_credentials;
+        ctx.agent_caller = options.agent_caller.get();
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
@@ -7462,6 +7463,15 @@ struct ApiServer::Impl {
                 page.state = status.value;
             }
         }
+        if (section == "agent" && page.unavailable.empty()) {
+            const ApiResult launches = unwrap(co_await workspace_call(
+                "list_agent_launches",
+                {{"customer_id", page.customer_id}, {"agent_id", page.subject}, {"limit", 20}},
+                context));
+            if (launches.ok) {
+                page.data["list_agent_launches"] = launches.value;
+            }
+        }
         if (section == "agents") {
             // The Agent Library does not need the workspace (docs/api/train-agents.md).
             const ApiResult library = unwrap(
@@ -7728,11 +7738,40 @@ struct ApiServer::Impl {
                 agent["model_name"] = "Orama base model";
                 agent["system_prompt"] = manifesto;
             }
+            const bool python = agent.value("runtime", std::string()) == "python";
+            const std::string trigger = agent.value("trigger", std::string());
             result = unwrap(co_await act("create_agent", std::move(agent)));
-            back = result.ok
-                       ? "/train/agent?" + query +
-                             "&id=" + oauth_url_encode(result.value.value("id", std::string()))
-                       : "/train/agents?" + query;
+            const std::string created = result.ok ? result.value.value("id", std::string()) : "";
+            if (result.ok && python && !trigger.empty()) {
+                // A trigger is lake's to fire (docs/api/agent-launches.md).
+                const ApiResult scheduled = unwrap(co_await workspace_call(
+                    "schedule_agent",
+                    {{"customer_id", customer_id}, {"agent_id", created}, {"trigger", trigger}},
+                    context));
+                if (!scheduled.ok) {
+                    result = scheduled;
+                }
+            }
+            back = !created.empty() ? "/train/agent?" + query + "&id=" + oauth_url_encode(created)
+                                    : "/train/agents?" + query;
+        } else if (action == "agent_run" || action == "agent_stop") {
+            const std::string id = form_field(body, "id");
+            back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
+            if (action == "agent_run") {
+                const std::string task = form_field(body, "input");
+                result = unwrap(co_await workspace_call(
+                    "launch_agent",
+                    {{"customer_id", customer_id},
+                     {"agent_id", id},
+                     {"mode", "job"},
+                     {"input", task.empty() ? nlohmann::json(nullptr) : nlohmann::json(task)}},
+                    context));
+            } else {
+                result = unwrap(co_await workspace_call(
+                    "stop_agent_launch",
+                    {{"customer_id", customer_id}, {"launch_id", form_field(body, "launch_id")}},
+                    context));
+            }
         } else if (action == "agent_delete") {
             const std::string id = form_field(body, "id");
             const std::string name = form_field(body, "name");
@@ -11723,9 +11762,11 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 32>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 34>{
              {{"/workspace/start", "start"},
               {"/train/agents/create", "agent_create"},
+              {"/train/agent/run", "agent_run"},
+              {"/train/agent/stop", "agent_stop"},
               {"/train/agent/delete", "agent_delete"},
               {"/train/dataset/promote", "dataset_promote"},
               {"/train/data/generate", "dataset_generate"},

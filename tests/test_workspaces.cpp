@@ -3,7 +3,9 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -16,6 +18,8 @@
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_library.hpp"
+#include "lake/control/agent_runs.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "temporary_directory.hpp"
@@ -1692,4 +1696,212 @@ TEST(Workspaces, AgentPageShowsTheDefinitionPipelinesRunsAndATypedDelete) {
     EXPECT_NE(html.find("Never trained."), std::string::npos);
     EXPECT_NE(html.find("action=\"/train/agent/delete\""), std::string::npos);
     EXPECT_NE(html.find("Type <strong>Renewal watcher</strong>"), std::string::npos);
+}
+
+// ---- Agent launches, schedules and turns (docs/api/agent-launches.md, lake#231) ----
+
+namespace {
+
+class FakeAgentService final : public lake::control::AgentCaller {
+public:
+    std::vector<std::tuple<std::string, std::string, json>> turns;
+    json answer = {{"ok", true}, {"reply", "done"}};
+
+    liquid::runtime::task<ZettaControlResult<json>>
+    turn(std::string endpoint, std::string token, json body) override {
+        turns.emplace_back(endpoint, token, body);
+        co_return ZettaControlResult<json>(answer);
+    }
+};
+
+struct AgentRuns {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    lake::control::Principal principal = *store.context_for(w.secret);
+    lake::api::Registry registry;
+    FakeAgentService agents;
+
+    AgentRuns() {
+        auto requested = w.run(w.service->request(w.customer_id));
+        const auto workspace = store.get_service(requested->service_id);
+        EXPECT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+        w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+        lake::api::register_core_capabilities(registry, "test");
+    }
+    lake::api::ApiResult call(const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.agent_caller = &agents;
+        context.authorized = true;
+        context.session_credential = true;
+        context.acting_user_id = principal.user_id;
+        context.acting_identity = principal.taap_id;
+        context.credential_session_id = principal.session_id;
+        context.scopes = principal.scopes;
+        context.pool_id = "lake";
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = w.customer_id;
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    }
+};
+
+} // namespace
+
+TEST(AgentRuns, TriggersBecomeTheirNextRunInUtc) {
+    // 2026-09-28 was a Monday; 10:00 UTC.
+    const std::int64_t monday = 1790589600;
+    using lake::control::next_run;
+    EXPECT_EQ(next_run("every 15 minutes", monday), monday + 900);
+    EXPECT_EQ(next_run("every 1 minute", monday), monday + 300) << "at most every five minutes";
+    EXPECT_EQ(next_run("hourly", monday), monday + 3600);
+    EXPECT_EQ(next_run("Every 2 days", monday), monday + 2 * 86400);
+    EXPECT_EQ(next_run("every day at 09:00", monday), monday + 23 * 3600);
+    EXPECT_EQ(next_run("every Monday at 11:30", monday), monday + 5400);
+    EXPECT_EQ(next_run("every Monday at 09:00", monday), monday + 7 * 86400 - 3600);
+    EXPECT_EQ(next_run("every weekday at 09:00", monday + 4 * 86400), monday + 7 * 86400 - 3600)
+        << "Friday's next weekday run is Monday";
+    EXPECT_FALSE(next_run("when a new dataset lands", monday));
+    EXPECT_FALSE(next_run("every day at 25:00", monday));
+}
+
+TEST(AgentRuns, TheSchedulerFiresDueSchedulesAsJobsAndMovesThem) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto session = store->sign_in_clerk(minted("scheduler"));
+    const auto principal = store->context_for(session->secret);
+    const std::string customer_id = store->list_customers(10, principal->user_id)->front().id;
+    ASSERT_TRUE(store->put_agent_schedule({customer_id,
+                                           "a-1",
+                                           "Watcher",
+                                           "every 2 hours",
+                                           1000,
+                                           0,
+                                           principal->user_id,
+                                           principal->taap_id}));
+    lake::control::AgentScheduler scheduler(store, std::chrono::seconds{60});
+    EXPECT_EQ(scheduler.tick(999), 0U) << "not yet due";
+    EXPECT_EQ(scheduler.tick(1000), 1U);
+    const auto launches = store->list_agent_launches(customer_id, "a-1", 10);
+    ASSERT_EQ(launches->size(), 1U);
+    EXPECT_EQ(launches->front().mode, "job");
+    EXPECT_EQ(launches->front().trigger, "schedule");
+    EXPECT_EQ(launches->front().created_by_user_id, principal->user_id);
+    EXPECT_EQ(scheduler.tick(1001), 0U) << "moved to its next run";
+    EXPECT_EQ(scheduler.tick(1000 + 7200 + 1), 1U);
+}
+
+TEST(AgentRuns, ALaunchCredentialActsAsTheLauncherWithTheLaunchScopes) {
+    lake::control::InMemoryStore store;
+    const auto session = store.sign_in_clerk(minted("launcher"));
+    const auto principal = store.context_for(session->secret);
+    const std::string customer_id = store.list_customers(10, principal->user_id)->front().id;
+    const auto launch = store.create_agent_launch({customer_id,
+                                                   "a-1",
+                                                   "Watcher",
+                                                   "job",
+                                                   "manual",
+                                                   nullptr,
+                                                   lake::control::agent_launch_scopes,
+                                                   principal->user_id,
+                                                   principal->taap_id});
+    ASSERT_TRUE(launch);
+    const std::string credential = "lal." + launch->id + ".0123456789abcdef0123456789abcdef";
+    EXPECT_FALSE(store.context_for(credential)) << "not before the operator reports its digest";
+    ASSERT_TRUE(store.set_agent_launch_status(
+        launch->id, "Running", "", "", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto acting = store.context_for(credential);
+    ASSERT_TRUE(acting) << acting.error().message;
+    EXPECT_EQ(acting->user_id, principal->user_id);
+    EXPECT_EQ(acting->kind, "agent_launch");
+    EXPECT_EQ(acting->scopes, lake::control::agent_launch_scopes);
+    EXPECT_FALSE(store.context_for("lal." + launch->id + ".ffffffffffffffffffffffffffffffff"));
+    ASSERT_TRUE(store.withdraw_agent_launch(launch->id));
+    EXPECT_FALSE(store.context_for(credential)) << "a stopped launch's credential stops too";
+}
+
+TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
+    AgentRuns r;
+    r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Watcher"}, {"runtime", "python"}};
+    const auto launched = r.call("launch_agent", {{"agent_id", "a-1"}, {"input", "week 39"}});
+    ASSERT_TRUE(launched.ok) << launched.error.message;
+    EXPECT_EQ(launched.value["mode"], "job");
+    const auto listed = r.call("list_agent_launches", {{"agent_id", "a-1"}});
+    ASSERT_EQ(listed.value["launches"].size(), 1U);
+    EXPECT_EQ(listed.value["launches"][0]["input"], "week 39");
+    const auto stopped = r.call("stop_agent_launch", {{"launch_id", launched.value["id"]}});
+    ASSERT_TRUE(stopped.ok) << stopped.error.message;
+    EXPECT_EQ(stopped.value["desired"], "absent");
+
+    const auto scheduled =
+        r.call("schedule_agent", {{"agent_id", "a-1"}, {"trigger", "every Monday at 09:00"}});
+    ASSERT_TRUE(scheduled.ok) << scheduled.error.message;
+    EXPECT_TRUE(scheduled.value["next_run_unix"].is_number());
+    const auto vague = r.call("schedule_agent", {{"agent_id", "a-1"}, {"trigger", "sometimes"}});
+    ASSERT_FALSE(vague.ok);
+    EXPECT_NE(vague.error.message.find("cannot place"), std::string::npos);
+
+    r.w.caller->answers["get_agent"] = {{"id", "n-1"}, {"name", "Native"}, {"runtime", "native"}};
+    EXPECT_FALSE(r.call("launch_agent", {{"agent_id", "n-1"}}).ok);
+}
+
+TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"},
+                              {"agent-project", "http://project:8080"},
+                              {"agent-autosuggest", "http://suggest:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    config.agent_service_token = "service-token";
+
+    // Ask Orama gets a key for this turn only: read capabilities and agent_turn, never an action.
+    const auto asked = r.call("agent_turn", {{"agent", "agent-ask-orama"}, {"message", "hi"}});
+    ASSERT_TRUE(asked.ok) << asked.error.message;
+    const auto& [ask_url, ask_token, ask_body] = r.agents.turns.back();
+    EXPECT_EQ(ask_url, "http://ask:8080");
+    EXPECT_EQ(ask_token, "service-token");
+    EXPECT_EQ(ask_body["lake_url"], "http://lake.internal:4900");
+    const std::string key = ask_body["lake_token"];
+    EXPECT_FALSE(r.store.context_for(key)) << "the turn's key is revoked when the turn ends";
+
+    const auto built = r.call("agent_turn", {{"agent", "agent-project"}, {"message", "churn"}});
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(std::get<2>(r.agents.turns.back())["zetta_base_url"],
+              "http://lake.internal:4900/workspaces/" + r.w.customer_id + "/zetta");
+
+    r.w.caller->answers["list_datasets"] = {{"datasets", json::array({{{"name", "accounts"}}})}};
+    r.w.caller->answers["get_dataset"] = {{"columns", json::array({{{"name", "churned"}}})}};
+    const auto suggested = r.call("agent_turn", {{"agent", "agent-autosuggest"}, {"message", "?"}});
+    ASSERT_TRUE(suggested.ok) << suggested.error.message;
+    const json& profile = std::get<2>(r.agents.turns.back())["profile"];
+    EXPECT_EQ(profile["tables"][0]["name"], "accounts");
+    EXPECT_EQ(profile["tables"][0]["columns"][0]["name"], "churned");
+    EXPECT_FALSE(std::get<2>(r.agents.turns.back()).contains("lake_token"))
+        << "Auto-Suggest reads nothing itself";
+
+    EXPECT_FALSE(r.call("agent_turn", {{"agent", "agent-creator"}, {"message", "x"}}).ok)
+        << "a library agent this lake does not run";
+    EXPECT_FALSE(r.call("agent_turn", {{"agent", "agent-eval-generator"}, {"message", "x"}}).ok);
+
+    r.w.caller->answers["get_agent"] = {{"id", "n-1"}, {"runtime", "native"}};
+    r.w.caller->answers["chat"] = {{"reply", "from the base model"}};
+    const auto native = r.call("agent_turn", {{"agent", "n-1"}, {"message", "hello"}});
+    ASSERT_TRUE(native.ok) << native.error.message;
+    EXPECT_EQ(native.value["reply"], "from the base model");
+    EXPECT_EQ(r.w.caller->capability, "chat");
+
+    r.w.caller->answers["get_agent"] = {{"id", "p-1"}, {"name", "Py"}, {"runtime", "python"}};
+    const auto starting = r.call("agent_turn", {{"agent", "p-1"}, {"message", "hello"}});
+    ASSERT_TRUE(starting.ok) << starting.error.message;
+    EXPECT_EQ(starting.value["status"], "starting");
+    const std::string launch_id = starting.value["launch_id"];
+    ASSERT_TRUE(r.store.set_agent_launch_status(launch_id, "Ready", "", "http://al-1:8080", "x"));
+    const std::size_t before = r.agents.turns.size();
+    const auto talked = r.call(
+        "agent_turn", {{"agent", "p-1"}, {"message", "hello again"}, {"conversation_id", "c-1"}});
+    ASSERT_TRUE(talked.ok) << talked.error.message;
+    ASSERT_EQ(r.agents.turns.size(), before + 1);
+    EXPECT_EQ(std::get<0>(r.agents.turns.back()), "http://al-1:8080");
+    EXPECT_EQ(std::get<2>(r.agents.turns.back())["message"], "hello again");
 }
