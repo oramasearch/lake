@@ -325,6 +325,10 @@ std::string web_ui_icon(std::string_view name) {
     } else if (name == "api") {
         body =
             R"(<path d="M1 2h14v12H1V2Zm2 2v8h10V4H3Zm1 2 2 2-2 2 1.4 1.4L8.8 8 5.4 4.6 4 6Zm5 4h3V8H9v2Z"/>)";
+    } else if (name == "agent") {
+        // A speech bubble with a face: an agent you can talk to.
+        body =
+            R"(<path d="M2 2h12v9H7l-3 3v-3H2V2Zm2 2v5h8V4H4Z"/><path d="M6 5.5h1v1.5H6zm3 0h1v1.5H9z"/>)";
     } else if (name == "theme") {
         body = R"(<path d="M8 1a7 7 0 1 0 7 7 7 7 0 0 0-7-7Zm0 12V3a5 5 0 0 1 0 10Z"/>)";
     } else {
@@ -360,6 +364,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view search[] = {"/search"};
     static constexpr std::string_view deployments[] = {"/deployments"};
     static constexpr std::string_view projects[] = {"/design"};
+    static constexpr std::string_view agents[] = {"/train/agents", "/train/agent"};
     static constexpr std::string_view data[] = {"/train/data", "/train/dataset", "/train/query"};
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
     static constexpr std::string_view models[] = {"/ship/models"};
@@ -396,6 +401,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return deployments;
     if (key == "projects")
         return projects;
+    if (key == "agents")
+        return agents;
     if (key == "data")
         return data;
     if (key == "runs")
@@ -524,6 +531,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         }
         items.push_back({"", "/search", "Search", "search", "search"});
         items.push_back({"Design", "/design/projects", "Projects", "audit", "projects"});
+        items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
         items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
         items.push_back({"Ship", "/ship/models", "Models", "api", "models"});
@@ -1696,7 +1704,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 12> workspace_sections{{
+constexpr std::array<WorkspaceSection, 14> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1710,6 +1718,13 @@ constexpr std::array<WorkspaceSection, 12> workspace_sections{{
      "/design/projects",
      "The steps Zetta runs, how data flows between them, and what the last run did. Change it "
      "here; a changed pipeline is approved again before it runs."},
+    {"agents",
+     "Train",
+     "Agents",
+     "/train/agents",
+     "Build your own agents and read what the unattended ones did. You talk to agents in Ask "
+     "Orama; the Agent Library lists the specialized agents Orama ships."},
+    {"agent", "Train", "Agent", "/train/agents", ""},
     {"data",
      "Train",
      "Data",
@@ -2760,12 +2775,239 @@ std::string index_content(const WorkspacePage& page) {
     return out;
 }
 
+// Studio's skills (orama-design src/studio/studioAgents.js): granted, never assumed.
+constexpr std::array<std::pair<std::string_view, std::string_view>, 5> agent_skills{{
+    {"search", "Search data"},
+    {"generate-data", "Generate a dataset"},
+    {"train", "Train a Model"},
+    {"summarize", "Summarize and explain"},
+    {"call-api", "Call the API"},
+}};
+
+std::string agent_skill_labels(const nlohmann::json& skills) {
+    std::string labels;
+    for (const nlohmann::json& skill : skills) {
+        if (!skill.is_string()) {
+            continue;
+        }
+        std::string label = skill.get<std::string>();
+        for (const auto& [key, text] : agent_skills) {
+            if (key == label) {
+                label = std::string(text);
+            }
+        }
+        labels += (labels.empty() ? "" : ", ") + label;
+    }
+    return labels.empty() ? std::string("—") : labels;
+}
+
+std::string agent_engagement(const nlohmann::json& agent) {
+    return json_text(agent, "trigger").empty() ? "Conversation" : "Conversation and unattended";
+}
+
+std::string agent_model_label(const nlohmann::json& agent) {
+    const std::string name = json_text(agent, "model_name");
+    return name.empty() ? json_text(agent, "model") : name;
+}
+
+// Every specialized agent Orama ships (docs/api/train-agents.md, Agent Library). Shown whether or
+// not the workspace is ready: the library is lake's, not the workspace's.
+std::string agent_library_content(const WorkspacePage& page) {
+    const nlohmann::json agents = page.data.value("list_agent_library", nlohmann::json::object())
+                                      .value("agents", nlohmann::json::array());
+    std::string out =
+        "<section class=\"panel\" id=\"agent-library\"><h2>Agent Library</h2><p class=\"sub\">The "
+        "specialized agents Orama ships. You meet each where it works; Ask Orama can delegate "
+        "to any of them.</p>";
+    if (agents.empty()) {
+        return out + "<p>The Agent Library is not available.</p></section>";
+    }
+    out += "<table><thead><tr><th>Agent</th><th>Where you meet it</th><th>Runs as</th>"
+           "<th>Status</th></tr></thead><tbody>";
+    for (const nlohmann::json& agent : agents) {
+        const std::string runs_as = json_text(agent, "runs_as");
+        const std::string status = json_text(agent, "status");
+        out += std::format(
+            "<tr><td><span class=\"agent-cell\"><strong>{}</strong><small>{}</small></span></td>"
+            "<td>{}</td><td>{}</td><td><span class=\"badge\">{}</span></td></tr>",
+            web_ui_escape(json_text(agent, "name")),
+            web_ui_escape(json_text(agent, "purpose")),
+            web_ui_escape(json_text(agent, "used_in")),
+            runs_as == "service"         ? "Its own service"
+            : runs_as == "agent-runtime" ? "agent-runtime"
+                                         : "Offline",
+            web_ui_escape(status));
+    }
+    return out + "</tbody></table></section>";
+}
+
+std::string agent_create_form(const WorkspacePage& page) {
+    std::string skills;
+    for (const auto& [key, label] : agent_skills) {
+        skills += std::format("<label><input type=\"checkbox\" name=\"skills\" value=\"{}\"> {}"
+                              "</label>",
+                              key,
+                              label);
+    }
+    return std::format(
+        "<section class=\"panel\" id=\"create-agent\"><h2>Create an Agent</h2><p class=\"sub\">"
+        "An agent carries a manifesto, a goal and the skills you grant it. Leave the trigger "
+        "empty and it only talks; fill it and it can also run on its own.</p><form "
+        "class=\"stack\" method=\"post\" action=\"/train/agents/create\">{}<label>Name<input "
+        "name=\"name\" required maxlength=\"80\" placeholder=\"Renewal watcher\"></label><label>"
+        "Purpose<input name=\"purpose\" required placeholder=\"Flag renewals at risk a month "
+        "ahead\"></label><label>Work area<select name=\"work_area\"><option "
+        "value=\"workspace\">This workspace</option><option value=\"project\">A single "
+        "project</option><option value=\"dataset\">Specific data</option></select></label>"
+        "<label>Project or datasets (for a single project or specific data)<input "
+        "name=\"work_area_detail\" placeholder=\"churn\"></label><label>Manifesto<textarea "
+        "name=\"manifesto\" rows=\"3\" placeholder=\"Answer from company data only. Say when "
+        "evidence is missing rather than estimating.\"></textarea></label><label>Goal<textarea "
+        "name=\"goal\" rows=\"2\" placeholder=\"Every at-risk renewal is flagged a month "
+        "ahead.\"></textarea></label><fieldset><legend>Skills</legend>{}</fieldset><label>Model"
+        "<select name=\"model\"><option value=\"base\">Orama base model (runs in your "
+        "workspace)</option><option value=\"frontier\">Frontier model (runs on "
+        "agent-runtime)</option></select></label><label>Trigger or schedule<input "
+        "name=\"trigger\" placeholder=\"every Monday at 09:00, or when a new dataset "
+        "lands\"></label><button class=\"button button-primary\" type=\"submit\">Create "
+        "agent</button></form></section>",
+        hidden("customer_id", page.customer_id),
+        skills);
+}
+
+std::string agents_content(const WorkspacePage& page) {
+    const std::string query = customer_query(page.customer_id);
+    const nlohmann::json listed = page.data.value("list_agents", nlohmann::json::object())
+                                      .value("agents", nlohmann::json::array());
+    std::string out = "<section class=\"panel\" id=\"your-agents\"><h2>Your Agents</h2>";
+    std::size_t shown = 0;
+    std::string rows;
+    for (const nlohmann::json& agent : listed) {
+        if (json_text(agent, "kind") == "orama") {
+            continue;
+        }
+        ++shown;
+        const std::string id = json_text(agent, "id");
+        const std::string status = json_text(agent, "status");
+        rows += std::format(
+            "<tr><td><span class=\"agent-cell\">{}<small>{}</small></span></td><td><span "
+            "class=\"badge\">{}</span></td><td>{}</td><td><code>{}</code></td><td><span "
+            "class=\"badge\">{}</span></td></tr>",
+            row_link("/train/agent?" + query + "&id=" + url_component(id),
+                     json_text(agent, "name")),
+            web_ui_escape(json_text(agent, "purpose")),
+            agent_engagement(agent),
+            web_ui_escape(agent_skill_labels(agent.value("skills", nlohmann::json::array()))),
+            web_ui_escape(agent_model_label(agent)),
+            web_ui_escape(status.empty() ? "idle" : status));
+    }
+    if (shown == 0) {
+        out += "<p>No agents yet. Create one below.</p>";
+    } else {
+        out += "<table><thead><tr><th>Agent</th><th>Engagement</th><th>Skills</th><th>Model</th>"
+               "<th>Status</th></tr></thead><tbody>" +
+               rows + "</tbody></table>";
+    }
+    return out + "</section>" + agent_create_form(page);
+}
+
+std::string agent_content(const WorkspacePage& page) {
+    const std::string query = customer_query(page.customer_id);
+    const nlohmann::json agent = page.data.value("get_agent", nlohmann::json::object());
+    if (agent.empty()) {
+        return "<div class=\"panel empty\">No such agent in this workspace.</div>";
+    }
+    const std::string runtime = json_text(agent, "runtime");
+    const nlohmann::json area = agent.value("work_area", nlohmann::json::object());
+    std::string area_text = json_text(area, "kind") == "project"   ? "A single project"
+                            : json_text(area, "kind") == "dataset" ? "Specific data"
+                                                                   : "This workspace";
+    if (!json_text(area, "detail").empty()) {
+        area_text += ": " + json_text(area, "detail");
+    }
+    const auto row = [](std::string_view label, std::string_view value) {
+        return std::format("<dt>{}</dt><dd>{}</dd>",
+                           label,
+                           web_ui_escape(value.empty() ? std::string_view("—") : value));
+    };
+    std::string out = "<section class=\"panel\"><h2>About</h2><dl>";
+    out += row("Purpose", json_text(agent, "purpose"));
+    out += row("Engagement", agent_engagement(agent));
+    out += row("Work area", area_text);
+    out += row("Skills", agent_skill_labels(agent.value("skills", nlohmann::json::array())));
+    out += row("Model", agent_model_label(agent));
+    out += row("Runs",
+               runtime == "python"    ? "On agent-runtime"
+               : runtime == "service" ? "As its own service"
+                                      : "In your workspace");
+    out += row("Manifesto", json_text(agent, "manifesto"));
+    out += row("Goal", json_text(agent, "goal"));
+    out += row("Trigger or schedule", json_text(agent, "trigger"));
+    out += row("Status", json_text(agent, "status"));
+    out += "</dl><p class=\"sub\">Talk to this agent in Ask Orama.</p></section>";
+
+    const nlohmann::json pipelines = agent.value("pipelines", nlohmann::json::array());
+    out += "<section class=\"panel\" id=\"agent-pipelines\"><h2>Pipelines</h2>";
+    if (pipelines.empty()) {
+        out += "<p>No Pipelines granted. An approved Pipeline granted here becomes one of this "
+               "agent's tools.</p>";
+    } else {
+        out += "<ul>";
+        for (const nlohmann::json& grant : pipelines) {
+            out += std::format("<li>{} in {} <small>approved {}</small></li>",
+                               row_link("/design/pipeline?" + query + "&project=" +
+                                            url_component(json_text(grant, "project")) +
+                                            "&graph=" + url_component(json_text(grant, "graph")),
+                                        json_text(grant, "graph")),
+                               web_ui_escape(json_text(grant, "project")),
+                               web_ui_escape(json_text(grant, "version")));
+        }
+        out += "</ul>";
+    }
+    out += "</section>";
+
+    out += "<section class=\"panel\" id=\"agent-runs\"><h2>Unattended Runs</h2>";
+    const nlohmann::json launches = page.data.value("list_agent_launches", nlohmann::json::object())
+                                        .value("launches", nlohmann::json::array());
+    if (launches.empty()) {
+        out += json_text(agent, "trigger").empty()
+                   ? "<p>This agent only talks: it has no trigger.</p>"
+                   : "<p>No unattended runs yet.</p>";
+    }
+    out += "</section>";
+
+    if (runtime.empty() || runtime == "native") {
+        const nlohmann::json training =
+            page.data.value("agent_training_status", nlohmann::json::object());
+        if (!training.empty()) {
+            out += std::format("<section class=\"panel\"><h2>Training</h2><p>{}</p></section>",
+                               web_ui_escape(json_text(training, "reason")));
+        }
+    }
+    out += std::format(
+        "<section class=\"panel\"><h2>Delete Agent</h2><form class=\"stack\" "
+        "method=\"post\" action=\"/train/agent/delete\">{}{}{}<label>Type <strong>{}</strong> to "
+        "delete this agent<input name=\"confirm\" required autocomplete=\"off\"></label><button "
+        "class=\"button button-danger\" type=\"submit\">Delete agent</button></form></section>",
+        hidden("customer_id", page.customer_id),
+        hidden("id", json_text(agent, "id")),
+        hidden("name", json_text(agent, "name")),
+        web_ui_escape(json_text(agent, "name")));
+    return out;
+}
+
 std::string workspace_content(const WorkspacePage& page) {
     if (page.section == "pipeline") {
         return pipeline_content(page);
     }
     if (page.section == "index") {
         return index_content(page);
+    }
+    if (page.section == "agents") {
+        return agents_content(page);
+    }
+    if (page.section == "agent") {
+        return agent_content(page);
     }
     const nlohmann::json& data = page.data;
     const std::string query = customer_query(page.customer_id);
@@ -3334,9 +3576,13 @@ std::vector<WebUiCrumb> workspace_trail(const WorkspacePage& page,
 
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     const WorkspaceSection& section = workspace_section(page.section);
-    const std::string title = page.subject.empty()
-                                  ? std::string(section.title)
-                                  : std::string(section.title) + ": " + page.subject;
+    const std::string named =
+        page.section == "agent"
+            ? json_text(page.data.value("get_agent", nlohmann::json::object()), "name")
+            : std::string();
+    const std::string subject = named.empty() ? page.subject : named;
+    const std::string title =
+        subject.empty() ? std::string(section.title) : std::string(section.title) + ": " + subject;
     std::string content = std::format("<p class=\"eyebrow\">{}</p><h1>{}</h1>",
                                       web_ui_escape(section.verb),
                                       web_ui_escape(title));
@@ -3387,6 +3633,9 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     }
     if (page.unavailable.empty() && page.section == "data") {
         content += storage_content(page);
+    }
+    if (page.section == "agents") {
+        content += agent_library_content(page);
     }
     return web_ui_shell("lake — " + title, workspace_trail(page, section), content, viewer);
 }

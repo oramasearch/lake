@@ -764,6 +764,28 @@ dd {
   margin: 0;
   overflow-wrap: anywhere;
 }
+.agent-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lake-space-1);
+}
+.agent-cell small {
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-11);
+}
+fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lake-space-2) var(--lake-space-4);
+  margin: 0;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  padding: var(--lake-space-2) var(--lake-space-3);
+}
+legend {
+  padding: 0 var(--lake-space-1);
+  color: var(--lake-text-secondary);
+  font-size: var(--lake-text-11);
+}
 .badge {
   min-height: 1.25rem;
   display: inline-flex;

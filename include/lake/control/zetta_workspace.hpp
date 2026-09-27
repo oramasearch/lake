@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,6 +23,14 @@ namespace lake::control {
 struct WorkspaceConfig {
     std::string service_dir;          // LAKE_SERVICE_DIR
     std::size_t max_per_customer = 0; // LAKE_SERVICES_PER_CUSTOMER; 0 (the default) means no limit
+    // The Agent Library's running agents (LAKE_AGENT_ENDPOINTS, set by the operator), keyed by
+    // repository name (agent_library.hpp).
+    std::map<std::string, std::string> agent_endpoints;
+    // The checkpoint a native agent built on "the Orama base model" loads inside a workspace
+    // (LAKE_BASE_AGENT_MODEL; docs/api/train-agents.md).
+    std::string base_agent_model = "/var/lib/zetta/models/base-agent";
+    // The frontier model a Python agent built from the form runs on (LAKE_AGENT_MODEL).
+    std::string frontier_model = "gpt-4o";
 
     bool configured() const {
         return !service_dir.empty();

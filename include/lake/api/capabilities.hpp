@@ -29,6 +29,9 @@ void register_workspace_capabilities(Registry& registry);
 // workspace_query / workspace_act both consult these, so the two can never disagree.
 bool workspace_read_allowed(std::string_view capability);
 bool workspace_action_allowed(std::string_view capability);
+// Whether Zetta takes the capability with GET: every read, and `chat`, which lake authorizes as
+// an action because it loads a model.
+bool workspace_uses_get(std::string_view capability);
 // Zetta's OpenAPI document reduced to the allow-listed paths, rebased under `base` (the agent
 // path of one workspace), so a client deriving its tools from it sees exactly what it may call.
 nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_view base);

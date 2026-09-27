@@ -28,6 +28,11 @@ struct GroupRule {
 
 // First match wins, so the narrow groups come before Repositories, which takes the rest.
 constexpr std::array group_rules{
+    GroupRule{"Agents",
+              "The Agent Library of specialized agents Orama ships, and the agents you build in "
+              "Train > Agents (list, create, chat and run them through workspace_query and "
+              "workspace_act).",
+              [](std::string_view n) { return n == "list_agent_library"; }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your Zetta workspace: projects and pipelines, data, runs, models and search "
               "indexes. workspace_query and workspace_act reach every allowed Zetta capability.",
@@ -124,15 +129,16 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 9> group_order{"Workspace: Design, Train and Ship",
-                                                      "Services",
-                                                      "Storage",
-                                                      "Repositories",
-                                                      "Organizations and access",
-                                                      "Identity and sessions",
-                                                      "Secrets, keys and certificates",
-                                                      "Audit and transparency",
-                                                      "Server"};
+constexpr std::array<std::string_view, 10> group_order{"Workspace: Design, Train and Ship",
+                                                       "Agents",
+                                                       "Services",
+                                                       "Storage",
+                                                       "Repositories",
+                                                       "Organizations and access",
+                                                       "Identity and sessions",
+                                                       "Secrets, keys and certificates",
+                                                       "Audit and transparency",
+                                                       "Server"};
 
 std::string required_fields(const Capability& capability) {
     std::string out;

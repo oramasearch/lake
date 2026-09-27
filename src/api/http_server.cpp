@@ -83,6 +83,7 @@
 #include "lake/control/pki.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/transparency/log.hpp"
@@ -590,6 +591,26 @@ std::string form_field(std::string_view body, std::string_view name) {
         pos = amp + 1;
     }
     return {};
+}
+
+// Every value of a repeated field (checkboxes), in order.
+std::vector<std::string> form_fields(std::string_view body, std::string_view name) {
+    std::vector<std::string> values;
+    std::size_t pos = 0;
+    while (pos < body.size()) {
+        const std::size_t amp = body.find('&', pos);
+        std::string_view pair =
+            body.substr(pos, amp == std::string_view::npos ? std::string_view::npos : amp - pos);
+        const std::size_t eq = pair.find('=');
+        if (eq != std::string_view::npos && form_decode(pair.substr(0, eq)) == name) {
+            values.push_back(form_decode(pair.substr(eq + 1)));
+        }
+        if (amp == std::string_view::npos) {
+            break;
+        }
+        pos = amp + 1;
+    }
+    return values;
 }
 
 struct MultipartFile {
@@ -7391,7 +7412,7 @@ struct ApiServer::Impl {
         page.customer_id = std::move(selection.customer_id);
         if (section == "project") {
             page.subject = query_value(route, "name");
-        } else if (section == "run" || section == "index") {
+        } else if (section == "run" || section == "index" || section == "agent") {
             page.subject = query_value(route, "id");
         } else if (section == "dataset") {
             page.subject = query_value(route, "name");
@@ -7437,6 +7458,14 @@ struct ApiServer::Impl {
                 page.state = status.value;
             }
         }
+        if (section == "agents") {
+            // The Agent Library does not need the workspace (docs/api/train-agents.md).
+            const ApiResult library = unwrap(
+                co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
+            if (library.ok) {
+                page.data["list_agent_library"] = library.value;
+            }
+        }
         if (page.unavailable.empty() && section == "data") {
             // Storage does not need the workspace (docs/api/storage.md).
             const ApiResult stores = unwrap(co_await workspace_call(
@@ -7468,6 +7497,11 @@ struct ApiServer::Impl {
                 if (services.ok) {
                     page.data["list_services"] = services.value;
                 }
+            } else if (section == "agents") {
+                reads = {{"list_agents", nlohmann::json::object()}};
+            } else if (section == "agent") {
+                reads = {{"get_agent", {{"id", page.subject}}},
+                         {"agent_training_status", {{"id", page.subject}}}};
             } else if (section == "runs") {
                 reads = {{"list_runs", nlohmann::json::object()}};
             } else if (section == "run") {
@@ -7637,8 +7671,8 @@ struct ApiServer::Impl {
         if (action == "start") {
             const std::string requested = form_field(body, "return");
             back = requested == "/design/projects" || requested == "/train/data" ||
-                           requested == "/train/runs" || requested == "/ship/models" ||
-                           requested == "/ship/indexes"
+                           requested == "/train/agents" || requested == "/train/runs" ||
+                           requested == "/ship/models" || requested == "/ship/indexes"
                        ? requested
                        : std::string("/design/projects");
             back += "?" + query;
@@ -7650,6 +7684,62 @@ struct ApiServer::Impl {
                 "delete_workspace",
                 {{"customer_id", customer_id}, {"confirm", form_field(body, "confirm")}},
                 context));
+        } else if (action == "agent_create") {
+            // Train > Agents > Create an Agent: Studio's boxes (docs/api/train-agents.md). The
+            // Orama base model makes a native agent that runs in the workspace; a frontier model
+            // makes a Python agent that runs on agent-runtime from the instructions composed here.
+            const std::string name = form_field(body, "name");
+            const std::string purpose = form_field(body, "purpose");
+            const std::string manifesto = form_field(body, "manifesto");
+            const std::string goal = form_field(body, "goal");
+            nlohmann::json agent{{"name", name},
+                                 {"purpose", purpose},
+                                 {"description", purpose},
+                                 {"work_area",
+                                  {{"kind", form_field(body, "work_area")},
+                                   {"detail", form_field(body, "work_area_detail")}}},
+                                 {"manifesto", manifesto},
+                                 {"goal", goal},
+                                 {"skills", form_fields(body, "skills")},
+                                 {"trigger", form_field(body, "trigger")}};
+            const control::WorkspaceConfig* config =
+                options.workspaces ? &options.workspaces->config() : nullptr;
+            if (form_field(body, "model") == "frontier") {
+                std::string instructions = "# " + name + "\n\n" + purpose + "\n";
+                if (!manifesto.empty()) {
+                    instructions += "\n## How you work\n\n" + manifesto + "\n";
+                }
+                if (!goal.empty()) {
+                    instructions += "\n## Your goal\n\n" + goal + "\n";
+                }
+                agent["runtime"] = "python";
+                agent["model_name"] = config ? config->frontier_model : std::string("gpt-4o");
+                agent["definition"] = {{"source", "zetta"},
+                                       {"instructions", instructions},
+                                       {"files", nlohmann::json::array()},
+                                       {"entrypoint", ""}};
+            } else {
+                agent["runtime"] = "native";
+                agent["model"] = config ? config->base_agent_model : std::string();
+                agent["model_name"] = "Orama base model";
+                agent["system_prompt"] = manifesto;
+            }
+            result = unwrap(co_await act("create_agent", std::move(agent)));
+            back = result.ok
+                       ? "/train/agent?" + query +
+                             "&id=" + oauth_url_encode(result.value.value("id", std::string()))
+                       : "/train/agents?" + query;
+        } else if (action == "agent_delete") {
+            const std::string id = form_field(body, "id");
+            const std::string name = form_field(body, "name");
+            if (form_field(body, "confirm") != name) {
+                result = ApiResult::failure("invalid_input", "Type the agent's name to delete it.");
+                back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
+            } else {
+                result = unwrap(co_await act("delete_agent", {{"id", id}}));
+                back = result.ok ? "/train/agents?" + query
+                                 : "/train/agent?" + query + "&id=" + oauth_url_encode(id);
+            }
         } else if (action == "delete_project") {
             const std::string project = form_field(body, "project");
             if (form_field(body, "confirm") != project) {
@@ -10963,9 +11053,9 @@ struct ApiServer::Impl {
                 status = http::status::not_found;
                 body =
                     error_body("unknown_capability", capability + " is not available through lake");
-            } else if (read != get) {
+            } else if (workspace_uses_get(capability) != get) {
                 status = http::status::method_not_allowed;
-                allow = read ? "GET" : "POST";
+                allow = workspace_uses_get(capability) ? "GET" : "POST";
                 body = error_body("method_not_allowed",
                                   capability + " takes " + allow + " through lake");
             } else if (get) {
@@ -11608,9 +11698,11 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 12>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 14>{{{"/design/projects", "projects"},
                                                               {"/design/project", "project"},
                                                               {"/design/pipeline", "pipeline"},
+                                                              {"/train/agents", "agents"},
+                                                              {"/train/agent", "agent"},
                                                               {"/train/data", "data"},
                                                               {"/train/dataset", "dataset"},
                                                               {"/train/query", "query"},
@@ -11627,8 +11719,10 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 30>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 32>{
              {{"/workspace/start", "start"},
+              {"/train/agents/create", "agent_create"},
+              {"/train/agent/delete", "agent_delete"},
               {"/train/dataset/promote", "dataset_promote"},
               {"/train/data/generate", "dataset_generate"},
               {"/train/data/connect-service", "connect_service"},
