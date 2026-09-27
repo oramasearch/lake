@@ -2564,8 +2564,7 @@ void register_agent_run_capabilities(Registry& registry) {
                 body["lake_url"] = config.internal_url;
                 // The agents that read the person's workspace get lake's read-only path to it.
                 if (agent == "agent-project" || agent == "agent-autosuggest" ||
-                    agent == "agent-creator" || agent == "agent-eval-generator" ||
-                    agent == "agent-project-corpus") {
+                    agent == "agent-creator" || agent == "agent-project-corpus") {
                     body["zetta_base_url"] =
                         config.internal_url + "/workspaces/" + customer_id + "/zetta";
                     body["zetta_token"] = "{{credential}}";

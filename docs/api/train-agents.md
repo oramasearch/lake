@@ -50,7 +50,7 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 | `agent-project` | Project Agent | Design: Create a Solution and revised plans; Ask Orama's subagent | its own service |
 | `agent-autosuggest` | Auto-Suggest | Design: Discover Opportunities; Ask Orama's subagent | its own service |
 | `agent-creator` | AgentCreator | Train: Agents, Create with the Agent Factory | `agent-runtime` |
-| `agent-eval-generator` | Eval Generator | A realistic test case on request (a role, their problem, real-looking data), read against your workspace; publishes nothing (lake#263) | service |
+| `agent-eval-generator` | Eval Generator | A realistic test case on request (a role, their problem, real-looking data), with its own invented tables; publishes nothing (lake#263) | service |
 | `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | One example of what is worth building for a situation you describe, checked against the test cases; writes nothing to the corpus (lake#263) | service |
 | `agent-project-corpus` | Project Corpus Generator | A worked example of building or changing a pipeline on your own data, replayed against your workspace; changes nothing (lake#263) | service |
 
