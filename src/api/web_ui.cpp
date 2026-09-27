@@ -3411,8 +3411,27 @@ std::string workspace_content(const WorkspacePage& page) {
                                              ? "No description."
                                              : json_text(project, "description")));
         const nlohmann::json graphs = project.value("graphs", nlohmann::json::array());
+        // Made from an Opportunity: the Project Agent designs the pipeline in the background.
+        const nlohmann::json build = data.value("build", nlohmann::json::object());
+        const std::string build_status = json_text(build, "status");
+        const bool designing = graphs.empty() && (build_status == "pending" ||
+                                                  build_status == "Running");
+        if (designing) {
+            out += "<section class=\"panel notice\" role=\"status\"><p><strong>The Project Agent "
+                   "is designing this project's pipeline…</strong> It reads your data and the "
+                   "Opportunity this project came from; the pipeline appears here when it is "
+                   "done. You can leave this page. This page checks again every 3 seconds.</p>"
+                   "<meta http-equiv=\"refresh\" content=\"3\"></section>";
+        } else if (graphs.empty() && build_status == "Failed") {
+            out += std::format("<p class=\"error\" role=\"alert\">The Project Agent could not "
+                               "design this project's pipeline: {} Describe it below instead."
+                               "</p>",
+                               web_ui_escape(json_text(build, "message")));
+        }
         out += "<section class=\"panel\"><h2>Pipelines</h2>";
-        if (graphs.empty()) {
+        if (graphs.empty() && designing) {
+            out += "<p>Designing…</p>";
+        } else if (graphs.empty()) {
             out += "<p>No pipelines yet. Describe what the project should predict or answer, "
                    "and Zetta builds one.</p>";
         } else {

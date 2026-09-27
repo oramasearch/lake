@@ -910,6 +910,10 @@ public:
     // Background agent turns (lake#269, docs/api/agent-bus.md).
     virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
     virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;
+    // A space's newest task of one kind (a project's pipeline build is kind "build:<project>");
+    // not_found when there is none.
+    virtual Result<AgentTask> latest_agent_task(const std::string& customer_id,
+                                                const std::string& kind) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
     // it and where on agent-events its events will start. Exactly one claim succeeds; another is
     // a conflict, as is a claim by a different agent.

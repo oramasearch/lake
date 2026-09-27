@@ -1050,6 +1050,17 @@ std::string utc_now() {
 }
 } // namespace
 
+Result<AgentTask> InMemoryStore::latest_agent_task(const std::string& customer_id,
+                                                   const std::string& kind) {
+    std::lock_guard lock(mutex_);
+    for (auto task = agent_tasks_.rbegin(); task != agent_tasks_.rend(); ++task) {
+        if (task->customer_id == customer_id && task->kind == kind) {
+            return *task;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no " + kind + " task"});
+}
+
 Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
                                                   const std::string& agent,
                                                   const std::string& credential_sha256,

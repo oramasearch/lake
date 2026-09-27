@@ -8,6 +8,17 @@ project draft (`create_projects_from_opportunities {opportunity_ids}`, on confir
 (`dismiss_opportunity`). `list_opportunities {task_id?}` reads them over REST and MCP. Each names the
 catalogue solution it maps to; the catalogue itself in lake is lake#270.
 
+**A project made from an Opportunity gets its pipeline.** Creating the project starts a Project
+Agent task in the background (kind `build:<project>`), briefed with the Opportunity: its intent, what
+it changes, why the data supports it, its catalogue solution and methodology. The agent reads the
+workspace and answers a design (the dataset, the label, the features, the model and the hold-out),
+never a change. The project's page says *The Project Agent is designing this project's pipeline…*
+while it works. When it is done, and while the project still has no pipeline, the page compiles the
+design with Zetta's `capture_intent` + `compile_intent` and points the pipeline at the design's
+dataset, exactly as *Build a Pipeline* does. A design that cannot be compiled, or a failed task, is
+said on the page, with *Build a Pipeline* still there. `create_projects_from_opportunities` answers
+the tasks as `builds`. Verify: `HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnConfirmation`.
+
 **The latest scan is the recommendation (lake#287).** *Recommended* lists the newest scan's
 Opportunities. What earlier scans recommended and nobody acted on folds under *Earlier scans (N)* in the
 same form, where it can still be picked or dismissed; *Not yet* is the newest scan's. Nothing is

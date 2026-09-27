@@ -4598,6 +4598,23 @@ public:
         });
     }
 
+    Result<AgentTask> latest_agent_task(const std::string& customer_id,
+                                        const std::string& kind) override {
+        return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + task_columns +
+                    " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                    "WHERE t.customer_id = $1::uuid AND t.kind = $2 ORDER BY t.created_at DESC "
+                    "LIMIT 1",
+                customer_id,
+                kind);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no " + kind + " task"});
+            }
+            return task_from(rows[0]);
+        });
+    }
+
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,

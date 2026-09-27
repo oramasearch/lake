@@ -1749,7 +1749,9 @@ void register_agent_flow_capabilities(Registry& registry) {
         .description =
             "Create one draft project per chosen Opportunity (agent_turn with agent-autosuggest "
             "answers them): named from its intent, with the Opportunity it came from in its "
-            "description. Answers the projects' names.",
+            "description. The Project Agent then designs each project's pipeline in the "
+            "background (builds: {project, task_id}); the project's page compiles the design "
+            "when it is done. Answers the projects' names and the builds.",
         .input_schema = customer_input_schema(
             {{"opportunities",
               {{"type", "array"}, {"items", {{"type", "object"}}}, {"minItems", 1}}},
@@ -1788,6 +1790,10 @@ void register_agent_flow_capabilities(Registry& registry) {
             }
             agent_audit(context, "discover.create", customer_id, {{"count", items.size()}});
             json names = json::array();
+            json builds = json::array();
+            const bool builds_pipelines =
+                context.workspaces && context.agent_bus &&
+                context.workspaces->config().agent_endpoints.contains("agent-project");
             std::size_t position = 0;
             for (const json& item : items) {
                 const std::string intent = item.value("intent", std::string());
@@ -1816,8 +1822,38 @@ void register_agent_flow_capabilities(Registry& registry) {
                     context.store->set_opportunity_status(ids[position], "project", name);
                 }
                 ++position;
+                // The Project Agent designs its pipeline in the background; the project page
+                // compiles that design when it is done (kind "build:<project>").
+                if (builds_pipelines) {
+                    std::string brief = "Design the pipeline for the project " + name + ": " +
+                                        intent + ".";
+                    for (const auto& [field, label] :
+                         {std::pair{"business_action", " What it changes: "},
+                          std::pair{"why_this_data_supports_it", " Why the data supports it: "},
+                          std::pair{"solution", " Catalogue solution: "},
+                          std::pair{"methodology", " Methodology: "}}) {
+                        if (const std::string value = item.value(field, std::string());
+                            !value.empty()) {
+                            brief += label + value;
+                        }
+                    }
+                    const ApiResult started = called(co_await call_capability(
+                        context,
+                        "agent_turn",
+                        {{"customer_id", customer_id},
+                         {"agent", "agent-project"},
+                         {"kind", "build:" + name},
+                         {"message", brief},
+                         {"context", {{"opportunity", item}}}}));
+                    if (started.ok) {
+                        builds.push_back(
+                            {{"project", name},
+                             {"task_id", started.value.value("task_id", std::string())}});
+                    }
+                }
             }
-            co_return ApiResult::success({{"projects", std::move(names)}});
+            co_return ApiResult::success(
+                {{"projects", std::move(names)}, {"builds", std::move(builds)}});
         }});
     registry.add(Capability{
         .name = "get_ask_conversation",

@@ -342,6 +342,7 @@ protected:
         std::filesystem::create_directories(workspace_dir_);
         lake::control::WorkspaceConfig workspace_config{workspace_dir_.string(), 0};
         workspace_config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"},
+                                            {"agent-project", "http://project:8080"},
                                             {"agent-autosuggest", "http://suggest:8080"},
                                             {"agent-creator", "http://creator:8080"}};
         workspace_config.internal_url = "http://lake.internal";
@@ -1161,7 +1162,67 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
     const auto after = store_->list_opportunities(customer_id);
     const auto made = std::ranges::find(*after, chosen->id, &lake::control::Opportunity::id);
     EXPECT_EQ(made->status, "project");
-    EXPECT_EQ(made->project, input["name"].get<std::string>());
+    const std::string project = input["name"];
+    EXPECT_EQ(made->project, project);
+
+    // The Project Agent designs the new project's pipeline in the background, and the project's
+    // page compiles the design once it is done (Steve, 2026-09-27).
+    const auto build = store_->latest_agent_task(customer_id, "build:" + project);
+    ASSERT_TRUE(build) << "creating the project started the Project Agent";
+    EXPECT_EQ(build->agent, "agent-project");
+    EXPECT_NE(build->body["message"].get<std::string>().find("Predict which accounts will churn"),
+              std::string::npos);
+    workspace_caller_->answers["get_project"] = {{"name", project},
+                                                 {"graphs", nlohmann::json::array()}};
+    const std::string page_path =
+        "/design/project?customer_id=" + customer_id + "&name=" + project;
+    const std::string designing = connection->request("GET", page_path, "", cookie);
+    EXPECT_NE(designing.find("The Project Agent is designing"), std::string::npos);
+    EXPECT_EQ(std::ranges::count_if(workspace_caller_->calls,
+                                    [](const auto& call) {
+                                        return std::get<0>(call) == "compile_intent";
+                                    }),
+              0)
+        << "nothing is compiled before the design exists";
+
+    agents_->answer = {
+        {"ok", true},
+        {"result",
+         {{"applied", false},
+          {"pipeline",
+           {{"dataset", "datasets.accounts"},
+            {"label", "churned"},
+            {"features", {"failed_payments", "tenure_months"}},
+            {"model_kind", "gbdt"},
+            {"holdout_fraction", 0.2}}}}}};
+    run_agent_task(*connection, build->id);
+    workspace_caller_->answers["capture_intent"] = {{"input_id", "in-1"}};
+    workspace_caller_->answers["compile_intent"] = {{"name", "churn"}};
+    workspace_caller_->answers["get_graph"] = {
+        {"name", "churn"},
+        {"nodes",
+         {{{"id", "load"}, {"kind", "connect"}, {"name", "Load"}},
+          {{"id", "extra"}, {"kind", "connect"}, {"name", "Extra"}},
+          {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}}},
+        {"edges", nlohmann::json::array()}};
+    const std::string built = connection->request("GET", page_path, "", cookie);
+    ASSERT_TRUE(built.starts_with("HTTP/1.1 200")) << built.substr(0, 300);
+    const auto captured = std::ranges::find_if(workspace_caller_->calls, [](const auto& call) {
+        return std::get<0>(call) == "capture_intent";
+    });
+    ASSERT_NE(captured, workspace_caller_->calls.end());
+    const std::string text = std::get<2>(*captured)["text"];
+    EXPECT_NE(text.find("Predict churned from datasets.accounts using failed_payments, "
+                        "tenure_months."),
+              std::string::npos)
+        << text;
+    EXPECT_NE(text.find("Train a gbdt model with a 20% hold-out."), std::string::npos) << text;
+    const auto saved = std::ranges::find_if(workspace_caller_->calls, [](const auto& call) {
+        return std::get<0>(call) == "save_graph";
+    });
+    ASSERT_NE(saved, workspace_caller_->calls.end()) << "pointed at the design's dataset";
+    EXPECT_NE(std::get<2>(*saved).dump().find("\"table\":\"accounts\""), std::string::npos)
+        << std::get<2>(*saved).dump();
 }
 
 TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved) {
