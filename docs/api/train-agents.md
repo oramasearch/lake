@@ -58,6 +58,13 @@ Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS
 this lake* otherwise, and *Offline tool* for the three agents that produce evaluations and
 training data rather than serving people. People do not create or delete library agents.
 
+The page (2026-09-27, the UX review) says what each agent does for the person and where to use it,
+in plain words: *Agent · What it does for you · Where to use it* and a badge (*Available*, *Not
+available here*, *Not yet available to chat* for the offline three). The create form's fields are
+*What it's for*, *Where it works*, **Instructions** (stored as the record's `manifesto`), *What
+success looks like* (`goal`), *What it may do* (`skills`), *Model* and *Runs on its own*
+(`trigger`).
+
 ## Capabilities
 
 | Capability | Kind | Authorization | What it does |

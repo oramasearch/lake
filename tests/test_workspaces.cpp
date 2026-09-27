@@ -1170,6 +1170,102 @@ TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
         << "GET /v1/search_index for outside callers";
 }
 
+TEST(Workspaces, PredictAnswersOnlyThroughAPublishedModel) {
+    // UX review 2026-09-27 (lake#250): a published model could not be called from outside lake.
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    w.caller->answers["get_model"] = {{"id", "m-1"}, {"exposed", false}};
+    w.caller->answers["score"] = {{"ranked", json::array({{{"entity", 0}, {"risk", 0.91}}})}};
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto predict = [&] {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        json input{{"customer_id", w.customer_id},
+                   {"model", "m-1"},
+                   {"rows", json::array({{{"support_tickets", 11}}})}};
+        auto completed = liquid::runtime::block_on(registry.call_async("predict", input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    const auto refused = predict();
+    ASSERT_FALSE(refused.ok);
+    EXPECT_NE(refused.error.message.find("not published"), std::string::npos);
+    EXPECT_NE(w.caller->calls.back().first, "score") << "nothing is scored";
+
+    w.caller->answers["get_model"]["exposed"] = true;
+    const auto scored = predict();
+    ASSERT_TRUE(scored.ok) << scored.error.message;
+    EXPECT_EQ(scored.value["ranked"][0]["risk"], 0.91);
+    EXPECT_EQ(w.caller->calls.back().first, "score");
+    EXPECT_EQ(w.caller->calls.back().second["model"], "m-1");
+    EXPECT_EQ(w.caller->calls.back().second["rows"][0]["support_tickets"], 11);
+}
+
+TEST(Workspaces, ModelsPageNamesScoresPublishesAndShowsHowToCallThem) {
+    lake::api::WorkspacePage page;
+    page.section = "models";
+    page.customer_id = std::string(customer);
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["names"] = {{"projects", {{"p-1", "retention"}}}, {"graphs", json::object()}};
+    page.data["list_models"] = {
+        {"models",
+         json::array({{{"id", "m-1-aaaaaaaa"}, {"name", "retention_churn"}, {"project", "p-1"},
+                       {"created", "2026-09-27T13:29:23.873Z"}},
+                      {{"id", "m-2-bbbbbbbb"}, {"name", "churn_model"}, {"project", "p-gone"},
+                       {"created", "2026-09-25T18:48:53.966Z"}}})}};
+    page.data["model_details"] = {
+        {"m-1-aaaaaaaa",
+         {{"exposed", true},
+          {"metrics", {{"held_out_auc", 0.88}, {"in_sample_auc", 0.95}}},
+          {"feature_schema", {{"features", json::array({"support_tickets"})}}}}},
+        {"m-2-bbbbbbbb", {{"exposed", false}, {"metrics", {{"in_sample_auc", 0.94}}}}}};
+    page.data["origin"] = "https://lake.example";
+    const std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find(">retention</a>"), std::string::npos) << "the project by name";
+    EXPECT_NE(html.find("a deleted project"), std::string::npos);
+    EXPECT_NE(html.find("AUC 0.880 <small>held out</small>"), std::string::npos);
+    EXPECT_NE(html.find("in-sample only"), std::string::npos);
+    EXPECT_NE(html.find("2026-09-27 13:29 UTC"), std::string::npos);
+    EXPECT_NE(html.find(">published</span>"), std::string::npos);
+    EXPECT_NE(html.find("https://lake.example/v1/predict"), std::string::npos);
+    EXPECT_NE(html.find("&quot;support_tickets&quot;: 0"), std::string::npos)
+        << "a row keyed by the model's own features";
+    EXPECT_EQ(html.find(">Publish</button></form> <form"), std::string::npos)
+        << "one action per model, never both";
+}
+
+TEST(Workspaces, RunsShowPipelinesByNameAndSayWhyAFailureFailed) {
+    lake::api::WorkspacePage page;
+    page.section = "runs";
+    page.customer_id = std::string(customer);
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["names"] = {{"projects", {{"p-1", "retention"}}},
+                          {"graphs", {{"g-1", {{"name", "churn"}, {"project", "retention"}}}}}};
+    page.data["list_runs"] = {
+        {"runs",
+         json::array({{{"id", "r-1"}, {"graph", "g-1"}, {"project", "p-1"}, {"status", "succeeded"},
+                       {"created", "2026-09-27T13:29:22.572Z"}},
+                      {{"id", "r-2"}, {"graph", "g-gone"}, {"project", "p-gone"},
+                       {"status", "failed"}, {"created", "2026-09-26T15:46:54.278Z"}}})}};
+    const std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find(">churn</a>"), std::string::npos);
+    EXPECT_NE(html.find(">retention</a>"), std::string::npos);
+    EXPECT_NE(html.find("a pipeline of a deleted project"), std::string::npos);
+    EXPECT_NE(html.find(">Why it failed</a>"), std::string::npos);
+    EXPECT_EQ(html.find(">r-1</a>"), std::string::npos) << "no raw run ids as the label";
+}
+
 TEST(Workspaces, IndexPageSearchesPublishesAndShowsHowToCallIt) {
     lake::api::WorkspacePage page;
     page.section = "index";
