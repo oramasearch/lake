@@ -1570,14 +1570,21 @@ json proposal_files(const json& proposal) {
 // Orama conversation back. The pages call these, so REST, MCP and the site do the same thing.
 namespace {
 
+// A design field as text: the model writes null (or a number) as readily as a string.
+std::string design_text_field(const json& design, const char* key) {
+    const auto found = design.find(key);
+    return found != design.end() && found->is_string() ? found->get<std::string>() : std::string();
+}
+
 // The one table a Project Agent design trains on: `dataset`, else the first of
 // `training_sources` or `datasets` (the agent's build output names it either way).
 std::string design_dataset(const json& design) {
-    if (const std::string dataset = design.value("dataset", std::string()); !dataset.empty()) {
+    if (const std::string dataset = design_text_field(design, "dataset"); !dataset.empty()) {
         return dataset;
     }
-    for (const char* key : {"training_sources", "datasets"}) {
-        const json list = design.value(key, json::array());
+    for (const char* key : {"training_sources", "datasets", "sources"}) {
+        const auto found = design.find(key);
+        const json list = found != design.end() ? *found : json();
         if (list.is_array() && !list.empty() && list.front().is_string()) {
             return list.front().get<std::string>();
         }
@@ -1588,14 +1595,17 @@ std::string design_dataset(const json& design) {
 // A design in words for Zetta's compiler: what it predicts, from which data, with which model.
 std::string design_text(const std::string& brief, const json& design) {
     std::string text = brief;
-    const std::string label = design.value("label", std::string());
+    const std::string label = design_text_field(design, "label");
     if (!label.empty()) {
         text += " Predict " + label;
         if (const std::string dataset = design_dataset(design); !dataset.empty()) {
             text += " from " + dataset;
         }
         std::string features;
-        for (const json& feature : design.value("features", json::array())) {
+        const auto features_found = design.find("features");
+        for (const json& feature : features_found != design.end() && features_found->is_array()
+                                       ? *features_found
+                                       : json::array()) {
             if (feature.is_string()) {
                 features += (features.empty() ? "" : ", ") + feature.get<std::string>();
             }
@@ -1605,7 +1615,7 @@ std::string design_text(const std::string& brief, const json& design) {
         }
         text += ".";
     }
-    if (const std::string model = design.value("model_kind", std::string()); !model.empty()) {
+    if (const std::string model = design_text_field(design, "model_kind"); !model.empty()) {
         text += " Train a " + model + " model";
         if (design.contains("holdout_fraction") && design["holdout_fraction"].is_number()) {
             text += " with a " +
@@ -1713,13 +1723,17 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
         co_return ApiResult::success(json::object());
     }
     const std::string project = task.kind.substr(6);
-    const json design = task.result.value("result", json::object()).value("pipeline", json::object());
+    const json answer = task.result.value("result", json());
+    const json design = answer.is_object() && answer.contains("pipeline") &&
+                                answer["pipeline"].is_object()
+                            ? answer["pipeline"]
+                            : json::object();
     const std::string dataset = design_dataset(design);
     json model = json::object();
-    if (const std::string label = design.value("label", std::string()); !label.empty()) {
+    if (const std::string label = design_text_field(design, "label"); !label.empty()) {
         model["target"] = label;
     }
-    if (const std::string algo = design.value("model_kind", std::string()); !algo.empty()) {
+    if (const std::string algo = design_text_field(design, "model_kind"); !algo.empty()) {
         model["algo"] = algo;
     }
     const ApiResult read = called(co_await call_capability(
@@ -1736,7 +1750,7 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
         co_return called(co_await compile_pipeline(context,
                                                    task.customer_id,
                                                    project,
-                                                   design_text(task.body.value("message", std::string()), design),
+                                                   design_text(design_text_field(task.body, "message"), design),
                                                    dataset,
                                                    model));
     }
@@ -1744,12 +1758,12 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     // the first one not yet approved. Applied once: a connect step that already reads the
     // design's table means it was.
     const auto open = std::ranges::find_if(graphs, [](const json& graph) {
-        return graph.value("approval", std::string()) != "approved";
+        return design_text_field(graph, "approval") != "approved";
     });
     if (open == graphs.end() || dataset.empty()) {
         co_return ApiResult::success(json::object());
     }
-    const std::string graph = open->value("name", std::string());
+    const std::string graph = design_text_field(*open, "name");
     const ApiResult current = called(co_await call_capability(
         context,
         "workspace_query",
@@ -1758,8 +1772,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
          {"input", {{"project", project}, {"graph", graph}}}}));
     const std::string table = dataset.substr(dataset.find('.') == std::string::npos ? 0 : dataset.find('.') + 1);
     for (const json& node : current.ok ? current.value.value("nodes", json::array()) : json::array()) {
-        if (node.value("kind", std::string()) == "connect" &&
-            node.value("attributes", json::object()).value("table", std::string()) == table) {
+        if (design_text_field(node, "kind") == "connect" && node.contains("attributes") &&
+            node["attributes"].is_object() && design_text_field(node["attributes"], "table") == table) {
             co_return ApiResult::success({{"graph", graph}});
         }
     }

@@ -7665,7 +7665,10 @@ struct ApiServer::Impl {
                     context));
                 page.data["build"] = {{"status", build->phase.empty() ? "pending" : build->phase},
                                       {"message", build->message}};
-                if (followed.ok && followed.value.contains("build_error")) {
+                if (!followed.ok) {
+                    page.error = "The Project Agent's design could not be read: " +
+                                 followed.error.message;
+                } else if (followed.value.contains("build_error")) {
                     page.error = "The Project Agent designed a pipeline, but it could not be "
                                  "applied: " + followed.value.value("build_error", std::string());
                 }

@@ -1273,6 +1273,30 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
                                     [](const auto& call) { return std::get<0>(call) == "save_graph"; }),
               saves)
         << "applied once: a pipeline that reads the design's table is left alone";
+
+    // A retrieval design has no label or model (the model writes null): it still applies, and a
+    // task that cannot be read is said on the page (live, 2026-09-27: "type must be string").
+    auto retrieval = store_->create_agent_task(lake::control::AgentTask{
+        .customer_id = customer_id, .agent = "agent-project", .kind = "build:" + project,
+        .body = {{"message", "Design it"}}, .scopes = second->scopes,
+        .requested_by_user_id = second->requested_by_user_id,
+        .requested_by_taap_id = second->requested_by_taap_id});
+    ASSERT_TRUE(liquid::runtime::block_on(agent_bus_->publish_task(*retrieval)).value());
+    agents_->answer = {{"ok", true},
+                       {"result",
+                        {{"pipeline",
+                          {{"sources", {"churn_results.at_risk_1"}},
+                           {"label", nullptr},
+                           {"model_kind", nullptr},
+                           {"model", false}}}}}};
+    run_agent_task(*connection, retrieval->id);
+    const std::string applied = connection->request("GET", page_path, "", cookie);
+    ASSERT_TRUE(applied.starts_with("HTTP/1.1 200"));
+    EXPECT_EQ(applied.find("could not be read"), std::string::npos) << "null fields are no error";
+    const auto retrieved = std::ranges::find_if(
+        workspace_caller_->calls.rbegin(), workspace_caller_->calls.rend(),
+        [](const auto& call) { return std::get<0>(call) == "save_graph"; });
+    EXPECT_NE(std::get<2>(*retrieved).dump().find("\"table\":\"at_risk_1\""), std::string::npos);
 }
 
 TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved) {
