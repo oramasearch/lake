@@ -35,7 +35,10 @@ Lake creates both (exposed) when it starts: one `agent-tasks.<agent>` topic per 
    `get_agent_task` and the pages read the task from there.
 
 Anyone who may read a task can follow it live with `receive_agent_events`. Ask Orama uses it to
-wait on a subagent it delegated to.
+wait on a subagent it delegated to. Following a task reads `agent-events` from where the task's own
+events start, never from the topic's beginning: when an agent claims a task, lake records the
+sequence its bus loop has reached (`agent_task_status.events_from`, migration 0033), and every event
+the task publishes comes after it (lake#275).
 
 **Nothing secret is on the bus.** Topics carry task ids only. The body travels in the answer to a
 claim, and the credential is handed over once and never stored.
@@ -47,7 +50,7 @@ claim, and the credential is handed over once and never stored.
 | `receive_agent_tasks {agent, from_sequence?, wait_ms?}` | read | that library agent | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; `next_sequence` continues |
 | `claim_agent_task {task_id, agent}` | action | that library agent | take the task; the body with its credential. A second claim, or a claim by another agent, is a `conflict` |
 | `publish_agent_event {task_id, agent, type, message?, result?}` | action | that library agent | publish on `agent-events`, only for a task that agent claimed and that has not finished |
-| `receive_agent_events {customer_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | the task's events from `from_sequence`, and the task as it stands |
+| `receive_agent_events {customer_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | the task's events from `from_sequence` (never before the task's own start), and the task as it stands |
 
 **Each library agent has its own bus credential.** The operator keeps one Secret,
 `lake-<name>-agent-bus`, with a random token per library agent. It mounts the whole Secret into

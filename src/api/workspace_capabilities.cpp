@@ -2660,8 +2660,13 @@ void register_agent_bus_capabilities(Registry& registry) {
             const std::string credential = std::string(control::agent_task_credential_prefix) +
                                            task_id + "." +
                                            control::identity_crypto::random_secret();
+            // Where its events will start on agent-events, so following it never reads the
+            // topic's whole history (lake#275).
             auto task = context.store->claim_agent_task(
-                task_id, input.at("agent"), control::identity_crypto::sha256_hex(credential));
+                task_id,
+                input.at("agent"),
+                control::identity_crypto::sha256_hex(credential),
+                context.agent_bus ? context.agent_bus->cursor() : 0);
             if (!task) {
                 return ApiResult::failure(task.error().code, task.error().message, "/task_id");
             }
@@ -2760,7 +2765,9 @@ void register_agent_bus_capabilities(Registry& registry) {
                 co_return ApiResult::failure("store_unavailable",
                                              "the agent bus is not configured on this lake");
             }
-            std::uint64_t next = input.value("from_sequence", std::uint64_t{1});
+            // Never before the task's own first event (lake#275): the topic only grows.
+            std::uint64_t next = std::max(input.value("from_sequence", std::uint64_t{1}),
+                                          context.store->get_agent_task(task_id)->events_from);
             const auto until = std::chrono::steady_clock::now() +
                                std::chrono::milliseconds(input.value("wait_ms", 0));
             json events = json::array();

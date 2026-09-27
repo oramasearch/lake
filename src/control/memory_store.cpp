@@ -1052,7 +1052,8 @@ std::string utc_now() {
 
 Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
                                                   const std::string& agent,
-                                                  const std::string& credential_sha256) {
+                                                  const std::string& credential_sha256,
+                                                  std::uint64_t events_from) {
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
     if (found == agent_tasks_.end() || found->desired != "present") {
@@ -1063,6 +1064,7 @@ Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
     }
     found->phase = "Running";
     found->credential_sha256 = credential_sha256;
+    found->events_from = events_from;
     found->started_at = utc_now();
     agent_task_clocks_[id].started = std::chrono::steady_clock::now();
     return *found;

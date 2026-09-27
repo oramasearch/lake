@@ -227,7 +227,8 @@ public:
     Result<AgentTask> get_agent_task(const std::string& id) override;
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
-                                       const std::string& credential_sha256) override;
+                                       const std::string& credential_sha256,
+                                       std::uint64_t events_from = 0) override;
     Result<AgentTask> record_agent_task_event(const std::string& id,
                                               const std::string& agent,
                                               const std::string& phase,

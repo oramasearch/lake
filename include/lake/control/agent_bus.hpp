@@ -120,6 +120,11 @@ public:
     const std::vector<std::string>& agents() const {
         return agents_;
     }
+    // The agent-events sequence this replica's loop reads next: every event published after
+    // now comes at or after it, so a task claimed now has its events from here on (lake#275).
+    std::uint64_t cursor() const {
+        return cursor_.load();
+    }
     // Creates agent-events and one agent-tasks.<agent> topic per library agent.
     liquid::runtime::task<ZettaControlResult<void>> start();
     // Publishes a task to its agent's topic and records when.

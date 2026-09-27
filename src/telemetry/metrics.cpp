@@ -664,9 +664,10 @@ public:
     }
     control::Result<control::AgentTask> claim_agent_task(const std::string& id,
                                                          const std::string& agent,
-                                                         const std::string& sha256) override {
+                                                         const std::string& sha256,
+                                                         std::uint64_t events_from) override {
         return call("claim_agent_task",
-                    [&] { return store_->claim_agent_task(id, agent, sha256); });
+                    [&] { return store_->claim_agent_task(id, agent, sha256, events_from); });
     }
     control::Result<control::AgentTask> record_agent_task_event(const std::string& id,
                                                                 const std::string& agent,

@@ -4534,7 +4534,8 @@ public:
         "COALESCE(ts.phase, ''), COALESCE(ts.message, ''), "
         "COALESCE(to_char(ts.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
         "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
-        "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text";
+        "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text, "
+        "COALESCE(ts.events_from, 0)";
 
     static Result<AgentTask> one_task(pqxx::work& tx, const std::string& id) {
         const pqxx::result rows = tx.exec_params(
@@ -4568,6 +4569,7 @@ public:
         task.finished_at = row[15].as<std::string>();
         task.credential_sha256 = row[16].as<std::string>();
         task.result = nlohmann::json::parse(row[17].as<std::string>(), nullptr, false);
+        task.events_from = row[18].as<std::uint64_t>();
         return task;
     }
 
@@ -4598,17 +4600,19 @@ public:
 
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
-                                       const std::string& credential_sha256) override {
+                                       const std::string& credential_sha256,
+                                       std::uint64_t events_from) override {
         return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
             // The insert is the claim: the primary key lets exactly one through.
             const pqxx::result claimed = tx.exec_params(
-                "INSERT INTO agent_task_status (task_id, phase, credential_sha256, started_at) "
-                "SELECT t.id, 'Running', $3, now() FROM agent_tasks t WHERE t.id = $1::uuid AND "
-                "t.agent = $2 AND t.desired = 'present' ON CONFLICT (task_id) DO NOTHING "
-                "RETURNING task_id",
+                "INSERT INTO agent_task_status (task_id, phase, credential_sha256, started_at, "
+                "events_from) SELECT t.id, 'Running', $3, now(), $4 FROM agent_tasks t WHERE "
+                "t.id = $1::uuid AND t.agent = $2 AND t.desired = 'present' ON CONFLICT (task_id) "
+                "DO NOTHING RETURNING task_id",
                 id,
                 agent,
-                credential_sha256);
+                credential_sha256,
+                static_cast<std::int64_t>(events_from));
             if (claimed.empty()) {
                 if (!one_task(tx, id)) {
                     return std::unexpected(StoreError{"not_found", "no agent task " + id});
@@ -4686,7 +4690,7 @@ public:
                 static_cast<int>(republish_after.count()));
             StaleAgentTasks out;
             for (const pqxx::row& row : rows) {
-                (row[18].as<bool>() ? out.unclaimed : out.overdue).push_back(task_from(row));
+                (row[19].as<bool>() ? out.unclaimed : out.overdue).push_back(task_from(row));
             }
             return out;
         });

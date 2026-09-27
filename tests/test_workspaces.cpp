@@ -2268,16 +2268,34 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
               "conflict")
         << "a finished task stays finished";
 
+    // A task claimed later starts where the loop has read to, past every earlier task's events,
+    // so following it never re-reads the topic's history (lake#275).
+    const auto second = r.call("agent_turn", {{"agent", "agent-ask-orama"}, {"message", "more"}});
+    const std::string second_id = second.value["task_id"];
+    ASSERT_TRUE(r.as_agent("claim_agent_task", {{"task_id", second_id}, {"agent", "agent-ask-orama"}})
+                    .ok);
+    EXPECT_EQ(r.store.get_agent_task(second_id)->events_from, 3U)
+        << "two events of the first task were read";
+    ASSERT_TRUE(r.as_agent("publish_agent_event", {{"task_id", second_id},
+                                                   {"agent", "agent-ask-orama"},
+                                                   {"type", "progress"},
+                                                   {"message", "second"}})
+                    .ok);
+    const auto own = r.call("receive_agent_events", {{"task_id", second_id}});
+    ASSERT_EQ(own.value["events"].size(), 1U);
+    EXPECT_EQ(own.value["events"][0]["sequence"], 3) << "read from the task's own start";
+    EXPECT_EQ(own.value["events"][0]["message"], "second");
+
     // What the bus loses is recovered from the store: an unclaimed task is published again, and
     // one nobody took by its deadline fails.
     const auto lost = r.call("agent_turn", {{"agent", "agent-ask-orama"}, {"message", "again"}});
     const std::string lost_id = lost.value["task_id"];
-    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 2U);
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 3U);
     r.pump();
-    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 2U) << "not before a minute";
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 3U) << "not before a minute";
     r.store.age_agent_task(lost_id, std::chrono::seconds(61));
     r.pump();
-    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 3U);
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 4U);
     r.store.age_agent_task(lost_id, std::chrono::seconds(300));
     r.pump();
     const auto expired = r.call("get_agent_task", {{"task_id", lost_id}});

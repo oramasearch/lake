@@ -357,6 +357,8 @@ struct AgentTask {
     std::string requested_by_user_id, requested_by_taap_id, created_at;
     std::string phase, message, started_at, finished_at, credential_sha256;
     nlohmann::json result = nullptr;
+    // The agent-events sequence at or before the task's first event (0: unknown), lake#275.
+    std::uint64_t events_from = 0;
 };
 // What lake's bus loop acts on: tasks nobody claimed since they were last published, and tasks
 // past their deadline (pending or running), which it fails.
@@ -909,10 +911,12 @@ public:
     virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
     virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
-    // it. Exactly one claim succeeds; another is a conflict, as is a claim by a different agent.
+    // it and where on agent-events its events will start. Exactly one claim succeeds; another is
+    // a conflict, as is a claim by a different agent.
     virtual Result<AgentTask> claim_agent_task(const std::string& id,
                                                const std::string& agent,
-                                               const std::string& credential_sha256) = 0;
+                                               const std::string& credential_sha256,
+                                               std::uint64_t events_from = 0) = 0;
     // What the claiming agent reported: Running with a message, or Succeeded / Failed with its
     // answer. Refused for a task that agent has not claimed or that already finished.
     virtual Result<AgentTask> record_agent_task_event(const std::string& id,

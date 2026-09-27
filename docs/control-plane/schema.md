@@ -445,6 +445,13 @@ answer and the **SHA-256** of the task's credential, cleared when the task finis
 what Auto-Suggest recommended, kept across scans, with what the person did with each). Idempotent;
 guard `agent_tasks_guard`. Contract: [`../api/agent-bus.md`](../api/agent-bus.md).
 
+## Agent task events migration
+
+`0033_agent_task_events` adds `agent_task_status.events_from` (bigint, default 0): the `agent-events`
+sequence lake's bus loop had reached when the agent claimed the task, at or before the task's first
+event, so following a task reads from there (lake#275). Idempotent; guard `agent_task_events_guard`.
+Contract: [`../api/agent-bus.md`](../api/agent-bus.md).
+
 ## Agent cron schedules migration
 
 `0031_agent_cron_schedules` adds `agent_cron_schedules` (written by lake: any number per agent,
