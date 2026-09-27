@@ -134,6 +134,10 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
             "store_error",
             "the workspace returned HTTP " + std::to_string(response.status) + " without JSON");
     }
+    // Zetta serves its OpenAPI document bare, not in the envelope (docs/api/workspaces.md).
+    if (capability == "openapi.json" && body.contains("openapi")) {
+        co_return ZettaControlResult<nlohmann::json>(body);
+    }
     if (!body.value("ok", false)) {
         const nlohmann::json error = body.value("error", nlohmann::json::object());
         co_return workspace_failure<nlohmann::json>(

@@ -10934,6 +10934,85 @@ struct ApiServer::Impl {
     // coerced by the input schema), POST actions (input as the JSON body). Auth,
     // validation, the call and the envelope are Registry::call + rest_*, exactly
     // the MCP path.
+    // /workspaces/<customer_id>/zetta/v1/<capability>: a workspace's Zetta for agents, in
+    // Zetta's own REST shape (reads GET with the query string, actions POST with a JSON body),
+    // through workspace_query / workspace_act so the allow-lists, authorization and audit are
+    // the ones every other lake caller gets (docs/api/workspaces.md, Agents reach Zetta).
+    boost::http::route_task serve_workspace_zetta(boost::http::route_params& route, bool openapi) {
+        namespace http = boost::http;
+        const std::string customer_id = route_value(route, "customer_id");
+        const bool get = route.req.method() == http::method::get;
+        ApiContext context = context_for(route);
+        http::status status = http::status::ok;
+        std::string body;
+        std::string allow;
+        if (openapi) {
+            auto completed = co_await registry.call_async(
+                "workspace_openapi", {{"customer_id", customer_id}}, context);
+            const ApiResult result =
+                completed ? std::move(*completed)
+                          : ApiResult::failure("store_error", completed.error().message);
+            status = http::int_to_status(static_cast<unsigned>(rest_status(result)));
+            body = result.ok ? result.value.dump() : rest_envelope(result).dump();
+        } else {
+            const std::string capability = route_value(route, "capability");
+            const bool read = workspace_read_allowed(capability);
+            const bool action = workspace_action_allowed(capability);
+            nlohmann::json input = nlohmann::json::object();
+            if (!read && !action) {
+                status = http::status::not_found;
+                body =
+                    error_body("unknown_capability", capability + " is not available through lake");
+            } else if (read != get) {
+                status = http::status::method_not_allowed;
+                allow = read ? "GET" : "POST";
+                body = error_body("method_not_allowed",
+                                  capability + " takes " + allow + " through lake");
+            } else if (get) {
+                // Values stay strings: the workspace coerces them by its own input schema, as a
+                // direct call to Zetta would.
+                for (const auto& parameter : route.url.params()) {
+                    input[std::string(parameter.key)] = std::string(parameter.value);
+                }
+            } else {
+                http::json_sink sink;
+                auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+                if (read_error) {
+                    status = http::status::bad_request;
+                    body = error_body("invalid_input", "could not read the request body as JSON");
+                } else if (bytes_read > 0) {
+                    input = to_nlohmann(sink.release());
+                    if (input.is_discarded() || !input.is_object()) {
+                        status = http::status::bad_request;
+                        body = error_body("invalid_input", "the request body is not a JSON object");
+                    }
+                }
+            }
+            if (body.empty()) {
+                auto completed = co_await registry.call_async(
+                    read ? "workspace_query" : "workspace_act",
+                    {{"customer_id", customer_id}, {"capability", capability}, {"input", input}},
+                    context);
+                const ApiResult result =
+                    completed ? std::move(*completed)
+                              : ApiResult::failure("store_error", completed.error().message);
+                status = http::int_to_status(static_cast<unsigned>(rest_status(result)));
+                body = rest_envelope(result).dump();
+            }
+        }
+        route.status(status);
+        route.res.set(http::field::content_type, "application/json; charset=utf-8");
+        route.res.set(http::field::cache_control, "no-store");
+        if (!allow.empty()) {
+            route.res.set(http::field::allow, allow);
+        }
+        stamp_response_headers(route, body);
+        auto [send_error] = co_await route.send(body);
+        if (send_error)
+            co_return http::route_error(send_error);
+        co_return http::route_done;
+    }
+
     boost::http::route_task serve_capability(boost::http::route_params& route,
                                              std::shared_ptr<const Capability> capability) {
         namespace http = boost::http;
@@ -12133,6 +12212,22 @@ bool ApiServer::start() {
                    const std::string path = "/v1/repositories/:repository_id/sync/chunks/:digest";
                    return impl.observe_request(route, path, impl.serve_sync_range(route));
                });
+    router.add(http::method::get,
+               "/workspaces/:customer_id/zetta/v1/openapi.json",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route,
+                                               "/workspaces/:customer_id/zetta/v1/openapi.json",
+                                               impl.serve_workspace_zetta(route, true));
+               });
+    for (const auto method : {http::method::get, http::method::post}) {
+        router.add(method,
+                   "/workspaces/:customer_id/zetta/v1/:capability",
+                   [&impl](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route,
+                                                   "/workspaces/:customer_id/zetta/v1/:capability",
+                                                   impl.serve_workspace_zetta(route, false));
+                   });
+    }
     for (const auto& capability : impl.registry.list()) {
         if (capability->transport != CapabilityTransport::Json) {
             continue;

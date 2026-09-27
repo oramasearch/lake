@@ -24,4 +24,13 @@ void register_platform_capabilities(Registry& registry);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 
+// The Zetta capabilities a lake caller may reach on a workspace: reads through GET, actions
+// through POST (docs/api/workspaces.md). The agent path /workspaces/<customer>/zetta/v1/ and
+// workspace_query / workspace_act both consult these, so the two can never disagree.
+bool workspace_read_allowed(std::string_view capability);
+bool workspace_action_allowed(std::string_view capability);
+// Zetta's OpenAPI document reduced to the allow-listed paths, rebased under `base` (the agent
+// path of one workspace), so a client deriving its tools from it sees exactly what it may call.
+nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_view base);
+
 } // namespace lake::api

@@ -6,8 +6,10 @@
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <ranges>
 #include <set>
@@ -15,8 +17,10 @@
 #include <string_view>
 #include <system_error>
 #include <tuple>
+#include <vector>
 
 #include <liquid/identity.hpp>
+#include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <pqxx/pqxx>
 
@@ -29,6 +33,7 @@
 #include "lake/api/server.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/zetta_workspace.hpp"
 #include "temporary_directory.hpp"
 
 namespace {
@@ -242,6 +247,22 @@ private:
     int descriptor_;
 };
 
+// A workspace cluster that answers from a table, recording what reached it.
+class RecordingWorkspace final : public lake::control::WorkspaceCaller {
+public:
+    std::vector<std::tuple<std::string, bool, nlohmann::json>> calls;
+    std::map<std::string, nlohmann::json> answers;
+
+    liquid::runtime::task<lake::control::ZettaControlResult<nlohmann::json>>
+    call(std::string, std::string, std::string capability, bool read, nlohmann::json input)
+        override {
+        calls.emplace_back(capability, read, input);
+        const auto answer = answers.find(capability);
+        co_return lake::control::ZettaControlResult<nlohmann::json>(
+            answer == answers.end() ? nlohmann::json::object() : answer->second);
+    }
+};
+
 // Parameters select the production Postgres store and a fresh client connection.
 class HttpResponseIsolation : public testing::TestWithParam<std::tuple<bool, bool>> {
 protected:
@@ -292,6 +313,11 @@ protected:
         options.metering.transfer_in_gib_micros = 1000;
         options.metering.transfer_out_gib_micros = 1000;
         options.metering.compute_second_micros = 1000;
+        workspace_dir_ = lake::test::fixture_path("http-services-" + lake::control::new_uuid_v4());
+        std::filesystem::create_directories(workspace_dir_);
+        workspaces_ = std::make_shared<lake::control::WorkspaceService>(
+            lake::control::WorkspaceConfig{workspace_dir_.string(), 0}, store_, workspace_caller_);
+        options.workspaces = workspaces_;
         server_ = std::make_unique<lake::api::ApiServer>(options);
         ASSERT_TRUE(server_->start()) << server_->reason();
     }
@@ -346,6 +372,9 @@ protected:
     }
 
     std::shared_ptr<lake::control::Store> store_;
+    std::shared_ptr<RecordingWorkspace> workspace_caller_ = std::make_shared<RecordingWorkspace>();
+    std::shared_ptr<lake::control::WorkspaceService> workspaces_;
+    std::filesystem::path workspace_dir_;
     std::unique_ptr<lake::api::ApiServer> server_;
     std::string postgres_uri_;
     std::string database_uri_;
@@ -631,6 +660,87 @@ TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {
         EXPECT_TRUE(response_header(anonymous, "location").empty());
         EXPECT_TRUE(response_header(anonymous, "set-cookie").empty());
     }
+}
+
+TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShape) {
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory == nullptr) {
+        GTEST_SKIP() << "the operator's status is written directly only on the memory store";
+    }
+    auto connection = connect();
+    const auto body_of = [](const std::string& response) {
+        return nlohmann::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+    };
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const nlohmann::json customers =
+        body_of(connection->request("GET", "/v1/list_customers", "", cookie));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
+    ASSERT_TRUE(requested && *requested);
+    const auto service = memory->get_service((*requested)->service_id);
+    ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
+    std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
+    workspace_caller_->answers["list_datasets"] = {
+        {"datasets", nlohmann::json::array({"accounts"})}};
+    workspace_caller_->answers["create_project"] = {{"name", "churn"}};
+    workspace_caller_->answers["openapi.json"] = {
+        {"openapi", "3.1.0"},
+        {"info", {{"title", "zetta"}}},
+        {"paths",
+         {{"/v1/list_datasets", {{"get", {{"operationId", "list_datasets"}}}}},
+          {"/v1/create_project", {{"post", {{"operationId", "create_project"}}}}},
+          {"/v1/sql", {{"get", {{"operationId", "sql"}}}}},
+          {"/v1/add_nodes", {{"post", {{"operationId", "add_nodes"}}}}}}}};
+    const std::string base = "/workspaces/" + customer_id + "/zetta/v1/";
+
+    const std::string read =
+        connection->request("GET", base + "list_datasets?database=main&limit=5", "", cookie);
+    ASSERT_TRUE(read.starts_with("HTTP/1.1 200")) << read.substr(0, 300);
+    EXPECT_EQ(body_of(read)["ok"], true);
+    EXPECT_EQ(body_of(read)["value"]["datasets"][0], "accounts");
+    const auto& [read_name, was_read, read_input] = workspace_caller_->calls.back();
+    EXPECT_EQ(read_name, "list_datasets");
+    EXPECT_TRUE(was_read);
+    EXPECT_EQ(read_input["limit"], "5") << "the workspace coerces query values itself";
+
+    const std::string act =
+        connection->request("POST", base + "create_project", R"({"name":"churn"})", cookie);
+    ASSERT_TRUE(act.starts_with("HTTP/1.1 200")) << act.substr(0, 300);
+    EXPECT_EQ(std::get<0>(workspace_caller_->calls.back()), "create_project");
+    EXPECT_EQ(std::get<2>(workspace_caller_->calls.back())["name"], "churn");
+
+    const std::size_t reached = workspace_caller_->calls.size();
+    const std::string wrong_method =
+        connection->request("POST", base + "list_datasets", "", cookie);
+    EXPECT_TRUE(wrong_method.starts_with("HTTP/1.1 405")) << wrong_method.substr(0, 300);
+    EXPECT_EQ(response_header(wrong_method, "allow"), "GET");
+    const std::string refused = connection->request("POST", base + "add_nodes", "{}", cookie);
+    EXPECT_TRUE(refused.starts_with("HTTP/1.1 404")) << refused.substr(0, 300);
+    EXPECT_NE(refused.find("not available through lake"), std::string::npos);
+    const std::string anonymous = connection->request("GET", base + "list_datasets");
+    EXPECT_FALSE(anonymous.starts_with("HTTP/1.1 200")) << anonymous.substr(0, 300);
+    const std::string other = connection->request(
+        "GET",
+        "/workspaces/0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0/zetta/v1/list_datasets",
+        "",
+        cookie);
+    EXPECT_FALSE(other.starts_with("HTTP/1.1 200")) << other.substr(0, 300);
+    EXPECT_EQ(workspace_caller_->calls.size(), reached) << "nothing refused reached the workspace";
+
+    const std::string openapi = connection->request("GET", base + "openapi.json", "", cookie);
+    ASSERT_TRUE(openapi.starts_with("HTTP/1.1 200")) << openapi.substr(0, 300);
+    const nlohmann::json document = body_of(openapi);
+    EXPECT_EQ(document["openapi"], "3.1.0") << "served bare, as Zetta serves it";
+    EXPECT_TRUE(document["paths"].contains("/v1/list_datasets"));
+    EXPECT_TRUE(document["paths"].contains("/v1/create_project"));
+    EXPECT_FALSE(document["paths"].contains("/v1/sql"))
+        << "sql is reached only through workspace_sql";
+    EXPECT_FALSE(document["paths"].contains("/v1/add_nodes"));
+    EXPECT_EQ(document["servers"][0]["url"], "/workspaces/" + customer_id + "/zetta");
 }
 
 INSTANTIATE_TEST_SUITE_P(HttpServer,
