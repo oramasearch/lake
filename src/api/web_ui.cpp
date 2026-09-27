@@ -411,8 +411,6 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
                                 viewer.signed_in ? "Repositories" : "Public Repositories",
                                 "repository",
                                 "repositories"}};
-    // The Docs section (lake#252) is for everyone, signed in or not.
-    items.push_back({"", "/docs", "Docs", "docs", "docs"});
     if (viewer.signed_in) {
         if (!viewer.administrator) {
             items.push_back(
@@ -454,6 +452,8 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Developer", "/v1/openapi.json", "API", "api", "api"});
         items.push_back({"Developer", "/developer/mcp", "MCP", "api", "mcp"});
     }
+    // The Docs section (lake#252), last under Developer, is for everyone, signed in or not.
+    items.push_back({"Developer", "/docs", "Docs", "docs", "docs"});
     return items;
 }
 

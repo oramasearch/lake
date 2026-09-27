@@ -1,6 +1,6 @@
 # The Docs section
 
-These files are the Docs customers read at `/docs` (lake#252). They are embedded into the binary at
+These files are the Docs customers read at `/docs` (lake#252), linked as **Docs**, the last item under **Developer** in the navigation (for everyone, signed in or not). They are embedded into the binary at
 build time by `cmake/embed_guide.cmake`, in the order its `GUIDE_FILES` lists (`index` is Getting
 started, then `concepts`, `load-data`, `train`, `ship`, `agents`, `developer`), and rendered by
 `lake::api::markdown_to_html` (`include/lake/api/markdown.hpp`: headings, lists, notes, code, tables,
