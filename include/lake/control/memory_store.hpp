@@ -225,12 +225,25 @@ public:
                                     nlohmann::json result = nullptr);
     Result<AgentTask> create_agent_task(const AgentTask&) override;
     Result<AgentTask> get_agent_task(const std::string& id) override;
+    Result<AgentTask> claim_agent_task(const std::string& id,
+                                       const std::string& agent,
+                                       const std::string& credential_sha256) override;
+    Result<AgentTask> record_agent_task_event(const std::string& id,
+                                              const std::string& agent,
+                                              const std::string& phase,
+                                              const std::string& message,
+                                              const nlohmann::json& result) override;
+    Result<void> fail_agent_task(const std::string& id, const std::string& message) override;
+    Result<void> mark_agent_task_published(const std::string& id) override;
+    Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) override;
+    // Moves a task's clocks back, so tests reach a deadline without waiting for it.
+    void age_agent_task(const std::string& id, std::chrono::seconds by);
     Result<void> record_opportunities(const std::vector<Opportunity>&) override;
     Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override;
     Result<Opportunity> set_opportunity_status(const std::string& id,
                                                const std::string& status,
                                                const std::string& project) override;
-    // What the operator writes to agent_task_status; tests and local demos call it directly.
+    // Sets a task's status directly; tests and local demos call it.
     Result<void> set_agent_task_status(const std::string& id,
                                        std::string phase,
                                        std::string message,
@@ -480,6 +493,10 @@ private:
     std::vector<std::pair<std::string, AgentLaunch>> agent_cron_runs_; // schedule id, run
     std::vector<AskMessage> ask_messages_;
     std::vector<AgentTask> agent_tasks_;
+    struct TaskClock {
+        std::chrono::steady_clock::time_point created, published, started;
+    };
+    std::map<std::string, TaskClock> agent_task_clocks_;
     std::vector<Opportunity> opportunities_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;

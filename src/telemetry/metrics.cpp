@@ -662,6 +662,34 @@ public:
     control::Result<control::AgentTask> get_agent_task(const std::string& id) override {
         return call("get_agent_task", [&] { return store_->get_agent_task(id); });
     }
+    control::Result<control::AgentTask> claim_agent_task(const std::string& id,
+                                                         const std::string& agent,
+                                                         const std::string& sha256) override {
+        return call("claim_agent_task",
+                    [&] { return store_->claim_agent_task(id, agent, sha256); });
+    }
+    control::Result<control::AgentTask> record_agent_task_event(const std::string& id,
+                                                                const std::string& agent,
+                                                                const std::string& phase,
+                                                                const std::string& message,
+                                                                const nlohmann::json& result) override {
+        return call("record_agent_task_event", [&] {
+            return store_->record_agent_task_event(id, agent, phase, message, result);
+        });
+    }
+    control::Result<void> fail_agent_task(const std::string& id,
+                                          const std::string& message) override {
+        return call("fail_agent_task", [&] { return store_->fail_agent_task(id, message); });
+    }
+    control::Result<void> mark_agent_task_published(const std::string& id) override {
+        return call("mark_agent_task_published",
+                    [&] { return store_->mark_agent_task_published(id); });
+    }
+    control::Result<control::StaleAgentTasks>
+    stale_agent_tasks(std::chrono::seconds republish_after) override {
+        return call("stale_agent_tasks",
+                    [&] { return store_->stale_agent_tasks(republish_after); });
+    }
     control::Result<void>
     record_opportunities(const std::vector<control::Opportunity>& rows) override {
         return call("record_opportunities", [&] { return store_->record_opportunities(rows); });

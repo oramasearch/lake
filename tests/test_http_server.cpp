@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "lake/api/server.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -233,10 +234,15 @@ public:
                         std::string_view path,
                         std::string_view body = {},
                         std::string_view cookie = {},
-                        std::string_view version = "HTTP/1.1") {
+                        std::string_view version = "HTTP/1.1",
+                        std::string_view bearer = {},
+                        std::string_view content_type = "application/x-www-form-urlencoded") {
         std::string wire = std::string(method) + " " + std::string(path) + " " +
                            std::string(version) + "\r\nHost: localhost\r\n";
-        wire += "Connection: keep-alive\r\nContent-Type: application/x-www-form-urlencoded\r\n";
+        wire += "Connection: keep-alive\r\nContent-Type: " + std::string(content_type) + "\r\n";
+        if (!bearer.empty()) {
+            wire += "Authorization: Bearer " + std::string(bearer) + "\r\n";
+        }
         wire += "Content-Length: " + std::to_string(body.size()) + "\r\n";
         if (!cookie.empty()) {
             wire += "Cookie: " + std::string(cookie) + "\r\n";
@@ -339,10 +345,18 @@ protected:
                                             {"agent-autosuggest", "http://suggest:8080"},
                                             {"agent-creator", "http://creator:8080"}};
         workspace_config.internal_url = "http://lake.internal";
+        workspace_config.agent_service_token = agent_service_token_;
+        std::vector<std::string> bus_agents;
+        for (const auto& [agent, endpoint] : workspace_config.agent_endpoints) {
+            bus_agents.push_back(agent);
+        }
         workspaces_ = std::make_shared<lake::control::WorkspaceService>(
             workspace_config, store_, workspace_caller_);
         options.workspaces = workspaces_;
         options.agent_caller = agents_;
+        agent_bus_ = std::make_shared<lake::control::AgentTaskBus>(store_, bus_, bus_agents);
+        ASSERT_TRUE(liquid::runtime::block_on(agent_bus_->start()).value());
+        options.agent_bus = agent_bus_;
         server_ = std::make_unique<lake::api::ApiServer>(options);
         ASSERT_TRUE(server_->start()) << server_->reason();
     }
@@ -360,51 +374,48 @@ protected:
         tx.commit();
     }
 
-    // The operator's part of a background agent turn (lake#269), done here: the task's body goes
-    // to the scripted agent with a generated credential in place of "{{credential}}", and the
-    // status is written as the operator writes it. Answers the credential the agent was handed.
-    std::string run_agent_task(const std::string& task_id) {
+    // A library agent's part of a background turn (docs/api/agent-bus.md), done here through
+    // lake's own capabilities with the agent service token: the task is received from the agent's
+    // topic, claimed (its body arrives with the task's credential in place of "{{credential}}"),
+    // handed to the scripted agent, and its answer published on agent-events. Lake's bus loop then
+    // applies it. Answers the credential the agent was handed.
+    std::string run_agent_task(HttpConnection& connection, const std::string& task_id) {
         const auto task = store_->get_agent_task(task_id);
         EXPECT_TRUE(task) << task_id;
         if (!task) {
             return {};
         }
-        const std::string credential = "lat." + task_id + ".0123456789abcdef0123456789abcdef";
-        const std::string digest = lake::control::identity_crypto::sha256_hex(credential);
-        const auto write = [&](const std::string& phase, const std::string& sha,
-                               const nlohmann::json& result) {
-            if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get())) {
-                ASSERT_TRUE(memory->set_agent_task_status(task_id, phase, "", sha, result));
-                return;
-            }
-            pqxx::connection connection(postgres_uri_);
-            pqxx::work tx(connection);
-            tx.exec("SET search_path TO " + tx.quote_name(schema_));
-            tx.exec_params("INSERT INTO agent_task_status (task_id, phase, credential_sha256, "
-                           "result) VALUES ($1::uuid, $2, $3, $4::jsonb) ON CONFLICT (task_id) DO "
-                           "UPDATE SET phase = EXCLUDED.phase, credential_sha256 = "
-                           "EXCLUDED.credential_sha256, result = EXCLUDED.result",
-                           task_id,
-                           phase,
-                           sha,
-                           result.dump());
-            tx.commit();
+        const auto call = [&](std::string_view method, const std::string& path,
+                              const nlohmann::json& body) {
+            const std::string response =
+                connection.request(method, path, method == "GET" ? "" : body.dump(), "",
+                                    "HTTP/1.1", agent_service_token_, "application/json");
+            const auto at = response.find("\r\n\r\n");
+            return nlohmann::json::parse(
+                at == std::string::npos ? std::string() : response.substr(at + 4), nullptr, false);
         };
-        write("Running", digest, nullptr);
-        std::function<void(nlohmann::json&)> fill = [&](nlohmann::json& value) {
-            if (value.is_string() && value.get<std::string>() == "{{credential}}") {
-                value = credential;
-            } else if (value.is_structured()) {
-                for (auto& item : value) {
-                    fill(item);
-                }
-            }
-        };
-        nlohmann::json body = task->body;
-        fill(body);
+        const nlohmann::json inbox =
+            call("GET", "/v1/receive_agent_tasks?agent=" + task->agent, nullptr);
+        EXPECT_EQ(inbox["ok"], true) << inbox.dump();
+        bool listed = false;
+        for (const auto& row : inbox["value"]["tasks"]) {
+            listed = listed || row["task_id"] == task_id;
+        }
+        EXPECT_TRUE(listed) << "the task is on " << task->agent << "'s topic: " << inbox.dump();
+        const nlohmann::json claimed =
+            call("POST", "/v1/claim_agent_task", {{"task_id", task_id}, {"agent", task->agent}});
+        EXPECT_EQ(claimed["ok"], true) << claimed.dump();
+        const nlohmann::json body = claimed["value"]["body"];
         agents_->turns.push_back(body);
-        write("Succeeded", "", agents_->answer);
-        return credential;
+        const nlohmann::json published = call("POST",
+                                              "/v1/publish_agent_event",
+                                              {{"task_id", task_id},
+                                               {"agent", task->agent},
+                                               {"type", "result"},
+                                               {"result", agents_->answer}});
+        EXPECT_EQ(published["ok"], true) << published.dump();
+        EXPECT_TRUE(liquid::runtime::block_on(agent_bus_->pump(std::chrono::milliseconds(0))));
+        return body.value("lake_token", std::string());
     }
 
     static std::string task_of(const std::string& response) {
@@ -453,6 +464,10 @@ protected:
     std::shared_ptr<lake::control::Store> store_;
     std::shared_ptr<RecordingWorkspace> workspace_caller_ = std::make_shared<RecordingWorkspace>();
     std::shared_ptr<ScriptedAgents> agents_ = std::make_shared<ScriptedAgents>();
+    std::string agent_service_token_ = "agent-service-token";
+    std::shared_ptr<lake::control::MemoryAgentBus> bus_ =
+        std::make_shared<lake::control::MemoryAgentBus>();
+    std::shared_ptr<lake::control::AgentTaskBus> agent_bus_;
     std::shared_ptr<lake::control::WorkspaceService> workspaces_;
     std::filesystem::path workspace_dir_;
     std::unique_ptr<lake::api::ApiServer> server_;
@@ -950,7 +965,7 @@ TEST_P(HttpResponseIsolation, AskOramaAnswersProposesAndRunsOnlyWhatThePersonCon
         "GET", "/ask?customer_id=" + customer_id + "&conversation=" + conversation + "&task=" + task,
         "", cookie);
     EXPECT_NE(thinking.find("Thinking…"), std::string::npos) << "the page follows the task";
-    const std::string credential = run_agent_task(task);
+    const std::string credential = run_agent_task(*connection, task);
     ASSERT_EQ(agents_->turns.size(), 1U);
     EXPECT_EQ(agents_->turns.back()["message"], "what do I have?");
     EXPECT_EQ(agents_->turns.back()["page"]["path"], "/repositories");
@@ -1101,7 +1116,7 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
     const std::string scanning = connection->request(
         "GET", "/design/opportunities?customer_id=" + customer_id + "&task=" + task, "", cookie);
     EXPECT_NE(scanning.find("Scanning your workspace"), std::string::npos);
-    run_agent_task(task);
+    run_agent_task(*connection, task);
     EXPECT_FALSE(agents_->turns.back().contains("profile"))
         << "Auto-Suggest builds the profile itself with its read-only credential";
     EXPECT_FALSE(agents_->turns.back()["zetta_token"].get<std::string>().empty());
@@ -1209,7 +1224,7 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
         "",
         cookie);
     EXPECT_NE(working.find("Working on it…"), std::string::npos);
-    const std::string credential = run_agent_task(task);
+    const std::string credential = run_agent_task(*connection, task);
     EXPECT_EQ(agents_->turns.back()["lake_token"], credential);
     const std::string page = connection->request("GET",
                                                  "/train/agents/new?customer_id=" + customer_id +

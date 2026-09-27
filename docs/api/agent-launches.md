@@ -59,23 +59,21 @@ table is no longer read, and is left for a deliberate drop.
 **No lake page or capability waits on a library agent inside an HTTP request.** `agent_turn` to
 Ask Orama, the Project Agent, Auto-Suggest or AgentCreator writes a task to `agent_tasks`
 (migration `0032_agent_tasks`: agent, kind, conversation, the body, scopes, deadline, who asked),
-`NOTIFY`s `lake_services`, and answers `{task_id, status: pending}` at once. The Orama operator:
+publishes it on the agent bus, and answers `{task_id, status: pending}` at once. The agent claims
+it, is handed the body with a `lat.` credential lake never stores, and publishes its progress and
+answer, all over Zetta pub/sub: [agent-bus.md](agent-bus.md).
 
-1. generates the task's credential, `lat.<task id>.<secret>`, and writes only its SHA-256 to
-   `agent_task_status`;
-2. sends the body to the agent's service (`POST /v1/turn`, the service token as bearer), with every
-   `"{{credential}}"` in it replaced by that credential (as `lake_token` and `zetta_token`);
-3. writes the phase (Pending, Running, Succeeded, Failed), the answer and when, and clears the
-   credential, which then stops resolving.
+`get_agent_task {task_id}` follows a task, and `receive_agent_events` follows it live. A finished
+Project Agent proposal carries `review_url` (the pipeline page with `&task=`). Pages redirect at
+once and follow the task:
 
-lake resolves `lat.` credentials by digest as the person who asked, with the task's scopes, while
-the task runs. `get_agent_task {task_id}` follows it; a finished Project Agent proposal carries
-`review_url` (the pipeline page with `&task=`). Pages redirect at once and follow the task: Ask
-Orama and the Agent Factory show *Thinking…* / *Working on it…* and record the answer in the
-conversation once; the pipeline page shows *The Project Agent is working on it…*; Design →
-Opportunities shows *Scanning your workspace…*. Auto-Suggest builds the workspace profile itself with
-its read-only credential. Your own Python and native agents still answer within the call (a
-follow-up).
+- Ask Orama and the Agent Factory show *Thinking…* / *Working on it…* and record the answer in the
+  conversation once;
+- the pipeline page shows *The Project Agent is working on it…*;
+- Design → Opportunities shows *Scanning your workspace…*.
+
+Auto-Suggest builds the workspace profile itself with its read-only credential. Your own Python and
+native agents still answer within the call (a follow-up).
 
 ## Turns
 

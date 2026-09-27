@@ -36,6 +36,7 @@ namespace lake::control {
 class PlatformService;
 class WorkspaceService;
 class AgentCaller;
+class AgentTaskBus;
 }
 namespace lake::transparency {
 class Service;
@@ -130,6 +131,8 @@ struct ApiContext {
     control::WorkspaceService* workspaces = nullptr;
     // Sends a turn to an agent's service (docs/api/agent-launches.md); null without agents.
     control::AgentCaller* agent_caller = nullptr;
+    // Agent traffic over Zetta pub/sub (docs/api/agent-bus.md); null when not configured.
+    control::AgentTaskBus* agent_bus = nullptr;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS: the instance-wide switch over every customer's opt-in
     // to keys and tokens that never expire (lake#234).
     bool non_expiring_credentials_allowed = true;

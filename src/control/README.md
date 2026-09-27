@@ -18,3 +18,8 @@ rules are in `docs/build/testing.md`; the public query contract is in `docs/api/
 PostgreSQL session authentication uses a unique public lookup UUID and constant-time SHA-256
 verification of one random bearer. Legacy sessions are invalidated by migration `0022_session_lookup`.
 Password Argon2 policy remains unchanged. See `docs/api/auth.md` and `docs/control-plane/schema.md`.
+
+Agent tasks (lake#269) are claimed with one insert into `agent_task_status`, so exactly one claim
+wins. A finished task keeps its phase and loses its credential digest. `agent_bus.cpp` publishes
+tasks on Zetta pub/sub and applies what agents publish; `stale_agent_tasks` is what its loop
+re-publishes or fails. See `docs/api/agent-bus.md`.

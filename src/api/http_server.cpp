@@ -4842,6 +4842,7 @@ struct ApiServer::Impl {
         ctx.workspaces = options.workspaces.get();
         ctx.non_expiring_credentials_allowed = options.allow_non_expiring_credentials;
         ctx.agent_caller = options.agent_caller.get();
+        ctx.agent_bus = options.agent_bus.get();
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
@@ -4900,6 +4901,14 @@ struct ApiServer::Impl {
             ctx.authorized = true;
             ctx.acting_identity = "admin";
             ctx.operator_credential = true;
+        } else if (!bearer.empty() && options.workspaces &&
+                   !options.workspaces->config().agent_service_token.empty() &&
+                   constant_time_equal(bearer, options.workspaces->config().agent_service_token)) {
+            // A library agent's service (docs/api/agent-bus.md): it may only reach the agent
+            // bus's capabilities, which check for this kind themselves.
+            ctx.authorized = true;
+            ctx.acting_identity = "agent-service";
+            ctx.credential_kind = "agent_service";
         } else if (!bearer.empty() && options.store) {
             if (auto principal = options.store->context_for(bearer)) {
                 ctx.authorized = true;

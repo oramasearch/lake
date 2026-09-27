@@ -1597,10 +1597,11 @@ CREATE TABLE IF NOT EXISTS agent_cron_guard (
 INSERT INTO schema_migrations (version) VALUES ('0031_agent_cron_schedules') ON CONFLICT DO NOTHING;
 
 -- ---------------------------------------------------------------------------------------------
--- 0032_agent_tasks: agent turns run in the background (lake#269). lake writes the desired turn and
--- answers the HTTP request at once; the Orama operator sends it to the agent's service with a
--- credential it generates (lat.<task id>.<secret>, only its SHA-256 stored) and writes the answer
--- into agent_task_status. No page or capability waits on an agent inside a request.
+-- 0032_agent_tasks: agent turns run in the background (lake#269, docs/api/agent-bus.md). lake
+-- writes the turn, publishes it on the agent bus (Zetta pub/sub, topic agent-tasks.<agent>) and
+-- answers the HTTP request at once. The agent claims it through lake, which hands it a fresh
+-- credential (lat.<task id>.<secret>, only its SHA-256 stored); what the agent publishes on
+-- agent-events lake writes into agent_task_status. No page or capability waits on an agent.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS agent_tasks (
     id                   uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1610,8 +1611,8 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     -- What asked: ask, factory, discover, pipeline or api; and the conversation it belongs to.
     kind                 text        NOT NULL DEFAULT 'api',
     conversation_id      uuid,
-    -- The body the agent's /v1/turn receives; "{{credential}}" is replaced by the task's
-    -- credential, which only the operator ever holds.
+    -- The body the agent receives when it claims the task; "{{credential}}" is replaced by the
+    -- task's credential, which lake hands over once and never stores.
     body                 jsonb       NOT NULL DEFAULT '{}'::jsonb,
     -- The lake capabilities the task's credential may call.
     scopes               text[]      NOT NULL,
@@ -1620,6 +1621,8 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     generation           bigint      NOT NULL DEFAULT 1,
     requested_by_user_id uuid        REFERENCES users(id) ON DELETE CASCADE,
     requested_by_taap_id text        NOT NULL DEFAULT '',
+    -- When lake last published it on the bus; an unclaimed task is published again.
+    published_at         timestamptz,
     created_at           timestamptz NOT NULL DEFAULT now(),
     updated_at           timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT agent_task_desired_check CHECK (desired IN ('present', 'absent')),
@@ -1629,7 +1632,7 @@ CREATE INDEX IF NOT EXISTS agent_tasks_conversation_idx
     ON agent_tasks (conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS agent_tasks_customer_idx ON agent_tasks (customer_id, created_at DESC);
 
--- Written only by the operator: one row per task, replaced on every observed change.
+-- Written by lake: inserted when the agent claims the task, updated by what it publishes.
 CREATE TABLE IF NOT EXISTS agent_task_status (
     task_id             uuid        PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
     phase               text        NOT NULL DEFAULT '',

@@ -1038,7 +1038,107 @@ Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
     task.created_at = std::format(
         "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
     agent_tasks_.push_back(task);
+    const auto now = std::chrono::steady_clock::now();
+    agent_task_clocks_[task.id] = {now, now, {}};
     return task;
+}
+
+namespace {
+std::string utc_now() {
+    return std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+}
+} // namespace
+
+Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
+                                                  const std::string& agent,
+                                                  const std::string& credential_sha256) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end() || found->desired != "present") {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    if (found->agent != agent || !found->phase.empty()) {
+        return std::unexpected(StoreError{"conflict", "the task is not waiting for " + agent});
+    }
+    found->phase = "Running";
+    found->credential_sha256 = credential_sha256;
+    found->started_at = utc_now();
+    agent_task_clocks_[id].started = std::chrono::steady_clock::now();
+    return *found;
+}
+
+Result<AgentTask> InMemoryStore::record_agent_task_event(const std::string& id,
+                                                         const std::string& agent,
+                                                         const std::string& phase,
+                                                         const std::string& message,
+                                                         const nlohmann::json& result) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end() || found->agent != agent || found->phase != "Running") {
+        return std::unexpected(
+            StoreError{"conflict", "the task is not running on " + agent});
+    }
+    found->phase = phase;
+    found->message = message;
+    if (phase != "Running") {
+        found->result = result;
+        found->finished_at = utc_now();
+        found->credential_sha256.clear(); // a finished task's credential stops
+    }
+    return *found;
+}
+
+Result<void> InMemoryStore::fail_agent_task(const std::string& id, const std::string& message) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    if (found->finished_at.empty()) {
+        found->phase = "Failed";
+        found->message = message;
+        found->finished_at = utc_now();
+        found->credential_sha256.clear();
+    }
+    return {};
+}
+
+Result<void> InMemoryStore::mark_agent_task_published(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    agent_task_clocks_[id].published = std::chrono::steady_clock::now();
+    return {};
+}
+
+Result<StaleAgentTasks> InMemoryStore::stale_agent_tasks(std::chrono::seconds republish_after) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    StaleAgentTasks out;
+    for (const AgentTask& task : agent_tasks_) {
+        if (!task.finished_at.empty() || task.desired != "present") {
+            continue;
+        }
+        const TaskClock& clock = agent_task_clocks_[task.id];
+        const auto deadline = std::chrono::seconds(task.deadline_seconds);
+        if (task.phase.empty()) {
+            if (now - clock.created >= deadline) {
+                out.overdue.push_back(task);
+            } else if (now - clock.published >= republish_after) {
+                out.unclaimed.push_back(task);
+            }
+        } else if (now - clock.started >= deadline) {
+            out.overdue.push_back(task);
+        }
+    }
+    return out;
+}
+
+void InMemoryStore::age_agent_task(const std::string& id, std::chrono::seconds by) {
+    std::lock_guard lock(mutex_);
+    TaskClock& clock = agent_task_clocks_[id];
+    clock.created -= by;
+    clock.published -= by;
+    clock.started -= by;
 }
 
 Result<AgentTask> InMemoryStore::get_agent_task(const std::string& id) {

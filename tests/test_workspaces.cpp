@@ -17,6 +17,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -1888,8 +1889,18 @@ struct AgentRuns {
     lake::control::Principal principal = *store.context_for(w.secret);
     lake::api::Registry registry;
     FakeAgentService agents;
+    std::shared_ptr<lake::control::MemoryAgentBus> bus =
+        std::make_shared<lake::control::MemoryAgentBus>();
+    std::shared_ptr<lake::control::AgentTaskBus> agent_bus =
+        std::make_shared<lake::control::AgentTaskBus>(
+            w.store,
+            bus,
+            std::vector<std::string>{
+                "agent-ask-orama", "agent-project", "agent-autosuggest", "agent-creator"},
+            std::chrono::seconds(0));
 
     AgentRuns() {
+        EXPECT_TRUE(liquid::runtime::block_on(agent_bus->start()).value());
         auto requested = w.run(w.service->request(w.customer_id));
         const auto workspace = store.get_service(requested->service_id);
         EXPECT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
@@ -1901,6 +1912,7 @@ struct AgentRuns {
         context.store = &store;
         context.workspaces = w.service.get();
         context.agent_caller = &agents;
+        context.agent_bus = agent_bus.get();
         context.authorized = true;
         context.session_credential = true;
         context.acting_user_id = principal.user_id;
@@ -1913,6 +1925,24 @@ struct AgentRuns {
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
+    }
+    // A call as a library agent's service: the agent service token (docs/api/agent-bus.md).
+    lake::api::ApiResult as_agent(const std::string& name, json input, bool service = true) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.agent_bus = agent_bus.get();
+        context.authorized = true;
+        context.acting_identity = service ? "agent-service" : principal.taap_id;
+        context.credential_kind = service ? "agent_service" : "session";
+        context.request_id = lake::control::new_uuid_v4();
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    }
+    std::size_t pump() {
+        auto pumped = liquid::runtime::block_on(agent_bus->pump(std::chrono::milliseconds(0)));
+        return pumped && *pumped ? **pumped : 0;
     }
 };
 
@@ -2146,6 +2176,102 @@ TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {
     EXPECT_EQ((*read).value["messages"][0]["content"], "hi");
 }
 
+TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const auto asked = r.call("agent_turn", {{"agent", "agent-ask-orama"}, {"message", "hi"}});
+    ASSERT_TRUE(asked.ok) << asked.error.message;
+    const std::string task_id = asked.value["task_id"];
+
+    // Only a library agent's service reaches the bus's agent side.
+    EXPECT_EQ(r.as_agent("receive_agent_tasks", {{"agent", "agent-ask-orama"}}, false).error.code,
+              "unauthorized");
+    EXPECT_EQ(r.as_agent("receive_agent_tasks", {{"agent", "agent-nope"}}).error.code, "not_found");
+    const auto inbox = r.as_agent("receive_agent_tasks", {{"agent", "agent-ask-orama"}});
+    ASSERT_TRUE(inbox.ok) << inbox.error.message;
+    ASSERT_EQ(inbox.value["tasks"].size(), 1U);
+    EXPECT_EQ(inbox.value["tasks"][0]["task_id"], task_id);
+    EXPECT_EQ(inbox.value["next_sequence"], 2);
+
+    // One claim, by the task's own agent; the body arrives with a fresh credential.
+    EXPECT_EQ(r.as_agent("claim_agent_task", {{"task_id", task_id}, {"agent", "agent-project"}})
+                  .error.code,
+              "conflict");
+    const auto claimed =
+        r.as_agent("claim_agent_task", {{"task_id", task_id}, {"agent", "agent-ask-orama"}});
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    const std::string credential = claimed.value["body"]["lake_token"];
+    EXPECT_TRUE(credential.starts_with("lat." + task_id + "."));
+    EXPECT_TRUE(r.store.context_for(credential)) << "the credential acts while the task runs";
+    EXPECT_EQ(r.as_agent("claim_agent_task", {{"task_id", task_id}, {"agent", "agent-ask-orama"}})
+                  .error.code,
+              "conflict")
+        << "exactly one claim succeeds";
+    EXPECT_TRUE(r.as_agent("receive_agent_tasks", {{"agent", "agent-ask-orama"}})
+                    .value["tasks"]
+                    .empty())
+        << "a claimed task is not offered again";
+
+    // Progress and the result go out on agent-events; lake's bus loop applies them.
+    ASSERT_TRUE(r.as_agent("publish_agent_event",
+                           {{"task_id", task_id},
+                            {"agent", "agent-ask-orama"},
+                            {"type", "progress"},
+                            {"message", "Reading your datasets"}})
+                    .ok);
+    EXPECT_EQ(r.pump(), 1U);
+    const auto live = r.call("receive_agent_events", {{"task_id", task_id}});
+    ASSERT_TRUE(live.ok) << live.error.message;
+    ASSERT_EQ(live.value["events"].size(), 1U);
+    EXPECT_EQ(live.value["events"][0]["type"], "progress");
+    EXPECT_EQ(live.value["task"]["status"], "running");
+    EXPECT_EQ(live.value["task"]["message"], "Reading your datasets");
+    EXPECT_EQ(r.as_agent("publish_agent_event",
+                         {{"task_id", task_id}, {"agent", "agent-project"}, {"type", "failed"}})
+                  .error.code,
+              "conflict")
+        << "only the agent that claimed it reports on it";
+    ASSERT_TRUE(r.as_agent("publish_agent_event",
+                           {{"task_id", task_id},
+                            {"agent", "agent-ask-orama"},
+                            {"type", "result"},
+                            {"result", {{"ok", true}, {"reply", "hello"}}}})
+                    .ok);
+    EXPECT_EQ(r.pump(), 1U);
+    const auto done = r.call("get_agent_task", {{"task_id", task_id}});
+    EXPECT_EQ(done.value["status"], "succeeded");
+    EXPECT_EQ(done.value["answer"]["reply"], "hello");
+    EXPECT_FALSE(r.store.context_for(credential)) << "a finished task's credential stops";
+    const auto followed = r.call("receive_agent_events",
+                                 {{"task_id", task_id}, {"from_sequence", 2}});
+    ASSERT_EQ(followed.value["events"].size(), 1U);
+    EXPECT_EQ(followed.value["events"][0]["result"]["reply"], "hello");
+    EXPECT_EQ(r.as_agent("publish_agent_event",
+                         {{"task_id", task_id}, {"agent", "agent-ask-orama"}, {"type", "failed"}})
+                  .error.code,
+              "conflict")
+        << "a finished task stays finished";
+
+    // What the bus loses is recovered from the store: an unclaimed task is published again, and
+    // one nobody took by its deadline fails.
+    const auto lost = r.call("agent_turn", {{"agent", "agent-ask-orama"}, {"message", "again"}});
+    const std::string lost_id = lost.value["task_id"];
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 2U);
+    r.pump();
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 2U) << "not before a minute";
+    r.store.age_agent_task(lost_id, std::chrono::seconds(61));
+    r.pump();
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-ask-orama").size(), 3U);
+    r.store.age_agent_task(lost_id, std::chrono::seconds(300));
+    r.pump();
+    const auto expired = r.call("get_agent_task", {{"task_id", lost_id}});
+    EXPECT_EQ(expired.value["status"], "failed");
+    EXPECT_NE(expired.value["message"].get<std::string>().find("No agent picked this up"),
+              std::string::npos);
+}
+
 TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     AgentRuns r;
     auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
@@ -2165,7 +2291,12 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     const auto ask_task = r.store.get_agent_task(asked.value["task_id"]);
     ASSERT_TRUE(ask_task);
     EXPECT_EQ(ask_task->body["lake_token"], "{{credential}}")
-        << "only the operator ever holds the task's credential";
+        << "the credential is made when an agent claims the task, and never stored";
+    const auto published = r.bus->events("agent-tasks.agent-ask-orama");
+    ASSERT_EQ(published.size(), 1U) << "the task is published on its agent's topic";
+    EXPECT_EQ(published[0].correlation_id, ask_task->id);
+    EXPECT_EQ(published[0].payload["task_id"], ask_task->id);
+    EXPECT_FALSE(published[0].payload.contains("body")) << "no task body on the bus";
     EXPECT_EQ(ask_task->body["lake_url"], "http://lake.internal:4900");
     // Ask Orama reads what the person may read and changes nothing itself.
     const auto& scopes = ask_task->scopes;
@@ -2177,15 +2308,15 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     // Its credential acts as the person, with the task's scopes, while the task runs.
     const std::string credential =
         "lat." + ask_task->id + ".0123456789abcdef0123456789abcdef";
-    EXPECT_FALSE(r.store.context_for(credential)) << "not before the operator reports it";
-    ASSERT_TRUE(r.store.set_agent_task_status(
-        ask_task->id, "Running", "", lake::control::identity_crypto::sha256_hex(credential)));
+    EXPECT_FALSE(r.store.context_for(credential)) << "not before an agent claims the task";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        ask_task->id, "agent-ask-orama", lake::control::identity_crypto::sha256_hex(credential)));
     const auto acting = r.store.context_for(credential);
     ASSERT_TRUE(acting) << acting.error().message;
     EXPECT_EQ(acting->user_id, r.principal.user_id);
     EXPECT_EQ(acting->kind, "agent_task");
-    ASSERT_TRUE(r.store.set_agent_task_status(ask_task->id, "Succeeded", "", "",
-                                              {{"ok", true}, {"reply", "hello"}}));
+    ASSERT_TRUE(r.store.record_agent_task_event(
+        ask_task->id, "agent-ask-orama", "Succeeded", "", {{"ok", true}, {"reply", "hello"}}));
     EXPECT_FALSE(r.store.context_for(credential)) << "a finished task's credential stops";
     const auto followed = r.call("get_agent_task", {{"task_id", ask_task->id}});
     ASSERT_TRUE(followed.ok) << followed.error.message;

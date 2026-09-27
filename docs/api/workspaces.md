@@ -128,6 +128,10 @@ works unchanged when pointed here:
   outside the allow-list is `404 unknown_capability` ("not available through lake"); a read called
   with `POST` or an action with `GET` is `405 method_not_allowed` with an `Allow` header. Nothing
   refused reaches the workspace.
+- **The workspace's pub/sub.** `list_topics` and `receive_events` (reads) and `create_topic`,
+  `drop_topic` and `publish_event` (actions) are allowed; only topics created `exposed` are
+  reachable, and a `receive_events` long poll waits at most 10 seconds through lake
+  ([agent-bus.md](agent-bus.md)).
 - **Tools from the filtered OpenAPI.** Agents derive their tool list from this document (the
   `new-agent` rule), so they see exactly what they may call. `sql` is not in it: SQL reaches a
   workspace only through `workspace_sql`, which runs one read-only query.

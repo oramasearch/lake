@@ -12,7 +12,9 @@
 
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
@@ -26,7 +28,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 27> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 29> workspace_reads = {"server_info",
                                                               "score",
                                                               "explain",
                                                               "list_projects",
@@ -52,8 +54,13 @@ constexpr std::array<std::string_view, 27> workspace_reads = {"server_info",
                                                               "list_dataset_generators",
                                                               "list_agents",
                                                               "get_agent",
-                                                              "agent_training_status"};
-constexpr std::array<std::string_view, 31> workspace_actions = {"create_project",
+                                                              "agent_training_status",
+                                                              // The workspace's own pub/sub
+                                                              // (docs/api/agent-bus.md): only
+                                                              // topics created exposed.
+                                                              "list_topics",
+                                                              "receive_events"};
+constexpr std::array<std::string_view, 34> workspace_actions = {"create_project",
                                                                 "capture_intent",
                                                                 "compile_intent",
                                                                 "approve_plan",
@@ -83,6 +90,9 @@ constexpr std::array<std::string_view, 31> workspace_actions = {"create_project"
                                                                 "delete_agent",
                                                                 "set_training_schedule",
                                                                 "agent_run",
+                                                                "create_topic",
+                                                                "drop_topic",
+                                                                "publish_event",
                                                                 // A read in Zetta, called with GET,
                                                                 // but it loads a model and spends
                                                                 // compute: `write` in lake.
@@ -2284,9 +2294,10 @@ void register_agent_run_capabilities(Registry& registry) {
                     }
                     scopes.push_back("workspace_query");
                 }
-                // The turn runs in the background (lake#269): lake records it and answers at
-                // once; the Orama operator sends it with a credential it generates, which is
-                // "{{credential}}" here and never known to lake.
+                // The turn runs in the background (lake#269): lake records it, publishes it on
+                // the agent bus and answers at once. The agent claims it through lake, which
+                // replaces "{{credential}}" with a credential it hands over once and never stores
+                // (docs/api/agent-bus.md).
                 scopes.push_back("get_agent_task");
                 body["lake_token"] = "{{credential}}";
                 body["lake_url"] = config.internal_url;
@@ -2332,6 +2343,10 @@ void register_agent_run_capabilities(Registry& registry) {
                     co_return ApiResult::failure(
                         "unauthorized", "talking to " + agent + " needs a signed-in person");
                 }
+                if (context.agent_bus == nullptr) {
+                    co_return ApiResult::failure("store_unavailable",
+                                                 "the agent bus is not configured on this lake");
+                }
                 auto task = context.store->create_agent_task(
                     control::AgentTask{.customer_id = customer_id,
                                        .agent = agent,
@@ -2345,6 +2360,9 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (!task) {
                     co_return ApiResult::failure(task.error().code, task.error().message);
                 }
+                // A publish that fails is not the caller's failure: the task is recorded, and
+                // lake's bus loop publishes an unclaimed task again.
+                static_cast<void>(co_await context.agent_bus->publish_task(*task));
                 co_return ApiResult::success(task_json(*task));
             }
 
@@ -2507,9 +2525,281 @@ json workspace_openapi(const json& document, std::string_view base) {
     return filtered;
 }
 
+// Agent traffic over Zetta pub/sub (docs/api/agent-bus.md, lake#269). The first three are the
+// library agents' side, authenticated with the agent service token; receive_agent_events is for
+// anyone who may read the task.
+namespace {
+bool agent_service(const ApiContext& context) {
+    return context.credential_kind == "agent_service";
+}
+
+// The bus's agent side is authorized by the service token, not by policy; this names the
+// object for the audit trail.
+std::expected<std::string, ApiError> agent_bus_object(const json&, ApiContext&) {
+    return std::string("agent_bus");
+}
+
+ApiResult not_agent_service() {
+    return ApiResult::failure("unauthorized", "only a library agent's service may call this");
+}
+
+// Replaces every "{{credential}}" string in a task body.
+void fill_credential(json& value, const std::string& credential) {
+    if (value.is_string() && value.get<std::string>() == "{{credential}}") {
+        value = credential;
+    } else if (value.is_structured()) {
+        for (json& item : value) {
+            fill_credential(item, credential);
+        }
+    }
+}
+
+json bus_wait_schema() {
+    return {{"type", "integer"},
+            {"minimum", 0},
+            {"maximum", 10000},
+            {"description", "long poll: wait up to this many milliseconds for an event"}};
+}
+} // namespace
+
+void register_agent_bus_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "receive_agent_tasks",
+        .title = "Receive agent tasks",
+        .description =
+            "A library agent's inbox (topic agent-tasks.<agent> on lake's Zetta pub/sub): the "
+            "tasks published for it from `from_sequence` on, oldest first, without those "
+            "already claimed. Long-polls up to `wait_ms`. Pass the returned `next_sequence` to "
+            "continue. Only a library agent's service may call it (its service token).",
+        .input_schema = {{"type", "object"},
+                         {"required", json::array({"agent"})},
+                         {"additionalProperties", false},
+                         {"properties",
+                          {{"agent", {{"type", "string"}}},
+                           {"from_sequence", {{"type", "integer"}, {"minimum", 1}}},
+                           {"wait_ms", bus_wait_schema()}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "agent_bus",
+        .action = "read",
+        .resolve_object = agent_bus_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!agent_service(context)) {
+                co_return not_agent_service();
+            }
+            if (context.agent_bus == nullptr || context.store == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the agent bus is not configured on this lake");
+            }
+            const std::string agent = input.at("agent");
+            if (!std::ranges::contains(context.agent_bus->agents(), agent)) {
+                co_return ApiResult::failure("not_found", "no library agent " + agent, "/agent");
+            }
+            const std::uint64_t from = input.value("from_sequence", std::uint64_t{1});
+            auto batch = control::settled(co_await context.agent_bus->bus().receive(
+                control::agent_tasks_topic(agent),
+                from,
+                100,
+                std::chrono::milliseconds(input.value("wait_ms", 0))));
+            if (!batch) {
+                co_return ApiResult::failure("store_unavailable", batch.error().message);
+            }
+            json tasks = json::array();
+            for (const control::BusEvent& event : batch->events) {
+                auto task = context.store->get_agent_task(event.correlation_id);
+                if (!task || !task->phase.empty() || task->desired != "present") {
+                    continue;
+                }
+                tasks.push_back({{"sequence", event.sequence},
+                                 {"task_id", task->id},
+                                 {"customer_id", task->customer_id},
+                                 {"kind", task->kind}});
+            }
+            co_return ApiResult::success(
+                {{"tasks", std::move(tasks)}, {"next_sequence", batch->next_sequence}});
+        }});
+    registry.add(Capability{
+        .name = "claim_agent_task",
+        .title = "Claim an agent task",
+        .description =
+            "A library agent takes one task it received: exactly one claim succeeds (another is "
+            "a conflict). Answers the task's body with the task's own credential in it, handed "
+            "over this once; lake keeps only its SHA-256. Only a library agent's service may "
+            "call it.",
+        .input_schema = {{"type", "object"},
+                         {"required", json::array({"task_id", "agent"})},
+                         {"additionalProperties", false},
+                         {"properties",
+                          {{"task_id", {{"type", "string"}}}, {"agent", {{"type", "string"}}}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "agent_bus",
+        .action = "write",
+        .resolve_object = agent_bus_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!agent_service(context)) {
+                return not_agent_service();
+            }
+            if (context.store == nullptr) {
+                return unavailable();
+            }
+            const std::string task_id = input.at("task_id");
+            const std::string credential = std::string(control::agent_task_credential_prefix) +
+                                           task_id + "." +
+                                           control::identity_crypto::random_secret();
+            auto task = context.store->claim_agent_task(
+                task_id, input.at("agent"), control::identity_crypto::sha256_hex(credential));
+            if (!task) {
+                return ApiResult::failure(task.error().code, task.error().message, "/task_id");
+            }
+            json body = task->body;
+            fill_credential(body, credential);
+            context.audit_customer_id = task->customer_id;
+            context.audit_object = "agent_task/" + task->id;
+            return ApiResult::success({{"task_id", task->id},
+                                       {"customer_id", task->customer_id},
+                                       {"agent", task->agent},
+                                       {"kind", task->kind},
+                                       {"deadline_seconds", task->deadline_seconds},
+                                       {"body", std::move(body)}});
+        }});
+    registry.add(Capability{
+        .name = "publish_agent_event",
+        .title = "Publish an agent event",
+        .description =
+            "A library agent reports on a task it claimed, on topic agent-events: `progress` "
+            "(a message while it works), `result` (its answer, which finishes the task) or "
+            "`failed`. Lake applies it to the task. Only a library agent's service may call it, "
+            "and only for a task it claimed that has not finished.",
+        .input_schema = {{"type", "object"},
+                         {"required", json::array({"task_id", "agent", "type"})},
+                         {"additionalProperties", false},
+                         {"properties",
+                          {{"task_id", {{"type", "string"}}},
+                           {"agent", {{"type", "string"}}},
+                           {"type",
+                            {{"type", "string"},
+                             {"enum", json::array({"progress", "result", "failed"})}}},
+                           {"message", {{"type", "string"}}},
+                           {"result", {{"type", "object"}}}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "agent_bus",
+        .action = "write",
+        .resolve_object = agent_bus_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!agent_service(context)) {
+                co_return not_agent_service();
+            }
+            if (context.agent_bus == nullptr || context.store == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the agent bus is not configured on this lake");
+            }
+            const std::string task_id = input.at("task_id");
+            auto task = context.store->get_agent_task(task_id);
+            if (!task || task->agent != input.at("agent").get<std::string>() ||
+                task->phase != "Running") {
+                co_return ApiResult::failure(
+                    "conflict", "the task is not running on this agent", "/task_id");
+            }
+            json event = input;
+            auto published = control::settled(co_await context.agent_bus->bus().publish(
+                std::string(control::agent_events_topic), std::move(event), task_id));
+            if (!published) {
+                co_return ApiResult::failure("store_unavailable", published.error().message);
+            }
+            co_return ApiResult::success({{"event_id", *published}});
+        }});
+    registry.add(Capability{
+        .name = "receive_agent_events",
+        .title = "Follow an agent turn live",
+        .description =
+            "What the agent of one background turn has published (topic agent-events on lake's "
+            "Zetta pub/sub): progress messages and its result, from `from_sequence` on, "
+            "long-polling up to `wait_ms`. Always answers the task as it stands (as "
+            "get_agent_task); pass `next_sequence` to continue.",
+        .input_schema = customer_input_schema({{"task_id", {{"type", "string"}}},
+                                               {"from_sequence", {{"type", "integer"}, {"minimum", 1}}},
+                                               {"wait_ms", bus_wait_schema()}},
+                                              json::array({"task_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (context.store == nullptr) {
+                co_return unavailable();
+            }
+            const std::string task_id = input.at("task_id");
+            const auto owned = [&](const control::Result<control::AgentTask>& task) {
+                return task && task->customer_id == input.at("customer_id").get<std::string>() &&
+                       (task->requested_by_user_id == context.acting_user_id ||
+                        context.acting_identity == "admin");
+            };
+            if (!owned(context.store->get_agent_task(task_id))) {
+                co_return ApiResult::failure("not_found", "no such task in this space");
+            }
+            if (context.agent_bus == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the agent bus is not configured on this lake");
+            }
+            std::uint64_t next = input.value("from_sequence", std::uint64_t{1});
+            const auto until = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(input.value("wait_ms", 0));
+            json events = json::array();
+            // Other tasks' events share the topic: read past them until one of this task's
+            // arrives or the wait is over.
+            for (int page = 0; page < 50; ++page) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    until - std::chrono::steady_clock::now());
+                auto batch = control::settled(co_await context.agent_bus->bus().receive(
+                    std::string(control::agent_events_topic),
+                    next,
+                    1000,
+                    std::max(left, std::chrono::milliseconds(0))));
+                if (!batch) {
+                    co_return ApiResult::failure("store_unavailable", batch.error().message);
+                }
+                for (const control::BusEvent& event : batch->events) {
+                    if (event.correlation_id != task_id || !event.payload.is_object()) {
+                        continue;
+                    }
+                    json row{{"sequence", event.sequence},
+                             {"type", event.payload.value("type", std::string())},
+                             {"message", event.payload.value("message", std::string())}};
+                    if (event.payload.contains("result")) {
+                        row["result"] = event.payload["result"];
+                    }
+                    events.push_back(std::move(row));
+                }
+                const bool moved = batch->next_sequence > next;
+                next = std::max(next, batch->next_sequence);
+                if (!events.empty() || (!moved && std::chrono::steady_clock::now() >= until)) {
+                    break;
+                }
+            }
+            auto task = context.store->get_agent_task(task_id);
+            if (!task) {
+                co_return ApiResult::failure(task.error().code, task.error().message);
+            }
+            settle_discover(context, *task);
+            co_return ApiResult::success({{"events", std::move(events)},
+                                          {"next_sequence", next},
+                                          {"task", task_json(*task)}});
+        }});
+}
+
 void register_workspace_capabilities(Registry& registry) {
     register_agent_run_capabilities(registry);
     register_agent_flow_capabilities(registry);
+    register_agent_bus_capabilities(registry);
     register_sql_capability(registry);
     register_pipeline_capabilities(registry);
     register_parity_capabilities(registry);

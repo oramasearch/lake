@@ -104,6 +104,10 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     // A read that hangs must not hold a page for a minute (zetta#1007: get_run_report never
     // answers); actions such as compile_intent may legitimately take longer.
     request.timeout_seconds = read ? 15 : 60;
+    // receive_events long-polls; through lake it waits at most 10 s, inside the read timeout.
+    if (capability == "receive_events" && input.value("wait_ms", 0LL) > 10'000) {
+        input["wait_ms"] = 10'000;
+    }
     if (read) {
         request.method = "GET";
         std::string query;

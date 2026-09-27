@@ -142,6 +142,7 @@ phase 1, lake#196), with their capabilities and the Train → Data → Storage p
 | `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships and whether this lake runs it | [train-agents.md](train-agents.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |
 | `agent_turn` | action | customer, agent, message | one conversation turn with any agent: library, native or Python | [agent-launches.md](agent-launches.md) |
+| `receive_agent_tasks`, `claim_agent_task`, `publish_agent_event`, `receive_agent_events` | read / action | agent, task, sequence | the agent bus: library agents take tasks and report over Zetta pub/sub; anyone who asked follows a task live | [agent-bus.md](agent-bus.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |
 | `revoke_agent_session` | action | customer, agent session | the key with `revoked_at`; it never verifies again | [agents.md](agents.md) |

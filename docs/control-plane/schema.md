@@ -439,10 +439,11 @@ Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md
 ## Agent tasks migration
 
 `0032_agent_tasks` adds `agent_tasks` (written by lake: a library agent's turn to run in the
-background, with its body, scopes and deadline), `agent_task_status` (written by the operator: phase,
-answer and the **SHA-256** of the task's credential) and `opportunities` (Design → Opportunities:
+background, with its body, scopes, deadline and when it was last published on the agent bus),
+`agent_task_status` (written by lake when an agent claims the task and as it reports: phase, message,
+answer and the **SHA-256** of the task's credential, cleared when the task finishes) and `opportunities` (Design → Opportunities:
 what Auto-Suggest recommended, kept across scans, with what the person did with each). Idempotent;
-guard `agent_tasks_guard`. Contract: [`../api/agent-launches.md`](../api/agent-launches.md).
+guard `agent_tasks_guard`. Contract: [`../api/agent-bus.md`](../api/agent-bus.md).
 
 ## Agent cron schedules migration
 

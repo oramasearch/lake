@@ -1,5 +1,6 @@
 #pragma once
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -344,9 +345,9 @@ struct NewAgentCronSchedule {
     std::vector<std::string> scopes;
     std::string created_by_user_id, created_by_taap_id;
 };
-// One agent turn run in the background (lake#269): lake writes it and answers the request at once;
-// the Orama operator sends it to the agent and writes the status. `phase` is empty until the
-// operator reports, then Pending, Running, Succeeded or Failed.
+// One agent turn run in the background (lake#269): lake writes it, publishes it on the agent bus
+// (docs/api/agent-bus.md) and answers the request at once. `phase` is empty until an agent claims
+// it, then Running, and Succeeded or Failed once the agent (or lake's deadline) finishes it.
 struct AgentTask {
     std::string id, customer_id, agent, kind, conversation_id;
     nlohmann::json body = nlohmann::json::object();
@@ -356,6 +357,11 @@ struct AgentTask {
     std::string requested_by_user_id, requested_by_taap_id, created_at;
     std::string phase, message, started_at, finished_at, credential_sha256;
     nlohmann::json result = nullptr;
+};
+// What lake's bus loop acts on: tasks nobody claimed since they were last published, and tasks
+// past their deadline (pending or running), which it fails.
+struct StaleAgentTasks {
+    std::vector<AgentTask> unclaimed, overdue;
 };
 
 // One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans.
@@ -899,9 +905,25 @@ public:
     // The runs the schedules' CronJobs started, as launches (trigger "schedule"), newest first.
     virtual Result<std::vector<AgentLaunch>>
     list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
-    // Background agent turns (lake#269). Creating one NOTIFYs lake_services.
+    // Background agent turns (lake#269, docs/api/agent-bus.md).
     virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
     virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;
+    // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
+    // it. Exactly one claim succeeds; another is a conflict, as is a claim by a different agent.
+    virtual Result<AgentTask> claim_agent_task(const std::string& id,
+                                               const std::string& agent,
+                                               const std::string& credential_sha256) = 0;
+    // What the claiming agent reported: Running with a message, or Succeeded / Failed with its
+    // answer. Refused for a task that agent has not claimed or that already finished.
+    virtual Result<AgentTask> record_agent_task_event(const std::string& id,
+                                                      const std::string& agent,
+                                                      const std::string& phase,
+                                                      const std::string& message,
+                                                      const nlohmann::json& result) = 0;
+    // Lake's deadline: Failed with a message, claimed or not; a finished task is left alone.
+    virtual Result<void> fail_agent_task(const std::string& id, const std::string& message) = 0;
+    virtual Result<void> mark_agent_task_published(const std::string& id) = 0;
+    virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;
     // Opportunities: a finished scan's rows are written once (a second call for the same task
     // writes nothing); newest scan first.
     virtual Result<void> record_opportunities(const std::vector<Opportunity>&) = 0;

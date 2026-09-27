@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/api/server.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
@@ -287,6 +288,25 @@ int main(int argc, char** argv) {
     opts.allow_non_expiring_credentials =
         env_or("LAKE_ALLOW_NON_EXPIRING_CREDENTIALS", "true") != "false";
     const bool workspaces_configured = workspace_config.configured() && opts.store != nullptr;
+    // The agent bus (docs/api/agent-bus.md): lake's own Zetta's pub/sub, or memory for a demo lake.
+    std::vector<std::string> bus_agents;
+    for (const auto& [agent, endpoint] : workspace_config.agent_endpoints) {
+        bus_agents.push_back(agent);
+    }
+    const std::string bus_url = env_or("LAKE_DATA_PLANE_URL", "");
+    const std::string bus_token = env_or("LAKE_DATA_PLANE_TOKEN", "");
+    if (workspaces_configured && !bus_agents.empty()) {
+        std::shared_ptr<lake::control::AgentBus> bus;
+        if (!bus_url.empty() && !bus_token.empty()) {
+            bus = std::make_shared<lake::control::ZettaAgentBus>(bus_url, bus_token);
+        } else if (memory_store) {
+            bus = std::make_shared<lake::control::MemoryAgentBus>();
+        }
+        if (bus) {
+            opts.agent_bus = std::make_shared<lake::control::AgentTaskBus>(
+                opts.store, std::move(bus), std::move(bus_agents));
+        }
+    }
     if (workspaces_configured) {
         if (!platform_transport_required) {
             lake::control::install_zetta_control_transport();
@@ -324,12 +344,49 @@ int main(int argc, char** argv) {
             {"replication_token_set", opts.replication_token.empty() ? "no" : "yes"},
             {"operator_zetta_configured", operator_zetta_url.empty() ? "no" : "yes"},
             {"logs_configured", logs_url.empty() ? "no" : "yes"},
+            {"agent_bus", opts.agent_bus ? (bus_url.empty() ? "memory" : "zetta") : "no"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}
             .dump());
+    // Applies what agents publish and recovers what the bus lost; on its own thread because
+    // each pass long-polls the bus.
+    std::jthread bus_loop;
+    if (opts.agent_bus) {
+        bus_loop = std::jthread([bus = opts.agent_bus](std::stop_token stop) {
+            bool started = false;
+            while (!stop.stop_requested()) {
+                if (!started) {
+                    auto created = liquid::runtime::block_on(bus->start());
+                    started = created && created->has_value();
+                    if (!started) {
+                        std::println(
+                            stderr,
+                            "{}",
+                            nlohmann::json{{"event", "agent_bus_unavailable"},
+                                           {"error",
+                                            created ? created->error().message : "transport"}}
+                                .dump());
+                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                        continue;
+                    }
+                }
+                auto pumped = liquid::runtime::block_on(bus->pump(std::chrono::seconds(5)));
+                if (!pumped || !pumped->has_value()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                } else if (**pumped == 0) {
+                    // Nothing arrived within the long poll (or the bus does not wait).
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                }
+            }
+        });
+    }
     while (!stop_requested.load()) {
         server.wait_for_work(std::chrono::milliseconds(100));
         server.drain();
+    }
+    if (bus_loop.joinable()) {
+        bus_loop.request_stop();
+        bus_loop.join();
     }
     server.stop();
     if (platform_transport_required || workspaces_configured) {
