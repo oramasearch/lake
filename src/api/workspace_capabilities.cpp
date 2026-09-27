@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <array>
 #include <expected>
+#include <map>
 #include <string>
 #include <string_view>
 
 #include <optional>
 
 #include "lake/api/pipeline.hpp"
+#include "lake/control/agent_library.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -21,7 +23,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 22> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 25> workspace_reads = {"server_info",
                                                               "list_projects",
                                                               "get_project",
                                                               "get_graph",
@@ -42,8 +44,11 @@ constexpr std::array<std::string_view, 22> workspace_reads = {"server_info",
                                                               "get_trace",
                                                               "list_traces",
                                                               "list_source_tables",
-                                                              "list_dataset_generators"};
-constexpr std::array<std::string_view, 25> workspace_actions = {"create_project",
+                                                              "list_dataset_generators",
+                                                              "list_agents",
+                                                              "get_agent",
+                                                              "agent_training_status"};
+constexpr std::array<std::string_view, 31> workspace_actions = {"create_project",
                                                                 "capture_intent",
                                                                 "compile_intent",
                                                                 "approve_plan",
@@ -67,7 +72,16 @@ constexpr std::array<std::string_view, 25> workspace_actions = {"create_project"
                                                                 "compile_n8n",
                                                                 "compile_python",
                                                                 "promote_dataset",
-                                                                "generate_dataset"};
+                                                                "generate_dataset",
+                                                                "create_agent",
+                                                                "update_agent",
+                                                                "delete_agent",
+                                                                "set_training_schedule",
+                                                                "agent_run",
+                                                                // A read in Zetta, called with GET,
+                                                                // but it loads a model and spends
+                                                                // compute: `write` in lake.
+                                                                "chat"};
 
 template <std::size_t Size>
 bool listed(const std::array<std::string_view, Size>& names, std::string_view name) {
@@ -139,8 +153,10 @@ void register_workspace_call(Registry& registry, bool read) {
                                              "/capability");
             }
             set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
-            auto called = co_await context.workspaces->call(
-                input.at("customer_id"), capability, read, input.value("input", json::object()));
+            auto called = co_await context.workspaces->call(input.at("customer_id"),
+                                                            capability,
+                                                            workspace_uses_get(capability),
+                                                            input.value("input", json::object()));
             if (!called) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }
@@ -1178,6 +1194,10 @@ bool workspace_action_allowed(std::string_view capability) {
     return listed(workspace_actions, capability);
 }
 
+bool workspace_uses_get(std::string_view capability) {
+    return workspace_read_allowed(capability) || capability == "chat";
+}
+
 json workspace_openapi(const json& document, std::string_view base) {
     json filtered = document.is_object() ? document : json::object();
     json paths = json::object();
@@ -1339,6 +1359,32 @@ void register_workspace_capabilities(Registry& registry) {
             co_return ApiResult::success(
                 workspace_openapi(**called, "/workspaces/" + customer_id + "/zetta"));
         }});
+    registry.add(Capability{
+        .name = "list_agent_library",
+        .title = "The Agent Library",
+        .description =
+            "Every specialized agent Orama ships (Ask Orama, the Project Agent, Auto-Suggest, "
+            "AgentCreator and the offline evaluation and corpus agents): what each does, where "
+            "you meet it, and whether this lake runs it.",
+        .input_schema = {{"type", "object"},
+                         {"properties", json::object()},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "principal",
+        .action = "read",
+        .resolve_object = [](const json&,
+                             ApiContext& context) -> std::expected<std::string, ApiError> {
+            return "principal/" + context.acting_identity;
+        },
+        // The library is the same for everyone signed in.
+        .authorizes_candidates = true,
+        .handler =
+            [](const json&, ApiContext& context) {
+                const std::map<std::string, std::string> none;
+                return ApiResult::success(control::agent_library_json(
+                    context.workspaces ? context.workspaces->config().agent_endpoints : none));
+            }});
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);
     register_service_capabilities(registry);

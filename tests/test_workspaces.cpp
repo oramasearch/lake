@@ -15,6 +15,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/agent_library.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "temporary_directory.hpp"
@@ -1530,4 +1531,165 @@ TEST(Workspaces, BreadcrumbMirrorsTheUrlWithNamesAndAbbreviatedIds) {
     crumbs = trail(lake::api::web_ui_workspace(page, true));
     EXPECT_NE(crumbs.find(">Data</a>"), std::string::npos) << crumbs;
     EXPECT_NE(crumbs.find("<span aria-current=\"page\">Query</span>"), std::string::npos) << crumbs;
+}
+
+// Train > Agents (docs/api/train-agents.md, lake#229): the agents people build live in the
+// workspace's Zetta, and the Agent Library lists every specialized agent Orama ships.
+TEST(Workspaces, AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    for (const std::string_view read : {"list_agents", "get_agent", "agent_training_status"}) {
+        const auto result = call(
+            "workspace_query", {{"customer_id", w.customer_id}, {"capability", std::string(read)}});
+        EXPECT_TRUE(result.ok) << read << ": " << result.error.message;
+        EXPECT_TRUE(w.caller->read) << read;
+    }
+    for (const std::string_view action :
+         {"create_agent", "update_agent", "delete_agent", "set_training_schedule", "agent_run"}) {
+        const auto result = call(
+            "workspace_act", {{"customer_id", w.customer_id}, {"capability", std::string(action)}});
+        EXPECT_TRUE(result.ok) << action << ": " << result.error.message;
+        EXPECT_FALSE(w.caller->read) << action << " is a POST";
+    }
+    const auto chat_as_read =
+        call("workspace_query", {{"customer_id", w.customer_id}, {"capability", "chat"}});
+    EXPECT_FALSE(chat_as_read.ok) << "chat loads a model: never through the read path";
+    const auto chat = call("workspace_act",
+                           {{"customer_id", w.customer_id},
+                            {"capability", "chat"},
+                            {"input", {{"agent", "a-1"}, {"message", "hello"}}}});
+    ASSERT_TRUE(chat.ok) << chat.error.message;
+    EXPECT_EQ(w.caller->capability, "chat");
+    EXPECT_TRUE(w.caller->read) << "Zetta takes chat with GET";
+    EXPECT_TRUE(lake::api::workspace_uses_get("chat"));
+    EXPECT_FALSE(lake::api::workspace_read_allowed("chat"));
+}
+
+TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
+    const auto endpoints = lake::control::parse_agent_endpoints(
+        "agent-ask-orama=http://ask:8080,agent-project=http://project:8080,unknown=http://x,bad");
+    EXPECT_EQ(endpoints.size(), 2U) << "unknown keys and malformed pairs are ignored";
+    const json library = lake::control::agent_library_json(endpoints);
+    const json agents = library.at("agents");
+    std::vector<std::string> keys;
+    for (const json& agent : agents) {
+        keys.push_back(agent.at("key"));
+    }
+    EXPECT_EQ(keys,
+              (std::vector<std::string>{"agent-ask-orama",
+                                        "agent-project",
+                                        "agent-autosuggest",
+                                        "agent-creator",
+                                        "agent-eval-generator",
+                                        "agent-autosuggest-corpus",
+                                        "agent-project-corpus"}));
+    EXPECT_EQ(agents[0].at("name"), "Ask Orama");
+    EXPECT_EQ(agents[0].at("status"), "Available");
+    EXPECT_EQ(agents[2].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[4].at("status"), "Offline tool");
+    EXPECT_FALSE(agents[4].at("chat").get<bool>());
+}
+
+TEST(Workspaces, AgentsPageShowsYourAgentsTheStudioFormAndTheAgentLibrary) {
+    lake::api::WorkspacePage page;
+    page.section = "agents";
+    page.customer_id = std::string(customer);
+    page.customers = {{std::string(customer), "you", true}};
+    page.data["list_agent_library"] =
+        lake::control::agent_library_json({{"agent-ask-orama", "http://ask:8080"}});
+
+    // Before the workspace is ready the library still shows, beside Start your workspace.
+    const std::string waiting = lake::api::web_ui_workspace(page);
+    EXPECT_NE(waiting.find("Agent Library"), std::string::npos);
+    EXPECT_NE(waiting.find("Ask Orama"), std::string::npos);
+    EXPECT_NE(waiting.find("Project Corpus Generator"), std::string::npos);
+
+    page.state = {{"ready", true}, {"workspace", "ws-1"}};
+    page.data["list_agents"] = {
+        {"agents",
+         json::array({{{"id", "a-1"},
+                       {"name", "Renewal watcher"},
+                       {"kind", "custom"},
+                       {"runtime", "python"},
+                       {"purpose", "Flag renewals at risk"},
+                       {"skills", {"search", "summarize"}},
+                       {"trigger", "every Monday"},
+                       {"model_name", "gpt-4o"},
+                       {"status", "idle"}},
+                      {{"id", "a-2"}, {"name", "Hidden Orama agent"}, {"kind", "orama"}}})},
+        {"default_agent_id", ""}};
+    const std::string html = lake::api::web_ui_workspace(page);
+    EXPECT_NE(html.find("Your Agents"), std::string::npos);
+    EXPECT_NE(html.find("Renewal watcher"), std::string::npos);
+    EXPECT_NE(html.find("Conversation and unattended"), std::string::npos);
+    EXPECT_NE(html.find("Search data, Summarize and explain"), std::string::npos);
+    EXPECT_EQ(html.find("Hidden Orama agent"), std::string::npos)
+        << "Orama's agents are in the library, not in Your Agents";
+    for (const std::string_view box : {"name=\"purpose\"",
+                                       "name=\"work_area\"",
+                                       "name=\"manifesto\"",
+                                       "name=\"goal\"",
+                                       "name=\"skills\" value=\"generate-data\"",
+                                       "value=\"frontier\"",
+                                       "name=\"trigger\"",
+                                       "action=\"/train/agents/create\""}) {
+        EXPECT_NE(html.find(box), std::string::npos) << box;
+    }
+    EXPECT_LT(html.find("<h2>Your Agents</h2>"), html.find("<h2>Agent Library</h2>"));
+
+    // Train > Agents is the first Train link.
+    const std::string home = lake::api::web_ui_home(true);
+    EXPECT_NE(home.find("href=\"/train/agents\""), std::string::npos);
+    EXPECT_LT(home.find("href=\"/train/agents\""), home.find("href=\"/train/data\""));
+    lake::api::WebUiViewer viewer{true};
+    viewer.path = "/train/agent";
+    EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/train/agents\" aria-current=\"page\""),
+              std::string::npos);
+}
+
+TEST(Workspaces, AgentPageShowsTheDefinitionPipelinesRunsAndATypedDelete) {
+    lake::api::WorkspacePage page;
+    page.section = "agent";
+    page.subject = "a-1";
+    page.customer_id = std::string(customer);
+    page.state = {{"ready", true}};
+    page.data["get_agent"] = {
+        {"id", "a-1"},
+        {"name", "Renewal watcher"},
+        {"runtime", "native"},
+        {"model_name", "Orama base model"},
+        {"work_area", {{"kind", "project"}, {"detail", "churn"}}},
+        {"manifesto", "Answer from company data only."},
+        {"pipelines",
+         json::array(
+             {{{"project", "churn"}, {"graph", "weekly"}, {"version", "2026-09-26T10:00:00Z"}}})}};
+    page.data["agent_training_status"] = {{"reason", "Never trained. Its schedule will train it."}};
+    const std::string html = lake::api::web_ui_workspace(page);
+    EXPECT_NE(html.find("Agent: Renewal watcher"), std::string::npos) << "titled by name, not id";
+    EXPECT_NE(html.find("A single project: churn"), std::string::npos);
+    EXPECT_NE(html.find("In your workspace"), std::string::npos);
+    EXPECT_NE(html.find("graph=weekly"), std::string::npos);
+    EXPECT_NE(html.find("This agent only talks"), std::string::npos);
+    EXPECT_NE(html.find("Never trained."), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/agent/delete\""), std::string::npos);
+    EXPECT_NE(html.find("Type <strong>Renewal watcher</strong>"), std::string::npos);
 }

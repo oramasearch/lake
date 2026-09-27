@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/api/server.hpp"
+#include "lake/control/agent_library.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -81,6 +82,10 @@ int usage() {
         "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
     std::println(
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
+    std::println(
+        "  LAKE_AGENT_ENDPOINTS lists the Agent Library agents this lake runs (key=url,...)");
+    std::println("  LAKE_BASE_AGENT_MODEL is the base-agent checkpoint inside a workspace");
+    std::println("  LAKE_AGENT_MODEL is the frontier model Python agents run on (default gpt-4o)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -256,6 +261,14 @@ int main(int argc, char** argv) {
     // service connections at LAKE_SERVICE_DIR when the Lake enables services; without it the
     // Services, Design, Train and Ship pages say the feature is unavailable.
     lake::control::WorkspaceConfig workspace_config{env_or("LAKE_SERVICE_DIR", "")};
+    workspace_config.agent_endpoints =
+        lake::control::parse_agent_endpoints(env_or("LAKE_AGENT_ENDPOINTS", ""));
+    if (const std::string model = env_or("LAKE_BASE_AGENT_MODEL", ""); !model.empty()) {
+        workspace_config.base_agent_model = model;
+    }
+    if (const std::string model = env_or("LAKE_AGENT_MODEL", ""); !model.empty()) {
+        workspace_config.frontier_model = model;
+    }
     if (const std::string limit = env_or("LAKE_SERVICES_PER_CUSTOMER", ""); !limit.empty()) {
         std::size_t parsed = 0;
         const auto [end, error] =

@@ -743,6 +743,67 @@ TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShap
     EXPECT_EQ(document["servers"][0]["url"], "/workspaces/" + customer_id + "/zetta");
 }
 
+TEST_P(HttpResponseIsolation, CreateAnAgentBuildsANativeOrAPythonAgentFromStudiosBoxes) {
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory == nullptr) {
+        GTEST_SKIP() << "the operator's status is written directly only on the memory store";
+    }
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customers_response =
+        connection->request("GET", "/v1/list_customers", "", cookie);
+    const std::string customer_id =
+        nlohmann::json::parse(customers_response.substr(customers_response.find("\r\n\r\n") + 4))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
+    ASSERT_TRUE(requested && *requested);
+    const auto service = memory->get_service((*requested)->service_id);
+    ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
+    std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
+    workspace_caller_->answers["create_agent"] = {{"id", "a-1"}, {"name", "Renewal watcher"}};
+
+    const std::string boxes = "customer_id=" + customer_id +
+                              "&name=Renewal+watcher&purpose=Flag+renewals&work_area=project"
+                              "&work_area_detail=churn&manifesto=Company+data+only&goal=A+month+"
+                              "ahead&skills=search&skills=summarize&trigger=every+Monday";
+    const std::string frontier =
+        connection->request("POST", "/train/agents/create", boxes + "&model=frontier", cookie);
+    ASSERT_TRUE(frontier.starts_with("HTTP/1.1 302")) << frontier.substr(0, 300);
+    EXPECT_NE(response_header(frontier, "location").find("/train/agent?"), std::string::npos);
+    const auto& [python_name, python_read, python] = workspace_caller_->calls.back();
+    EXPECT_EQ(python_name, "create_agent");
+    EXPECT_FALSE(python_read);
+    EXPECT_EQ(python["runtime"], "python");
+    EXPECT_EQ(python["skills"], nlohmann::json::array({"search", "summarize"}));
+    EXPECT_EQ(python["work_area"]["detail"], "churn");
+    EXPECT_EQ(python["definition"]["source"], "zetta");
+    const std::string instructions = python["definition"]["instructions"];
+    EXPECT_NE(instructions.find("# Renewal watcher"), std::string::npos);
+    EXPECT_NE(instructions.find("Company data only"), std::string::npos);
+    EXPECT_NE(instructions.find("A month ahead"), std::string::npos);
+
+    const std::string native =
+        connection->request("POST", "/train/agents/create", boxes + "&model=base", cookie);
+    ASSERT_TRUE(native.starts_with("HTTP/1.1 302")) << native.substr(0, 300);
+    const nlohmann::json& base = std::get<2>(workspace_caller_->calls.back());
+    EXPECT_EQ(base["runtime"], "native");
+    EXPECT_EQ(base["model"], "/var/lib/zetta/models/base-agent");
+    EXPECT_EQ(base["model_name"], "Orama base model");
+    EXPECT_FALSE(base.contains("definition"));
+
+    const std::string page = connection->request("GET", "/train/agents", "", cookie);
+    ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
+    EXPECT_NE(page.find("Agent Library"), std::string::npos);
+    EXPECT_NE(page.find("Auto-Suggest"), std::string::npos);
+}
+
 INSTANTIATE_TEST_SUITE_P(HttpServer,
                          HttpResponseIsolation,
                          testing::Combine(testing::Bool(), testing::Bool()),
