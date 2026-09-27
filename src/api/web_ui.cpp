@@ -3249,9 +3249,14 @@ std::string discover_content(const WorkspacePage& page) {
     }
     const nlohmann::json rows = page.data.value("list_opportunities", nlohmann::json::object())
                                     .value("opportunities", nlohmann::json::array());
-    std::string last_scan;
+    // The newest scan's Opportunities are the recommendation; what earlier scans recommended and
+    // nobody acted on is kept, collapsed, so each idea is not listed once per scan (lake#287).
+    std::string last_scan, latest_task;
     for (const nlohmann::json& row : rows) {
-        last_scan = std::max(last_scan, json_text(row, "created_at"));
+        if (json_text(row, "created_at") > last_scan) {
+            last_scan = json_text(row, "created_at");
+            latest_task = json_text(row, "task_id");
+        }
     }
     if (!running) {
         out += "<div class=\"panel empty\">Auto-Suggest is not running on this lake, so a new "
@@ -3270,13 +3275,16 @@ std::string discover_content(const WorkspacePage& page) {
             hidden("customer_id", page.customer_id),
             last_scan.empty() ? "Scan my workspace" : "Scan again");
     }
-    std::string fresh, made, later, dismissed;
+    std::string fresh, earlier, made, later, dismissed;
+    std::size_t earlier_count = 0;
     for (const nlohmann::json& row : rows) {
         const std::string state = json_text(row, "status");
         const std::string id = json_text(row, "id");
         const nlohmann::json detail = row.value("detail", nlohmann::json::object());
+        const bool current = json_text(row, "task_id") == latest_task;
         if (state == "new") {
-            fresh += std::format(
+            earlier_count += current ? 0 : 1;
+            (current ? fresh : earlier) += std::format(
                 "<article class=\"panel ask-proposal\"><label class=\"opportunity-pick\"><input "
                 "type=\"checkbox\" name=\"pick\" value=\"{}\"> <span>{}</span></label><p "
                 "class=\"sub\">{}{}</p>"
@@ -3301,7 +3309,7 @@ std::string discover_content(const WorkspacePage& page) {
                                  url_component(json_text(row, "project")),
                              json_text(row, "project")) +
                     "</li>";
-        } else if (state == "not_yet") {
+        } else if (state == "not_yet" && current) {
             later += "<li><strong>" + web_ui_escape(json_text(row, "intent")) + "</strong>: " +
                      web_ui_escape(json_text(row, "why")) + "</li>";
         } else if (state == "dismissed") {
@@ -3312,15 +3320,25 @@ std::string discover_content(const WorkspacePage& page) {
         out += "<div class=\"panel empty\">No Opportunities yet. Scan your workspace to see what "
                "your data could be used for.</div>";
     }
-    if (!fresh.empty()) {
+    if (!fresh.empty() || !earlier.empty()) {
         out += std::format(
             "<section class=\"panel\"><h2>Recommended</h2><form class=\"stack\" method=\"post\" "
-            "action=\"/design/opportunities/create\">{}{}<label><input type=\"checkbox\" "
+            "action=\"/design/opportunities/create\">{}{}{}<label><input type=\"checkbox\" "
             "name=\"confirm\" value=\"yes\" required> Create a project draft for each selected "
             "Opportunity. Nothing runs until you approve a plan.</label><button class=\"button "
             "button-primary\" type=\"submit\">Create project drafts</button></form></section>",
             hidden("customer_id", page.customer_id),
-            fresh);
+            fresh.empty() ? std::string("<p class=\"sub\">The latest scan recommended nothing "
+                                        "new.</p>")
+                          : fresh,
+            earlier.empty()
+                ? std::string()
+                : std::format("<details class=\"earlier-scans\"><summary>Earlier scans ({})"
+                              "</summary><p class=\"sub\">What earlier scans recommended and "
+                              "nobody has acted on. The latest scan above replaces them; you can "
+                              "still pick or dismiss one.</p>{}</details>",
+                              earlier_count,
+                              earlier));
     }
     if (!made.empty()) {
         out += "<section class=\"panel\"><h2>Made into Projects</h2><ul>" + made + "</ul></section>";

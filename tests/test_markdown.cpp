@@ -168,3 +168,37 @@ TEST(WebUi, AnAgentsMarkdownReplyRendersAndStaysEscaped) {
     EXPECT_NE(page.find("**not bold** &lt;b&gt;me&lt;/b&gt;"), std::string::npos)
         << "the person's own words are shown as typed";
 }
+
+TEST(WebUi, TheLatestScanIsTheRecommendationAndEarlierOnesFold) {
+    // lake#287: every scan added its Opportunities to the last one's, so ideas piled up.
+    lake::api::WorkspacePage page;
+    page.section = "discover";
+    page.customer_id = "c-1";
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    const auto row = [](std::string id, std::string task, std::string at, std::string status,
+                        std::string intent) {
+        return nlohmann::json{{"id", id}, {"task_id", task}, {"created_at", at},
+                              {"status", status}, {"intent", intent}, {"solution", "S-1"},
+                              {"methodology", "classifier"}, {"why", "because"},
+                              {"detail", nlohmann::json::object()}};
+    };
+    page.data["list_opportunities"] = {{"opportunities", nlohmann::json::array({
+        row("o-3", "scan-2", "2026-09-27T19:00:00Z", "new", "Predict churn and rank accounts"),
+        row("o-4", "scan-2", "2026-09-27T19:00:00Z", "not_yet", "Forecast revenue"),
+        row("o-1", "scan-1", "2026-09-27T12:00:00Z", "new", "Rank accounts for outreach"),
+        row("o-2", "scan-1", "2026-09-27T12:00:00Z", "project", "Score leads"),
+        row("o-5", "scan-1", "2026-09-27T12:00:00Z", "not_yet", "Old reason")})}};
+    const std::string html = lake::api::web_ui_workspace(page, true);
+    const auto recommended = html.find("<h2>Recommended</h2>");
+    const auto earlier = html.find("<summary>Earlier scans (1)</summary>");
+    ASSERT_NE(recommended, std::string::npos);
+    ASSERT_NE(earlier, std::string::npos);
+    const auto newest = html.find("Predict churn and rank accounts");
+    const auto older = html.find("Rank accounts for outreach");
+    EXPECT_TRUE(recommended < newest && newest < earlier) << "the latest scan leads";
+    EXPECT_GT(older, earlier) << "an untouched earlier idea folds under Earlier scans";
+    EXPECT_NE(html.find("value=\"o-1\""), std::string::npos) << "it can still be picked";
+    EXPECT_NE(html.find("Score leads"), std::string::npos) << "what a person acted on stays";
+    EXPECT_NE(html.find("Forecast revenue"), std::string::npos);
+    EXPECT_EQ(html.find("Old reason"), std::string::npos) << "Not Yet is the latest scan's";
+}

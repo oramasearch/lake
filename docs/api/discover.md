@@ -8,6 +8,13 @@ project draft (`create_projects_from_opportunities {opportunity_ids}`, on confir
 (`dismiss_opportunity`). `list_opportunities {task_id?}` reads them over REST and MCP. Each names the
 catalogue solution it maps to; the catalogue itself in lake is lake#270.
 
+**The latest scan is the recommendation (lake#287).** *Recommended* lists the newest scan's
+Opportunities. What earlier scans recommended and nobody acted on folds under *Earlier scans (N)* in the
+same form, where it can still be picked or dismissed; *Not yet* is the newest scan's. Nothing is
+deleted or rewritten: the grouping is decided when the page is drawn, and everything a person acted on
+(made into a project, dismissed) keeps its own section. `list_opportunities` still returns every row,
+each with its `task_id`. Verify: `WebUi.TheLatestScanIsTheRecommendationAndEarlierOnesFold`.
+
 # Discover Opportunities
 
 **Status: implemented 2026-09-27 (lake#237, epic lake#228).** Design's *Discover Opportunities*
