@@ -89,6 +89,14 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 `--memory-store` uses an in-memory bus. The startup line reports `agent_bus`: `zetta`, `memory` or
 `no`.
 
+## Verify on a deployment
+
+`tools/e2e/agents.py <base-url> <token-file> <customer-id> [T1 …]` is the agents' live scenario
+suite: each library agent over the bus, as the person whose key it holds, with a pass condition per
+scenario (T1–T10, each a GitHub issue labelled `test`: https://github.com/oramasearch/lake/issues/276
+to https://github.com/oramasearch/lake/issues/285). It prints one line per scenario and exits 1 when
+one fails. It only proposes; nothing is confirmed. Run it after a roll of lake, Zetta or an agent.
+
 ## Not yet
 
 - Custom Python agents on `agent-runtime` still answer within the call.
