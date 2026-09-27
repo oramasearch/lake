@@ -764,6 +764,26 @@ dd {
   margin: 0;
   overflow-wrap: anywhere;
 }
+.ask-orama {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lake-space-1);
+}
+.ask-conversation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lake-space-3);
+}
+.ask-message {
+  border-left: var(--lake-border-width) solid var(--lake-border-subtle);
+  padding-left: var(--lake-space-3);
+}
+.ask-message.ask-agent {
+  border-left-color: var(--lake-border-strong);
+}
+.ask-proposal {
+  margin-top: var(--lake-space-2);
+}
 .agent-cell {
   display: flex;
   flex-direction: column;

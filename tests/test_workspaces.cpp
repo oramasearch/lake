@@ -1687,6 +1687,8 @@ TEST(Workspaces, AgentPageShowsTheDefinitionPipelinesRunsAndATypedDelete) {
          json::array(
              {{{"project", "churn"}, {"graph", "weekly"}, {"version", "2026-09-26T10:00:00Z"}}})}};
     page.data["agent_training_status"] = {{"reason", "Never trained. Its schedule will train it."}};
+    page.data["approved_pipelines"] = json::array(
+        {{{"project", "churn"}, {"graph", "weekly"}}, {{"project", "churn"}, {"graph", "daily"}}});
     const std::string html = lake::api::web_ui_workspace(page);
     EXPECT_NE(html.find("Agent: Renewal watcher"), std::string::npos) << "titled by name, not id";
     EXPECT_NE(html.find("A single project: churn"), std::string::npos);
@@ -1695,6 +1697,11 @@ TEST(Workspaces, AgentPageShowsTheDefinitionPipelinesRunsAndATypedDelete) {
     EXPECT_NE(html.find("This agent only talks"), std::string::npos);
     EXPECT_NE(html.find("Never trained."), std::string::npos);
     EXPECT_NE(html.find("action=\"/train/agent/delete\""), std::string::npos);
+    EXPECT_NE(html.find("action=\"/train/agent/revoke\""), std::string::npos);
+    EXPECT_NE(html.find("Approved Pipelines You Can Grant"), std::string::npos);
+    EXPECT_NE(html.find("value=\"daily\""), std::string::npos) << "an approved, ungranted one";
+    EXPECT_EQ(html.find("<li>weekly in churn <form"), std::string::npos)
+        << "a granted Pipeline is not offered again";
     EXPECT_NE(html.find("Type <strong>Renewal watcher</strong>"), std::string::npos);
 }
 

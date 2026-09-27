@@ -214,6 +214,26 @@ struct WorkspacePage {
 };
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
 
+// Ask Orama (docs/api/ask-orama.md, lake#236): one conversation, whose messages are lake's
+// ask_messages rows as JSON ({id, role, content, payload}). `agents` is the selector: Ask Orama
+// first, then every other agent that takes a conversation ({id, name}).
+struct AskPage {
+    std::string customer_id, conversation_id, from, agent, error;
+    nlohmann::json messages = nlohmann::json::array();
+    nlohmann::json agents = nlohmann::json::array();
+};
+std::string web_ui_ask(const AskPage& page, WebUiViewer viewer = true);
+
+// Train > Agents > Agent Factory (docs/api/agent-factory.md, lake#233): a conversation with
+// AgentCreator, its latest answer (a question, or a proposal with its defects), and the proposal's
+// SHA-256, which Approve and create is bound to.
+struct FactoryPage {
+    std::string customer_id, conversation_id, error, message_id, proposal_sha256;
+    nlohmann::json messages = nlohmann::json::array();
+    nlohmann::json latest = nlohmann::json::object();
+};
+std::string web_ui_factory(const FactoryPage& page, WebUiViewer viewer = true);
+
 // Ship > Packages: the registries' catalog ({oci, npm, python}: [{name, versions}]). `origin` is
 // the public origin for install commands; empty omits them.
 std::string web_ui_packages(const nlohmann::json& catalog,
