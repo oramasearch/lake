@@ -4,7 +4,9 @@
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <format>
 #include <print>
+#include <vector>
 
 #include <zetta/connect/http_transport.hpp>
 
@@ -45,19 +47,148 @@ std::optional<std::int64_t> clock_time(std::string_view text) {
 constexpr std::array<std::string_view, 7> weekdays{
     "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"};
 
+std::vector<std::string_view> split(std::string_view text, char separator) {
+    std::vector<std::string_view> parts;
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t end = text.find(separator, start);
+        parts.push_back(text.substr(start, end - start));
+        if (end == std::string_view::npos) {
+            return parts;
+        }
+        start = end + 1;
+    }
+}
+
+struct CronField {
+    std::string_view name;
+    int low, high;
+    std::array<std::string_view, 12> names{}; // three-letter names, from `low`
+};
+
+constexpr std::array<CronField, 5> cron_fields{{
+    {"minute", 0, 59, {}},
+    {"hour", 0, 23, {}},
+    {"day of month", 1, 31, {}},
+    {"month", 1, 12, {"jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+                      "dec"}},
+    {"day of week", 0, 7, {"sun", "mon", "tue", "wed", "thu", "fri", "sat"}},
+}};
+
+std::optional<int> cron_value(const CronField& field, std::string_view text) {
+    if (const auto value = number(text)) {
+        return *value;
+    }
+    const std::string name = lowered(text);
+    for (std::size_t index = 0; index < field.names.size(); ++index) {
+        if (!field.names[index].empty() && field.names[index] == name) {
+            return field.low + static_cast<int>(index);
+        }
+    }
+    return std::nullopt;
+}
+
+// The values one field selects, or why it is refused.
+std::expected<std::vector<int>, std::string> cron_values(const CronField& field,
+                                                         std::string_view text) {
+    std::vector<int> values;
+    for (const std::string_view item : split(text, ',')) {
+        std::string_view range = item;
+        int step = 1;
+        if (const std::size_t slash = item.find('/'); slash != std::string_view::npos) {
+            const auto parsed = number(item.substr(slash + 1));
+            if (!parsed || *parsed < 1) {
+                return std::unexpected("the " + std::string(field.name) + " step in '" +
+                                       std::string(item) + "' is not a positive number");
+            }
+            step = *parsed;
+            range = item.substr(0, slash);
+        }
+        int first = field.low, last = field.high;
+        if (range != "*") {
+            const std::size_t dash = range.find('-');
+            const auto from = cron_value(field, range.substr(0, dash));
+            const auto to = dash == std::string_view::npos
+                                ? (step > 1 ? std::optional<int>(field.high) : from)
+                                : cron_value(field, range.substr(dash + 1));
+            if (!from || !to || *from < field.low || *to > field.high || *from > *to) {
+                return std::unexpected("'" + std::string(item) + "' is not a " +
+                                       std::string(field.name) + " (" +
+                                       std::to_string(field.low) + "-" +
+                                       std::to_string(field.high) + ")");
+            }
+            first = *from;
+            last = *to;
+        }
+        for (int value = first; value <= last; value += step) {
+            values.push_back(value);
+        }
+    }
+    std::ranges::sort(values);
+    return values;
+}
+
 } // namespace
 
-std::optional<std::int64_t> next_run(std::string_view trigger, std::int64_t now_unix) {
+std::expected<std::string, std::string> normalize_cron(std::string_view expression) {
+    std::string text;
+    for (const std::string_view part : split(expression, ' ')) {
+        if (!part.empty()) {
+            text += (text.empty() ? "" : " ") + std::string(part);
+        }
+    }
+    const std::string macro = lowered(text);
+    if (macro == "@hourly") {
+        return "0 * * * *";
+    }
+    if (macro == "@daily" || macro == "@midnight") {
+        return "0 0 * * *";
+    }
+    if (macro == "@weekly") {
+        return "0 0 * * 0";
+    }
+    if (macro == "@monthly") {
+        return "0 0 1 * *";
+    }
+    if (macro == "@yearly" || macro == "@annually") {
+        return "0 0 1 1 *";
+    }
+    const auto fields = split(text, ' ');
+    if (fields.size() != 5) {
+        return std::unexpected(std::string("a cron expression has five fields: minute, hour, day "
+                                           "of month, month, day of week"));
+    }
+    std::vector<int> minutes;
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        auto values = cron_values(cron_fields[index], fields[index]);
+        if (!values) {
+            return std::unexpected(values.error());
+        }
+        if (index == 0) {
+            minutes = std::move(*values);
+        }
+    }
+    // At most once every five minutes: no two minutes of an hour (wrapping to the next) closer.
+    for (std::size_t index = 0; index < minutes.size(); ++index) {
+        const int next = index + 1 < minutes.size() ? minutes[index + 1] : minutes.front() + 60;
+        if (minutes.size() > 1 && next - minutes[index] < 5) {
+            return std::unexpected(
+                std::string("a schedule may run at most once every five minutes"));
+        }
+    }
+    return text;
+}
+
+std::optional<std::string> trigger_cron(std::string_view trigger) {
     const std::string text = lowered(trigger);
-    constexpr std::int64_t day = 86400;
     if (text == "hourly") {
-        return now_unix + 3600;
+        return "0 * * * *";
     }
     if (text == "daily") {
-        return now_unix + day;
+        return "0 0 * * *";
     }
     if (text == "weekly") {
-        return now_unix + 7 * day;
+        return "0 0 * * 0";
     }
     if (!text.starts_with("every ")) {
         return std::nullopt;
@@ -69,13 +200,28 @@ std::optional<std::int64_t> next_run(std::string_view trigger, std::int64_t now_
         if (const auto count = number(rest.substr(0, space)); count && *count > 0) {
             const std::string_view unit = rest.substr(space + 1);
             if (unit.starts_with("minute")) {
-                return now_unix + std::max<std::int64_t>(*count, 5) * 60;
+                if (*count % 60 == 0 && *count / 60 <= 23) {
+                    return *count == 60 ? "0 * * * *" : std::format("0 */{} * * *", *count / 60);
+                }
+                if (*count < 5 || *count > 59) {
+                    return std::nullopt;
+                }
+                return std::format("*/{} * * * *", *count);
             }
             if (unit.starts_with("hour")) {
-                return now_unix + *count * 3600;
+                if (*count == 24) {
+                    return "0 0 * * *";
+                }
+                if (*count > 23) {
+                    return std::nullopt;
+                }
+                return *count == 1 ? "0 * * * *" : std::format("0 */{} * * *", *count);
             }
             if (unit.starts_with("day")) {
-                return now_unix + *count * day;
+                if (*count > 31) {
+                    return std::nullopt;
+                }
+                return *count == 1 ? "0 0 * * *" : std::format("0 0 */{} * *", *count);
             }
             return std::nullopt;
         }
@@ -90,77 +236,19 @@ std::optional<std::int64_t> next_run(std::string_view trigger, std::int64_t now_
     if (!time) {
         return std::nullopt;
     }
-    const std::int64_t midnight = now_unix - now_unix % day;
-    const int today = static_cast<int>(((now_unix / day) + 4) % 7); // 1970-01-01 was a Thursday
-    for (int offset = 0; offset <= 7; ++offset) {
-        const std::int64_t candidate = midnight + offset * day + *time;
-        if (candidate <= now_unix) {
-            continue;
-        }
-        const int weekday = (today + offset) % 7;
-        if (when == "day" || (when == "weekday" && weekday >= 1 && weekday <= 5) ||
-            when == weekdays[weekday]) {
-            return candidate;
+    const std::int64_t hour = *time / 3600, minute = *time % 3600 / 60;
+    if (when == "day") {
+        return std::format("{} {} * * *", minute, hour);
+    }
+    if (when == "weekday") {
+        return std::format("{} {} * * 1-5", minute, hour);
+    }
+    for (std::size_t index = 0; index < weekdays.size(); ++index) {
+        if (when == weekdays[index]) {
+            return std::format("{} {} * * {}", minute, hour, index);
         }
     }
     return std::nullopt;
-}
-
-AgentScheduler::AgentScheduler(std::shared_ptr<Store> store, std::chrono::seconds interval)
-    : store_(std::move(store)), interval_(interval) {}
-
-AgentScheduler::~AgentScheduler() {
-    stopping_ = true;
-    if (thread_.joinable()) {
-        thread_.join();
-    }
-}
-
-void AgentScheduler::start() {
-    thread_ = std::thread([this] {
-        while (!stopping_) {
-            const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
-            tick(now);
-            for (std::int64_t waited = 0; waited < interval_.count() && !stopping_; ++waited) {
-                std::this_thread::sleep_for(std::chrono::seconds{1});
-            }
-        }
-    });
-}
-
-std::size_t AgentScheduler::tick(std::int64_t now_unix) {
-    const auto due = store_->due_agent_schedules(now_unix);
-    if (!due) {
-        std::println(stderr, "lake: agent scheduler: {}", due.error().message);
-        return 0;
-    }
-    std::size_t fired = 0;
-    for (const AgentSchedule& schedule : *due) {
-        const auto launched = store_->create_agent_launch(NewAgentLaunch{
-            .customer_id = schedule.customer_id,
-            .agent_id = schedule.agent_id,
-            .agent_name = schedule.agent_name,
-            .mode = "job",
-            .trigger = "schedule",
-            .input = {{"trigger", schedule.trigger}, {"scheduled_for", schedule.next_run_unix}},
-            .scopes = agent_launch_scopes,
-            .created_by_user_id = schedule.created_by_user_id,
-            .created_by_taap_id = schedule.created_by_taap_id});
-        if (launched) {
-            ++fired;
-        } else {
-            std::println(stderr, "lake: agent scheduler: {}", launched.error().message);
-        }
-        // A trigger lake can no longer place in time stops rather than firing every tick.
-        const auto next = next_run(schedule.trigger, now_unix);
-        store_->mark_agent_schedule_run(schedule.customer_id,
-                                        schedule.agent_id,
-                                        now_unix,
-                                        next.value_or(now_unix + 3650 * 86400));
-    }
-    return fired;
 }
 
 liquid::runtime::task<ZettaControlResult<nlohmann::json>>

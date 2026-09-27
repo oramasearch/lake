@@ -1,13 +1,11 @@
 #pragma once
 
-#include <atomic>
-#include <chrono>
+#include <expected>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include <liquid/runtime.hpp>
@@ -17,8 +15,8 @@
 #include "lake/control/zetta_control.hpp"
 
 // Running user-created and library agents (docs/api/agent-launches.md, lake#231): the scopes a
-// launch's credential carries, when a trigger is next due, the scheduler that fires schedules, and
-// the injected caller that sends a turn to an agent's service.
+// launch's credential carries, the cron expressions a schedule may use (the Orama operator runs
+// each schedule as a CronJob), and the injected caller that sends a turn to an agent's service.
 namespace lake::control {
 
 // The lake capabilities a launched agent's credential may call: its workspace through the agent
@@ -31,29 +29,16 @@ inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
                                                           "repository_tree",
                                                           "repository_file"};
 
-// When `trigger` (Studio's plain words) is next due after `now_unix`, or nothing when lake cannot
-// schedule it by time. Understood: "every N minutes|hours|days", "hourly", "daily", "weekly",
-// "every day at HH:MM", "every <weekday> at HH:MM", "every weekday at HH:MM" (UTC).
-std::optional<std::int64_t> next_run(std::string_view trigger, std::int64_t now_unix);
+// A schedule's cron expression (docs/api/agent-launches.md): the five fields a Kubernetes CronJob
+// takes (minute, hour, day of month, month, day of week), or one of @hourly, @daily, @weekly,
+// @monthly, @yearly. Returns the five-field form, or why lake refuses it. A schedule may fire at
+// most once every five minutes.
+std::expected<std::string, std::string> normalize_cron(std::string_view expression);
 
-// Fires due schedules as job launches, acting as whoever set the schedule.
-class AgentScheduler {
-public:
-    AgentScheduler(std::shared_ptr<Store> store, std::chrono::seconds interval);
-    ~AgentScheduler();
-    AgentScheduler(const AgentScheduler&) = delete;
-    AgentScheduler& operator=(const AgentScheduler&) = delete;
-
-    void start();
-    // One pass: launch every due schedule and move it to its next run. Returns how many fired.
-    std::size_t tick(std::int64_t now_unix);
-
-private:
-    std::shared_ptr<Store> store_;
-    std::chrono::seconds interval_;
-    std::atomic<bool> stopping_{false};
-    std::thread thread_;
-};
+// Studio's plain-words trigger as a cron expression, or nothing when lake cannot place it in
+// time. Understood: "every N minutes|hours|days", "hourly", "daily", "weekly", "every day at
+// HH:MM", "every weekday at HH:MM", "every <weekday> at HH:MM".
+std::optional<std::string> trigger_cron(std::string_view trigger);
 
 // One turn to an agent's service: POST <endpoint>/v1/turn with the service token as bearer.
 // Injected so tests need no HTTP server.

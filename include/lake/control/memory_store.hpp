@@ -202,12 +202,27 @@ public:
                                          std::string credential_sha256,
                                          std::optional<int> exit_code = std::nullopt,
                                          nlohmann::json result = nullptr);
-    Result<void> put_agent_schedule(const AgentSchedule&) override;
-    Result<std::vector<AgentSchedule>> due_agent_schedules(std::int64_t now_unix) override;
-    Result<void> mark_agent_schedule_run(const std::string& customer_id,
-                                         const std::string& agent_id,
-                                         std::int64_t ran_unix,
-                                         std::int64_t next_run_unix) override;
+    Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) override;
+    Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) override;
+    Result<std::vector<AgentCronSchedule>>
+    list_agent_cron_schedules(const std::string& customer_id, const std::string& agent_id) override;
+    Result<AgentCronSchedule> withdraw_agent_cron_schedule(const std::string& id) override;
+    Result<std::vector<AgentLaunch>> list_agent_cron_runs(const std::string& customer_id,
+                                                          const std::string& agent_id,
+                                                          int limit) override;
+    // What the operator writes to agent_cron_schedule_status and agent_cron_runs; tests and local
+    // demos call them directly. A run is keyed by its Job's uid.
+    Result<void> set_agent_cron_schedule_status(const std::string& id,
+                                                std::string phase,
+                                                std::string message,
+                                                std::string credential_sha256);
+    Result<void> put_agent_cron_run(const std::string& schedule_id,
+                                    const std::string& run_id,
+                                    const std::string& job_name,
+                                    std::string phase,
+                                    std::string message,
+                                    std::optional<int> exit_code = std::nullopt,
+                                    nlohmann::json result = nullptr);
     Result<AskMessage> append_ask_message(const AskMessage&) override;
     Result<std::vector<AskMessage>> ask_conversation(const std::string& conversation_id,
                                                      const std::string& user_id,
@@ -448,7 +463,8 @@ private:
     std::vector<AgentSession> agent_sessions_;
     std::set<std::string> non_expiring_customers_;
     std::vector<AgentLaunch> agent_launches_;
-    std::vector<AgentSchedule> agent_schedules_;
+    std::vector<AgentCronSchedule> agent_cron_schedules_;
+    std::vector<std::pair<std::string, AgentLaunch>> agent_cron_runs_; // schedule id, run
     std::vector<AskMessage> ask_messages_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;

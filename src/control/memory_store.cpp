@@ -885,41 +885,145 @@ Result<void> InMemoryStore::set_agent_launch_status(const std::string& id,
     return {};
 }
 
-Result<void> InMemoryStore::put_agent_schedule(const AgentSchedule& schedule) {
+Result<AgentCronSchedule>
+InMemoryStore::create_agent_cron_schedule(const NewAgentCronSchedule& in) {
     std::lock_guard lock(mutex_);
-    std::erase_if(agent_schedules_, [&](const AgentSchedule& value) {
-        return value.customer_id == schedule.customer_id && value.agent_id == schedule.agent_id;
-    });
-    if (!schedule.trigger.empty()) {
-        agent_schedules_.push_back(schedule);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& value) { return value.id == in.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
     }
+    if (in.agent_id.empty() || in.cron.empty() || in.scopes.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "agent schedule is invalid"});
+    }
+    AgentCronSchedule schedule;
+    schedule.id = new_uuid_v4();
+    schedule.customer_id = in.customer_id;
+    schedule.agent_id = in.agent_id;
+    schedule.agent_name = in.agent_name;
+    schedule.cron = in.cron;
+    schedule.time_zone = in.time_zone.empty() ? "Etc/UTC" : in.time_zone;
+    schedule.description = in.description;
+    schedule.input = in.input;
+    schedule.scopes = in.scopes;
+    schedule.slug = managed_service_slug("as", schedule.id);
+    schedule.desired = "present";
+    schedule.created_by_user_id = in.created_by_user_id;
+    schedule.created_by_taap_id = in.created_by_taap_id;
+    schedule.created_at = schedule.updated_at = std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    agent_cron_schedules_.push_back(schedule);
+    return schedule;
+}
+
+Result<AgentCronSchedule> InMemoryStore::get_agent_cron_schedule(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_cron_schedules_, id, &AgentCronSchedule::id);
+    if (found == agent_cron_schedules_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent schedule " + id});
+    }
+    return *found;
+}
+
+Result<std::vector<AgentCronSchedule>>
+InMemoryStore::list_agent_cron_schedules(const std::string& customer_id,
+                                         const std::string& agent_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<AgentCronSchedule> schedules;
+    for (const AgentCronSchedule& schedule : agent_cron_schedules_) {
+        if (schedule.customer_id == customer_id && schedule.desired == "present" &&
+            (agent_id.empty() || schedule.agent_id == agent_id)) {
+            schedules.push_back(schedule);
+        }
+    }
+    return schedules;
+}
+
+Result<AgentCronSchedule> InMemoryStore::withdraw_agent_cron_schedule(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_cron_schedules_, id, &AgentCronSchedule::id);
+    if (found == agent_cron_schedules_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent schedule " + id});
+    }
+    if (found->desired == "absent") {
+        return std::unexpected(StoreError{"conflict", "the schedule is already removed"});
+    }
+    found->desired = "absent";
+    ++found->generation;
+    return *found;
+}
+
+Result<std::vector<AgentLaunch>> InMemoryStore::list_agent_cron_runs(const std::string& customer_id,
+                                                                     const std::string& agent_id,
+                                                                     int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<AgentLaunch> runs;
+    for (auto it = agent_cron_runs_.rbegin(); it != agent_cron_runs_.rend(); ++it) {
+        if (it->second.customer_id == customer_id &&
+            (agent_id.empty() || it->second.agent_id == agent_id)) {
+            runs.push_back(it->second);
+        }
+        if (limit > 0 && static_cast<int>(runs.size()) >= limit) {
+            break;
+        }
+    }
+    return runs;
+}
+
+Result<void> InMemoryStore::set_agent_cron_schedule_status(const std::string& id,
+                                                           std::string phase,
+                                                           std::string message,
+                                                           std::string credential_sha256) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_cron_schedules_, id, &AgentCronSchedule::id);
+    if (found == agent_cron_schedules_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent schedule " + id});
+    }
+    found->phase = std::move(phase);
+    found->message = std::move(message);
+    found->credential_sha256 = std::move(credential_sha256);
+    found->observed_generation = found->generation;
     return {};
 }
 
-Result<std::vector<AgentSchedule>> InMemoryStore::due_agent_schedules(std::int64_t now_unix) {
+Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
+                                               const std::string& run_id,
+                                               const std::string& job_name,
+                                               std::string phase,
+                                               std::string message,
+                                               std::optional<int> exit_code,
+                                               nlohmann::json result) {
     std::lock_guard lock(mutex_);
-    std::vector<AgentSchedule> due;
-    for (const AgentSchedule& schedule : agent_schedules_) {
-        if (schedule.next_run_unix > 0 && schedule.next_run_unix <= now_unix) {
-            due.push_back(schedule);
-        }
+    const auto schedule =
+        std::ranges::find(agent_cron_schedules_, schedule_id, &AgentCronSchedule::id);
+    if (schedule == agent_cron_schedules_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent schedule " + schedule_id});
     }
-    return due;
-}
-
-Result<void> InMemoryStore::mark_agent_schedule_run(const std::string& customer_id,
-                                                    const std::string& agent_id,
-                                                    std::int64_t ran_unix,
-                                                    std::int64_t next_run_unix) {
-    std::lock_guard lock(mutex_);
-    for (AgentSchedule& schedule : agent_schedules_) {
-        if (schedule.customer_id == customer_id && schedule.agent_id == agent_id) {
-            schedule.last_run_unix = ran_unix;
-            schedule.next_run_unix = next_run_unix;
-            return {};
-        }
+    auto run = std::ranges::find_if(
+        agent_cron_runs_, [&](const auto& entry) { return entry.second.id == run_id; });
+    if (run == agent_cron_runs_.end()) {
+        AgentLaunch launch;
+        launch.id = run_id;
+        launch.customer_id = schedule->customer_id;
+        launch.agent_id = schedule->agent_id;
+        launch.agent_name = schedule->agent_name;
+        launch.mode = "job";
+        launch.trigger = "schedule";
+        launch.input = schedule->input;
+        launch.slug = job_name;
+        launch.desired = "present";
+        launch.created_by_user_id = schedule->created_by_user_id;
+        launch.created_by_taap_id = schedule->created_by_taap_id;
+        launch.created_at = launch.updated_at =
+            std::format("{:%FT%TZ}",
+                        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+        agent_cron_runs_.emplace_back(schedule_id, std::move(launch));
+        run = std::prev(agent_cron_runs_.end());
     }
-    return std::unexpected(StoreError{"not_found", "no schedule for agent " + agent_id});
+    run->second.phase = std::move(phase);
+    run->second.message = std::move(message);
+    run->second.exit_code = exit_code;
+    run->second.result = std::move(result);
+    return {};
 }
 
 Result<AskMessage> InMemoryStore::append_ask_message(const AskMessage& message) {
@@ -2032,6 +2136,33 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
+    if (secret.starts_with(agent_schedule_credential_prefix)) {
+        const auto parsed = parse_agent_credential(secret, agent_schedule_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto schedule =
+            std::ranges::find(agent_cron_schedules_, parsed->first, &AgentCronSchedule::id);
+        if (schedule == agent_cron_schedules_.end() || schedule->desired != "present" ||
+            schedule->credential_sha256.empty() ||
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                     schedule->credential_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto user = std::ranges::find_if(
+            users_, [&](const User& row) { return row.id == schedule->created_by_user_id; });
+        if (user == users_.end() || user->taap_id.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "schedule identity is unavailable"});
+        }
+        return Principal{user->id,
+                         user->taap_id,
+                         "schedule:" + schedule->id,
+                         "",
+                         "lake",
+                         "agent_schedule",
+                         schedule->scopes,
+                         std::nullopt};
+    }
     if (secret.starts_with(agent_launch_credential_prefix)) {
         const auto parsed = parse_agent_launch_credential(secret);
         if (!parsed) {

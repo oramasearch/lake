@@ -4318,75 +4318,212 @@ public:
         });
     }
 
-    Result<void> put_agent_schedule(const AgentSchedule& schedule) override {
-        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            if (schedule.trigger.empty()) {
-                tx.exec_params("DELETE FROM agent_schedules WHERE customer_id = $1::uuid AND "
-                               "agent_id = $2",
-                               schedule.customer_id,
-                               schedule.agent_id);
-                return {};
+    static constexpr const char* cron_schedule_columns =
+        "s.id::text, s.customer_id::text, s.agent_id, s.agent_name, s.cron, s.time_zone, "
+        "s.description, s.slug, s.desired, s.input::text, array_to_json(s.scopes)::text, "
+        "s.generation, COALESCE(s.created_by_user_id::text, ''), s.created_by_taap_id, "
+        "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(ss.phase, ''), COALESCE(ss.message, ''), "
+        "COALESCE(to_char(ss.last_schedule_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), COALESCE(ss.credential_sha256, ''), "
+        "COALESCE(ss.observed_generation, 0)";
+
+    static AgentCronSchedule cron_schedule_from(const pqxx::row& row) {
+        AgentCronSchedule schedule;
+        schedule.id = row[0].as<std::string>();
+        schedule.customer_id = row[1].as<std::string>();
+        schedule.agent_id = row[2].as<std::string>();
+        schedule.agent_name = row[3].as<std::string>();
+        schedule.cron = row[4].as<std::string>();
+        schedule.time_zone = row[5].as<std::string>();
+        schedule.description = row[6].as<std::string>();
+        schedule.slug = row[7].as<std::string>();
+        schedule.desired = row[8].as<std::string>();
+        schedule.input = nlohmann::json::parse(row[9].as<std::string>(), nullptr, false);
+        schedule.scopes =
+            nlohmann::json::parse(row[10].as<std::string>()).get<std::vector<std::string>>();
+        schedule.generation = row[11].as<std::int64_t>();
+        schedule.created_by_user_id = row[12].as<std::string>();
+        schedule.created_by_taap_id = row[13].as<std::string>();
+        schedule.created_at = row[14].as<std::string>();
+        schedule.updated_at = row[15].as<std::string>();
+        schedule.phase = row[16].as<std::string>();
+        schedule.message = row[17].as<std::string>();
+        schedule.last_schedule_at = row[18].as<std::string>();
+        schedule.credential_sha256 = row[19].as<std::string>();
+        schedule.observed_generation = row[20].as<std::int64_t>();
+        return schedule;
+    }
+
+    static Result<AgentCronSchedule> one_cron_schedule(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + cron_schedule_columns +
+                " FROM agent_cron_schedules s LEFT JOIN agent_cron_schedule_status ss ON "
+                "ss.schedule_id = s.id WHERE s.id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no agent schedule " + id});
+        }
+        return cron_schedule_from(rows[0]);
+    }
+
+    // A schedule credential: as a launch credential, against the schedule's status row. Every run
+    // of the schedule's CronJob presents it and acts as the person who set the schedule.
+    Result<Principal> schedule_principal(const std::string& secret) {
+        const auto parsed = parse_agent_credential(secret, agent_schedule_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT COALESCE(ss.credential_sha256, ''), array_to_json(s.scopes)::text, "
+                "COALESCE(users.id::text, ''), COALESCE(users.taap_id, '') FROM "
+                "agent_cron_schedules s LEFT JOIN agent_cron_schedule_status ss ON "
+                "ss.schedule_id = s.id LEFT JOIN users ON users.id = s.created_by_user_id "
+                "WHERE s.id = $1::uuid AND s.desired = 'present'",
+                parsed->first);
+            if (rows.empty() || !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                                         rows[0][0].as<std::string>())) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
             }
-            tx.exec_params(
-                "INSERT INTO agent_schedules (customer_id, agent_id, agent_name, trigger, "
-                "next_run_at, created_by_user_id, created_by_taap_id) VALUES ($1::uuid, $2, $3, "
-                "$4, to_timestamp($5), NULLIF($6, '')::uuid, $7) ON CONFLICT (customer_id, "
-                "agent_id) DO UPDATE SET agent_name = EXCLUDED.agent_name, trigger = "
-                "EXCLUDED.trigger, next_run_at = EXCLUDED.next_run_at, created_by_user_id = "
-                "EXCLUDED.created_by_user_id, created_by_taap_id = EXCLUDED.created_by_taap_id",
-                schedule.customer_id,
-                schedule.agent_id,
-                schedule.agent_name,
-                schedule.trigger,
-                schedule.next_run_unix,
-                schedule.created_by_user_id,
-                schedule.created_by_taap_id);
-            return {};
+            if (rows[0][3].as<std::string>().empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "schedule identity is unavailable"});
+            }
+            return Principal{
+                rows[0][2].as<std::string>(),
+                rows[0][3].as<std::string>(),
+                "schedule:" + parsed->first,
+                "",
+                "lake",
+                "agent_schedule",
+                nlohmann::json::parse(rows[0][1].as<std::string>()).get<std::vector<std::string>>(),
+                std::nullopt};
         });
     }
 
-    Result<std::vector<AgentSchedule>> due_agent_schedules(std::int64_t now_unix) override {
-        return with_tx<std::vector<AgentSchedule>>(
-            [&](pqxx::work& tx) -> Result<std::vector<AgentSchedule>> {
+    Result<AgentCronSchedule>
+    create_agent_cron_schedule(const NewAgentCronSchedule& in) override {
+        if (in.agent_id.empty() || in.cron.empty() || in.scopes.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "agent schedule is invalid"});
+        }
+        return with_tx<AgentCronSchedule>([&](pqxx::work& tx) -> Result<AgentCronSchedule> {
+            const pqxx::result customers =
+                tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", in.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+            }
+            const std::string id = new_uuid_v4();
+            tx.exec_params(
+                "INSERT INTO agent_cron_schedules (id, customer_id, agent_id, agent_name, cron, "
+                "time_zone, description, input, scopes, slug, created_by_user_id, "
+                "created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, "
+                "ARRAY(SELECT jsonb_array_elements_text($9::jsonb)), $10, NULLIF($11, '')::uuid, "
+                "$12)",
+                id,
+                in.customer_id,
+                in.agent_id,
+                in.agent_name,
+                in.cron,
+                in.time_zone.empty() ? std::string("Etc/UTC") : in.time_zone,
+                in.description,
+                in.input.dump(),
+                nlohmann::json(in.scopes).dump(),
+                managed_service_slug("as", id),
+                in.created_by_user_id,
+                in.created_by_taap_id);
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_cron_schedule(tx, id);
+        });
+    }
+
+    Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) override {
+        return with_tx<AgentCronSchedule>(
+            [&](pqxx::work& tx) -> Result<AgentCronSchedule> { return one_cron_schedule(tx, id); });
+    }
+
+    Result<std::vector<AgentCronSchedule>>
+    list_agent_cron_schedules(const std::string& customer_id,
+                              const std::string& agent_id) override {
+        return with_tx<std::vector<AgentCronSchedule>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AgentCronSchedule>> {
                 const pqxx::result rows = tx.exec_params(
-                    "SELECT customer_id::text, agent_id, agent_name, trigger, "
-                    "floor(extract(epoch FROM next_run_at))::bigint, "
-                    "COALESCE(floor(extract(epoch FROM last_run_at))::bigint, 0), "
-                    "COALESCE(created_by_user_id::text, ''), created_by_taap_id FROM "
-                    "agent_schedules WHERE next_run_at <= to_timestamp($1) ORDER BY next_run_at",
-                    now_unix);
-                std::vector<AgentSchedule> due;
+                    std::string("SELECT ") + cron_schedule_columns +
+                        " FROM agent_cron_schedules s LEFT JOIN agent_cron_schedule_status ss ON "
+                        "ss.schedule_id = s.id WHERE s.customer_id = $1::uuid AND s.desired = "
+                        "'present' AND ($2 = '' OR s.agent_id = $2) ORDER BY s.created_at, s.id",
+                    customer_id,
+                    agent_id);
+                std::vector<AgentCronSchedule> schedules;
                 for (const pqxx::row& row : rows) {
-                    due.push_back(AgentSchedule{row[0].as<std::string>(),
-                                                row[1].as<std::string>(),
-                                                row[2].as<std::string>(),
-                                                row[3].as<std::string>(),
-                                                row[4].as<std::int64_t>(),
-                                                row[5].as<std::int64_t>(),
-                                                row[6].as<std::string>(),
-                                                row[7].as<std::string>()});
+                    schedules.push_back(cron_schedule_from(row));
                 }
-                return due;
+                return schedules;
             });
     }
 
-    Result<void> mark_agent_schedule_run(const std::string& customer_id,
-                                         const std::string& agent_id,
-                                         std::int64_t ran_unix,
-                                         std::int64_t next_run_unix) override {
-        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+    Result<AgentCronSchedule> withdraw_agent_cron_schedule(const std::string& id) override {
+        return with_tx<AgentCronSchedule>([&](pqxx::work& tx) -> Result<AgentCronSchedule> {
             const pqxx::result rows = tx.exec_params(
-                "UPDATE agent_schedules SET last_run_at = to_timestamp($3), next_run_at = "
-                "to_timestamp($4) WHERE customer_id = $1::uuid AND agent_id = $2 RETURNING 1",
-                customer_id,
-                agent_id,
-                ran_unix,
-                next_run_unix);
+                "UPDATE agent_cron_schedules SET desired = 'absent', generation = generation + 1, "
+                "updated_at = now() WHERE id = $1::uuid AND desired = 'present' RETURNING id",
+                id);
             if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "no schedule for " + agent_id});
+                const Result<AgentCronSchedule> existing = one_cron_schedule(tx, id);
+                if (!existing) {
+                    return existing;
+                }
+                return std::unexpected(StoreError{"conflict", "the schedule is already removed"});
             }
-            return {};
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_cron_schedule(tx, id);
         });
+    }
+
+    Result<std::vector<AgentLaunch>> list_agent_cron_runs(const std::string& customer_id,
+                                                          const std::string& agent_id,
+                                                          int limit) override {
+        return with_tx<std::vector<AgentLaunch>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AgentLaunch>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT r.id::text, s.customer_id::text, s.agent_id, s.agent_name, r.job_name, "
+                    "s.input::text, COALESCE(s.created_by_user_id::text, ''), "
+                    "s.created_by_taap_id, to_char(r.started_at AT TIME ZONE 'UTC', "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(r.updated_at AT TIME ZONE 'UTC', "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), r.phase, r.message, r.exit_code, "
+                    "r.result::text FROM agent_cron_runs r JOIN agent_cron_schedules s ON s.id = "
+                    "r.schedule_id WHERE s.customer_id = $1::uuid AND ($2 = '' OR s.agent_id = "
+                    "$2) ORDER BY r.started_at DESC, r.id LIMIT $3",
+                    customer_id,
+                    agent_id,
+                    limit > 0 ? limit : 100);
+                std::vector<AgentLaunch> runs;
+                for (const pqxx::row& row : rows) {
+                    AgentLaunch run;
+                    run.id = row[0].as<std::string>();
+                    run.customer_id = row[1].as<std::string>();
+                    run.agent_id = row[2].as<std::string>();
+                    run.agent_name = row[3].as<std::string>();
+                    run.slug = row[4].as<std::string>();
+                    run.mode = "job";
+                    run.trigger = "schedule";
+                    run.desired = "present";
+                    run.input = nlohmann::json::parse(row[5].as<std::string>(), nullptr, false);
+                    run.created_by_user_id = row[6].as<std::string>();
+                    run.created_by_taap_id = row[7].as<std::string>();
+                    run.created_at = row[8].as<std::string>();
+                    run.updated_at = row[9].as<std::string>();
+                    run.phase = row[10].as<std::string>();
+                    run.message = row[11].as<std::string>();
+                    if (!row[12].is_null()) {
+                        run.exit_code = row[12].as<int>();
+                    }
+                    run.result = nlohmann::json::parse(row[13].as<std::string>(), nullptr, false);
+                    runs.push_back(std::move(run));
+                }
+                return runs;
+            });
     }
 
     Result<AskMessage> append_ask_message(const AskMessage& message) override {
@@ -5195,6 +5332,9 @@ public:
     Result<Principal> context_for(const std::string& secret) override {
         if (secret.starts_with(agent_launch_credential_prefix)) {
             return launch_principal(secret);
+        }
+        if (secret.starts_with(agent_schedule_credential_prefix)) {
+            return schedule_principal(secret);
         }
         const auto lookup_id = session_lookup_id(secret);
         if (!lookup_id) {

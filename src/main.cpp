@@ -297,14 +297,6 @@ int main(int argc, char** argv) {
             std::make_shared<lake::control::ZettaWorkspaceCaller>());
         opts.agent_caller = std::make_shared<lake::control::HttpAgentCaller>();
     }
-    // Fires agent schedules as job launches (docs/api/agent-launches.md).
-    std::unique_ptr<lake::control::AgentScheduler> agent_scheduler;
-    if (workspaces_configured) {
-        agent_scheduler = std::make_unique<lake::control::AgentScheduler>(
-            opts.store, std::chrono::seconds{env_u64("LAKE_AGENT_SCHEDULER_SECONDS", 60)});
-        agent_scheduler->start();
-    }
-
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 

@@ -31,11 +31,13 @@ constexpr std::array group_rules{
     GroupRule{"Agents",
               "The Agent Library of specialized agents Orama ships, and the agents you build in "
               "Train > Agents: create them through workspace_act, talk to any of them with "
-              "agent_turn, run and schedule Python agents with launch_agent and schedule_agent.",
+              "agent_turn, run Python agents with launch_agent and give them cron schedules with "
+              "schedule_agent (each its own Kubernetes CronJob).",
               [](std::string_view n) {
                   return n == "list_agent_library" || n == "launch_agent" ||
                          n == "list_agent_launches" || n == "stop_agent_launch" ||
-                         n == "schedule_agent" || n == "agent_turn";
+                         n == "schedule_agent" || n == "list_agent_schedules" ||
+                         n == "unschedule_agent" || n == "agent_turn";
               }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your Zetta workspace: projects and pipelines, data, runs, models and search "
