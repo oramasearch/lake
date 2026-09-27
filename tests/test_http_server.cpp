@@ -1,6 +1,10 @@
 #include "postgres_fixture.hpp"
 #include <gtest/gtest.h>
 
+#include <functional>
+
+#include "lake/control/identity_crypto.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -354,6 +358,60 @@ protected:
         tx.exec("SET client_min_messages TO warning");
         tx.exec("DROP SCHEMA " + tx.quote_name(schema_) + " CASCADE");
         tx.commit();
+    }
+
+    // The operator's part of a background agent turn (lake#269), done here: the task's body goes
+    // to the scripted agent with a generated credential in place of "{{credential}}", and the
+    // status is written as the operator writes it. Answers the credential the agent was handed.
+    std::string run_agent_task(const std::string& task_id) {
+        const auto task = store_->get_agent_task(task_id);
+        EXPECT_TRUE(task) << task_id;
+        if (!task) {
+            return {};
+        }
+        const std::string credential = "lat." + task_id + ".0123456789abcdef0123456789abcdef";
+        const std::string digest = lake::control::identity_crypto::sha256_hex(credential);
+        const auto write = [&](const std::string& phase, const std::string& sha,
+                               const nlohmann::json& result) {
+            if (auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get())) {
+                ASSERT_TRUE(memory->set_agent_task_status(task_id, phase, "", sha, result));
+                return;
+            }
+            pqxx::connection connection(postgres_uri_);
+            pqxx::work tx(connection);
+            tx.exec("SET search_path TO " + tx.quote_name(schema_));
+            tx.exec_params("INSERT INTO agent_task_status (task_id, phase, credential_sha256, "
+                           "result) VALUES ($1::uuid, $2, $3, $4::jsonb) ON CONFLICT (task_id) DO "
+                           "UPDATE SET phase = EXCLUDED.phase, credential_sha256 = "
+                           "EXCLUDED.credential_sha256, result = EXCLUDED.result",
+                           task_id,
+                           phase,
+                           sha,
+                           result.dump());
+            tx.commit();
+        };
+        write("Running", digest, nullptr);
+        std::function<void(nlohmann::json&)> fill = [&](nlohmann::json& value) {
+            if (value.is_string() && value.get<std::string>() == "{{credential}}") {
+                value = credential;
+            } else if (value.is_structured()) {
+                for (auto& item : value) {
+                    fill(item);
+                }
+            }
+        };
+        nlohmann::json body = task->body;
+        fill(body);
+        agents_->turns.push_back(body);
+        write("Succeeded", "", agents_->answer);
+        return credential;
+    }
+
+    static std::string task_of(const std::string& response) {
+        const std::string location = response_header(response, "location");
+        const auto at = location.find("task=");
+        return at == std::string::npos ? std::string()
+                                       : location.substr(at + 5, location.find('&', at) - at - 5);
     }
 
     void create_identity_document() {
@@ -885,13 +943,23 @@ TEST_P(HttpResponseIsolation, AskOramaAnswersProposesAndRunsOnlyWhatThePersonCon
             "&from=%2Frepositories&agent=agent-ask-orama&message=what+do+I+have%3F",
         cookie);
     ASSERT_TRUE(sent.starts_with("HTTP/1.1 302")) << sent.substr(0, 300);
+    EXPECT_TRUE(agents_->turns.empty()) << "the request never waits on the agent (lake#269)";
+    const std::string task = task_of(sent);
+    ASSERT_FALSE(task.empty()) << response_header(sent, "location");
+    const std::string thinking = connection->request(
+        "GET", "/ask?customer_id=" + customer_id + "&conversation=" + conversation + "&task=" + task,
+        "", cookie);
+    EXPECT_NE(thinking.find("Thinking…"), std::string::npos) << "the page follows the task";
+    const std::string credential = run_agent_task(task);
     ASSERT_EQ(agents_->turns.size(), 1U);
     EXPECT_EQ(agents_->turns.back()["message"], "what do I have?");
     EXPECT_EQ(agents_->turns.back()["page"]["path"], "/repositories");
-    EXPECT_FALSE(agents_->turns.back()["lake_token"].get<std::string>().empty());
+    EXPECT_EQ(agents_->turns.back()["lake_token"], credential)
+        << "the agent is handed the task's own credential";
 
     const std::string page = connection->request(
-        "GET", "/ask?customer_id=" + customer_id + "&conversation=" + conversation, "", cookie);
+        "GET", "/ask?customer_id=" + customer_id + "&conversation=" + conversation + "&task=" + task,
+        "", cookie);
     ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
     EXPECT_NE(page.find("what do I have?"), std::string::npos);
     EXPECT_NE(page.find("You have no repositories yet"), std::string::npos);
@@ -1005,9 +1073,9 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
         {"datasets", nlohmann::json::array({{{"name", "accounts"}}})}};
     workspace_caller_->answers["create_project"] = {{"name", "x"}};
 
-    const std::string page = connection->request("GET", "/design/discover", "", cookie);
+    const std::string page = connection->request("GET", "/design/opportunities", "", cookie);
     ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
-    EXPECT_NE(page.find("action=\"/design/discover/scan\""), std::string::npos);
+    EXPECT_NE(page.find("action=\"/design/opportunities/scan\""), std::string::npos);
 
     agents_->answer = {
         {"ok", true},
@@ -1023,44 +1091,44 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
              nlohmann::json::array({{{"intent", "Forecast revenue"},
                                      {"reason", "no timestamp column"},
                                      {"answer", "capture it first"}}})}}}}}};
-    const std::string scanned =
-        connection->request("POST", "/design/discover/scan", "customer_id=" + customer_id, cookie);
-    ASSERT_TRUE(scanned.starts_with("HTTP/1.1 200")) << scanned.substr(0, 300);
-    EXPECT_NE(scanned.find("Predict which accounts will churn"), std::string::npos);
-    EXPECT_NE(scanned.find("capture it first"), std::string::npos);
-    EXPECT_EQ(agents_->turns.back()["profile"]["tables"][0]["name"], "accounts");
+    // The scan runs in the background (lake#269): the request returns at once.
+    const std::string scanned = connection->request(
+        "POST", "/design/opportunities/scan", "customer_id=" + customer_id, cookie);
+    ASSERT_TRUE(scanned.starts_with("HTTP/1.1 302")) << scanned.substr(0, 300);
+    EXPECT_TRUE(agents_->turns.empty()) << "the request never waits on Auto-Suggest";
+    const std::string task = task_of(scanned);
+    ASSERT_FALSE(task.empty());
+    const std::string scanning = connection->request(
+        "GET", "/design/opportunities?customer_id=" + customer_id + "&task=" + task, "", cookie);
+    EXPECT_NE(scanning.find("Scanning your workspace"), std::string::npos);
+    run_agent_task(task);
+    EXPECT_FALSE(agents_->turns.back().contains("profile"))
+        << "Auto-Suggest builds the profile itself with its read-only credential";
+    EXPECT_FALSE(agents_->turns.back()["zetta_token"].get<std::string>().empty());
 
-    const std::string opportunities =
-        nlohmann::json::array({{{"intent", "Predict which accounts will churn"},
-                                {"solution", "S-1"},
-                                {"methodology", "gbdt"},
-                                {"why_this_data_supports_it", "accounts.churned is the label"}}})
-            .dump();
-    const auto encode = [](std::string text) {
-        std::string out;
-        for (const unsigned char c : text) {
-            if (std::isalnum(c)) {
-                out += static_cast<char>(c);
-            } else {
-                out += std::format("%{:02X}", c);
-            }
-        }
-        return out;
-    };
+    const std::string found = connection->request(
+        "GET", "/design/opportunities?customer_id=" + customer_id + "&task=" + task, "", cookie);
+    EXPECT_NE(found.find("Predict which accounts will churn"), std::string::npos);
+    EXPECT_NE(found.find("Catalogue solution S-1"), std::string::npos);
+    EXPECT_NE(found.find("no timestamp column"), std::string::npos);
+    const std::string later =
+        connection->request("GET", "/design/opportunities?customer_id=" + customer_id, "", cookie);
+    EXPECT_NE(later.find("Predict which accounts will churn"), std::string::npos)
+        << "Opportunities are kept after the scan";
+    const auto rows = store_->list_opportunities(customer_id);
+    ASSERT_TRUE(rows && rows->size() == 2U);
+    const auto chosen = std::ranges::find(*rows, std::string("new"), &lake::control::Opportunity::status);
+    ASSERT_NE(chosen, rows->end());
+
     const std::size_t before = workspace_caller_->calls.size();
     const std::string unconfirmed = connection->request(
-        "POST",
-        "/design/discover/create",
-        "customer_id=" + customer_id + "&opportunities=" + encode(opportunities) + "&pick=0",
-        cookie);
+        "POST", "/design/opportunities/create",
+        "customer_id=" + customer_id + "&pick=" + chosen->id, cookie);
     EXPECT_NE(response_header(unconfirmed, "location").find("error="), std::string::npos);
     EXPECT_EQ(workspace_caller_->calls.size(), before) << "nothing is created without confirming";
-    const std::string created =
-        connection->request("POST",
-                            "/design/discover/create",
-                            "customer_id=" + customer_id +
-                                "&opportunities=" + encode(opportunities) + "&pick=0&confirm=yes",
-                            cookie);
+    const std::string created = connection->request(
+        "POST", "/design/opportunities/create",
+        "customer_id=" + customer_id + "&pick=" + chosen->id + "&confirm=yes", cookie);
     ASSERT_TRUE(created.starts_with("HTTP/1.1 302")) << created.substr(0, 300);
     const auto& [name, read, input] = workspace_caller_->calls.back();
     EXPECT_EQ(name, "create_project");
@@ -1068,6 +1136,10 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
     EXPECT_NE(input["description"].get<std::string>().find("Source Opportunity"),
               std::string::npos);
     EXPECT_EQ(input["intent"], "Predict which accounts will churn");
+    const auto after = store_->list_opportunities(customer_id);
+    const auto made = std::ranges::find(*after, chosen->id, &lake::control::Opportunity::id);
+    EXPECT_EQ(made->status, "project");
+    EXPECT_EQ(made->project, input["name"].get<std::string>());
 }
 
 TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved) {
@@ -1127,10 +1199,22 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
                                 "&message=an+agent+that+flags+renewals",
                             cookie);
     ASSERT_TRUE(sent.starts_with("HTTP/1.1 302")) << sent.substr(0, 300);
-    EXPECT_FALSE(agents_->turns.back()["lake_token"].get<std::string>().empty());
+    // AgentCreator works in the background (lake#269).
+    const std::string task = task_of(sent);
+    ASSERT_FALSE(task.empty()) << response_header(sent, "location");
+    const std::string working = connection->request(
+        "GET",
+        "/train/agents/new?customer_id=" + customer_id + "&conversation=" + conversation +
+            "&task=" + task,
+        "",
+        cookie);
+    EXPECT_NE(working.find("Working on it…"), std::string::npos);
+    const std::string credential = run_agent_task(task);
+    EXPECT_EQ(agents_->turns.back()["lake_token"], credential);
     const std::string page = connection->request("GET",
                                                  "/train/agents/new?customer_id=" + customer_id +
-                                                     "&conversation=" + conversation,
+                                                     "&conversation=" + conversation +
+                                                     "&task=" + task,
                                                  "",
                                                  cookie);
     ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);

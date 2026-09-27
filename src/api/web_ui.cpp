@@ -420,6 +420,9 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         }
         items.push_back({"", "/search", "Search", "search", "search"});
         items.push_back({"Design", "/design/projects", "Projects", "audit", "projects"});
+        items.push_back(
+            {"Design", "/design/opportunities", "Opportunities", "search", "opportunities"});
+        items.push_back({"Design", "/design/agent-library", "Agent Library", "agent", "agent library"});
         items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
         items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
@@ -1617,7 +1620,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 15> workspace_sections{{
+constexpr std::array<WorkspaceSection, 16> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1626,11 +1629,17 @@ constexpr std::array<WorkspaceSection, 15> workspace_sections{{
      "will measure it. Its pipelines are built from that intent."},
     {"discover",
      "Design",
-     "Discover Opportunities",
-     "/design/projects",
-     "Not sure where to start? Auto-Suggest studies the data your workspace can reach and "
-     "recommends what you could build from it. It reads only your approved data and never "
-     "changes it."},
+     "Opportunities",
+     "/design/opportunities",
+     "What your data could be used for. Auto-Suggest reads the data your workspace can reach and "
+     "recommends what to build, from Orama's solutions catalogue; it never changes your data. "
+     "Turn an Opportunity into a project, or dismiss it."},
+    {"library",
+     "Design",
+     "Agent Library",
+     "/design/agent-library",
+     "Agents Orama provides, each for one job. Use them where they appear, or ask Orama and it "
+     "brings in the right one."},
     {"project", "Design", "Project", "/design/projects", ""},
     {"pipeline",
      "Design",
@@ -2502,6 +2511,17 @@ std::string pipeline_content(const WorkspacePage& page) {
             base);
     }
 
+    if (page.data.value("project_agent_working", false)) {
+        out += "<section class=\"panel notice\" id=\"proposal\" role=\"status\"><p><strong>The "
+               "Project Agent is working on it…</strong> It reads your data and prepares the "
+               "edits; nothing changes until you apply them. This page checks again every 3 "
+               "seconds.</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
+    } else if (!json_text(page.data, "project_agent_error").empty()) {
+        out += "<p class=\"error\" role=\"alert\" id=\"proposal\">The Project Agent did not propose "
+               "a change: " +
+               web_ui_escape(json_text(page.data, "project_agent_error")) + "</p>";
+    }
+
     // Ask the Project Agent for a change instead of editing by hand (lake#249).
     out += std::format(
         "<section class=\"panel\"><h2>Ask the Project Agent</h2><form class=\"stack\" "
@@ -3203,7 +3223,10 @@ std::string agent_content(const WorkspacePage& page) {
 // Design > Discover Opportunities (docs/api/discover.md, lake#237): Auto-Suggest's answer as
 // ranked Opportunities, what it declined, and project drafts created only on confirmation.
 std::string discover_content(const WorkspacePage& page) {
+    // Design → Opportunities (lake#269): saved Opportunities, a scan that runs in the background,
+    // and what was done with each.
     std::string out;
+    const std::string query = customer_query(page.customer_id);
     const nlohmann::json library = page.data.value("list_agent_library", nlohmann::json::object());
     bool running = false;
     for (const nlohmann::json& agent : library.value("agents", nlohmann::json::array())) {
@@ -3211,84 +3234,103 @@ std::string discover_content(const WorkspacePage& page) {
             running = agent.value("deployed", false);
         }
     }
-    if (!running) {
-        return "<div class=\"panel empty\">Auto-Suggest is not running on this lake yet, so "
-               "Discover Opportunities is not available. Create a project from your own goal "
-               "instead.</div>";
-    }
-    const nlohmann::json answer = page.data.value("autosuggest", nlohmann::json());
-    if (!json_text(page.data, "scan_error").empty()) {
+    const nlohmann::json task = page.data.value("task", nlohmann::json::object());
+    const std::string status = json_text(task, "status");
+    const bool scanning = status == "pending" || status == "running";
+    if (scanning) {
+        out += "<section class=\"panel notice\" role=\"status\"><p><strong>Scanning your "
+               "workspace…</strong> Auto-Suggest is reading your datasets and matching them to "
+               "the solutions catalogue. You can leave this page; the Opportunities are kept "
+               "when it finishes. This page checks again every 3 seconds.</p><meta "
+               "http-equiv=\"refresh\" content=\"3\"></section>";
+    } else if (status == "failed") {
         out += std::format("<p class=\"error\" role=\"alert\">The scan did not finish: {}</p>",
-                           web_ui_escape(json_text(page.data, "scan_error")));
+                           web_ui_escape(json_text(task, "message")));
     }
-    if (!answer.is_object()) {
-        return out +
-               std::format(
-                   "<section class=\"panel\"><h2>Scan Your Workspace</h2><p>Auto-Suggest reads "
-                   "your "
-                   "workspace's datasets and their columns: reading approved sources, measuring "
-                   "coverage, checking suitability, preparing recommendations. It takes a minute "
-                   "and "
-                   "changes nothing.</p><form method=\"post\" "
-                   "action=\"/design/discover/scan\">{}<button "
-                   "class=\"button button-primary\" type=\"submit\">Scan my "
-                   "workspace</button></form>"
-                   "</section>",
-                   hidden("customer_id", page.customer_id));
+    const nlohmann::json rows = page.data.value("list_opportunities", nlohmann::json::object())
+                                    .value("opportunities", nlohmann::json::array());
+    std::string last_scan;
+    for (const nlohmann::json& row : rows) {
+        last_scan = std::max(last_scan, json_text(row, "created_at"));
     }
-    const nlohmann::json profile = answer.value("result", nlohmann::json::object())
-                                       .value("project_profile", nlohmann::json::object());
-    const nlohmann::json suggested = profile.value("suggested", nlohmann::json::array());
-    const nlohmann::json declined = profile.value("declined", nlohmann::json::array());
-    out += "<section class=\"panel\"><h2>Recommended Opportunities</h2>";
-    if (suggested.empty()) {
-        out += "<p>Auto-Suggest found nothing your data supports yet.</p>";
-    } else {
-        std::string cards;
-        for (std::size_t index = 0; index < suggested.size(); ++index) {
-            const nlohmann::json& item = suggested[index];
-            std::string first;
-            for (const nlohmann::json& step :
-                 item.value("required_first", nlohmann::json::array())) {
-                first += (first.empty() ? "" : "; ") +
-                         (step.is_string() ? step.get<std::string>() : step.dump());
-            }
-            cards += std::format(
+    if (!running) {
+        out += "<div class=\"panel empty\">Auto-Suggest is not running on this lake, so a new "
+               "scan is not available.</div>";
+    } else if (!scanning) {
+        out += std::format(
+            "<section class=\"panel\"><h2>Scan Your Workspace</h2><p>{}</p><form method=\"post\" "
+            "action=\"/design/opportunities/scan\">{}<button class=\"button button-primary\" "
+            "type=\"submit\">{}</button></form></section>",
+            last_scan.empty()
+                ? std::string("Auto-Suggest reads your workspace's datasets and their columns and "
+                              "recommends what to build. It runs in the background and changes "
+                              "nothing.")
+                : "Last scanned " + web_ui_escape(last_scan.substr(0, 16)) +
+                      " UTC. Scan again after your data changes; earlier Opportunities stay.",
+            hidden("customer_id", page.customer_id),
+            last_scan.empty() ? "Scan my workspace" : "Scan again");
+    }
+    std::string fresh, made, later, dismissed;
+    for (const nlohmann::json& row : rows) {
+        const std::string state = json_text(row, "status");
+        const std::string id = json_text(row, "id");
+        const nlohmann::json detail = row.value("detail", nlohmann::json::object());
+        if (state == "new") {
+            fresh += std::format(
                 "<article class=\"panel ask-proposal\"><label><input type=\"checkbox\" "
-                "name=\"pick\" value=\"{}\"> <strong>{}</strong></label><p class=\"sub\">{} · "
-                "{}</p><p>{}</p>{}{}</article>",
-                index,
-                web_ui_escape(json_text(item, "intent")),
-                web_ui_escape(json_text(item, "solution")),
-                web_ui_escape(json_text(item, "methodology")),
-                web_ui_escape(json_text(item, "why_this_data_supports_it")),
-                first.empty() ? std::string()
-                              : "<p><strong>First:</strong> " + web_ui_escape(first) + "</p>",
-                json_text(item, "business_action").empty()
+                "name=\"pick\" value=\"{}\"> <strong>{}</strong></label><p class=\"sub\">{}{}</p>"
+                "<p>{}</p>{}<p><button type=\"submit\" formaction=\"/design/opportunities/dismiss\" "
+                "formnovalidate name=\"opportunity_id\" value=\"{}\">Dismiss</button></p></article>",
+                web_ui_escape(id),
+                web_ui_escape(json_text(row, "intent")),
+                json_text(row, "solution").empty()
+                    ? std::string()
+                    : "Catalogue solution " + web_ui_escape(json_text(row, "solution")) + " · ",
+                web_ui_escape(json_text(row, "methodology")),
+                web_ui_escape(json_text(row, "why")),
+                json_text(detail, "business_action").empty()
                     ? std::string()
                     : "<p><strong>What it changes:</strong> " +
-                          web_ui_escape(json_text(item, "business_action")) + "</p>");
+                          web_ui_escape(json_text(detail, "business_action")) + "</p>",
+                web_ui_escape(id));
+        } else if (state == "project") {
+            made += "<li>" + web_ui_escape(json_text(row, "intent")) + " → " +
+                    row_link("/design/project?" + query + "&name=" +
+                                 url_component(json_text(row, "project")),
+                             json_text(row, "project")) +
+                    "</li>";
+        } else if (state == "not_yet") {
+            later += "<li><strong>" + web_ui_escape(json_text(row, "intent")) + "</strong>: " +
+                     web_ui_escape(json_text(row, "why")) + "</li>";
+        } else if (state == "dismissed") {
+            dismissed += "<li>" + web_ui_escape(json_text(row, "intent")) + "</li>";
         }
-        out += std::format(
-            "<form class=\"stack\" method=\"post\" action=\"/design/discover/create\">{}{}{}"
-            "<label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> Create a "
-            "project draft for each selected Opportunity. Nothing runs until you approve a "
-            "plan.</label><button class=\"button button-primary\" type=\"submit\">Create project "
-            "drafts</button></form>",
-            hidden("customer_id", page.customer_id),
-            hidden("opportunities", suggested.dump()),
-            cards);
     }
-    out += "</section>";
-    if (!declined.empty()) {
-        out += "<section class=\"panel\"><h2>Not Yet</h2><ul>";
-        for (const nlohmann::json& item : declined) {
-            out += std::format("<li><strong>{}</strong>: {} <span class=\"badge\">{}</span></li>",
-                               web_ui_escape(json_text(item, "intent")),
-                               web_ui_escape(json_text(item, "reason")),
-                               web_ui_escape(json_text(item, "answer")));
-        }
-        out += "</ul></section>";
+    if (rows.empty() && !scanning) {
+        out += "<div class=\"panel empty\">No Opportunities yet. Scan your workspace to see what "
+               "your data could be used for.</div>";
+    }
+    if (!fresh.empty()) {
+        out += std::format(
+            "<section class=\"panel\"><h2>Recommended</h2><form class=\"stack\" method=\"post\" "
+            "action=\"/design/opportunities/create\">{}{}<label><input type=\"checkbox\" "
+            "name=\"confirm\" value=\"yes\" required> Create a project draft for each selected "
+            "Opportunity. Nothing runs until you approve a plan.</label><button class=\"button "
+            "button-primary\" type=\"submit\">Create project drafts</button></form></section>",
+            hidden("customer_id", page.customer_id),
+            fresh);
+    }
+    if (!made.empty()) {
+        out += "<section class=\"panel\"><h2>Made into Projects</h2><ul>" + made + "</ul></section>";
+    }
+    if (!later.empty()) {
+        out += "<section class=\"panel\"><h2>Not Yet</h2><p class=\"sub\">What your data does not "
+               "support yet, and why.</p><ul>" +
+               later + "</ul></section>";
+    }
+    if (!dismissed.empty()) {
+        out += "<details class=\"panel\"><summary>Dismissed</summary><ul>" + dismissed +
+               "</ul></details>";
     }
     return out;
 }
@@ -3327,9 +3369,9 @@ std::string workspace_content(const WorkspacePage& page) {
             }
             out += "</tbody></table>";
         }
-        out += std::format("<p><a class=\"button\" href=\"/design/discover?{}\">Discover "
-                           "Opportunities</a> Not sure where to start? Let Auto-Suggest study "
-                           "your data.</p>",
+        out += std::format("<p><a class=\"button\" href=\"/design/opportunities?{}\">See your "
+                           "Opportunities</a> Not sure where to start? Auto-Suggest recommends "
+                           "what your data could be used for.</p>",
                            query);
         out += std::format(
             "<section class=\"panel\"><h2>New Project</h2><form class=\"stack\" method=\"post\" "
@@ -4080,6 +4122,9 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
             std::format("<div class=\"panel empty\">{}</div>", web_ui_escape(page.unavailable));
     } else if (page.section == "services") {
         content += services_content(page);
+    } else if (page.section == "library") {
+        // The Agent Library is lake's, not the workspace's: shown whether it is ready or not.
+        content += agent_library_content(page);
     } else if (!page.state.value("ready", false)) {
         if (page.section == "data") {
             content += store_connection_notice(page);
@@ -7453,6 +7498,12 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
         }
         content += "</article>";
     }
+    if (page.working) {
+        content += "<article class=\"ask-message ask-agent\" role=\"status\"><p class=\"eyebrow\">"
+                   "Ask Orama</p><p><em>Thinking…</em> It keeps working if you leave; this page "
+                   "checks again every 2 seconds.</p><meta http-equiv=\"refresh\" "
+                   "content=\"2\"></article>";
+    }
     content += "</section>";
     std::string options;
     for (const nlohmann::json& agent : page.agents) {
@@ -7511,6 +7562,12 @@ std::string web_ui_factory(const FactoryPage& page, WebUiViewer viewer) {
     if (page.messages.empty()) {
         content += "<p>Describe the agent: what it is for, what it may touch, and what done looks "
                    "like.</p>";
+    }
+    if (page.working) {
+        content += "<article class=\"ask-message ask-agent\" role=\"status\"><p class=\"eyebrow\">"
+                   "AgentCreator</p><p><em>Working on it…</em> It keeps working if you leave; this "
+                   "page checks again every 2 seconds.</p><meta http-equiv=\"refresh\" "
+                   "content=\"2\"></article>";
     }
     content += "</section>";
     const nlohmann::json& latest = page.latest;

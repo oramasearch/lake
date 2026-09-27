@@ -1,3 +1,13 @@
+# Design → Opportunities
+
+**Updated 2026-09-27 (lake#269):** Discover became **Design → Opportunities** (`/design/opportunities`;
+`/design/discover` still answers). *Scan my workspace* is a background Auto-Suggest turn
+(`agent_turn`, kind `discover`); the page follows it and the Opportunities it recommends (and the
+ones it declines, *Not yet*) are **kept** as rows of `opportunities`, across scans. Each can become a
+project draft (`create_projects_from_opportunities {opportunity_ids}`, on confirmation) or be dismissed
+(`dismiss_opportunity`). `list_opportunities {task_id?}` reads them over REST and MCP. Each names the
+catalogue solution it maps to; the catalogue itself in lake is lake#270.
+
 # Discover Opportunities
 
 **Status: implemented 2026-09-27 (lake#237, epic lake#228).** Design's *Discover Opportunities*

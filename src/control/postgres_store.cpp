@@ -4526,6 +4526,198 @@ public:
             });
     }
 
+    static constexpr const char* task_columns =
+        "t.id::text, t.customer_id::text, t.agent, t.kind, COALESCE(t.conversation_id::text, ''), "
+        "t.body::text, array_to_json(t.scopes)::text, t.deadline_seconds, t.desired, "
+        "COALESCE(t.requested_by_user_id::text, ''), t.requested_by_taap_id, "
+        "to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(ts.phase, ''), COALESCE(ts.message, ''), "
+        "COALESCE(to_char(ts.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+        "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+        "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text";
+
+    static Result<AgentTask> one_task(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + task_columns +
+                " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                "WHERE t.id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no agent task " + id});
+        }
+        const pqxx::row& row = rows[0];
+        AgentTask task;
+        task.id = row[0].as<std::string>();
+        task.customer_id = row[1].as<std::string>();
+        task.agent = row[2].as<std::string>();
+        task.kind = row[3].as<std::string>();
+        task.conversation_id = row[4].as<std::string>();
+        task.body = nlohmann::json::parse(row[5].as<std::string>(), nullptr, false);
+        task.scopes = nlohmann::json::parse(row[6].as<std::string>()).get<std::vector<std::string>>();
+        task.deadline_seconds = row[7].as<int>();
+        task.desired = row[8].as<std::string>();
+        task.requested_by_user_id = row[9].as<std::string>();
+        task.requested_by_taap_id = row[10].as<std::string>();
+        task.created_at = row[11].as<std::string>();
+        task.phase = row[12].as<std::string>();
+        task.message = row[13].as<std::string>();
+        task.started_at = row[14].as<std::string>();
+        task.finished_at = row[15].as<std::string>();
+        task.credential_sha256 = row[16].as<std::string>();
+        task.result = nlohmann::json::parse(row[17].as<std::string>(), nullptr, false);
+        return task;
+    }
+
+    Result<AgentTask> create_agent_task(const AgentTask& in) override {
+        if (in.agent.empty() || in.scopes.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
+        }
+        return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            const std::string id = new_uuid_v4();
+            tx.exec_params(
+                "INSERT INTO agent_tasks (id, customer_id, agent, kind, conversation_id, body, "
+                "scopes, deadline_seconds, requested_by_user_id, requested_by_taap_id) VALUES "
+                "($1::uuid, $2::uuid, $3, $4, NULLIF($5, '')::uuid, $6::jsonb, "
+                "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, NULLIF($9, '')::uuid, $10)",
+                id,
+                in.customer_id,
+                in.agent,
+                in.kind.empty() ? std::string("api") : in.kind,
+                in.conversation_id,
+                in.body.dump(),
+                nlohmann::json(in.scopes).dump(),
+                in.deadline_seconds,
+                in.requested_by_user_id,
+                in.requested_by_taap_id);
+            // The operator's listener wakes at once; delivered on commit.
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_task(tx, id);
+        });
+    }
+
+    static constexpr const char* opportunity_columns =
+        "id::text, customer_id::text, task_id::text, rank, intent, solution, methodology, why, "
+        "payload::text, status, project, to_char(created_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+    static Opportunity opportunity_from(const pqxx::row& row) {
+        Opportunity out;
+        out.id = row[0].as<std::string>();
+        out.customer_id = row[1].as<std::string>();
+        out.task_id = row[2].as<std::string>();
+        out.rank = row[3].as<int>();
+        out.intent = row[4].as<std::string>();
+        out.solution = row[5].as<std::string>();
+        out.methodology = row[6].as<std::string>();
+        out.why = row[7].as<std::string>();
+        out.payload = nlohmann::json::parse(row[8].as<std::string>(), nullptr, false);
+        out.status = row[9].as<std::string>();
+        out.project = row[10].as<std::string>();
+        out.created_at = row[11].as<std::string>();
+        return out;
+    }
+
+    Result<void> record_opportunities(const std::vector<Opportunity>& rows) override {
+        if (rows.empty()) {
+            return {};
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            // Written once per scan: a second settle of the same task finds its rows.
+            if (!tx.exec_params("SELECT 1 FROM opportunities WHERE task_id = $1::uuid LIMIT 1",
+                                rows.front().task_id)
+                     .empty()) {
+                return {};
+            }
+            for (const Opportunity& row : rows) {
+                tx.exec_params("INSERT INTO opportunities (customer_id, task_id, rank, intent, "
+                               "solution, methodology, why, payload, status) VALUES ($1::uuid, "
+                               "$2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9) ON CONFLICT DO NOTHING",
+                               row.customer_id,
+                               row.task_id,
+                               row.rank,
+                               row.intent,
+                               row.solution,
+                               row.methodology,
+                               row.why,
+                               row.payload.dump(),
+                               row.status);
+            }
+            return {};
+        });
+    }
+
+    Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override {
+        return with_tx<std::vector<Opportunity>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Opportunity>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + opportunity_columns +
+                        " FROM opportunities WHERE customer_id = $1::uuid ORDER BY created_at DESC, "
+                        "rank",
+                    customer_id);
+                std::vector<Opportunity> out;
+                for (const pqxx::row& row : rows) {
+                    out.push_back(opportunity_from(row));
+                }
+                return out;
+            });
+    }
+
+    Result<Opportunity> set_opportunity_status(const std::string& id,
+                                               const std::string& status,
+                                               const std::string& project) override {
+        return with_tx<Opportunity>([&](pqxx::work& tx) -> Result<Opportunity> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE opportunities SET status = $2, project = $3, updated_at = "
+                            "now() WHERE id = $1::uuid RETURNING ") +
+                    opportunity_columns,
+                id,
+                status,
+                project);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no opportunity " + id});
+            }
+            return opportunity_from(rows[0]);
+        });
+    }
+
+    Result<AgentTask> get_agent_task(const std::string& id) override {
+        return with_tx<AgentTask>(
+            [&](pqxx::work& tx) -> Result<AgentTask> { return one_task(tx, id); });
+    }
+
+    // A task credential: as a launch credential, against the task's status row, acting as the
+    // person who asked.
+    Result<Principal> task_principal(const std::string& secret) {
+        const auto parsed = parse_agent_credential(secret, agent_task_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT COALESCE(ts.credential_sha256, ''), array_to_json(t.scopes)::text, "
+                "COALESCE(users.id::text, ''), COALESCE(users.taap_id, '') FROM agent_tasks t "
+                "LEFT JOIN agent_task_status ts ON ts.task_id = t.id LEFT JOIN users ON users.id = "
+                "t.requested_by_user_id WHERE t.id = $1::uuid AND t.desired = 'present'",
+                parsed->first);
+            if (rows.empty() || !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                                         rows[0][0].as<std::string>())) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            if (rows[0][3].as<std::string>().empty()) {
+                return std::unexpected(StoreError{"unauthorized", "task identity is unavailable"});
+            }
+            return Principal{
+                rows[0][2].as<std::string>(),
+                rows[0][3].as<std::string>(),
+                "task:" + parsed->first,
+                "",
+                "lake",
+                "agent_task",
+                nlohmann::json::parse(rows[0][1].as<std::string>()).get<std::vector<std::string>>(),
+                std::nullopt};
+        });
+    }
+
     Result<AskMessage> append_ask_message(const AskMessage& message) override {
         if (message.conversation_id.empty() || message.user_id.empty() ||
             (message.role != "user" && message.role != "assistant")) {
@@ -5335,6 +5527,9 @@ public:
         }
         if (secret.starts_with(agent_schedule_credential_prefix)) {
             return schedule_principal(secret);
+        }
+        if (secret.starts_with(agent_task_credential_prefix)) {
+            return task_principal(secret);
         }
         const auto lookup_id = session_lookup_id(secret);
         if (!lookup_id) {

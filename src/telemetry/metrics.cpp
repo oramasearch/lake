@@ -656,6 +656,26 @@ public:
     control::Result<control::AgentLaunch> withdraw_agent_launch(const std::string& id) override {
         return call("withdraw_agent_launch", [&] { return store_->withdraw_agent_launch(id); });
     }
+    control::Result<control::AgentTask> create_agent_task(const control::AgentTask& value) override {
+        return call("create_agent_task", [&] { return store_->create_agent_task(value); });
+    }
+    control::Result<control::AgentTask> get_agent_task(const std::string& id) override {
+        return call("get_agent_task", [&] { return store_->get_agent_task(id); });
+    }
+    control::Result<void>
+    record_opportunities(const std::vector<control::Opportunity>& rows) override {
+        return call("record_opportunities", [&] { return store_->record_opportunities(rows); });
+    }
+    control::Result<std::vector<control::Opportunity>>
+    list_opportunities(const std::string& customer_id) override {
+        return call("list_opportunities", [&] { return store_->list_opportunities(customer_id); });
+    }
+    control::Result<control::Opportunity> set_opportunity_status(const std::string& id,
+                                                                 const std::string& status,
+                                                                 const std::string& project) override {
+        return call("set_opportunity_status",
+                    [&] { return store_->set_opportunity_status(id, status, project); });
+    }
     control::Result<control::AgentCronSchedule>
     create_agent_cron_schedule(const control::NewAgentCronSchedule& value) override {
         return call("create_agent_cron_schedule",

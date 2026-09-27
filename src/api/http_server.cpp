@@ -4703,6 +4703,11 @@ struct ApiServer::Impl {
             "/design/pipeline/run",
             "/design/pipeline/deploy",
             "/design/pipeline/ask",
+            "/design/opportunities",
+            "/design/agent-library",
+            "/design/opportunities/scan",
+            "/design/opportunities/create",
+            "/design/opportunities/dismiss",
             "/design/pipeline/apply",
             "/design/project/new-pipeline",
             "/design/project/n8n",
@@ -7427,15 +7432,31 @@ struct ApiServer::Impl {
         if (section == "pipeline") {
             // A Project Agent proposal to review (lake#249), and run settings to prefill.
             nlohmann::json shown = nlohmann::json::object();
-            if (const std::string review = query_value(route, "proposal");
-                !review.empty() && options.store && !context.acting_user_id.empty()) {
-                auto kept = options.store->ask_conversation(review, context.acting_user_id, 5);
-                if (kept && !kept->empty()) {
+            // The Project Agent's background turn (lake#269): working, or its proposal.
+            if (const std::string task = query_value(route, "task"); !task.empty()) {
+                const ApiResult followed = unwrap(co_await workspace_call(
+                    "get_agent_task",
+                    {{"customer_id", query_value(route, "customer_id")}, {"task_id", task}},
+                    context));
+                const std::string status =
+                    followed.ok ? followed.value.value("status", std::string()) : "";
+                if (status == "pending" || status == "running") {
+                    shown["project_agent_working"] = true;
+                } else if (followed.ok) {
+                    const nlohmann::json answer =
+                        followed.value.value("answer", nlohmann::json::object());
                     const nlohmann::json proposal =
-                        kept->back().payload.value("proposal", nlohmann::json());
+                        answer.is_object()
+                            ? answer.value("result", nlohmann::json::object())
+                                  .value("proposal", nlohmann::json())
+                            : nlohmann::json();
                     if (proposal.is_object()) {
                         shown["proposal"] = proposal;
-                        shown["proposal_id"] = review;
+                    } else {
+                        shown["project_agent_error"] =
+                            answer.is_object() && answer.contains("result")
+                                ? answer["result"].value("reply", std::string("no proposal"))
+                                : followed.value.value("message", std::string("no proposal"));
                     }
                 }
             }
@@ -7570,7 +7591,28 @@ struct ApiServer::Impl {
                 page.data["list_agent_schedules"] = schedules.value;
             }
         }
-        if (section == "agents" || section == "discover") {
+        if (section == "discover") {
+            // Design → Opportunities (lake#269): the saved Opportunities, and the scan that is
+            // running or just finished (settled into rows the first time it is read).
+            const std::string task = query_value(route, "task");
+            if (!task.empty()) {
+                const ApiResult followed = unwrap(co_await workspace_call(
+                    "get_agent_task", {{"customer_id", page.customer_id}, {"task_id", task}}, context));
+                if (followed.ok) {
+                    page.data["task"] = followed.value;
+                }
+            }
+            nlohmann::json list_input{{"customer_id", page.customer_id}};
+            if (!task.empty()) {
+                list_input["task_id"] = task;
+            }
+            const ApiResult listed =
+                unwrap(co_await workspace_call("list_opportunities", std::move(list_input), context));
+            if (listed.ok) {
+                page.data["list_opportunities"] = listed.value;
+            }
+        }
+        if (section == "agents" || section == "discover" || section == "library") {
             // The Agent Library does not need the workspace (docs/api/train-agents.md).
             const ApiResult library = unwrap(
                 co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
@@ -7877,6 +7919,66 @@ struct ApiServer::Impl {
         co_return agents;
     }
 
+    // A background turn of a conversation (lake#269). True while it runs; once it finished, its
+    // answer becomes the conversation's assistant message, once, and this answers false.
+    liquid::runtime::task<bool> settle_turn(ApiContext& context,
+                                            std::string customer_id,
+                                            std::string task_id,
+                                            std::string conversation,
+                                            bool factory) {
+        const ApiResult got = unwrap(co_await workspace_call(
+            "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
+        if (!got.ok || !options.store) {
+            co_return false;
+        }
+        const std::string status = got.value.value("status", std::string());
+        if (status == "pending" || status == "running") {
+            co_return true;
+        }
+        auto messages = options.store->ask_conversation(conversation, context.acting_user_id, 200);
+        if (messages) {
+            for (const control::AskMessage& message : *messages) {
+                if (message.payload.is_object() &&
+                    message.payload.value("task_id", std::string()) == task_id) {
+                    co_return false;
+                }
+            }
+        }
+        const nlohmann::json answer = got.value.value("answer", nlohmann::json::object());
+        const bool ok = status == "succeeded" && answer.is_object() && answer.value("ok", true);
+        std::string text;
+        nlohmann::json payload{{"task_id", task_id}, {"agent", got.value.value("agent", std::string())}};
+        if (!ok) {
+            text = "That did not finish: " +
+                   (answer.is_object() && answer.contains("error")
+                        ? answer["error"].is_string() ? answer["error"].get<std::string>()
+                                                      : answer["error"].dump()
+                        : got.value.value("message", std::string("the agent did not answer")));
+        } else if (factory) {
+            const nlohmann::json creator = creator_answer(answer);
+            const std::string kind = creator.value("kind", std::string());
+            text = kind == "question"   ? creator.value("question", std::string())
+                   : kind == "proposal" ? std::string("Here is the agent I propose. Review it below.")
+                                        : answer.value("reply", std::string("AgentCreator did not answer."));
+            payload["answer"] = creator;
+        } else {
+            text = answer.value("reply", std::string());
+            payload["proposals"] = answer.value("proposals", nlohmann::json::array());
+            payload["reads"] = answer.value("reads", nlohmann::json::array());
+            payload["delegations"] = answer.value("delegations", nlohmann::json::array());
+            payload["trace_id"] = answer.value("trace_id", std::string());
+        }
+        options.store->append_ask_message({"",
+                                           conversation,
+                                           customer_id,
+                                           context.acting_user_id,
+                                           "assistant",
+                                           std::move(text),
+                                           std::move(payload),
+                                           ""});
+        co_return false;
+    }
+
     boost::http::route_task serve_ask_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized || context.acting_user_id.empty()) {
@@ -7890,6 +7992,12 @@ struct ApiServer::Impl {
         page.agent = query_value(route, "agent");
         page.error = query_value(route, "error");
         page.conversation_id = query_value(route, "conversation");
+        page.task_id = query_value(route, "task");
+        if (!page.task_id.empty() && !page.conversation_id.empty()) {
+            auto working = co_await settle_turn(
+                context, page.customer_id, page.task_id, page.conversation_id, false);
+            page.working = working && *working;
+        }
         if (page.conversation_id.empty()) {
             page.conversation_id = control::new_uuid_v4();
         } else if (options.store) {
@@ -7970,9 +8078,13 @@ struct ApiServer::Impl {
                                                 {"agent", agent},
                                                 {"message", message},
                                                 {"conversation_id", conversation},
-                                                {"page", page}},
+                                                {"page", page},
+                                                {"kind", "ask"}},
                                                context));
-            if (answered.ok) {
+            if (answered.ok && answered.value.contains("task_id")) {
+                // Running in the background (lake#269): the page follows the task.
+                back += "&task=" + oauth_url_encode(answered.value.value("task_id", std::string()));
+            } else if (answered.ok) {
                 const nlohmann::json& value = answered.value;
                 options.store->append_ask_message(
                     {"",
@@ -8060,6 +8172,12 @@ struct ApiServer::Impl {
             workspace_selection(context, query_value(route, "customer_id")).customer_id;
         page.error = query_value(route, "error");
         page.conversation_id = query_value(route, "conversation");
+        page.task_id = query_value(route, "task");
+        if (!page.task_id.empty() && !page.conversation_id.empty()) {
+            auto working = co_await settle_turn(
+                context, page.customer_id, page.task_id, page.conversation_id, true);
+            page.working = working && *working;
+        }
         if (page.conversation_id.empty()) {
             page.conversation_id = control::new_uuid_v4();
         } else if (options.store) {
@@ -8129,22 +8247,15 @@ struct ApiServer::Impl {
                 unwrap(co_await workspace_call("agent_turn",
                                                {{"customer_id", customer_id},
                                                 {"agent", "agent-creator"},
+                                                {"kind", "factory"},
                                                 {"message", message},
                                                 {"conversation_id", conversation}},
                                                context));
             if (!turned.ok) {
                 error = turned.error.message;
             } else {
-                const nlohmann::json answer = creator_answer(turned.value);
-                std::string text;
-                if (answer.value("kind", std::string()) == "question") {
-                    text = answer.value("question", std::string());
-                } else if (answer.value("kind", std::string()) == "proposal") {
-                    text = "Here is the agent I propose. Review it below.";
-                } else {
-                    text = turned.value.value("reply", std::string("AgentCreator did not answer."));
-                }
-                say(text, {{"answer", answer}});
+                // AgentCreator works in the background (lake#269); the page follows the task.
+                back += "&task=" + oauth_url_encode(turned.value.value("task_id", std::string()));
             }
             if (!error.empty()) {
                 back += "&error=" + oauth_url_encode(error);
@@ -8206,6 +8317,8 @@ struct ApiServer::Impl {
 
     // Design > Discover Opportunities: one Auto-Suggest turn over the profile lake builds, shown
     // on the page (docs/api/discover.md). Nothing is created here.
+    // Scan my workspace (lake#269): a background Auto-Suggest turn. The request returns at once to
+    // the Opportunities page, which follows the task until its Opportunities are saved.
     boost::http::route_task serve_discover_scan(boost::http::route_params& route) {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
@@ -8216,17 +8329,17 @@ struct ApiServer::Impl {
             co_return co_await redirect(route, "/sign-in");
         }
         const std::string customer_id = form_field(body, "customer_id");
-        const ApiResult answered = unwrap(
-            co_await workspace_call("agent_turn",
-                                    {{"customer_id", customer_id},
-                                     {"agent", "agent-autosuggest"},
-                                     {"message", "What could this workspace build from its data?"}},
-                                    context));
-        nlohmann::json extra{{"autosuggest", answered.ok ? answered.value : nlohmann::json()}};
-        if (!answered.ok) {
-            extra["scan_error"] = answered.error.message;
-        }
-        co_return co_await serve_workspace_page(route, "discover", customer_id, std::move(extra));
+        std::string back = "/design/opportunities?customer_id=" + oauth_url_encode(customer_id);
+        const ApiResult started = unwrap(co_await workspace_call(
+            "agent_turn",
+            {{"customer_id", customer_id},
+             {"agent", "agent-autosuggest"},
+             {"kind", "discover"},
+             {"message", "What could this workspace build from its data?"}},
+            context));
+        back += started.ok ? "&task=" + oauth_url_encode(started.value.value("task_id", std::string()))
+                           : "&error=" + oauth_url_encode(started.error.message);
+        co_return co_await redirect(route, back);
     }
 
     boost::http::route_task serve_workspace_form(boost::http::route_params& route,
@@ -8323,34 +8436,32 @@ struct ApiServer::Impl {
             back = !created.empty() ? "/train/agent?" + query + "&id=" + oauth_url_encode(created)
                                     : "/train/agents?" + query;
         } else if (action == "discover_create") {
-            // Project drafts from the selected Opportunities, only on the person's confirmation.
-            // Each draft carries its source Opportunity in its description.
-            back = "/design/projects?" + query;
-            const nlohmann::json opportunities =
-                nlohmann::json::parse(form_field(body, "opportunities"), nullptr, false);
+            // Project drafts from the chosen saved Opportunities, only on the person's
+            // confirmation (lake#269).
+            back = "/design/opportunities?" + query;
+            nlohmann::json ids = nlohmann::json::array();
+            for (const std::string& id : form_fields(body, "pick")) {
+                ids.push_back(id);
+            }
             if (form_field(body, "confirm") != "yes") {
                 result = ApiResult::failure("invalid_input", "Confirm to create the drafts.");
-            } else if (!opportunities.is_array()) {
-                result =
-                    ApiResult::failure("invalid_input", "The Opportunities did not come back.");
-            }
-            nlohmann::json chosen = nlohmann::json::array();
-            for (const std::string& pick :
-                 result.ok ? form_fields(body, "pick") : std::vector<std::string>{}) {
-                const std::size_t index = static_cast<std::size_t>(std::atoi(pick.c_str()));
-                if (index < opportunities.size() && opportunities[index].is_object()) {
-                    chosen.push_back(opportunities[index]);
-                }
-            }
-            if (result.ok && chosen.empty()) {
+            } else if (ids.empty()) {
                 result = ApiResult::failure("invalid_input", "Choose at least one Opportunity.");
-            } else if (result.ok) {
-                // The same capability REST and MCP call.
+            } else {
                 result = unwrap(co_await workspace_call(
                     "create_projects_from_opportunities",
-                    {{"customer_id", customer_id}, {"opportunities", std::move(chosen)}},
+                    {{"customer_id", customer_id}, {"opportunity_ids", std::move(ids)}},
                     context));
+                if (result.ok) {
+                    back = "/design/projects?" + query;
+                }
             }
+        } else if (action == "discover_dismiss") {
+            back = "/design/opportunities?" + query;
+            result = unwrap(co_await workspace_call(
+                "dismiss_opportunity",
+                {{"customer_id", customer_id}, {"opportunity_id", form_field(body, "opportunity_id")}},
+                context));
         } else if (action == "agent_grant" || action == "agent_revoke") {
             // Pipelines as tools (lake#238): the whole list is written back, so Zetta checks
             // every grant is still approved and pins each to its approval.
@@ -8502,19 +8613,14 @@ struct ApiServer::Impl {
                     {{"customer_id", customer_id},
                      {"agent", "agent-project"},
                      {"message", form_field(body, "request")},
+                     {"kind", "pipeline"},
                      {"context", {{"project", project}, {"graph", graph}}}},
                     context));
                 if (result.ok) {
-                    const std::string review = result.value.value("review_url", std::string());
-                    if (!review.empty()) {
-                        back = review;
-                    } else {
-                        result = ApiResult::failure(
-                            "engine_error",
-                            result.value.value("result", nlohmann::json::object())
-                                .value("reply",
-                                       std::string("The Project Agent did not propose a change.")));
-                    }
+                    // The Project Agent works in the background (lake#269).
+                    back = page_of(graph, "") + "&task=" +
+                           oauth_url_encode(result.value.value("task_id", std::string())) +
+                           "#proposal";
                 }
             } else if (action == "pipeline_apply") {
                 const auto edits = nlohmann::json::parse(form_field(body, "edits"), nullptr, false);
@@ -12536,8 +12642,10 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 15>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 17>{{{"/design/projects", "projects"},
                                                               {"/design/discover", "discover"},
+                                                              {"/design/opportunities", "discover"},
+                                                              {"/design/agent-library", "library"},
                                                               {"/design/project", "project"},
                                                               {"/design/pipeline", "pipeline"},
                                                               {"/train/agents", "agents"},
@@ -12558,12 +12666,14 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 41>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 43>{
              {{"/workspace/start", "start"},
               {"/train/agents/create", "agent_create"},
               {"/train/agent/run", "agent_run"},
               {"/train/agent/grant", "agent_grant"},
               {"/design/discover/create", "discover_create"},
+              {"/design/opportunities/create", "discover_create"},
+              {"/design/opportunities/dismiss", "discover_dismiss"},
               {"/train/agent/revoke", "agent_revoke"},
               {"/train/agent/stop", "agent_stop"},
               {"/train/agent/schedule", "agent_schedule"},
@@ -12612,6 +12722,12 @@ bool ApiServer::start() {
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/design/discover/scan", impl.serve_discover_scan(route));
+               });
+    router.add(http::method::post,
+               "/design/opportunities/scan",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/design/opportunities/scan", impl.serve_discover_scan(route));
                });
     router.add(http::method::get,
                "/train/agents/new",

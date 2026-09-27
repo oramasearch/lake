@@ -1026,6 +1026,90 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
     return {};
 }
 
+Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
+    std::lock_guard lock(mutex_);
+    if (in.agent.empty() || in.scopes.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
+    }
+    AgentTask task = in;
+    task.id = new_uuid_v4();
+    task.desired = "present";
+    task.phase.clear();
+    task.created_at = std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    agent_tasks_.push_back(task);
+    return task;
+}
+
+Result<AgentTask> InMemoryStore::get_agent_task(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    return *found;
+}
+
+Result<void> InMemoryStore::record_opportunities(const std::vector<Opportunity>& rows) {
+    std::lock_guard lock(mutex_);
+    if (!rows.empty() && std::ranges::any_of(opportunities_, [&](const Opportunity& kept) {
+            return kept.task_id == rows.front().task_id;
+        })) {
+        return {};
+    }
+    for (Opportunity row : rows) {
+        row.id = new_uuid_v4();
+        row.created_at = std::format(
+            "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+        opportunities_.push_back(std::move(row));
+    }
+    return {};
+}
+
+Result<std::vector<Opportunity>> InMemoryStore::list_opportunities(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Opportunity> out;
+    for (auto it = opportunities_.rbegin(); it != opportunities_.rend(); ++it) {
+        if (it->customer_id == customer_id) {
+            out.push_back(*it);
+        }
+    }
+    std::ranges::stable_sort(out, [](const Opportunity& a, const Opportunity& b) {
+        return a.task_id == b.task_id && a.rank < b.rank;
+    });
+    return out;
+}
+
+Result<Opportunity> InMemoryStore::set_opportunity_status(const std::string& id,
+                                                          const std::string& status,
+                                                          const std::string& project) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(opportunities_, id, &Opportunity::id);
+    if (found == opportunities_.end()) {
+        return std::unexpected(StoreError{"not_found", "no opportunity " + id});
+    }
+    found->status = status;
+    found->project = project;
+    return *found;
+}
+
+Result<void> InMemoryStore::set_agent_task_status(const std::string& id,
+                                                  std::string phase,
+                                                  std::string message,
+                                                  std::string credential_sha256,
+                                                  nlohmann::json result) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    found->phase = std::move(phase);
+    found->message = std::move(message);
+    found->credential_sha256 = std::move(credential_sha256);
+    found->result = std::move(result);
+    return {};
+}
+
 Result<AskMessage> InMemoryStore::append_ask_message(const AskMessage& message) {
     std::lock_guard lock(mutex_);
     if (message.conversation_id.empty() || message.user_id.empty() ||
@@ -2136,6 +2220,31 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
+    if (secret.starts_with(agent_task_credential_prefix)) {
+        const auto parsed = parse_agent_credential(secret, agent_task_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto task = std::ranges::find(agent_tasks_, parsed->first, &AgentTask::id);
+        if (task == agent_tasks_.end() || task->desired != "present" ||
+            task->credential_sha256.empty() ||
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret), task->credential_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto user = std::ranges::find_if(
+            users_, [&](const User& row) { return row.id == task->requested_by_user_id; });
+        if (user == users_.end() || user->taap_id.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "task identity is unavailable"});
+        }
+        return Principal{user->id,
+                         user->taap_id,
+                         "task:" + task->id,
+                         "",
+                         "lake",
+                         "agent_task",
+                         task->scopes,
+                         std::nullopt};
+    }
     if (secret.starts_with(agent_schedule_credential_prefix)) {
         const auto parsed = parse_agent_credential(secret, agent_schedule_credential_prefix);
         if (!parsed) {

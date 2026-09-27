@@ -436,6 +436,14 @@ conversations, read back only by the person who had them). Idempotent; guard `ag
 operator vendors it and selects that guard before a binary that launches agents is deployed.
 Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md).
 
+## Agent tasks migration
+
+`0032_agent_tasks` adds `agent_tasks` (written by lake: a library agent's turn to run in the
+background, with its body, scopes and deadline), `agent_task_status` (written by the operator: phase,
+answer and the **SHA-256** of the task's credential) and `opportunities` (Design → Opportunities:
+what Auto-Suggest recommended, kept across scans, with what the person did with each). Idempotent;
+guard `agent_tasks_guard`. Contract: [`../api/agent-launches.md`](../api/agent-launches.md).
+
 ## Agent cron schedules migration
 
 `0031_agent_cron_schedules` adds `agent_cron_schedules` (written by lake: any number per agent,

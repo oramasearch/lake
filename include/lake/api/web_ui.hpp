@@ -234,6 +234,9 @@ struct AskPage {
     std::string customer_id, conversation_id, from, agent, error;
     // In the side panel beside a page (lake#258): no site frame, and its forms stay in the panel.
     bool embed = false;
+    // A turn is running in the background (lake#269): the page says so and checks again.
+    bool working = false;
+    std::string task_id;
     nlohmann::json messages = nlohmann::json::array();
     nlohmann::json agents = nlohmann::json::array();
 };
@@ -244,6 +247,9 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer = true);
 // SHA-256, which Approve and create is bound to.
 struct FactoryPage {
     std::string customer_id, conversation_id, error, message_id, proposal_sha256;
+    // AgentCreator is working in the background (lake#269).
+    bool working = false;
+    std::string task_id;
     nlohmann::json messages = nlohmann::json::array();
     nlohmann::json latest = nlohmann::json::object();
 };

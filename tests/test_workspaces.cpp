@@ -2155,61 +2155,84 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     config.internal_url = "http://lake.internal:4900";
     config.agent_service_token = "service-token";
 
-    // Ask Orama gets a key for this turn only: read capabilities and agent_turn, never an action.
+    // A library agent's turn runs in the background (lake#269): the request answers with the
+    // task at once, and the agent is never called inside it.
+    const std::size_t called = r.agents.turns.size();
     const auto asked = r.call("agent_turn", {{"agent", "agent-ask-orama"}, {"message", "hi"}});
     ASSERT_TRUE(asked.ok) << asked.error.message;
-    const auto& [ask_url, ask_token, ask_body] = r.agents.turns.back();
-    EXPECT_EQ(ask_url, "http://ask:8080");
-    EXPECT_EQ(ask_token, "service-token");
-    EXPECT_EQ(ask_body["lake_url"], "http://lake.internal:4900");
-    const std::string key = ask_body["lake_token"];
-    EXPECT_FALSE(r.store.context_for(key)) << "the turn's key is revoked when the turn ends";
+    EXPECT_EQ(asked.value["status"], "pending");
+    EXPECT_EQ(r.agents.turns.size(), called) << "the request never waits on the agent";
+    const auto ask_task = r.store.get_agent_task(asked.value["task_id"]);
+    ASSERT_TRUE(ask_task);
+    EXPECT_EQ(ask_task->body["lake_token"], "{{credential}}")
+        << "only the operator ever holds the task's credential";
+    EXPECT_EQ(ask_task->body["lake_url"], "http://lake.internal:4900");
+    // Ask Orama reads what the person may read and changes nothing itself.
+    const auto& scopes = ask_task->scopes;
+    EXPECT_NE(std::ranges::find(scopes, "agent_turn"), scopes.end());
+    EXPECT_NE(std::ranges::find(scopes, "get_agent_task"), scopes.end());
+    EXPECT_NE(std::ranges::find(scopes, "list_agent_launches"), scopes.end());
+    EXPECT_EQ(std::ranges::find(scopes, "launch_agent"), scopes.end());
+
+    // Its credential acts as the person, with the task's scopes, while the task runs.
+    const std::string credential =
+        "lat." + ask_task->id + ".0123456789abcdef0123456789abcdef";
+    EXPECT_FALSE(r.store.context_for(credential)) << "not before the operator reports it";
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        ask_task->id, "Running", "", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto acting = r.store.context_for(credential);
+    ASSERT_TRUE(acting) << acting.error().message;
+    EXPECT_EQ(acting->user_id, r.principal.user_id);
+    EXPECT_EQ(acting->kind, "agent_task");
+    ASSERT_TRUE(r.store.set_agent_task_status(ask_task->id, "Succeeded", "", "",
+                                              {{"ok", true}, {"reply", "hello"}}));
+    EXPECT_FALSE(r.store.context_for(credential)) << "a finished task's credential stops";
+    const auto followed = r.call("get_agent_task", {{"task_id", ask_task->id}});
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    EXPECT_EQ(followed.value["status"], "succeeded");
+    EXPECT_EQ(followed.value["answer"]["reply"], "hello");
 
     const auto built = r.call("agent_turn", {{"agent", "agent-project"}, {"message", "churn"}});
     ASSERT_TRUE(built.ok) << built.error.message;
-    EXPECT_EQ(std::get<2>(r.agents.turns.back())["zetta_base_url"],
+    EXPECT_EQ(r.store.get_agent_task(built.value["task_id"])->body["zetta_base_url"],
               "http://lake.internal:4900/workspaces/" + r.w.customer_id + "/zetta");
 
-    // A change to an existing pipeline: the agent is handed the graph, and its proposal is kept
-    // for review on the pipeline page (lake#249).
+    // A change to an existing pipeline: the agent is handed the graph, and a finished proposal
+    // names the pipeline page where it is reviewed (lake#249).
     r.w.caller->answers["get_graph"] = {{"name", "churn"},
                                         {"nodes", json::array({{{"id", "pull"}, {"kind", "connect"},
                                                                 {"name", "Pull"}}})},
                                         {"edges", json::array()}};
-    r.agents.answer = {{"ok", true},
-                       {"result",
-                        {{"kind", "proposal"},
-                         {"reply", "Proposed, not applied: rename"},
-                         {"proposal",
-                          {{"project", "retention"},
-                           {"graph", "churn"},
-                           {"edits", json::array({{{"op", "rename"}, {"name", "churn v2"}}})}}}}}};
     const auto proposed = r.call("agent_turn",
                                  {{"agent", "agent-project"},
                                   {"message", "rename it"},
                                   {"context", {{"project", "retention"}, {"graph", "churn"}}}});
     ASSERT_TRUE(proposed.ok) << proposed.error.message;
-    EXPECT_EQ(std::get<2>(r.agents.turns.back())["context"]["pipeline"]["nodes"][0]["id"], "pull");
-    const std::string review = proposed.value["review_url"];
-    ASSERT_NE(review.find("/design/pipeline?customer_id=" + r.w.customer_id +
-                          "&project=retention&graph=churn&proposal="),
-              std::string::npos)
-        << review;
-    const auto kept = r.store.ask_conversation(review.substr(review.rfind('=') + 1),
-                                               r.principal.user_id, 5);
-    ASSERT_TRUE(kept && kept->size() == 1U);
-    EXPECT_EQ(kept->front().payload["proposal"]["edits"][0]["op"], "rename");
-    r.agents.answer = {{"ok", true}, {"reply", "done"}};
+    const std::string proposal_task = proposed.value["task_id"];
+    EXPECT_EQ(r.store.get_agent_task(proposal_task)->body["context"]["pipeline"]["nodes"][0]["id"],
+              "pull");
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        proposal_task, "Succeeded", "", "",
+        {{"ok", true},
+         {"result",
+          {{"kind", "proposal"},
+           {"proposal",
+            {{"project", "retention"},
+             {"graph", "churn"},
+             {"edits", json::array({{{"op", "rename"}, {"name", "churn v2"}}})}}}}}}));
+    const auto reviewed = r.call("get_agent_task", {{"task_id", proposal_task}});
+    ASSERT_TRUE(reviewed.ok);
+    EXPECT_EQ(reviewed.value["review_url"],
+              "/design/pipeline?customer_id=" + r.w.customer_id +
+                  "&project=retention&graph=churn&task=" + proposal_task);
 
-    r.w.caller->answers["list_datasets"] = {{"datasets", json::array({{{"name", "accounts"}}})}};
-    r.w.caller->answers["get_dataset"] = {{"columns", json::array({{{"name", "churned"}}})}};
+    // Auto-Suggest builds the workspace profile itself, with the task's read-only credential.
     const auto suggested = r.call("agent_turn", {{"agent", "agent-autosuggest"}, {"message", "?"}});
     ASSERT_TRUE(suggested.ok) << suggested.error.message;
-    const json& profile = std::get<2>(r.agents.turns.back())["profile"];
-    EXPECT_EQ(profile["tables"][0]["name"], "accounts");
-    EXPECT_EQ(profile["tables"][0]["columns"][0]["name"], "churned");
-    EXPECT_FALSE(std::get<2>(r.agents.turns.back()).contains("lake_token"))
-        << "Auto-Suggest reads nothing itself";
+    const auto suggest_task = r.store.get_agent_task(suggested.value["task_id"]);
+    EXPECT_FALSE(suggest_task->body.contains("profile")) << "lake reads nothing inside the request";
+    EXPECT_EQ(suggest_task->body["zetta_token"], "{{credential}}");
+    EXPECT_EQ(std::ranges::find(suggest_task->scopes, "workspace_act"), suggest_task->scopes.end());
 
     EXPECT_FALSE(r.call("agent_turn", {{"agent", "agent-creator"}, {"message", "x"}}).ok)
         << "a library agent this lake does not run";

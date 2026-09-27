@@ -223,6 +223,19 @@ public:
                                     std::string message,
                                     std::optional<int> exit_code = std::nullopt,
                                     nlohmann::json result = nullptr);
+    Result<AgentTask> create_agent_task(const AgentTask&) override;
+    Result<AgentTask> get_agent_task(const std::string& id) override;
+    Result<void> record_opportunities(const std::vector<Opportunity>&) override;
+    Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override;
+    Result<Opportunity> set_opportunity_status(const std::string& id,
+                                               const std::string& status,
+                                               const std::string& project) override;
+    // What the operator writes to agent_task_status; tests and local demos call it directly.
+    Result<void> set_agent_task_status(const std::string& id,
+                                       std::string phase,
+                                       std::string message,
+                                       std::string credential_sha256,
+                                       nlohmann::json result = nullptr);
     Result<AskMessage> append_ask_message(const AskMessage&) override;
     Result<std::vector<AskMessage>> ask_conversation(const std::string& conversation_id,
                                                      const std::string& user_id,
@@ -466,6 +479,8 @@ private:
     std::vector<AgentCronSchedule> agent_cron_schedules_;
     std::vector<std::pair<std::string, AgentLaunch>> agent_cron_runs_; // schedule id, run
     std::vector<AskMessage> ask_messages_;
+    std::vector<AgentTask> agent_tasks_;
+    std::vector<Opportunity> opportunities_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {

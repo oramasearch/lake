@@ -272,6 +272,8 @@ struct ManagedStore {
 // (agent_launch_status, agent_cron_schedule_status); lake compares digests and never stores it.
 inline constexpr std::string_view agent_launch_credential_prefix = "lal.";
 inline constexpr std::string_view agent_schedule_credential_prefix = "las.";
+// A background agent turn's credential (lake#269), resolved the same way.
+inline constexpr std::string_view agent_task_credential_prefix = "lat.";
 inline std::optional<std::pair<std::string, std::string>>
 parse_agent_credential(std::string_view secret, std::string_view prefix) {
     if (!secret.starts_with(prefix)) {
@@ -342,6 +344,29 @@ struct NewAgentCronSchedule {
     std::vector<std::string> scopes;
     std::string created_by_user_id, created_by_taap_id;
 };
+// One agent turn run in the background (lake#269): lake writes it and answers the request at once;
+// the Orama operator sends it to the agent and writes the status. `phase` is empty until the
+// operator reports, then Pending, Running, Succeeded or Failed.
+struct AgentTask {
+    std::string id, customer_id, agent, kind, conversation_id;
+    nlohmann::json body = nlohmann::json::object();
+    std::vector<std::string> scopes;
+    int deadline_seconds = 300;
+    std::string desired = "present";
+    std::string requested_by_user_id, requested_by_taap_id, created_at;
+    std::string phase, message, started_at, finished_at, credential_sha256;
+    nlohmann::json result = nullptr;
+};
+
+// One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans.
+struct Opportunity {
+    std::string id, customer_id, task_id;
+    int rank = 0;
+    std::string intent, solution, methodology, why;
+    nlohmann::json payload = nlohmann::json::object();
+    std::string status = "new", project, created_at;
+};
+
 // One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). Kept in lake because
 // the panel renders from any replica.
 struct AskMessage {
@@ -874,6 +899,16 @@ public:
     // The runs the schedules' CronJobs started, as launches (trigger "schedule"), newest first.
     virtual Result<std::vector<AgentLaunch>>
     list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
+    // Background agent turns (lake#269). Creating one NOTIFYs lake_services.
+    virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
+    virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;
+    // Opportunities: a finished scan's rows are written once (a second call for the same task
+    // writes nothing); newest scan first.
+    virtual Result<void> record_opportunities(const std::vector<Opportunity>&) = 0;
+    virtual Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) = 0;
+    virtual Result<Opportunity> set_opportunity_status(const std::string& id,
+                                                       const std::string& status,
+                                                       const std::string& project) = 0;
     // Ask Orama conversations (lake#236), only ever read back by the person who had them.
     virtual Result<AskMessage> append_ask_message(const AskMessage&) = 0;
     virtual Result<std::vector<AskMessage>>
