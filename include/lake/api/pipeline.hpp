@@ -22,6 +22,9 @@ inline constexpr std::string_view edge_kinds[] = {"data_flow", "control"};
 
 struct Step {
     std::string id, kind, name;
+    // What the step does beyond its kind (a connect step's source and table, a model step's target
+    // and algo). Carried through every edit: a save that dropped them would change what runs.
+    nlohmann::json attributes = nlohmann::json::object();
 };
 struct Edge {
     std::string from, to, kind;
@@ -46,12 +49,18 @@ nlohmann::json edges_json(const Graph& graph);
 std::string validate(const Graph& graph);
 
 // One edit, as the pipeline page's forms post it. `op` is one of add_step, rename_step,
-// kind_step, remove_step, add_edge, remove_edge, rename; the other fields are read as that op
+// kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value), rename; the other fields are read as that op
 // needs. The result is validated; an edit that would break the graph is refused with the reason.
 struct Edit {
     std::string op, step, kind, name, from, to;
+    // set_attribute's value (name is the attribute); null removes the attribute.
+    nlohmann::json value = nullptr;
 };
 std::expected<Graph, std::string> apply(Graph graph, const Edit& edit);
+// An edit from its JSON form ({op, step, kind, name, from, to, value}).
+Edit edit_from_json(const nlohmann::json& value);
+// Several edits in order, all or nothing: the first that fails names its position and reason.
+std::expected<Graph, std::string> apply_all(Graph graph, const nlohmann::json& edits);
 
 // The steps in dependency order (a step after every step with an edge into it); ties keep the
 // graph's own order. Empty when there is a cycle.
