@@ -784,6 +784,36 @@ dd {
 .ask-proposal {
   margin-top: var(--lake-space-2);
 }
+/* An agent's markdown reply: tables scroll inside the message rather than widen the page. */
+.ask-reply > :first-child {
+  margin-top: 0;
+}
+.ask-reply table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+/* A checkbox sits beside its words, never stretched across a grid label's row. */
+form label:has(> input[type='checkbox']),
+form label:has(> span > input[type='checkbox']) {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--lake-space-2);
+}
+label > input[type='checkbox'],
+label > span > input[type='checkbox'] {
+  flex: none;
+  margin: 0.2em 0 0;
+}
+/* An Opportunity's intent is its title: primary text, larger than the line under it. */
+.opportunity-pick {
+  color: var(--lake-text-primary);
+  font-size: var(--lake-text-16);
+  font-weight: var(--lake-weight-semibold);
+}
+.opportunity-pick + .sub {
+  margin-top: var(--lake-space-1);
+}
 .agent-cell {
   display: flex;
   flex-direction: column;

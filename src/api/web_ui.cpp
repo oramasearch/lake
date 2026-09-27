@@ -3277,8 +3277,9 @@ std::string discover_content(const WorkspacePage& page) {
         const nlohmann::json detail = row.value("detail", nlohmann::json::object());
         if (state == "new") {
             fresh += std::format(
-                "<article class=\"panel ask-proposal\"><label><input type=\"checkbox\" "
-                "name=\"pick\" value=\"{}\"> <strong>{}</strong></label><p class=\"sub\">{}{}</p>"
+                "<article class=\"panel ask-proposal\"><label class=\"opportunity-pick\"><input "
+                "type=\"checkbox\" name=\"pick\" value=\"{}\"> <span>{}</span></label><p "
+                "class=\"sub\">{}{}</p>"
                 "<p>{}</p>{}<p><button type=\"submit\" formaction=\"/design/opportunities/dismiss\" "
                 "formnovalidate name=\"opportunity_id\" value=\"{}\">Dismiss</button></p></article>",
                 web_ui_escape(id),
@@ -7448,13 +7449,17 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
         const bool person = json_text(message, "role") == "user";
         const nlohmann::json payload = message.value("payload", nlohmann::json::object());
         const std::string agent = payload.is_object() ? json_text(payload, "agent") : "";
+        // An agent answers in markdown (tables, lists, code); the renderer escapes every
+        // character before adding markup, so a reply cannot inject HTML.
         content += std::format(
-            "<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p><p>{}</p>",
+            "<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p>{}",
             person ? "ask-person" : "ask-agent",
             person ? std::string("You")
                    : (agent.empty() || agent == "agent-ask-orama" ? std::string("Ask Orama")
                                                                   : web_ui_escape(agent)),
-            web_ui_escape(json_text(message, "content")));
+            person ? "<p>" + web_ui_escape(json_text(message, "content")) + "</p>"
+                   : "<div class=\"ask-reply\">" +
+                         web_ui_markdown(json_text(message, "content")) + "</div>");
         if (payload.is_object()) {
             for (const nlohmann::json& delegation :
                  payload.value("delegations", nlohmann::json::array())) {
@@ -7553,11 +7558,13 @@ std::string web_ui_factory(const FactoryPage& page, WebUiViewer viewer) {
     for (const nlohmann::json& message : page.messages) {
         const bool person = json_text(message, "role") == "user";
         content +=
-            std::format("<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p><p>{}</p>"
+            std::format("<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p>{}"
                         "</article>",
                         person ? "ask-person" : "ask-agent",
                         person ? "You" : "AgentCreator",
-                        web_ui_escape(json_text(message, "content")));
+                        person ? "<p>" + web_ui_escape(json_text(message, "content")) + "</p>"
+                               : "<div class=\"ask-reply\">" +
+                                     web_ui_markdown(json_text(message, "content")) + "</div>");
     }
     if (page.messages.empty()) {
         content += "<p>Describe the agent: what it is for, what it may touch, and what done looks "

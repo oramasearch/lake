@@ -149,3 +149,22 @@ TEST(WebUi, ARunSaysWhatItReadAndWhenNothingWasTrained) {
     EXPECT_NE(project.find("<option value=\"datasets.accounts\">accounts</option>"),
               std::string::npos);
 }
+
+TEST(WebUi, AnAgentsMarkdownReplyRendersAndStaysEscaped) {
+    // UX review 2026-09-27 (2): Ask Orama answered with a markdown table shown as raw pipes.
+    lake::api::AskPage ask;
+    ask.customer_id = "c-1";
+    ask.conversation_id = "conv-1";
+    ask.messages = nlohmann::json::array(
+        {{{"role", "user"}, {"content", "**not bold** <b>me</b>"}},
+         {{"role", "assistant"},
+          {"content", "You have **2** models:\n\n| Model | AUC |\n|---|---:|\n| churn | 0.95 |\n\n"
+                      "<script>alert(1)</script>"}}});
+    const std::string page = lake::api::web_ui_ask(ask, true);
+    EXPECT_NE(page.find("<table>"), std::string::npos);
+    EXPECT_NE(page.find("<td>0.95</td>"), std::string::npos);
+    EXPECT_NE(page.find("<strong>2</strong>"), std::string::npos);
+    EXPECT_EQ(page.find("<script>alert"), std::string::npos) << "a reply cannot inject HTML";
+    EXPECT_NE(page.find("**not bold** &lt;b&gt;me&lt;/b&gt;"), std::string::npos)
+        << "the person's own words are shown as typed";
+}

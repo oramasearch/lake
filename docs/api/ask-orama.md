@@ -11,7 +11,9 @@ shows it and keeps it honest.
   conversation knows where it started.
 - `/ask`: the conversation, a **Talk to** selector (Ask Orama first, then the library's other running
   chat agents, then the space's own chat-capable agents), and a message box. *Start a new
-  conversation* begins another.
+  conversation* begins another. An agent's reply is rendered as markdown (tables, lists, code) through
+  lake's one renderer, which escapes every character first, so a reply cannot inject HTML; what the
+  person typed is shown as typed.
 - Each of Ask Orama's **proposals** (a change it wants to make) is shown with its capability and its
   impact, and a **Confirm** button. A confirmed proposal shows *Confirmed* and is never offered again.
 

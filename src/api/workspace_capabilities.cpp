@@ -1247,8 +1247,13 @@ void register_sql_capability(Registry& registry) {
     registry.add(Capability{
         .name = "workspace_sql",
         .title = "Query the workspace",
-        .description = "Run one read-only SQL query (SELECT or WITH) over the customer's workspace "
-                       "data and answer {columns, rows}. Anything else is refused; the workspace's "
+        .description = "Run one read-only SQL query over the customer's workspace data and answer "
+                       "{columns, rows}. The workspace speaks a SQL subset: SELECT <columns or *> "
+                       "FROM <database>.<table> [WHERE <column> <op> <value>] [GROUP BY <column>] "
+                       "[ORDER BY <column> [DESC], ...] [LIMIT n] [OFFSET n]; one WHERE "
+                       "comparison, aggregates (COUNT, SUM, AVG, MIN, MAX) only with GROUP BY, no "
+                       "joins, expressions or subqueries. list_datasets (through workspace_query) "
+                       "names the tables. Anything but a read is refused; the workspace's "
                        "administrative SQL is not reachable.",
         .input_schema = customer_input_schema(
             {{"statement", {{"type", "string"}}}, {"database", {{"type", "string"}}}},
