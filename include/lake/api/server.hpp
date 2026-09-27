@@ -14,6 +14,7 @@ namespace lake::control {
 class Store;
 class PlatformService;
 class WorkspaceService;
+class AgentCaller;
 } // namespace lake::control
 namespace lake::control::callers {
 class TokenReviewer;
@@ -56,6 +57,8 @@ struct ServerOptions {
     std::shared_ptr<control::WorkspaceService> workspaces;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false turns off every customer's opt-in (lake#234).
     bool allow_non_expiring_credentials = true;
+    // Talks to agent services (lake#231); tests inject a double, main the HTTP caller.
+    std::shared_ptr<control::AgentCaller> agent_caller;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;

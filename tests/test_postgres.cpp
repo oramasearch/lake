@@ -14,6 +14,8 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/control/agent_runs.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform_store.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -735,4 +737,98 @@ TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     EXPECT_EQ(listed->front().observed_generation, 1);
     EXPECT_EQ(store->get_store(first->id)->phase, "Deleted") << "history is still readable";
     EXPECT_EQ(store->get_store(lake::control::new_uuid_v4()).error().code, "not_found");
+}
+
+// Agent launches, their credential, schedules and Ask Orama messages against the production store
+// (docs/api/agent-launches.md, lake#231).
+TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:al-" + suffix, "al-" + suffix + "@example.com", "Launcher"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "al-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_services",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    const auto launch = store->create_agent_launch({customer->id,
+                                                    "a-1",
+                                                    "Watcher",
+                                                    "service",
+                                                    "manual",
+                                                    json{{"week", 39}},
+                                                    lake::control::agent_launch_scopes,
+                                                    user->id,
+                                                    user->taap_id});
+    ASSERT_TRUE(launch) << launch.error().message;
+    EXPECT_EQ(launch->slug, lake::control::managed_service_slug("al", launch->id));
+    EXPECT_EQ(launch->input["week"], 39);
+    EXPECT_EQ(launch->scopes, lake::control::agent_launch_scopes);
+    EXPECT_EQ(launch->phase, "") << "no status row yet";
+    listener.await_notification(5, 0);
+    EXPECT_NE(std::ranges::find(notified, launch->id), notified.end());
+
+    const std::string credential = "lal." + launch->id + ".0123456789abcdef0123456789abcdef";
+    EXPECT_FALSE(store->context_for(credential)) << "not before the operator reports its digest";
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO agent_launch_status (launch_id, phase, endpoint, "
+                       "credential_sha256, exit_code, result) VALUES ($1::uuid, 'Ready', "
+                       "'http://al:8080', $2, NULL, '{\"reply\":\"ok\"}'::jsonb)",
+                       launch->id,
+                       lake::control::identity_crypto::sha256_hex(credential));
+        tx.commit();
+    }
+    const auto acting = store->context_for(credential);
+    ASSERT_TRUE(acting) << acting.error().message;
+    EXPECT_EQ(acting->user_id, user->id);
+    EXPECT_EQ(acting->kind, "agent_launch");
+    EXPECT_EQ(acting->scopes, lake::control::agent_launch_scopes);
+    const auto listed = store->list_agent_launches(customer->id, "a-1", 10);
+    ASSERT_TRUE(listed && listed->size() == 1U);
+    EXPECT_EQ(listed->front().phase, "Ready");
+    EXPECT_EQ(listed->front().endpoint, "http://al:8080");
+    EXPECT_EQ(listed->front().result["reply"], "ok");
+    ASSERT_TRUE(store->withdraw_agent_launch(launch->id));
+    EXPECT_FALSE(store->context_for(credential)) << "a stopped launch's credential stops too";
+
+    ASSERT_TRUE(store->put_agent_schedule(
+        {customer->id, "a-1", "Watcher", "hourly", 1000, 0, user->id, user->taap_id}));
+    auto due = store->due_agent_schedules(1000);
+    ASSERT_TRUE(due);
+    EXPECT_TRUE(std::ranges::any_of(
+        *due, [&](const auto& s) { return s.agent_id == "a-1" && s.customer_id == customer->id; }));
+    ASSERT_TRUE(store->mark_agent_schedule_run(customer->id, "a-1", 1000, 4600));
+    due = store->due_agent_schedules(1001);
+    EXPECT_FALSE(
+        std::ranges::any_of(*due, [&](const auto& s) { return s.customer_id == customer->id; }));
+    ASSERT_TRUE(store->put_agent_schedule(
+        {customer->id, "a-1", "Watcher", "", 0, 0, user->id, user->taap_id}));
+
+    const std::string conversation = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store->append_ask_message(
+        {"", conversation, customer->id, user->id, "user", "what runs?", nullptr, ""}));
+    ASSERT_TRUE(store->append_ask_message({"",
+                                           conversation,
+                                           customer->id,
+                                           user->id,
+                                           "assistant",
+                                           "two runs",
+                                           json{{"reads", json::array()}},
+                                           ""}));
+    const auto messages = store->ask_conversation(conversation, user->id, 50);
+    ASSERT_TRUE(messages && messages->size() == 2U);
+    EXPECT_EQ(messages->at(0).role, "user");
+    EXPECT_EQ(messages->at(1).payload["reads"], json::array());
+    EXPECT_TRUE(store->ask_conversation(conversation, lake::control::new_uuid_v4(), 50)->empty())
+        << "only the person who had the conversation reads it back";
 }

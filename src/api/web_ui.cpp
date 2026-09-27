@@ -2944,7 +2944,10 @@ std::string agent_content(const WorkspacePage& page) {
     out += row("Goal", json_text(agent, "goal"));
     out += row("Trigger or schedule", json_text(agent, "trigger"));
     out += row("Status", json_text(agent, "status"));
-    out += "</dl><p class=\"sub\">Talk to this agent in Ask Orama.</p></section>";
+    out += std::format("</dl><p><a class=\"button\" href=\"/ask?{}&agent={}\">Talk to this "
+                       "agent in Ask Orama</a></p></section>",
+                       query,
+                       url_component(json_text(agent, "id")));
 
     const nlohmann::json pipelines = agent.value("pipelines", nlohmann::json::array());
     out += "<section class=\"panel\" id=\"agent-pipelines\"><h2>Pipelines</h2>";
@@ -2969,10 +2972,60 @@ std::string agent_content(const WorkspacePage& page) {
     out += "<section class=\"panel\" id=\"agent-runs\"><h2>Unattended Runs</h2>";
     const nlohmann::json launches = page.data.value("list_agent_launches", nlohmann::json::object())
                                         .value("launches", nlohmann::json::array());
+    bool changing = false;
     if (launches.empty()) {
         out += json_text(agent, "trigger").empty()
                    ? "<p>This agent only talks: it has no trigger.</p>"
-                   : "<p>No unattended runs yet.</p>";
+                   : "<p>No unattended runs yet. Its trigger runs it.</p>";
+    } else {
+        out += "<table><thead><tr><th>Started</th><th>How</th><th>Mode</th><th>Status</th>"
+               "<th>Result</th><th></th></tr></thead><tbody>";
+        for (const nlohmann::json& launch : launches) {
+            const std::string phase = json_text(launch, "phase");
+            const bool present = json_text(launch, "desired") == "present";
+            const bool live = present && phase != "Succeeded" && phase != "Failed";
+            changing = changing || (live && phase != "Ready");
+            const nlohmann::json result = launch.value("result", nlohmann::json());
+            std::string answer = result.is_object() ? json_text(result, "reply") : "";
+            if (answer.empty() && result.is_object()) {
+                answer = json_text(result, "error");
+            }
+            const std::string status = !present ? std::string("Stopped")
+                                                : (phase.empty() ? std::string("Pending") : phase);
+            std::string stop;
+            if (live) {
+                stop = std::format("<form class=\"inline\" method=\"post\" "
+                                   "action=\"/train/agent/stop\">{}{}{}<button "
+                                   "type=\"submit\">Stop</button></form>",
+                                   hidden("customer_id", page.customer_id),
+                                   hidden("id", json_text(agent, "id")),
+                                   hidden("launch_id", json_text(launch, "id")));
+            }
+            out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td><span "
+                               "class=\"badge\">{}</span> <small>{}</small></td><td>{}</td>"
+                               "<td>{}</td></tr>",
+                               web_ui_escape(json_text(launch, "created_at")),
+                               web_ui_escape(json_text(launch, "trigger")),
+                               web_ui_escape(json_text(launch, "mode")),
+                               web_ui_escape(status),
+                               web_ui_escape(json_text(launch, "message")),
+                               web_ui_escape(answer.substr(0, 400)),
+                               stop);
+        }
+        out += "</tbody></table>";
+    }
+    if (runtime == "python") {
+        out += std::format(
+            "<form class=\"stack\" method=\"post\" action=\"/train/agent/run\">{}{}<label>Run "
+            "it once with<input name=\"input\" placeholder=\"What should it do this "
+            "time?\"></label><button class=\"button button-primary\" type=\"submit\">Run "
+            "now</button></form>",
+            hidden("customer_id", page.customer_id),
+            hidden("id", json_text(agent, "id")));
+    }
+    if (changing) {
+        out += "<p class=\"sub\" role=\"status\">A run is starting. This page checks again "
+               "every 5 seconds.<meta http-equiv=\"refresh\" content=\"5\"></p>";
     }
     out += "</section>";
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <expected>
 #include <map>
 #include <string>
@@ -11,6 +12,7 @@
 
 #include "lake/api/pipeline.hpp"
 #include "lake/control/agent_library.hpp"
+#include "lake/control/agent_runs.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -1186,6 +1188,520 @@ void register_sql_capability(Registry& registry) {
         }});
 }
 
+namespace {
+
+// The workspace's answer to one Zetta call, or the failure as an ApiResult. Not std::expected:
+// a liquid task already wraps its value in one, and nesting them makes every co_return ambiguous.
+struct ZettaAnswer {
+    json value;
+    std::optional<ApiResult> failure;
+
+    explicit operator bool() const {
+        return !failure;
+    }
+    const json* operator->() const {
+        return &value;
+    }
+    json& operator*() {
+        return value;
+    }
+    ApiResult error() const {
+        return *failure;
+    }
+};
+
+liquid::runtime::task<ZettaAnswer>
+zetta_call(ApiContext& context, std::string customer_id, std::string capability, json input) {
+    auto called = co_await context.workspaces->call(
+        customer_id, capability, workspace_uses_get(capability), std::move(input));
+    if (!called) {
+        co_return ZettaAnswer{json(),
+                              ApiResult::failure("store_unavailable", called.error().message)};
+    }
+    if (!*called) {
+        co_return ZettaAnswer{json(),
+                              ApiResult::failure(called->error().code, called->error().message)};
+    }
+    co_return ZettaAnswer{std::move(**called), std::nullopt};
+}
+
+ZettaAnswer answered(std::expected<ZettaAnswer, liquid::error> completed) {
+    if (!completed) {
+        return ZettaAnswer{json(), ApiResult::failure("store_error", completed.error().message)};
+    }
+    return std::move(*completed);
+}
+
+json launch_json(const control::AgentLaunch& launch) {
+    return {{"id", launch.id},
+            {"customer_id", launch.customer_id},
+            {"agent_id", launch.agent_id},
+            {"agent_name", launch.agent_name},
+            {"mode", launch.mode},
+            {"trigger", launch.trigger},
+            {"input", launch.input},
+            {"slug", launch.slug},
+            {"desired", launch.desired},
+            {"phase", launch.phase},
+            {"message", launch.message},
+            {"exit_code", launch.exit_code ? json(*launch.exit_code) : json(nullptr)},
+            {"result", launch.result},
+            {"created_at", launch.created_at},
+            {"created_by_taap_id", launch.created_by_taap_id}};
+}
+
+void agent_audit(ApiContext& context,
+                 std::string kind,
+                 const std::string& customer_id,
+                 json details) {
+    context.audit_kind = std::move(kind);
+    context.audit_details = std::move(details);
+    context.audit_details["customer_id"] = customer_id;
+}
+
+// A key for one turn of a library agent, derived from the person's own credential and bounded to
+// `scopes`; revoked when the turn ends (docs/api/agent-launches.md).
+std::expected<control::IssuedSession, ApiResult>
+turn_key(ApiContext& context, const std::string& agent, std::vector<std::string> scopes) {
+    if (context.acting_user_id.empty() || context.store == nullptr) {
+        return std::unexpected(ApiResult::failure(
+            "unauthorized", "talking to " + agent + " needs a signed-in person"));
+    }
+    control::NewToken token{context.acting_user_id,
+                            context.pool_id,
+                            "agent turn: " + agent,
+                            "",
+                            std::move(scopes),
+                            900,
+                            false};
+    if (context.session_credential && !context.credential_session_id.starts_with("launch:")) {
+        token.parent_session_id = context.credential_session_id;
+    }
+    auto issued = context.store->create_token(token);
+    if (!issued) {
+        return std::unexpected(ApiResult::failure(issued.error().code, issued.error().message));
+    }
+    return std::move(*issued);
+}
+
+void end_turn_key(ApiContext& context, const control::IssuedSession& key) {
+    if (context.store != nullptr) {
+        context.store->revoke_session(context.acting_user_id, key.session.id);
+    }
+}
+
+// The workspace's profile for Auto-Suggest: its datasets and their columns, as lake reads them.
+liquid::runtime::task<json> workspace_profile(ApiContext& context, std::string customer_id) {
+    json profile{{"industry", ""}, {"persona", ""}, {"tables", json::array()}};
+    auto listed =
+        answered(co_await zetta_call(context, customer_id, "list_datasets", json::object()));
+    if (!listed) {
+        co_return profile;
+    }
+    std::size_t read = 0;
+    for (const json& dataset : listed->value("datasets", json::array())) {
+        if (++read > 12) {
+            break;
+        }
+        const std::string name =
+            dataset.is_string() ? dataset.get<std::string>() : dataset.value("name", std::string());
+        const std::string database = dataset.is_object()
+                                         ? dataset.value("database", std::string("datasets"))
+                                         : std::string("datasets");
+        json table{{"database", database}, {"name", name}, {"columns", json::array()}};
+        auto got = answered(co_await zetta_call(
+            context, customer_id, "get_dataset", {{"dataset", name}, {"database", database}}));
+        if (got) {
+            table["columns"] = got->value("columns", json::array());
+            if (got->contains("rows")) {
+                table["rows"] = (*got)["rows"];
+            }
+        }
+        profile["tables"].push_back(std::move(table));
+    }
+    co_return profile;
+}
+
+} // namespace
+
+void register_agent_run_capabilities(Registry& registry) {
+    const auto customer_agent_schema = [](json properties, json required) {
+        return customer_input_schema(std::move(properties), std::move(required));
+    };
+    registry.add(Capability{
+        .name = "launch_agent",
+        .title = "Run an agent",
+        .description = "Run a user-created Python agent on agent-runtime: `job` runs it once "
+                       "(unattended), `service` keeps it up for conversations. The operator runs "
+                       "the launch; list_agent_launches follows it.",
+        .input_schema =
+            customer_agent_schema({{"agent_id", {{"type", "string"}}},
+                                   {"mode", {{"type", "string"}, {"enum", {"job", "service"}}}},
+                                   {"input", {{"description", "what a job is asked to do"}}}},
+                                  json::array({"agent_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces || !context.store) {
+                co_return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            const std::string agent_id = input.at("agent_id");
+            auto agent = answered(
+                co_await zetta_call(context, customer_id, "get_agent", {{"id", agent_id}}));
+            if (!agent) {
+                co_return agent.error();
+            }
+            if (agent->value("runtime", std::string("native")) != "python") {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "only Python agents run on agent-runtime; a native agent runs in the "
+                    "workspace (talk to it with agent_turn)");
+            }
+            const std::string mode = input.value("mode", std::string("job"));
+            agent_audit(
+                context, "agent.launch", customer_id, {{"agent_id", agent_id}, {"mode", mode}});
+            auto launched = context.store->create_agent_launch(
+                control::NewAgentLaunch{.customer_id = customer_id,
+                                        .agent_id = agent_id,
+                                        .agent_name = agent->value("name", std::string()),
+                                        .mode = mode,
+                                        .trigger = "manual",
+                                        .input = input.value("input", json(nullptr)),
+                                        .scopes = control::agent_launch_scopes,
+                                        .created_by_user_id = context.acting_user_id,
+                                        .created_by_taap_id = context.acting_identity});
+            if (!launched) {
+                co_return ApiResult::failure(launched.error().code, launched.error().message);
+            }
+            co_return ApiResult::success(launch_json(*launched));
+        }});
+    registry.add(Capability{
+        .name = "list_agent_launches",
+        .title = "List agent runs",
+        .description = "The runs of the space's agents (or one agent's), newest first, with the "
+                       "operator's phase and each finished job's result.",
+        .input_schema = customer_agent_schema(
+            {{"agent_id", {{"type", "string"}}}, {"limit", {{"type", "integer"}}}}, json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        // Like every list_ capability it authorizes itself: read on the customer.
+        .authorizes_candidates = true,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return unavailable();
+            }
+            const auto object = customer_object(input, context);
+            if (!object) {
+                return ApiResult::failure(
+                    object.error().code, object.error().message, object.error().path);
+            }
+            if (context.acting_identity != "admin") {
+                const auto decision = control::authorize(*context.store,
+                                                         context.acting_identity,
+                                                         *object,
+                                                         "read",
+                                                         context.authorization_cache);
+                if (!decision) {
+                    return ApiResult::failure(decision.error().code, decision.error().message);
+                }
+                if (!decision->allowed) {
+                    return ApiResult::failure("unauthorized",
+                                              "principal is not allowed to read the customer");
+                }
+            }
+            auto listed = context.store->list_agent_launches(input.at("customer_id"),
+                                                             input.value("agent_id", std::string()),
+                                                             input.value("limit", 50));
+            if (!listed) {
+                return ApiResult::failure(listed.error().code, listed.error().message);
+            }
+            json launches = json::array();
+            for (const control::AgentLaunch& launch : *listed) {
+                launches.push_back(launch_json(launch));
+            }
+            return ApiResult::success({{"launches", std::move(launches)}});
+        }});
+    registry.add(Capability{
+        .name = "stop_agent_launch",
+        .title = "Stop an agent run",
+        .description = "Stop a run: the operator removes its Job or Deployment. A finished job "
+                       "is left as it is.",
+        .input_schema = customer_agent_schema({{"launch_id", {{"type", "string"}}}},
+                                              json::array({"launch_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            auto launch = context.store->get_agent_launch(input.at("launch_id"));
+            if (!launch || launch->customer_id != customer_id) {
+                return ApiResult::failure("not_found", "no such run in this space");
+            }
+            agent_audit(context,
+                        "agent.stop",
+                        customer_id,
+                        {{"launch_id", launch->id}, {"agent_id", launch->agent_id}});
+            auto stopped = context.store->withdraw_agent_launch(launch->id);
+            if (!stopped) {
+                return ApiResult::failure(stopped.error().code, stopped.error().message);
+            }
+            return ApiResult::success(launch_json(*stopped));
+        }});
+    registry.add(Capability{
+        .name = "schedule_agent",
+        .title = "Schedule an agent",
+        .description = "Run a Python agent unattended on its trigger: every N minutes, hours or "
+                       "days, hourly, daily, weekly, every day at HH:MM, every <weekday> at HH:MM "
+                       "(UTC). An empty trigger removes the schedule.",
+        .input_schema = customer_agent_schema(
+            {{"agent_id", {{"type", "string"}}}, {"trigger", {{"type", "string"}}}},
+            json::array({"agent_id", "trigger"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces || !context.store) {
+                co_return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            const std::string agent_id = input.at("agent_id");
+            const std::string trigger = input.at("trigger");
+            auto agent = answered(
+                co_await zetta_call(context, customer_id, "get_agent", {{"id", agent_id}}));
+            if (!agent) {
+                co_return agent.error();
+            }
+            const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::system_clock::now().time_since_epoch())
+                                 .count();
+            std::optional<std::int64_t> next;
+            if (!trigger.empty()) {
+                if (agent->value("runtime", std::string("native")) != "python") {
+                    co_return ApiResult::failure("invalid_input",
+                                                 "only Python agents run unattended on a trigger");
+                }
+                next = control::next_run(trigger, now);
+                if (!next) {
+                    co_return ApiResult::failure(
+                        "invalid_input",
+                        "lake cannot place '" + trigger +
+                            "' in time; use every N minutes, "
+                            "hours or days, daily, weekly, or every <day> at HH:MM",
+                        "/trigger");
+                }
+            }
+            agent_audit(context,
+                        "agent.schedule",
+                        customer_id,
+                        {{"agent_id", agent_id}, {"trigger", trigger}});
+            auto stored = context.store->put_agent_schedule(
+                control::AgentSchedule{customer_id,
+                                       agent_id,
+                                       agent->value("name", std::string()),
+                                       trigger,
+                                       next.value_or(0),
+                                       0,
+                                       context.acting_user_id,
+                                       context.acting_identity});
+            if (!stored) {
+                co_return ApiResult::failure(stored.error().code, stored.error().message);
+            }
+            co_return ApiResult::success({{"agent_id", agent_id},
+                                          {"trigger", trigger},
+                                          {"next_run_unix", next ? json(*next) : json(nullptr)}});
+        }});
+    registry.add(Capability{
+        .name = "agent_turn",
+        .title = "Talk to an agent",
+        .description =
+            "Send one message to any agent: a specialized agent of the Agent Library by its key "
+            "(agent-ask-orama, agent-project, agent-autosuggest, agent-creator) or an agent of "
+            "this space by its id. A native agent answers from the workspace; a Python agent from "
+            "its running service (started on first use).",
+        .input_schema = customer_agent_schema({{"agent", {{"type", "string"}}},
+                                               {"message", {{"type", "string"}}},
+                                               {"conversation_id", {{"type", "string"}}},
+                                               {"context", {{"type", "object"}}},
+                                               {"page", {{"type", "object"}}}},
+                                              json::array({"agent", "message"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [&registry](const json& input,
+                                     ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces || !context.store) {
+                co_return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            const std::string agent = input.at("agent");
+            const std::string message = input.at("message");
+            const control::WorkspaceConfig& config = context.workspaces->config();
+            agent_audit(context, "agent.turn", customer_id, {{"agent", agent}});
+            json body{{"conversation_id", input.value("conversation_id", std::string())},
+                      {"message", message},
+                      {"customer_id", customer_id},
+                      {"page", input.value("page", json::object())}};
+
+            if (const control::LibraryAgent* library = control::library_agent(agent)) {
+                if (library->runs_as == "offline") {
+                    co_return ApiResult::failure(
+                        "invalid_input", std::string(library->name) + " is an offline tool");
+                }
+                const auto endpoint = config.agent_endpoints.find(agent);
+                if (endpoint == config.agent_endpoints.end() || context.agent_caller == nullptr) {
+                    co_return ApiResult::failure("store_unavailable",
+                                                 std::string(library->name) + " is not running on "
+                                                                              "this lake");
+                }
+                std::vector<std::string> scopes{"workspace_query", "workspace_openapi"};
+                if (agent == "agent-ask-orama") {
+                    // Ask Orama reads everything the person may read and changes nothing itself:
+                    // its key carries every read capability and agent_turn, never an action.
+                    scopes = {"agent_turn", "workspace_openapi"};
+                    for (const auto& capability : registry.list()) {
+                        if (capability->kind == CapabilityKind::Read) {
+                            scopes.push_back(capability->name);
+                        }
+                    }
+                    scopes.push_back("workspace_query");
+                }
+                std::optional<control::IssuedSession> key;
+                if (agent != "agent-autosuggest") {
+                    auto issued = turn_key(context, agent, std::move(scopes));
+                    if (!issued) {
+                        co_return issued.error();
+                    }
+                    key = std::move(*issued);
+                    body["lake_token"] = key->secret;
+                    body["lake_url"] = config.internal_url;
+                }
+                if (agent == "agent-project") {
+                    body["request"] = message;
+                    body["context"] = input.value("context", json::object());
+                    body["zetta_base_url"] =
+                        config.internal_url + "/workspaces/" + customer_id + "/zetta";
+                    body["zetta_token"] = body["lake_token"];
+                } else if (agent == "agent-autosuggest") {
+                    json profile = input.value("context", json::object()).value("profile", json());
+                    if (!profile.is_object()) {
+                        auto built = co_await workspace_profile(context, customer_id);
+                        profile = built ? std::move(*built) : json::object();
+                    }
+                    body["profile"] = std::move(profile);
+                    body["request"] = message;
+                }
+                auto reply = co_await context.agent_caller->turn(
+                    endpoint->second, config.agent_service_token, std::move(body));
+                if (key) {
+                    end_turn_key(context, *key);
+                }
+                if (!reply) {
+                    co_return ApiResult::failure("store_error", reply.error().message);
+                }
+                if (!*reply) {
+                    co_return ApiResult::failure(reply->error().code, reply->error().message);
+                }
+                json answer = std::move(**reply);
+                answer["agent"] = agent;
+                co_return answer.value("ok", false)
+                    ? ApiResult::success(std::move(answer))
+                    : ApiResult::failure("engine_error",
+                                         answer.value("error", std::string("the agent failed")));
+            }
+
+            auto record =
+                answered(co_await zetta_call(context, customer_id, "get_agent", {{"id", agent}}));
+            if (!record) {
+                co_return record.error();
+            }
+            const std::string runtime = record->value("runtime", std::string("native"));
+            if (runtime == "native") {
+                auto chatted = answered(co_await zetta_call(
+                    context, customer_id, "chat", {{"agent", agent}, {"message", message}}));
+                if (!chatted) {
+                    co_return chatted.error();
+                }
+                json answer = std::move(*chatted);
+                answer["agent"] = agent;
+                co_return ApiResult::success(std::move(answer));
+            }
+            if (runtime != "python") {
+                co_return ApiResult::failure("invalid_input", "this agent is not talked to here");
+            }
+            auto launches = context.store->list_agent_launches(customer_id, agent, 20);
+            if (!launches) {
+                co_return ApiResult::failure(launches.error().code, launches.error().message);
+            }
+            const auto live = std::ranges::find_if(*launches, [](const control::AgentLaunch& l) {
+                return l.mode == "service" && l.desired == "present";
+            });
+            if (live == launches->end()) {
+                auto started = context.store->create_agent_launch(
+                    control::NewAgentLaunch{.customer_id = customer_id,
+                                            .agent_id = agent,
+                                            .agent_name = record->value("name", std::string()),
+                                            .mode = "service",
+                                            .trigger = "conversation",
+                                            .scopes = control::agent_launch_scopes,
+                                            .created_by_user_id = context.acting_user_id,
+                                            .created_by_taap_id = context.acting_identity});
+                if (!started) {
+                    co_return ApiResult::failure(started.error().code, started.error().message);
+                }
+                co_return ApiResult::success(
+                    {{"agent", agent},
+                     {"status", "starting"},
+                     {"launch_id", started->id},
+                     {"reply", "The agent is starting. Send your message again in a moment."}});
+            }
+            if (live->phase != "Ready" || live->endpoint.empty() ||
+                context.agent_caller == nullptr) {
+                co_return ApiResult::success(
+                    {{"agent", agent},
+                     {"status", "starting"},
+                     {"launch_id", live->id},
+                     {"reply",
+                      "The agent is still starting (" +
+                          (live->phase.empty() ? std::string("pending") : live->phase) +
+                          "). Send your message again in a moment."}});
+            }
+            auto reply = co_await context.agent_caller->turn(
+                live->endpoint,
+                config.agent_service_token,
+                {{"conversation_id", body["conversation_id"]}, {"message", message}});
+            if (!reply) {
+                co_return ApiResult::failure("store_error", reply.error().message);
+            }
+            if (!*reply) {
+                co_return ApiResult::failure(reply->error().code, reply->error().message);
+            }
+            json answer = std::move(**reply);
+            answer["agent"] = agent;
+            co_return answer.value("ok", false)
+                ? ApiResult::success(std::move(answer))
+                : ApiResult::failure("engine_error",
+                                     answer.value("error", std::string("the agent failed")));
+        }});
+}
+
 bool workspace_read_allowed(std::string_view capability) {
     return listed(workspace_reads, capability);
 }
@@ -1232,6 +1748,7 @@ json workspace_openapi(const json& document, std::string_view base) {
 }
 
 void register_workspace_capabilities(Registry& registry) {
+    register_agent_run_capabilities(registry);
     register_sql_capability(registry);
     register_pipeline_capabilities(registry);
     register_parity_capabilities(registry);

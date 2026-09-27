@@ -13,6 +13,7 @@
 
 #include "lake/api/server.hpp"
 #include "lake/control/agent_library.hpp"
+#include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -271,6 +272,8 @@ int main(int argc, char** argv) {
     if (const std::string model = env_or("LAKE_AGENT_MODEL", ""); !model.empty()) {
         workspace_config.frontier_model = model;
     }
+    workspace_config.internal_url = env_or("LAKE_INTERNAL_URL", "");
+    workspace_config.agent_service_token = env_or("LAKE_AGENT_SERVICE_TOKEN", "");
     if (const std::string limit = env_or("LAKE_SERVICES_PER_CUSTOMER", ""); !limit.empty()) {
         std::size_t parsed = 0;
         const auto [end, error] =
@@ -292,6 +295,14 @@ int main(int argc, char** argv) {
             std::move(workspace_config),
             opts.store,
             std::make_shared<lake::control::ZettaWorkspaceCaller>());
+        opts.agent_caller = std::make_shared<lake::control::HttpAgentCaller>();
+    }
+    // Fires agent schedules as job launches (docs/api/agent-launches.md).
+    std::unique_ptr<lake::control::AgentScheduler> agent_scheduler;
+    if (workspaces_configured) {
+        agent_scheduler = std::make_unique<lake::control::AgentScheduler>(
+            opts.store, std::chrono::seconds{env_u64("LAKE_AGENT_SCHEDULER_SECONDS", 60)});
+        agent_scheduler->start();
     }
 
     std::signal(SIGINT, on_signal);

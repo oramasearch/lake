@@ -30,7 +30,12 @@ struct WorkspaceConfig {
     // (LAKE_BASE_AGENT_MODEL; docs/api/train-agents.md).
     std::string base_agent_model = "/var/lib/zetta/models/base-agent";
     // The frontier model a Python agent built from the form runs on (LAKE_AGENT_MODEL).
-    std::string frontier_model = "gpt-4o";
+    std::string frontier_model = "gpt-5.5";
+    // lake's in-cluster address, handed to agents so they reach it without leaving the cluster
+    // (LAKE_INTERNAL_URL), and the bearer lake presents to agent services
+    // (LAKE_AGENT_SERVICE_TOKEN).
+    std::string internal_url;
+    std::string agent_service_token;
 
     bool configured() const {
         return !service_dir.empty();

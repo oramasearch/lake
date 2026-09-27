@@ -188,6 +188,30 @@ public:
                                   std::string phase,
                                   std::string message,
                                   std::string endpoint);
+    Result<AgentLaunch> create_agent_launch(const NewAgentLaunch&) override;
+    Result<AgentLaunch> get_agent_launch(const std::string& id) override;
+    Result<std::vector<AgentLaunch>> list_agent_launches(const std::string& customer_id,
+                                                         const std::string& agent_id,
+                                                         int limit) override;
+    Result<AgentLaunch> withdraw_agent_launch(const std::string& id) override;
+    // What the operator writes to agent_launch_status; tests and local demos call it directly.
+    Result<void> set_agent_launch_status(const std::string& id,
+                                         std::string phase,
+                                         std::string message,
+                                         std::string endpoint,
+                                         std::string credential_sha256,
+                                         std::optional<int> exit_code = std::nullopt,
+                                         nlohmann::json result = nullptr);
+    Result<void> put_agent_schedule(const AgentSchedule&) override;
+    Result<std::vector<AgentSchedule>> due_agent_schedules(std::int64_t now_unix) override;
+    Result<void> mark_agent_schedule_run(const std::string& customer_id,
+                                         const std::string& agent_id,
+                                         std::int64_t ran_unix,
+                                         std::int64_t next_run_unix) override;
+    Result<AskMessage> append_ask_message(const AskMessage&) override;
+    Result<std::vector<AskMessage>> ask_conversation(const std::string& conversation_id,
+                                                     const std::string& user_id,
+                                                     int limit) override;
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -423,6 +447,9 @@ private:
     std::vector<PkiCertificateRecord> pki_certificates_;
     std::vector<AgentSession> agent_sessions_;
     std::set<std::string> non_expiring_customers_;
+    std::vector<AgentLaunch> agent_launches_;
+    std::vector<AgentSchedule> agent_schedules_;
+    std::vector<AskMessage> ask_messages_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {
