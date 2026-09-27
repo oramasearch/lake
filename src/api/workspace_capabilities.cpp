@@ -2293,7 +2293,9 @@ void register_agent_run_capabilities(Registry& registry) {
                     // its key carries every read capability and agent_turn, never an action.
                     scopes = {"agent_turn", "workspace_openapi"};
                     for (const auto& capability : registry.list()) {
-                        if (capability->kind == CapabilityKind::Read) {
+                        // Every read, including actions that only read (workspace_query).
+                        if (capability->kind == CapabilityKind::Read ||
+                            capability->action == "read") {
                             scopes.push_back(capability->name);
                         }
                     }

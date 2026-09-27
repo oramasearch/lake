@@ -199,6 +199,12 @@ phase 1, lake#196), with their capabilities and the Train → Data → Storage p
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
 
+Each operation carries **`x-lake-action`**: `read` or `write`, the action lake authorizes the call
+as. It is what the call does, apart from how it is sent: an action (POST) can be a read, like
+`workspace_query` (its input is a JSON object) or `predict`. An agent that may only read decides
+from it, not from the method. Ask Orama's turn credential carries every capability whose action is
+`read`.
+
 The binary sync operations use `/v1/repositories/<repository-id>/sync/*` rather than the generic
 `/v1/<capability>` mapping. Their OpenAPI operations are generated from registry entries, and the
 complete wire contract, including Liquid #192's server-derived per-reference authorization,

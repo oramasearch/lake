@@ -1967,7 +1967,14 @@ TEST(Rest, OpenApiCoversEveryCapability) {
         const std::string method = rest_method(*capability) == "GET" ? "get" : "post";
         ASSERT_TRUE(doc["paths"].contains(rest_path(*capability))) << capability->name;
         EXPECT_TRUE(doc["paths"][rest_path(*capability)].contains(method)) << capability->name;
+        // What the call does, apart from how it is sent (UX review 2026-09-27: Ask Orama took
+        // workspace_query, a POST, for a change and never read the workspace).
+        EXPECT_EQ(doc["paths"][rest_path(*capability)][method].value("x-lake-action", ""),
+                  capability->action)
+            << capability->name;
     }
+    EXPECT_EQ(doc["paths"]["/v1/workspace_query"]["post"]["x-lake-action"], "read");
+    EXPECT_EQ(doc["paths"]["/v1/workspace_act"]["post"]["x-lake-action"], "write");
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/push"));
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/pull"));
     EXPECT_TRUE(doc["paths"].contains("/v1/repositories/{repository_id}/sync/find-missing"));
