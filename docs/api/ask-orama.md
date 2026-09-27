@@ -25,6 +25,9 @@ shows it and keeps it honest.
   lake, as the person, through the ordinary registry path with its own authorization and audit.
   Only a proposal lake stored in that person's conversation can be confirmed: a forged index or
   another person's message is refused.
+- **A change to an existing pipeline** goes to the Project Agent with `{project, graph}`; its answer is a
+  proposal and the conversation shows *Review the proposed change*, a link to the pipeline page where
+  it is applied (lake#249).
 - **It delegates to any agent** (`delegate` → `agent_turn`): the Project Agent, Auto-Suggest, and any
   agent the person built; an unattended agent is started by proposing `launch_agent`.
 - **Conversations are lake's.** Every message is an `ask_messages` row (migration `0030`): the

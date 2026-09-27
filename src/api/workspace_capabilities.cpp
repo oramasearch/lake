@@ -10,6 +10,7 @@
 
 #include <optional>
 
+#include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -675,10 +676,12 @@ void register_pipeline_capabilities(Registry& registry) {
         .description =
             "Apply one edit to a pipeline in the customer's workspace and save it: `op` is "
             "add_step (kind, name), rename_step (step, name), kind_step (step, kind), remove_step "
-            "(step), add_edge (from, to, kind data_flow|control), remove_edge (from, to) or rename "
-            "(name). The result must keep unique step ids, known kinds, edges between existing "
-            "steps "
-            "and no cycle. A saved pipeline is proposed again and must be re-approved to run.",
+            "(step), add_edge (from, to, kind data_flow|control), remove_edge (from, to), "
+            "set_attribute (step, name, value; a null value removes it) or rename (name). Or pass "
+            "`edits`, a list of such edits, to apply them in order as one save (all or nothing), "
+            "as a Project Agent proposal is applied. The result must keep unique step ids, known "
+            "kinds, edges between existing steps and no cycle. A saved pipeline is proposed again "
+            "and must be re-approved to run.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}}},
                                                {"graph", {{"type", "string"}}},
                                                {"op",
@@ -690,13 +693,18 @@ void register_pipeline_capabilities(Registry& registry) {
                                                                "remove_step",
                                                                "add_edge",
                                                                "remove_edge",
+                                                               "set_attribute",
                                                                "rename"})}}},
                                                {"step", {{"type", "string"}}},
                                                {"kind", {{"type", "string"}}},
                                                {"name", {{"type", "string"}}},
                                                {"from", {{"type", "string"}}},
-                                               {"to", {{"type", "string"}}}},
-                                              json::array({"project", "graph", "op"})),
+                                               {"to", {{"type", "string"}}},
+                                               {"value", json::object()},
+                                               {"edits",
+                                                {{"type", "array"},
+                                                 {"items", {{"type", "object"}}}}}},
+                                              json::array({"project", "graph"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -724,13 +732,13 @@ void register_pipeline_capabilities(Registry& registry) {
                 co_return ApiResult::failure("store_error", current.error());
             }
             const std::size_t before = current->steps.size();
-            pipeline::Edit edit{.op = input.at("op"),
-                                .step = input.value("step", std::string()),
-                                .kind = input.value("kind", std::string()),
-                                .name = input.value("name", std::string()),
-                                .from = input.value("from", std::string()),
-                                .to = input.value("to", std::string())};
-            auto edited = pipeline::apply(*current, edit);
+            const json edits = input.value("edits", json());
+            if (edits.is_null() && !input.contains("op")) {
+                co_return ApiResult::failure("invalid_input", "give an op or a list of edits", "/op");
+            }
+            auto edited = edits.is_null()
+                              ? pipeline::apply(*current, pipeline::edit_from_json(input))
+                              : pipeline::apply_all(*current, edits);
             if (!edited) {
                 co_return ApiResult::failure("invalid_input", edited.error());
             }
@@ -1782,6 +1790,25 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (agent == "agent-project") {
                     body["request"] = message;
                     body["context"] = input.value("context", json::object());
+                    // A request about an existing pipeline is a change request (lake#249): the
+                    // agent is handed the graph as it is and answers with a proposal.
+                    json& handed = body["context"];
+                    if (!handed.is_object()) {
+                        handed = json::object();
+                    }
+                    if (handed.value("project", std::string()) != "" &&
+                        handed.value("graph", std::string()) != "" &&
+                        !handed.contains("pipeline")) {
+                        auto graph = answered(co_await zetta_call(
+                            context,
+                            customer_id,
+                            "get_graph",
+                            {{"project", handed["project"]}, {"graph", handed["graph"]}}));
+                        if (!graph) {
+                            co_return graph.error();
+                        }
+                        handed["pipeline"] = std::move(*graph);
+                    }
                     body["zetta_base_url"] =
                         config.internal_url + "/workspaces/" + customer_id + "/zetta";
                     body["zetta_token"] = body["lake_token"];
@@ -1807,6 +1834,28 @@ void register_agent_run_capabilities(Registry& registry) {
                 }
                 json answer = std::move(**reply);
                 answer["agent"] = agent;
+                // A Project Agent proposal is kept for the person to review on the pipeline page,
+                // where it is applied only on their confirmation (lake#249).
+                if (const json proposal = answer.value("result", json::object())
+                                              .value("proposal", json());
+                    agent == "agent-project" && proposal.is_object() &&
+                    !context.acting_user_id.empty() && context.store != nullptr) {
+                    const std::string review = control::new_uuid_v4();
+                    auto kept = context.store->append_ask_message(
+                        control::AskMessage{.conversation_id = review,
+                                            .customer_id = customer_id,
+                                            .user_id = context.acting_user_id,
+                                            .role = "assistant",
+                                            .content = answer["result"].value("reply", std::string()),
+                                            .payload = {{"proposal", proposal}}});
+                    if (kept) {
+                        answer["review_url"] =
+                            "/design/pipeline?customer_id=" + customer_id + "&project=" +
+                            oauth_url_encode(proposal.value("project", std::string())) + "&graph=" +
+                            oauth_url_encode(proposal.value("graph", std::string())) +
+                            "&proposal=" + review;
+                    }
+                }
                 co_return answer.value("ok", false)
                     ? ApiResult::success(std::move(answer))
                     : ApiResult::failure("engine_error",

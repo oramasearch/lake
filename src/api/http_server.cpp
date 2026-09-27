@@ -4698,6 +4698,8 @@ struct ApiServer::Impl {
             "/design/pipeline/gate",
             "/design/pipeline/run",
             "/design/pipeline/deploy",
+            "/design/pipeline/ask",
+            "/design/pipeline/apply",
             "/design/project/new-pipeline",
             "/design/project/n8n",
             "/design/project/python",
@@ -7388,12 +7390,31 @@ struct ApiServer::Impl {
             co_return co_await redirect(route, "/sign-in");
         }
         if (section == "pipeline") {
+            // A Project Agent proposal to review (lake#249), and run settings to prefill.
+            nlohmann::json shown = nlohmann::json::object();
+            if (const std::string review = query_value(route, "proposal");
+                !review.empty() && options.store && !context.acting_user_id.empty()) {
+                auto kept = options.store->ask_conversation(review, context.acting_user_id, 5);
+                if (kept && !kept->empty()) {
+                    const nlohmann::json proposal =
+                        kept->back().payload.value("proposal", nlohmann::json());
+                    if (proposal.is_object()) {
+                        shown["proposal"] = proposal;
+                        shown["proposal_id"] = review;
+                    }
+                }
+            }
+            for (const char* key : {"dataset", "holdout", "model"}) {
+                if (std::string value = query_value(route, key); !value.empty()) {
+                    shown[std::string("run_") + key] = value;
+                }
+            }
             auto built = co_await pipeline_page(context,
                                                 query_value(route, "customer_id"),
                                                 query_value(route, "project"),
                                                 query_value(route, "graph"),
                                                 query_value(route, "step"),
-                                                nlohmann::json::object());
+                                                std::move(shown));
             WorkspacePage page = built ? std::move(*built) : WorkspacePage{};
             if (!built) {
                 page.section = "pipeline";
@@ -8578,6 +8599,46 @@ struct ApiServer::Impl {
                                    : op == "add_step"  ? result.value.value("step", std::string())
                                    : op == "add_edge"  ? form_field(body, "from")
                                                        : form_field(body, "step"));
+                }
+            } else if (action == "pipeline_ask") {
+                // Ask the Project Agent for a change (lake#249): it answers with a proposal, kept
+                // for review; nothing changes until the person applies it.
+                result = unwrap(co_await workspace_call(
+                    "agent_turn",
+                    {{"customer_id", customer_id},
+                     {"agent", "agent-project"},
+                     {"message", form_field(body, "request")},
+                     {"context", {{"project", project}, {"graph", graph}}}},
+                    context));
+                if (result.ok) {
+                    const std::string review = result.value.value("review_url", std::string());
+                    if (!review.empty()) {
+                        back = review;
+                    } else {
+                        result = ApiResult::failure(
+                            "engine_error",
+                            result.value.value("result", nlohmann::json::object())
+                                .value("reply",
+                                       std::string("The Project Agent did not propose a change.")));
+                    }
+                }
+            } else if (action == "pipeline_apply") {
+                const auto edits = nlohmann::json::parse(form_field(body, "edits"), nullptr, false);
+                result = unwrap(co_await workspace_call("edit_pipeline",
+                                                        {{"customer_id", customer_id},
+                                                         {"project", project},
+                                                         {"graph", graph},
+                                                         {"edits", edits}},
+                                                        context));
+                if (result.ok) {
+                    graph = result.value.value("name", graph);
+                    back = page_of(graph, "");
+                    for (const char* key : {"dataset", "holdout"}) {
+                        if (const std::string value = form_field(body, key); !value.empty()) {
+                            back += std::string("&") + key + "=" + oauth_url_encode(value);
+                        }
+                    }
+                    back += "#run";
                 }
             } else if (action == "pipeline_approve") {
                 result =
@@ -12515,7 +12576,7 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 39>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 41>{
              {{"/workspace/start", "start"},
               {"/train/agents/create", "agent_create"},
               {"/train/agent/run", "agent_run"},
@@ -12536,6 +12597,8 @@ bool ApiServer::start() {
               {"/design/pipeline/gate", "pipeline_gate"},
               {"/design/pipeline/run", "pipeline_run"},
               {"/design/pipeline/deploy", "pipeline_deploy"},
+              {"/design/pipeline/ask", "pipeline_ask"},
+              {"/design/pipeline/apply", "pipeline_apply"},
               {"/design/project/new-pipeline", "pipeline_new"},
               {"/design/project/n8n", "pipeline_n8n"},
               {"/design/project/python", "pipeline_python"},
