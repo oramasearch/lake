@@ -501,9 +501,14 @@ struct AgentSession {
     std::string attestation;
     std::uint64_t transparency_index = 0;
     std::string transparency_root;
-    std::int64_t expires_unix = 0;
+    std::int64_t expires_unix = 0; // 0 when the key never expires
     std::string issued_at;
-    std::string expires_at;
+    std::string expires_at; // "never" for a non-expiring key (lake#234)
+    std::string revoked_at; // empty while the key is usable
+
+    bool never_expires() const {
+        return expires_at == "never";
+    }
 };
 
 struct NewAgentSession {
@@ -783,6 +788,14 @@ public:
     virtual Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) = 0;
     virtual Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) = 0;
     virtual Result<AgentSession> create_agent_session(const NewAgentSession& value) = 0;
+    // Marks one agent session key revoked; a revoked key never verifies again (lake#234).
+    virtual Result<AgentSession> revoke_agent_session(const std::string& customer_id,
+                                                      const std::string& id) = 0;
+    // The customer's opt-in to credentials that never expire (lake#234), off by default.
+    virtual Result<bool>
+    customer_allows_non_expiring_credentials(const std::string& customer_id) = 0;
+    virtual Result<void> set_customer_non_expiring_credentials(const std::string& customer_id,
+                                                               bool allowed) = 0;
     virtual Result<AgentSession> get_agent_session(const std::string& customer_id,
                                                    const std::string& id) = 0;
     virtual Result<PkiRecoveryCeremonyRecord>

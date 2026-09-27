@@ -1436,6 +1436,39 @@ std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
                 ApiError{"unauthorized", "requested scopes exceed issuing credential"});
         }
     }
+    if (input.value("never_expires", false)) {
+        // A standing token (lake#234): no expiry and no parent, so signing out does not end it.
+        // Its authority is still the person's live grants on every request, and revoking it,
+        // revoking the person's sessions or suspending them still stops it.
+        if (input.value("reason", "").empty() || std::ranges::find(scopes, "*") != scopes.end()) {
+            return std::unexpected(
+                ApiError{"invalid_input",
+                         "a token that never expires needs a reason and named scopes (not *)"});
+        }
+        if (!context.non_expiring_credentials_allowed) {
+            return std::unexpected(ApiError{"unauthorized",
+                                            "this lake does not allow credentials that never "
+                                            "expire (LAKE_ALLOW_NON_EXPIRING_CREDENTIALS)"});
+        }
+        const auto customers = context.store->list_customers(10, context.acting_user_id);
+        const auto personal =
+            customers
+                ? std::ranges::find(*customers, "individual", &control::Customer::customer_type)
+                : std::vector<control::Customer>::const_iterator{};
+        if (!customers || personal == customers->end()) {
+            return std::unexpected(ApiError{"unauthorized", "no personal space to check"});
+        }
+        const auto allowed = context.store->customer_allows_non_expiring_credentials(personal->id);
+        if (!allowed || !*allowed) {
+            return std::unexpected(
+                ApiError{"unauthorized",
+                         "credentials that never expire are off for your space; turn on "
+                         "allow_non_expiring_credentials with set_customer_credential_policy"});
+        }
+        token.is_static = true;
+        token.expires_in_seconds = 0;
+        return token;
+    }
     if (is_static && (context.credential_kind != "static" || context.credential_expires_at_unix)) {
         return std::unexpected(
             ApiError{"unauthorized", "issuing credential cannot derive a static token"});
@@ -2265,6 +2298,11 @@ void register_identity_capabilities(Registry& registry) {
                             {{"type", "array"}, {"items", {{"type", "string"}}}, {"minItems", 1}}},
                            {"expires_in_seconds", {{"type", "integer"}}},
                            {"static", {{"type", "boolean"}}},
+                           {"never_expires",
+                            {{"type", "boolean"},
+                             {"description",
+                              "a standing token with no expiry that survives sign-out; needs a "
+                              "reason and named scopes, and the space's opt-in (lake#234)"}}},
                            {"reason", {{"type", "string"}}}}},
                          {"required", json::array({"name", "scopes"})},
                          {"additionalProperties", false}},

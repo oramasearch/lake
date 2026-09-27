@@ -641,6 +641,22 @@ public:
     create_agent_session(const control::NewAgentSession& value) override {
         return call("create_agent_session", [&] { return store_->create_agent_session(value); });
     }
+    control::Result<control::AgentSession> revoke_agent_session(const std::string& customer_id,
+                                                                const std::string& id) override {
+        return call("revoke_agent_session",
+                    [&] { return store_->revoke_agent_session(customer_id, id); });
+    }
+    control::Result<bool>
+    customer_allows_non_expiring_credentials(const std::string& customer_id) override {
+        return call("customer_allows_non_expiring_credentials",
+                    [&] { return store_->customer_allows_non_expiring_credentials(customer_id); });
+    }
+    control::Result<void> set_customer_non_expiring_credentials(const std::string& customer_id,
+                                                                bool allowed) override {
+        return call("set_customer_non_expiring_credentials", [&] {
+            return store_->set_customer_non_expiring_credentials(customer_id, allowed);
+        });
+    }
     control::Result<control::AgentSession> get_agent_session(const std::string& customer_id,
                                                              const std::string& id) override {
         return call("get_agent_session",

@@ -54,6 +54,8 @@ struct ServerOptions {
     // Customer Zetta workspaces (docs/api/workspaces.md); null leaves Design, Train and Ship
     // unavailable.
     std::shared_ptr<control::WorkspaceService> workspaces;
+    // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false turns off every customer's opt-in (lake#234).
+    bool allow_non_expiring_credentials = true;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;

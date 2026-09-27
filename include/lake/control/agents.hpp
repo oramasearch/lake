@@ -26,6 +26,9 @@ struct MintRequest {
     std::string dispatcher_taap_id;
     std::vector<std::string> scopes;
     int lifetime_seconds = 900;
+    // lake#234: no expiry at all. Only when the customer and the instance allow it (checked by
+    // the capability); the key stays revocable.
+    bool never_expires = false;
 };
 
 struct MintedSession {

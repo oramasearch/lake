@@ -142,6 +142,8 @@ phase 1, lake#196), with their capabilities and the Train → Data → Storage p
 | `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships and whether this lake runs it | [train-agents.md](train-agents.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |
+| `revoke_agent_session` | action | customer, agent session | the key with `revoked_at`; it never verifies again | [agents.md](agents.md) |
+| `set_customer_credential_policy` | action | customer, `allow_non_expiring_credentials` | the customer's opt-in to keys and tokens that never expire | [agents.md](agents.md) |
 | `timestamp_checkpoint` | action | — | RFC 4998 evidence record for the current checkpoint signature | [transparency.md](transparency.md) |
 | `renew_timestamp_evidence` | action | checkpoint digest | evidence record with a new archive timestamp over its predecessor | [transparency.md](transparency.md) |
 | `timestamp_evidence` | read | checkpoint digest | verified evidence record, token summaries, and renewal deadline | [transparency.md](transparency.md) |

@@ -202,6 +202,11 @@ public:
     Result<PkiCertificateRecord> get_pki_certificate(const std::string& id) override;
     Result<PkiCertificateRecord> revoke_pki_certificate(const std::string& id) override;
     Result<AgentSession> create_agent_session(const NewAgentSession& value) override;
+    Result<AgentSession> revoke_agent_session(const std::string& customer_id,
+                                              const std::string& id) override;
+    Result<bool> customer_allows_non_expiring_credentials(const std::string& customer_id) override;
+    Result<void> set_customer_non_expiring_credentials(const std::string& customer_id,
+                                                       bool allowed) override;
     Result<AgentSession> get_agent_session(const std::string& customer_id,
                                            const std::string& id) override;
     Result<PkiRecoveryCeremonyRecord>
@@ -417,6 +422,7 @@ private:
     std::vector<PkiCallerRecord> pki_callers_;
     std::vector<PkiCertificateRecord> pki_certificates_;
     std::vector<AgentSession> agent_sessions_;
+    std::set<std::string> non_expiring_customers_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {

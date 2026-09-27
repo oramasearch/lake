@@ -124,6 +124,15 @@ durable identity.
   fit within the issuer’s remaining lifetime. A longer lifetime is refused with `unauthorized`.
   When omitted, the lifetime is the lesser of 30 days and that remaining lifetime. The store caps
   the persisted expiry at the parent’s exact timestamp, including time spent handling issuance.
+- **Tokens that never expire** (lake#234). `create_token` with `never_expires: true` from a
+  signed-in person issues a **standing** token: static, no expiry, and **no parent**, so signing out
+  or the browser session expiring does not end it. It needs a non-empty `reason` and named scopes
+  (never `*`) within the issuer's scopes, the person's personal space must have
+  `allow_non_expiring_credentials` on (`set_customer_credential_policy`), and the instance must not
+  set `LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false`. Its authority is still the person's live grants on
+  every request; revoking it, `revoke_user_sessions`, or removing the person stops it. The tokens
+  page offers it as *Never expires* and lists such tokens as *Never expires* with their reason.
+  Verify: `TokenAttenuation.NeverExpiringTokensNeedTheOptInAndSurviveSignOut`.
 - Browser and TAAP sessions are expiring issuers and cannot create static tokens. Static authority
   is derivable only from an already static credential, with the same scope restrictions and a
   non-empty reason. The trusted operator context retains its explicit root authority; the public

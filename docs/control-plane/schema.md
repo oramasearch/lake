@@ -415,3 +415,13 @@ with one live name per customer (lake#196). Idempotent (`IF NOT EXISTS`); guard 
 The operator vendors it (orama-operator#184) and selects that guard before a binary that offers
 storage is deployed. Contract: [`storage.md`](storage.md); capabilities and page:
 [`../api/storage.md`](../api/storage.md).
+
+## Non-expiring credentials migration
+
+`0029_non_expiring_credentials` adds `customers.allow_non_expiring_credentials` (the customer's
+opt-in, `false` by default) and `agent_sessions.revoked_at` (lake#234). A never-expiring agent key
+stores `expires_at = 'infinity'`, which the existing `agent_sessions_expiry_check` accepts, and
+reads back as `expires_at: "never"`. Idempotent (`ADD COLUMN IF NOT EXISTS`); guard
+`credentials_guard`. The operator vendors it and selects that guard before a binary that offers
+never-expiring credentials is deployed. Capabilities: [`../api/agents.md`](../api/agents.md) and
+[`../api/identity.md`](../api/identity.md).

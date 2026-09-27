@@ -281,6 +281,90 @@ void exercise_agent_session(lake::control::Store& store,
     std::filesystem::remove_all(root);
 }
 
+// lake#234: a key that never expires, allowed only by the customer's opt-in and the instance
+// switch, still verifies years later, and stops the moment it is revoked.
+void exercise_non_expiring_session(lake::control::Store& store,
+                                   const std::string& customer_id,
+                                   const std::string& instance) {
+    const auto root = lake::test::fixture_path(instance);
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    lake::transparency::TiledLog log(root, instance);
+    std::chrono::sys_seconds now =
+        std::chrono::sys_days{std::chrono::year{2026} / std::chrono::September / 5} +
+        std::chrono::hours{12};
+    lake::control::agents::Service agents([&now] { return now; });
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.agents = &agents;
+    context.transparency_log = &log;
+    context.authorized = true;
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    context.instance_kek = std::string(instance_kek);
+    const json request{{"customer_id", customer_id},
+                       {"dispatcher_taap_id", "taap:1:ed25519:dispatcher-" + instance},
+                       {"durable_agent_taap_id", "taap:1:ed25519:durable-" + instance},
+                       {"never_expires", true},
+                       {"scopes", json::array({"drip:write"})}};
+
+    const auto off = registry.call("mint_agent_session_key", request, context);
+    ASSERT_FALSE(off.ok) << "off by default";
+    EXPECT_NE(off.error.message.find("allow_non_expiring_credentials"), std::string::npos);
+
+    context.request_id.clear();
+    const auto allowed =
+        registry.call("set_customer_credential_policy",
+                      {{"customer_id", customer_id}, {"allow_non_expiring_credentials", true}},
+                      context);
+    ASSERT_TRUE(allowed.ok) << allowed.error.message;
+    context.non_expiring_credentials_allowed = false;
+    context.request_id.clear();
+    const auto instance_off = registry.call("mint_agent_session_key", request, context);
+    ASSERT_FALSE(instance_off.ok) << "the instance switch overrides the customer";
+    EXPECT_NE(instance_off.error.message.find("LAKE_ALLOW_NON_EXPIRING_CREDENTIALS"),
+              std::string::npos);
+    context.non_expiring_credentials_allowed = true;
+
+    context.request_id.clear();
+    const auto minted = registry.call("mint_agent_session_key", request, context);
+    ASSERT_TRUE(minted.ok) << minted.error.code << ": " << minted.error.message;
+    EXPECT_EQ(minted.value.at("expires_at"), "never");
+    EXPECT_TRUE(minted.value.at("never_expires").get<bool>());
+    const std::string session_id = minted.value.at("agent_session_id");
+    const auto stored = store.get_agent_session(customer_id, session_id);
+    ASSERT_TRUE(stored) << stored.error().message;
+    EXPECT_TRUE(stored->never_expires());
+    const std::vector<std::byte> body = bytes("a drip years later");
+    const auto seed = from_base64url(minted.value.at("private_key").get<std::string>());
+    const auto signature = sign_drip(
+        seed, minted.value.at("session_taap_id").get<std::string>(), stored->issued_at, body);
+    const json drip{{"agent_session_id", session_id},
+                    {"body", base64url(body)},
+                    {"customer_id", customer_id},
+                    {"signature", base64url(signature)}};
+
+    now += std::chrono::days{3650};
+    context.request_id.clear();
+    const auto later = registry.call("verify_agent_session_drip", drip, context);
+    ASSERT_TRUE(later.ok) << later.error.code << ": " << later.error.message;
+
+    context.request_id.clear();
+    const auto revoked =
+        registry.call("revoke_agent_session",
+                      {{"customer_id", customer_id}, {"agent_session_id", session_id}},
+                      context);
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    EXPECT_FALSE(revoked.value.at("revoked_at").get<std::string>().empty());
+    context.request_id.clear();
+    const auto refused = registry.call("verify_agent_session_drip", drip, context);
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.message, "agent session key has been revoked");
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 TEST(AgentSessions, MintsAttributesUsesAndExpiresSessionKey) {
@@ -301,4 +385,23 @@ TEST(PostgresAgentSessions, PersistsLoggedSessionAndDurableAttribution) {
     const std::string customer_id = create_customer(*store, suffix);
     ASSERT_FALSE(customer_id.empty());
     exercise_agent_session(*store, customer_id, "agent-postgres-" + suffix, false);
+}
+
+TEST(AgentSessions, NeverExpiringKeysNeedTheOptInAndStayRevocable) {
+    lake::control::InMemoryStore store;
+    const std::string customer_id = create_customer(store, "memory-never");
+    ASSERT_FALSE(customer_id.empty());
+    exercise_non_expiring_session(store, customer_id, "agent-memory-never");
+}
+
+TEST(PostgresAgentSessions, NeverExpiringKeysNeedTheOptInAndStayRevocable) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    auto store = lake::control::make_postgres_store(uri, std::string(instance_kek));
+    const std::string suffix = lake::control::new_uuid_v4();
+    const std::string customer_id = create_customer(*store, "never-" + suffix.substr(0, 8));
+    ASSERT_FALSE(customer_id.empty());
+    exercise_non_expiring_session(*store, customer_id, "agent-postgres-never-" + suffix);
 }
