@@ -121,6 +121,10 @@ Tests that look for a heading search for its Title Case text.
 
 ## Themes and responsive behavior
 
+The sidebar is sticky and one viewport tall; `.app-shell` paints its column (surface and right
+border) as a background, so the column runs the full height of a long page. Below `58rem` the
+sidebar becomes a top strip and the shell paints nothing.
+
 The light theme is the default and `prefers-color-scheme` selects dark when there is no explicit
 choice. The theme button stores `light` or `dark` in `localStorage["lake-theme"]`; a short script in
 the document head applies that preference before CSS loads, avoiding a wrong-theme flash. The
