@@ -131,8 +131,8 @@ void register_workspace_call(Registry& registry, bool read) {
                 co_return unavailable();
             }
             const std::string capability = input.at("capability");
-            if (read ? !listed(workspace_reads, capability)
-                     : !listed(workspace_actions, capability)) {
+            if (read ? !workspace_read_allowed(capability)
+                     : !workspace_action_allowed(capability)) {
                 co_return ApiResult::failure("invalid_input",
                                              capability + " is not a workspace " +
                                                  (read ? "read" : "action"),
@@ -1170,6 +1170,47 @@ void register_sql_capability(Registry& registry) {
         }});
 }
 
+bool workspace_read_allowed(std::string_view capability) {
+    return listed(workspace_reads, capability);
+}
+
+bool workspace_action_allowed(std::string_view capability) {
+    return listed(workspace_actions, capability);
+}
+
+json workspace_openapi(const json& document, std::string_view base) {
+    json filtered = document.is_object() ? document : json::object();
+    json paths = json::object();
+    const json source = filtered.value("paths", json::object());
+    for (const auto& [path, operations] : source.items()) {
+        if (!path.starts_with("/v1/") || !operations.is_object()) {
+            continue;
+        }
+        const std::string name = path.substr(4);
+        const bool read = workspace_read_allowed(name);
+        const bool action = workspace_action_allowed(name);
+        json kept = json::object();
+        for (const auto& [method, operation] : operations.items()) {
+            if ((method == "get" && read) || (method == "post" && action)) {
+                kept[method] = operation;
+            }
+        }
+        if (!kept.empty()) {
+            paths[path] = std::move(kept);
+        }
+    }
+    filtered["paths"] = std::move(paths);
+    filtered["servers"] = json::array({{{"url", std::string(base)}}});
+    json info = filtered.value("info", json::object());
+    info["description"] =
+        "A lake workspace's Zetta, reduced to the capabilities lake allows. Reads are GET "
+        "/v1/<name> with the input in the query string; actions are POST /v1/<name> with a JSON "
+        "body. Authenticate with a lake token or agent key; every call is authorized on the "
+        "customer and audited.";
+    filtered["info"] = std::move(info);
+    return filtered;
+}
+
 void register_workspace_capabilities(Registry& registry) {
     register_sql_capability(registry);
     register_pipeline_capabilities(registry);
@@ -1268,6 +1309,35 @@ void register_workspace_capabilities(Registry& registry) {
                 co_return ApiResult::failure(state->error().code, state->error().message);
             }
             co_return ApiResult::success((*state)->to_json());
+        }});
+    registry.add(Capability{
+        .name = "workspace_openapi",
+        .title = "A workspace's OpenAPI",
+        .description =
+            "The customer's Zetta OpenAPI document reduced to what lake allows, served under "
+            "/workspaces/<customer_id>/zetta/v1/. Agents derive their Zetta tools from it.",
+        .input_schema = customer_input_schema(json::object(), json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            auto called = co_await context.workspaces->call(
+                customer_id, "openapi.json", true, json::object());
+            if (!called) {
+                co_return ApiResult::failure("store_unavailable", called.error().message);
+            }
+            if (!*called) {
+                co_return ApiResult::failure(called->error().code, called->error().message);
+            }
+            co_return ApiResult::success(
+                workspace_openapi(**called, "/workspaces/" + customer_id + "/zetta"));
         }});
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);

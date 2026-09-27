@@ -104,6 +104,32 @@ Reads are `GET /v1/<capability>` with the input as query parameters; actions are
 `POST /v1/<capability>` with a JSON body. lake unwraps Zetta's `{ok, value}` envelope and passes
 Zetta's own error message through.
 
+## Agents reach Zetta through lake
+
+Agents never hold a workspace's admin token (lake#235). lake serves each workspace's Zetta in
+Zetta's own REST shape, so a client written against a Zetta node (`ZETTA_BASE_URL`, `ZETTA_TOKEN`)
+works unchanged when pointed here:
+
+| Route | What it does |
+|---|---|
+| `GET /workspaces/<customer_id>/zetta/v1/<capability>?<input>` | An allow-listed **read**. Query values are passed as strings and the workspace coerces them by its own input schema, exactly as a direct call would |
+| `POST /workspaces/<customer_id>/zetta/v1/<capability>` | An allow-listed **action**, the JSON body as its input |
+| `GET /workspaces/<customer_id>/zetta/v1/openapi.json` | Zetta's OpenAPI document reduced to the allow-listed paths and methods, with `servers` pointing at this path. Served bare, as Zetta serves it. Also the `workspace_openapi` capability |
+
+- **Same gate as every lake caller.** Each call goes through `workspace_query` / `workspace_act`:
+  the same allow-lists (`workspace_read_allowed` / `workspace_action_allowed`), `read` or `write`
+  on the customer, and the audit kinds `workspace.query` / `workspace.act` with the capability
+  named, attributed to whoever holds the bearer (a person, or an agent's token).
+- **Answers in Zetta's shape.** The body is the `{ok, value}` / `{ok, error}` envelope. A capability
+  outside the allow-list is `404 unknown_capability` ("not available through lake"); a read called
+  with `POST` or an action with `GET` is `405 method_not_allowed` with an `Allow` header. Nothing
+  refused reaches the workspace.
+- **Tools from the filtered OpenAPI.** Agents derive their tool list from this document (the
+  `new-agent` rule), so they see exactly what they may call. `sql` is not in it: SQL reaches a
+  workspace only through `workspace_sql`, which runs one read-only query.
+
+Verify: `HttpServer/HttpResponseIsolation.AgentsReachAWorkspacesZettaThroughLakeInZettasShape`.
+
 ## Configuration
 
 | Variable | Set by | Meaning |
