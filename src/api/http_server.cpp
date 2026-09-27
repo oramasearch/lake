@@ -7654,34 +7654,20 @@ struct ApiServer::Impl {
             }
         }
         // A project made from an Opportunity: the Project Agent designs its pipeline in the
-        // background; once it is done, and while the project has no pipeline, lake compiles it.
+        // background; reading its task applies the design once it is done (settle_build).
         if (page.unavailable.empty() && page.state.value("ready", false) &&
             section == "project" && !page.subject.empty() && context.store) {
             if (auto build = context.store->latest_agent_task(page.customer_id,
                                                               "build:" + page.subject)) {
+                const ApiResult followed = unwrap(co_await workspace_call(
+                    "get_agent_task",
+                    {{"customer_id", page.customer_id}, {"task_id", build->id}},
+                    context));
                 page.data["build"] = {{"status", build->phase.empty() ? "pending" : build->phase},
                                       {"message", build->message}};
-                if (build->phase == "Succeeded") {
-                    const ApiResult project = unwrap(co_await workspace_call(
-                        "workspace_query",
-                        {{"customer_id", page.customer_id},
-                         {"capability", "get_project"},
-                         {"input", {{"name", page.subject}}}},
-                        context));
-                    if (project.ok &&
-                        project.value.value("graphs", nlohmann::json::array()).empty()) {
-                        const nlohmann::json design =
-                            build->result.value("result", nlohmann::json::object())
-                                .value("pipeline", nlohmann::json::object());
-                        const ApiResult built = unwrap(co_await compile_pipeline(
-                            context, page.customer_id, page.subject,
-                            design_intent(build->body.value("message", std::string()), design),
-                            design.value("dataset", std::string())));
-                        if (!built.ok) {
-                            page.error = "The Project Agent designed a pipeline, but it could not "
-                                         "be built: " + built.error.message;
-                        }
-                    }
+                if (followed.ok && followed.value.contains("build_error")) {
+                    page.error = "The Project Agent designed a pipeline, but it could not be "
+                                 "applied: " + followed.value.value("build_error", std::string());
                 }
             }
         }
@@ -7976,117 +7962,6 @@ struct ApiServer::Impl {
 
     // A background turn of a conversation (lake#269). True while it runs; once it finished, its
     // answer becomes the conversation's assistant message, once, and this answers false.
-    // What Zetta compiles for a Project Agent's design: the brief it was given, then the design in
-    // words (what it predicts, from which data, with which model and hold-out).
-    static std::string design_intent(const std::string& brief, const nlohmann::json& design) {
-        std::string text = brief;
-        const std::string label = design.value("label", std::string());
-        if (!label.empty()) {
-            text += " Predict " + label;
-            if (const std::string dataset = design.value("dataset", std::string()); !dataset.empty()) {
-                text += " from " + dataset;
-            }
-            std::string features;
-            for (const nlohmann::json& feature : design.value("features", nlohmann::json::array())) {
-                if (feature.is_string()) {
-                    features += (features.empty() ? "" : ", ") + feature.get<std::string>();
-                }
-            }
-            if (!features.empty()) {
-                text += " using " + features;
-            }
-            text += ".";
-        }
-        if (const std::string model = design.value("model_kind", std::string()); !model.empty()) {
-            text += " Train a " + model + " model";
-            if (design.contains("holdout_fraction") && design["holdout_fraction"].is_number()) {
-                text += " with a " +
-                        std::to_string(static_cast<int>(design["holdout_fraction"].get<double>() * 100)) +
-                        "% hold-out";
-            }
-            text += ".";
-        }
-        return text;
-    }
-
-    // A project's pipeline from a description (Build a Pipeline, and a Project Agent's design for
-    // a project made from an Opportunity): capture it as the project's intent and compile it.
-    // Zetta compiles a captured input, and an older workspace image requires its input_id. With a
-    // dataset, the builder's first connect step is pointed at it and the connect steps that read
-    // nothing are removed (lake#251). Answers {graph} on success.
-    liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
-                                                      std::string customer_id,
-                                                      std::string project,
-                                                      std::string intent,
-                                                      std::string chosen) {
-        const auto act = [&](std::string capability, nlohmann::json input) {
-            return workspace_call("workspace_act",
-                                  {{"customer_id", customer_id},
-                                   {"capability", std::move(capability)},
-                                   {"input", std::move(input)}},
-                                  context);
-        };
-        ApiResult result =
-            unwrap(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
-        if (result.ok) {
-            nlohmann::json input{{"project", project}};
-            if (const std::string input_id = result.value.value("input_id", std::string());
-                !input_id.empty()) {
-                input["input_id"] = input_id;
-            }
-            result = unwrap(co_await act("compile_intent", std::move(input)));
-        }
-        if (!result.ok) {
-            co_return result;
-        }
-        const std::string built_graph =
-            result.value.value("name", result.value.value("graph", std::string()));
-        if (!chosen.empty() && !built_graph.empty()) {
-            const ApiResult graph = unwrap(co_await workspace_call(
-                "workspace_query",
-                {{"customer_id", customer_id},
-                 {"capability", "get_graph"},
-                 {"input", {{"project", project}, {"graph", built_graph}}}},
-                context));
-            const std::size_t dot = chosen.find('.');
-            nlohmann::json edits = nlohmann::json::array();
-            bool pointed = false;
-            for (const nlohmann::json& node : graph.ok
-                                                  ? graph.value.value("nodes", nlohmann::json::array())
-                                                  : nlohmann::json::array()) {
-                if (node.value("kind", std::string()) != "connect") {
-                    continue;
-                }
-                const std::string id = node.value("id", std::string());
-                if (!pointed) {
-                    edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "source"},
-                                     {"value", chosen.substr(0, dot)}});
-                    edits.push_back(
-                        {{"op", "set_attribute"}, {"step", id}, {"name", "table"},
-                         {"value", dot == std::string::npos ? chosen : chosen.substr(dot + 1)}});
-                    edits.push_back(
-                        {{"op", "rename_step"}, {"step", id}, {"name", "Load " + chosen}});
-                    pointed = true;
-                } else {
-                    edits.push_back({{"op", "remove_step"}, {"step", id}});
-                }
-            }
-            if (!edits.empty()) {
-                const ApiResult edited = unwrap(co_await workspace_call(
-                    "edit_pipeline",
-                    {{"customer_id", customer_id},
-                     {"project", project},
-                     {"graph", built_graph},
-                     {"edits", std::move(edits)}},
-                    context));
-                if (!edited.ok) {
-                    co_return edited;
-                }
-            }
-        }
-        co_return ApiResult::success({{"graph", built_graph}});
-    }
-
     liquid::runtime::task<bool> settle_turn(ApiContext& context,
                                             std::string customer_id,
                                             std::string task_id,
@@ -9094,7 +8969,8 @@ struct ApiServer::Impl {
             const std::string project = form_field(body, "project");
             const std::string chosen = form_field(body, "dataset");
             back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            result = unwrap(co_await compile_pipeline(
+            context.registry = &registry;
+            result = unwrap(co_await lake::api::compile_pipeline(
                 context, customer_id, project, form_field(body, "intent"), chosen));
             const std::string built_graph = result.ok ? result.value.value("graph", std::string())
                                                       : std::string();

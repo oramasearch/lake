@@ -1,5 +1,8 @@
 #pragma once
 #include "lake/api/registry.hpp"
+#include "lake/control/store.hpp"
+
+#include <liquid/runtime.hpp>
 
 namespace lake::api {
 
@@ -38,5 +41,27 @@ bool workspace_uses_get(std::string_view capability);
 // Zetta's OpenAPI document reduced to the allow-listed paths, rebased under `base` (the agent
 // path of one workspace), so a client deriving its tools from it sees exactly what it may call.
 nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_view base);
+
+// A project's pipeline from a description: capture it as the intent, compile it, and point it at
+// `dataset` ("<database>.<table>") with the `model` step attributes (target, algo). Answers
+// {graph}. Needs context.registry (set by any registry call).
+liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
+                                                  std::string customer_id,
+                                                  std::string project,
+                                                  std::string intent,
+                                                  std::string dataset,
+                                                  nlohmann::json model = nullptr);
+// Points an existing pipeline's first connect step at `dataset` (removing the other connect steps)
+// and sets its model step's attributes.
+liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
+                                                std::string customer_id,
+                                                std::string project,
+                                                std::string graph,
+                                                std::string dataset,
+                                                nlohmann::json model = nullptr);
+// A finished Project Agent build (kind "build:<project>") applied to the project, once: compiled
+// when the project has no pipeline, otherwise its first unapproved pipeline pointed at the design's
+// dataset with the design's target and model.
+liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::AgentTask task);
 
 } // namespace lake::api

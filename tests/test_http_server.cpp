@@ -1223,6 +1223,56 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
     ASSERT_NE(saved, workspace_caller_->calls.end()) << "pointed at the design's dataset";
     EXPECT_NE(std::get<2>(*saved).dump().find("\"table\":\"accounts\""), std::string::npos)
         << std::get<2>(*saved).dump();
+    EXPECT_NE(std::get<2>(*saved).dump().find("\"target\":\"churned\""), std::string::npos)
+        << "the model step learns the design's target";
+
+    // Zetta compiles a pipeline from a project's intent when it is created, and a design may name
+    // its table under training_sources: the project's own pipeline is pointed at it, once.
+    const auto second = store_->latest_agent_task(customer_id, "build:" + project);
+    const std::string again = lake::control::new_uuid_v4();
+    auto rebuild = store_->create_agent_task(lake::control::AgentTask{
+        .customer_id = customer_id, .agent = "agent-project", .kind = "build:" + project,
+        .body = {{"message", "Design it"}}, .scopes = second->scopes,
+        .requested_by_user_id = second->requested_by_user_id,
+        .requested_by_taap_id = second->requested_by_taap_id});
+    ASSERT_TRUE(rebuild);
+    ASSERT_TRUE(liquid::runtime::block_on(agent_bus_->publish_task(*rebuild)).value());
+    agents_->answer = {{"ok", true},
+                       {"result",
+                        {{"pipeline",
+                          {{"training_sources", {"datasets.accounts_v2"}},
+                           {"label", "churned"},
+                           {"model_kind", "gbdt"}}}}}};
+    run_agent_task(*connection, rebuild->id);
+    workspace_caller_->answers["get_project"] = {
+        {"name", project},
+        {"graphs", {{{"name", "churn skeleton"}, {"approval", "proposed"}}}}};
+    const std::size_t compiles = std::ranges::count_if(workspace_caller_->calls, [](const auto& call) {
+        return std::get<0>(call) == "compile_intent";
+    });
+    connection->request("GET", page_path, "", cookie);
+    EXPECT_EQ(std::ranges::count_if(workspace_caller_->calls,
+                                    [](const auto& call) {
+                                        return std::get<0>(call) == "compile_intent";
+                                    }),
+              compiles)
+        << "a project that has a pipeline is not compiled again";
+    const auto repointed = std::ranges::find_if(
+        workspace_caller_->calls.rbegin(), workspace_caller_->calls.rend(),
+        [](const auto& call) { return std::get<0>(call) == "save_graph"; });
+    ASSERT_NE(repointed, workspace_caller_->calls.rend());
+    EXPECT_NE(std::get<2>(*repointed).dump().find("\"table\":\"accounts_v2\""), std::string::npos)
+        << std::get<2>(*repointed).dump();
+    const std::size_t saves = std::ranges::count_if(workspace_caller_->calls, [](const auto& call) {
+        return std::get<0>(call) == "save_graph";
+    });
+    workspace_caller_->answers["get_graph"]["nodes"][0]["attributes"] = {{"source", "datasets"},
+                                                                         {"table", "accounts_v2"}};
+    connection->request("GET", page_path, "", cookie);
+    EXPECT_EQ(std::ranges::count_if(workspace_caller_->calls,
+                                    [](const auto& call) { return std::get<0>(call) == "save_graph"; }),
+              saves)
+        << "applied once: a pipeline that reads the design's table is left alone";
 }
 
 TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved) {

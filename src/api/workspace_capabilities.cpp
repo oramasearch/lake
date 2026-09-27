@@ -1568,6 +1568,204 @@ json proposal_files(const json& proposal) {
 // The agent capabilities that were page-only (UX review 2026-09-27): creating an agent from an
 // approved AgentCreator proposal, turning chosen Opportunities into projects, and reading an Ask
 // Orama conversation back. The pages call these, so REST, MCP and the site do the same thing.
+namespace {
+
+// The one table a Project Agent design trains on: `dataset`, else the first of
+// `training_sources` or `datasets` (the agent's build output names it either way).
+std::string design_dataset(const json& design) {
+    if (const std::string dataset = design.value("dataset", std::string()); !dataset.empty()) {
+        return dataset;
+    }
+    for (const char* key : {"training_sources", "datasets"}) {
+        const json list = design.value(key, json::array());
+        if (list.is_array() && !list.empty() && list.front().is_string()) {
+            return list.front().get<std::string>();
+        }
+    }
+    return {};
+}
+
+// A design in words for Zetta's compiler: what it predicts, from which data, with which model.
+std::string design_text(const std::string& brief, const json& design) {
+    std::string text = brief;
+    const std::string label = design.value("label", std::string());
+    if (!label.empty()) {
+        text += " Predict " + label;
+        if (const std::string dataset = design_dataset(design); !dataset.empty()) {
+            text += " from " + dataset;
+        }
+        std::string features;
+        for (const json& feature : design.value("features", json::array())) {
+            if (feature.is_string()) {
+                features += (features.empty() ? "" : ", ") + feature.get<std::string>();
+            }
+        }
+        if (!features.empty()) {
+            text += " using " + features;
+        }
+        text += ".";
+    }
+    if (const std::string model = design.value("model_kind", std::string()); !model.empty()) {
+        text += " Train a " + model + " model";
+        if (design.contains("holdout_fraction") && design["holdout_fraction"].is_number()) {
+            text += " with a " +
+                    std::to_string(static_cast<int>(design["holdout_fraction"].get<double>() * 100)) +
+                    "% hold-out";
+        }
+        text += ".";
+    }
+    return text;
+}
+
+} // namespace
+
+liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
+                                                std::string customer_id,
+                                                std::string project,
+                                                std::string graph,
+                                                std::string dataset,
+                                                json model) {
+    const ApiResult read = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", customer_id},
+         {"capability", "get_graph"},
+         {"input", {{"project", project}, {"graph", graph}}}}));
+    if (!read.ok) {
+        co_return read;
+    }
+    const std::size_t dot = dataset.find('.');
+    const std::string source = dot == std::string::npos ? std::string("datasets") : dataset.substr(0, dot);
+    const std::string table = dot == std::string::npos ? dataset : dataset.substr(dot + 1);
+    json edits = json::array();
+    bool pointed = false, modelled = false;
+    for (const json& node : read.value.value("nodes", json::array())) {
+        const std::string id = node.value("id", std::string());
+        const std::string kind = node.value("kind", std::string());
+        if (kind == "connect" && !dataset.empty()) {
+            if (!pointed) {
+                edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "source"},
+                                 {"value", source}});
+                edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "table"},
+                                 {"value", table}});
+                edits.push_back({{"op", "rename_step"}, {"step", id}, {"name", "Load " + dataset}});
+                pointed = true;
+            } else {
+                edits.push_back({{"op", "remove_step"}, {"step", id}});
+            }
+        } else if (kind == "model" && !modelled && model.is_object()) {
+            for (const auto& [name, value] : model.items()) {
+                if (!value.is_null()) {
+                    edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", name},
+                                     {"value", value}});
+                }
+            }
+            modelled = true;
+        }
+    }
+    if (edits.empty()) {
+        co_return ApiResult::success({{"graph", graph}});
+    }
+    const ApiResult edited = called(co_await call_capability(
+        context,
+        "edit_pipeline",
+        {{"customer_id", customer_id}, {"project", project}, {"graph", graph}, {"edits", edits}}));
+    if (!edited.ok) {
+        co_return edited;
+    }
+    co_return ApiResult::success({{"graph", graph}});
+}
+
+liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
+                                                  std::string customer_id,
+                                                  std::string project,
+                                                  std::string intent,
+                                                  std::string dataset,
+                                                  json model) {
+    const auto act = [&](std::string capability, json input) {
+        return call_capability(context,
+                               "workspace_act",
+                               {{"customer_id", customer_id},
+                                {"capability", std::move(capability)},
+                                {"input", std::move(input)}});
+    };
+    ApiResult result = called(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
+    if (result.ok) {
+        json input{{"project", project}};
+        if (const std::string input_id = result.value.value("input_id", std::string());
+            !input_id.empty()) {
+            input["input_id"] = input_id;
+        }
+        result = called(co_await act("compile_intent", std::move(input)));
+    }
+    if (!result.ok) {
+        co_return result;
+    }
+    const std::string graph = result.value.value("name", result.value.value("graph", std::string()));
+    if (graph.empty() || (dataset.empty() && !model.is_object())) {
+        co_return ApiResult::success({{"graph", graph}});
+    }
+    co_return called(co_await point_pipeline(context, customer_id, project, graph, dataset, model));
+}
+
+liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::AgentTask task) {
+    if (!task.kind.starts_with("build:") || task.phase != "Succeeded" || !task.result.is_object()) {
+        co_return ApiResult::success(json::object());
+    }
+    const std::string project = task.kind.substr(6);
+    const json design = task.result.value("result", json::object()).value("pipeline", json::object());
+    const std::string dataset = design_dataset(design);
+    json model = json::object();
+    if (const std::string label = design.value("label", std::string()); !label.empty()) {
+        model["target"] = label;
+    }
+    if (const std::string algo = design.value("model_kind", std::string()); !algo.empty()) {
+        model["algo"] = algo;
+    }
+    const ApiResult read = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", task.customer_id},
+         {"capability", "get_project"},
+         {"input", {{"name", project}}}}));
+    if (!read.ok) {
+        co_return read;
+    }
+    const json graphs = read.value.value("graphs", json::array());
+    if (graphs.empty()) {
+        co_return called(co_await compile_pipeline(context,
+                                                   task.customer_id,
+                                                   project,
+                                                   design_text(task.body.value("message", std::string()), design),
+                                                   dataset,
+                                                   model));
+    }
+    // The project's own pipeline (Zetta compiles one from its intent when it is created):
+    // the first one not yet approved. Applied once: a connect step that already reads the
+    // design's table means it was.
+    const auto open = std::ranges::find_if(graphs, [](const json& graph) {
+        return graph.value("approval", std::string()) != "approved";
+    });
+    if (open == graphs.end() || dataset.empty()) {
+        co_return ApiResult::success(json::object());
+    }
+    const std::string graph = open->value("name", std::string());
+    const ApiResult current = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", task.customer_id},
+         {"capability", "get_graph"},
+         {"input", {{"project", project}, {"graph", graph}}}}));
+    const std::string table = dataset.substr(dataset.find('.') == std::string::npos ? 0 : dataset.find('.') + 1);
+    for (const json& node : current.ok ? current.value.value("nodes", json::array()) : json::array()) {
+        if (node.value("kind", std::string()) == "connect" &&
+            node.value("attributes", json::object()).value("table", std::string()) == table) {
+            co_return ApiResult::success({{"graph", graph}});
+        }
+    }
+    co_return called(co_await point_pipeline(context, task.customer_id, project, graph, dataset, model));
+}
+
 void register_agent_flow_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_agent_from_proposal",
@@ -2199,18 +2397,24 @@ void register_agent_run_capabilities(Registry& registry) {
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return unavailable();
+                co_return unavailable();
             }
             auto task = context.store->get_agent_task(input.at("task_id"));
             if (!task || task->customer_id != input.at("customer_id").get<std::string>() ||
                 (task->requested_by_user_id != context.acting_user_id &&
                  context.acting_identity != "admin")) {
-                return ApiResult::failure("not_found", "no such task in this space");
+                co_return ApiResult::failure("not_found", "no such task in this space");
             }
             settle_discover(context, *task);
-            return ApiResult::success(task_json(*task));
+            json out = task_json(*task);
+            // A project's pipeline design is applied once it is done, wherever it is read.
+            if (const ApiResult built = called(co_await settle_build(context, *task)); !built.ok) {
+                out["build_error"] = built.error.message;
+            }
+            co_return ApiResult::success(std::move(out));
         }});
     registry.add(Capability{
         .name = "list_opportunities",
@@ -2843,6 +3047,7 @@ void register_agent_bus_capabilities(Registry& registry) {
                 co_return ApiResult::failure(task.error().code, task.error().message);
             }
             settle_discover(context, *task);
+            static_cast<void>(co_await settle_build(context, *task));
             co_return ApiResult::success({{"events", std::move(events)},
                                           {"next_sequence", next},
                                           {"task", task_json(*task)}});

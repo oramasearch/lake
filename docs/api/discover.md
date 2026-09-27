@@ -13,9 +13,13 @@ Agent task in the background (kind `build:<project>`), briefed with the Opportun
 it changes, why the data supports it, its catalogue solution and methodology. The agent reads the
 workspace and answers a design (the dataset, the label, the features, the model and the hold-out),
 never a change. The project's page says *The Project Agent is designing this project's pipeline…*
-while it works. When it is done, and while the project still has no pipeline, the page compiles the
-design with Zetta's `capture_intent` + `compile_intent` and points the pipeline at the design's
-dataset, exactly as *Build a Pipeline* does. A design that cannot be compiled, or a failed task, is
+while it works. Once it is done, reading the task (the project page, `get_agent_task`,
+`receive_agent_events`) applies the design, once: Zetta compiles a pipeline from a project's intent
+when the project is created, so the project's first unapproved pipeline is pointed at the design's
+table (`dataset`, else the first of `training_sources`), its other connect steps removed, and its
+model step given the design's `target` (label) and `algo` (model kind). A project with no pipeline
+is compiled from the design first, exactly as *Build a Pipeline* does. A pipeline that already reads
+the design's table is left alone. A design that cannot be compiled, or a failed task, is
 said on the page, with *Build a Pipeline* still there. `create_projects_from_opportunities` answers
 the tasks as `builds`. Verify: `HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnConfirmation`.
 
