@@ -300,6 +300,7 @@ std::vector<std::shared_ptr<const Capability>> Registry::list() const {
 
 ApiResult
 Registry::call(const std::string& name, const nlohmann::json& input, ApiContext& context) const {
+    context.registry = this;
     const auto capability = find(name);
     if (!capability)
         return ApiResult::failure("unknown_capability", "no capability named " + name);
@@ -326,6 +327,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
 liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                                                       const nlohmann::json& input,
                                                       ApiContext& context) const {
+    context.registry = this;
     const auto capability = find(name);
     if (!capability) {
         co_return ApiResult::failure("unknown_capability", "no capability named " + name);

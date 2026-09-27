@@ -55,7 +55,12 @@ Developer → MCP):
 - **Teach Your Agent**: *Download the lake skill* (`GET /skills/lake/SKILL.md`, **public** and linked
   from `/llms.txt` with a one-line install command; `/developer/mcp/skill` serves the same; `SKILL.md` as an
   attachment, for `~/.claude/skills/lake/`), `/llms.txt`, `/llms-full.txt`, and OpenAPI.
-- **Worked Flows**: build and run a pipeline (`create_pipeline` → `edit_pipeline` →
+- **Keys**: every tool or read-only; by default as long as the sign-in (at most 30 days), 1 or 7 days,
+  or **Never** (a standing key with a reason and named tools, where the space allows it, lake#234,
+  lake#259).
+- **Worked Flows**: load a dataset (`upload_dataset` through `workspace_act`), train a model and call
+  it (`capture_intent` → `compile_intent` → `approve_plan` → `run_pipeline` → `get_run_report` →
+  `expose_model` → `predict`), build and run a pipeline (`create_pipeline` → `edit_pipeline` →
   `get_pipeline` → `workspace_act` `approve_plan` → `run_pipeline`), stand up and connect a
   Postgres service (`list_service_kinds` → `create_service` → `list_services` →
   `service_connection` → `connect_service`), search a published index (`workspace_query`

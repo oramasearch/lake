@@ -1614,4 +1614,94 @@ legend {
 .waterfall-bar.failed {
   background: var(--lake-danger);
 }
+.docs {
+  display: grid;
+  grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr);
+  gap: 2rem;
+  align-items: start;
+}
+.docs-contents ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: sticky;
+  top: 1rem;
+}
+.docs-contents a {
+  display: block;
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--lake-radius-control);
+  color: var(--lake-text-secondary);
+  text-decoration: none;
+}
+.docs-contents a[aria-current="page"] {
+  background: var(--lake-layer);
+  color: var(--lake-text-primary);
+  font-weight: var(--lake-weight-semibold);
+}
+.docs-page {
+  max-width: 46rem;
+  line-height: 1.6;
+}
+.docs-page h1 {
+  margin-top: 0;
+}
+.docs-page h2 {
+  margin-top: 2rem;
+  border-bottom: var(--lake-border-width) solid var(--lake-border-subtle);
+  padding-bottom: 0.3rem;
+}
+.docs-page pre {
+  overflow-x: auto;
+}
+.docs-next {
+  margin-top: 2.5rem;
+  color: var(--lake-text-secondary);
+}
+@media (max-width: 720px) {
+  .docs {
+    grid-template-columns: 1fr;
+  }
+  .docs-contents ul {
+    position: static;
+  }
+}
+.ask-dock {
+  position: relative;
+}
+.ask-dock > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.ask-dock > summary::-webkit-details-marker {
+  display: none;
+}
+.ask-dock-panel {
+  position: fixed;
+  top: 3.5rem;
+  right: 1rem;
+  bottom: 1rem;
+  width: min(28rem, calc(100vw - 2rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--lake-surface);
+  border: var(--lake-border-width) solid var(--lake-border-strong);
+  border-radius: var(--lake-radius-control);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  z-index: 50;
+}
+.ask-dock-panel iframe {
+  flex: 1;
+  width: 100%;
+  border: 0;
+}
+.ask-dock-panel p {
+  margin: 0;
+  font-size: 0.85rem;
+}
+body.ask-embedded main {
+  padding: 0.75rem;
+}
 )lake_styles"

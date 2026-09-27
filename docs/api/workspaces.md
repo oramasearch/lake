@@ -19,6 +19,7 @@ with the operator is [`../control-plane/services.md`](../control-plane/services.
 | Train | `/train/dataset?database=&name=` | `get_dataset` (columns, partitions, health), its first 20 rows (`workspace_sql`), *Keep durable* (`promote_dataset`), *Query it* |
 | Train | `/train/query?statement=&database=` | Read-only SQL over the workspace's data (`workspace_sql`) |
 | Train | `/train/data`, *Generate a dataset* | `list_dataset_generators`, `generate_dataset` (never its `path`, which writes a file on the node) |
+| Train | `/train/data` (layout) | **Load Data** first and open (upload a file, pull a table from a connection, generate one); after an upload, *Loaded N rows into <dataset>* with a link. Then connections, datasets and storage (only what can be created today; the rest one *coming later* line). A dataset page shows its columns, its first 20 rows (lake trims them: the workspace SQL has no LIMIT yet, zetta#1021) and *Storage details* under a disclosure; the Query page shows at most 500 rows (lake#256, lake#257) |
 | Train | `/train/runs`, `/train/run?id=` | `list_runs`, `get_run` (lineage, outputs, log), `get_run_report` rendered as tables (what it learned from, what it leans on, most at risk, caveats, what it cannot tell), and the run's spans from `list_traces` as a waterfall |
 | Ship | `/ship/models` | `list_models`, `expose_model`, `unexpose_model` (publish a model's `POST /v1/models/<name>/predict` inside the workspace) |
 | Ship | `/ship/indexes` | `list_indexes`, *New index* (`create_index` over a dataset, BM25F full-text) |

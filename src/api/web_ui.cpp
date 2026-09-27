@@ -1,5 +1,7 @@
 #include "lake/api/web_ui.hpp"
 
+#include "lake/api/markdown.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -77,130 +79,11 @@ std::string markdown_slug(std::string_view heading) {
     return slug.empty() ? "section" : slug;
 }
 
-std::string markdown_inline(std::string_view text) {
-    std::string output;
-    std::size_t offset = 0;
-    while (offset < text.size()) {
-        if (text[offset] == '`') {
-            const std::size_t end = text.find('`', offset + 1);
-            if (end == std::string_view::npos) {
-                output += "&#96;";
-                ++offset;
-                continue;
-            }
-            output += "<code>";
-            output += web_ui_escape(text.substr(offset + 1, end - offset - 1));
-            output += "</code>";
-            offset = end + 1;
-            continue;
-        }
-        if (text.substr(offset).starts_with("**")) {
-            const std::size_t end = text.find("**", offset + 2);
-            if (end != std::string_view::npos) {
-                output += "<strong>";
-                output += web_ui_escape(text.substr(offset + 2, end - offset - 2));
-                output += "</strong>";
-                offset = end + 2;
-                continue;
-            }
-        }
-        output += web_ui_escape(text.substr(offset, 1));
-        ++offset;
-    }
-    return output;
-}
-
 } // namespace
 
 std::string web_ui_markdown(std::string_view markdown) {
-    std::istringstream input{std::string(markdown)};
-    std::string line;
-    std::string output = "<article class=\"markdown-body\">";
-    std::map<std::string, std::size_t> heading_counts;
-    bool code_open = false;
-    bool list_open = false;
-    bool paragraph_open = false;
-    auto close_paragraph = [&]() {
-        if (paragraph_open) {
-            output += "</p>";
-            paragraph_open = false;
-        }
-    };
-    auto close_list = [&]() {
-        if (list_open) {
-            output += "</ul>";
-            list_open = false;
-        }
-    };
-    while (std::getline(input, line)) {
-        if (line.starts_with("```")) {
-            close_paragraph();
-            close_list();
-            if (code_open) {
-                output += "</code></pre>";
-            } else {
-                output += "<pre><code>";
-            }
-            code_open = !code_open;
-            continue;
-        }
-        if (code_open) {
-            output += web_ui_escape(line);
-            output += '\n';
-            continue;
-        }
-        std::size_t level = 0;
-        while (level < line.size() && level < 6 && line[level] == '#') {
-            ++level;
-        }
-        if (level > 0 && level < line.size() && line[level] == ' ') {
-            close_paragraph();
-            close_list();
-            const std::string_view heading{line.data() + level + 1, line.size() - level - 1};
-            std::string slug = markdown_slug(heading);
-            const std::size_t duplicate = heading_counts[slug]++;
-            if (duplicate > 0) {
-                slug += '-' + std::to_string(duplicate + 1);
-            }
-            output += std::format("<h{} id=\"{}\">{}<a class=\"heading-anchor\" href=\"#{}\" "
-                                  "aria-label=\"Link to this heading\">#</a></h{}>",
-                                  level,
-                                  slug,
-                                  markdown_inline(heading),
-                                  slug,
-                                  level);
-            continue;
-        }
-        if (line.starts_with("- ") || line.starts_with("* ")) {
-            close_paragraph();
-            if (!list_open) {
-                output += "<ul>";
-                list_open = true;
-            }
-            output += "<li>" + markdown_inline(std::string_view(line).substr(2)) + "</li>";
-            continue;
-        }
-        if (line.empty()) {
-            close_paragraph();
-            close_list();
-            continue;
-        }
-        close_list();
-        if (!paragraph_open) {
-            output += "<p>";
-            paragraph_open = true;
-        } else {
-            output += ' ';
-        }
-        output += markdown_inline(line);
-    }
-    close_paragraph();
-    close_list();
-    if (code_open) {
-        output += "</code></pre>";
-    }
-    output += "</article>";
-    return output;
+    // One renderer for READMEs and the Docs section (lake/api/markdown.hpp).
+    return "<article class=\"markdown-body\">" + markdown_to_html(markdown) + "</article>";
 }
 
 std::string web_ui_hashed_asset_url(std::string_view path, std::string_view contents) {
@@ -329,6 +212,10 @@ std::string web_ui_icon(std::string_view name) {
         // A speech bubble with a face: an agent you can talk to.
         body =
             R"(<path d="M2 2h12v9H7l-3 3v-3H2V2Zm2 2v5h8V4H4Z"/><path d="M6 5.5h1v1.5H6zm3 0h1v1.5H9z"/>)";
+    } else if (name == "docs") {
+        // An open book: the Docs section.
+        body =
+            R"(<path d="M1 3c2.5-1 5-1 7 .5C10 2 12.5 2 15 3v10c-2.5-1-5-1-7 .5C6 12 3.5 12 1 13V3Zm2 1.3v6.5c1.4-.3 2.8-.2 4 .4V4.7C5.8 4 4.4 4 3 4.3Zm10 0c-1.4-.3-2.8-.3-4 .4v6.5c1.2-.6 2.6-.7 4-.4V4.3Z"/>)";
     } else if (name == "theme") {
         body = R"(<path d="M8 1a7 7 0 1 0 7 7 7 7 0 0 0-7-7Zm0 12V3a5 5 0 0 1 0 10Z"/>)";
     } else {
@@ -524,6 +411,8 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
                                 viewer.signed_in ? "Repositories" : "Public Repositories",
                                 "repository",
                                 "repositories"}};
+    // The Docs section (lake#252) is for everyone, signed in or not.
+    items.push_back({"", "/docs", "Docs", "docs", "docs"});
     if (viewer.signed_in) {
         if (!viewer.administrator) {
             items.push_back(
@@ -639,11 +528,19 @@ std::string session_control(const WebUiViewer& viewer) {
     if (viewer.administrator) {
         return std::format("<span class=\"session\">{}</span>", sign_out);
     }
-    // Ask Orama (docs/api/ask-orama.md): on every page, carrying the page it was opened from.
-    const std::string ask =
-        std::format("<a class=\"button ask-orama\" href=\"/ask?from={}\">{}Ask Orama</a>",
-                    url_component(viewer.path.empty() ? std::string_view("/") : viewer.path),
-                    web_ui_icon("agent"));
+    // Ask Orama (docs/api/ask-orama.md): a panel beside every page (lake#258), told the whole page
+    // it was opened from, path and query. No script: the toggle is a <details>, the panel a frame of
+    // the Ask page in its embedded form, and a link opens it full size.
+    const std::string from = (viewer.path.empty() ? std::string("/") : viewer.path) +
+                             (viewer.query.empty() ? std::string() : "?" + viewer.query);
+    const std::string ask = std::format(
+        "<details class=\"ask-dock\"><summary class=\"button ask-orama\">{}Ask Orama</summary>"
+        "<div class=\"ask-dock-panel\"><iframe src=\"/ask?embed=1&amp;from={}\" title=\"Ask Orama\" "
+        "loading=\"lazy\"></iframe><p><a href=\"/ask?from={}\">Open Ask Orama in a full page</a></p>"
+        "</div></details>",
+        web_ui_icon("agent"),
+        url_component(from),
+        url_component(from));
     return ask +
            std::format("<details class=\"account-menu\"><summary>{}<span>Account</span></summary>"
                        "<div class=\"account-menu-panel\"><a href=\"/settings\">Settings</a>"
@@ -1260,29 +1157,37 @@ std::string web_ui_home(WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">lake by Orama</p>"
         "<h1>Design, train, and ship AI on your own data.</h1>"
-        "<p class=\"sub\">Keep your files, datasets and models in shared repositories, train "
-        "models on them, and put them into production, in Orama's cloud or your own.</p>";
+        "<p class=\"sub\">Load your data into your own workspace, train models on it, and call "
+        "them from your code, in Orama's cloud or your own.</p>";
     if (viewer.signed_in) {
-        content += "<p class=\"actions\"><a class=\"button button-primary\" "
-                   "href=\"/repositories\">Open your repositories</a> <a class=\"button\" "
-                   "href=\"/deployments\">See your deployments</a></p>";
+        content += "<p class=\"actions\"><a class=\"button button-primary\" href=\"/docs\">"
+                   "Getting started</a> <a class=\"button\" href=\"/train/data\">Load your data</a>"
+                   "</p>";
     } else {
         content += "<p class=\"actions\"><a class=\"button button-primary\" "
                    "href=\"/sign-up\">Create account</a> <a class=\"button\" "
-                   "href=\"/sign-in\">Sign in</a></p>";
+                   "href=\"/sign-in\">Sign in</a> <a class=\"button\" href=\"/docs\">Read the docs"
+                   "</a></p>";
     }
     content += "<div class=\"grid\">"
                "<section class=\"card\"><h3>Design</h3>"
-               "<p>Start from the business question and the decisions it drives. Keep the plan, "
-               "the data and the work in one repository your team edits together.</p></section>"
+               "<p>Start from the business question and the decision it should improve. A "
+               "project turns it into a pipeline you can read, change and approve.</p>"
+               + std::string(viewer.signed_in ? "<p><a href=\"/design/projects\">Projects</a></p>" : "") +
+               "</section>"
                "<section class=\"card\"><h3>Train</h3>"
-               "<p>Put datasets and models in repositories. Each revision is stored once, and "
-               "every model records the data and code it was trained from.</p></section>"
+               "<p>Your data lives in your workspace: upload a file, connect a database or "
+               "generate a dataset, then train on it and read what each run found.</p>"
+               + std::string(viewer.signed_in ? "<p><a href=\"/train/data\">Data</a> · <a "
+                                                "href=\"/train/runs\">Runs</a></p>"
+                                              : "") +
+               "</section>"
                "<section class=\"card\"><h3>Ship</h3>"
-               "<p>Deploy a repository to an environment, serve it on your domain, and read its "
-               "logs. Push your work with <code>liquid push</code> and a token from your "
-               "account. Installing Liquid currently requires access to its source "
-               "repository.</p>";
+               "<p>Publish a model and call it from your code, publish a search index, or run "
+               "databases for your team. Files and code live in repositories.</p>"
+               + std::string(viewer.signed_in ? "<p><a href=\"/ship/models\">Models</a> · <a "
+                                                "href=\"/repositories\">Repositories</a></p>"
+                                              : "");
     if (viewer.signed_in && !viewer.administrator) {
         content += "<p><a href=\"/tokens\">Create a token</a></p>";
     }
@@ -2188,31 +2093,38 @@ std::string storage_content(const WorkspacePage& page) {
         out += "<p class=\"muted\">This page checks again every 3 seconds while storage is "
                "changing.</p><meta http-equiv=\"refresh\" content=\"3\">";
     }
+    // Only what can be created today; the rest is one plain line, without internal plans
+    // (lake#257).
     std::string options;
     bool chosen = false;
+    bool more = false;
     for (const control::StoreProvider& entry : control::store_providers) {
-        const bool select = entry.available && !chosen;
-        chosen = chosen || select;
-        options +=
-            std::format("<option value=\"{}:{}\"{}{}>{}</option>",
-                        entry.type,
-                        entry.provider,
-                        entry.available ? "" : " disabled",
-                        select ? " selected" : "",
-                        web_ui_escape(entry.available ? std::string(entry.label)
-                                                      : std::string(entry.label) + " — not yet: " +
-                                                            std::string(entry.unavailable_reason)));
+        if (!entry.available) {
+            more = true;
+            continue;
+        }
+        options += std::format("<option value=\"{}:{}\"{}>{}</option>",
+                               entry.type,
+                               entry.provider,
+                               chosen ? "" : " selected",
+                               web_ui_escape(std::string(entry.label)));
+        chosen = true;
     }
+    const std::string later = more ? "<small>Buckets (Cloudflare R2, AWS S3, Backblaze B2, "
+                                     "Azure, Google Cloud) and shared filesystems are coming "
+                                     "later.</small>"
+                                   : "";
     out += std::format(
         "<h3>New Storage</h3><form class=\"stack\" method=\"post\" "
         "action=\"/train/data/store-create\">{}<label>Type and provider<select "
-        "name=\"store\">{}</select></label><label>Name<input name=\"name\" required "
+        "name=\"store\">{}</select>{}</label><label>Name<input name=\"name\" required "
         "pattern=\"[a-z][a-z0-9\\-]{{0,30}}\" placeholder=\"uploads\"></label><label>Size (GiB)"
         "<input name=\"size_gi\" type=\"number\" min=\"1\" max=\"100\" value=\"10\"></label>"
         "<button class=\"button button-primary\" type=\"submit\">Create storage</button></form>"
         "</section>",
         hidden("customer_id", page.customer_id),
-        options);
+        options,
+        later);
     return out;
 }
 
@@ -3378,6 +3290,19 @@ std::string workspace_content(const WorkspacePage& page) {
                                                .value("connections", nlohmann::json::array());
         const nlohmann::json datasets = data.value("list_datasets", nlohmann::json::object())
                                             .value("datasets", nlohmann::json::array());
+        // Load data comes first (lake#256): the way in, open, then what is already here.
+        std::string load;
+        if (const auto loaded = data.find("loaded"); loaded != data.end()) {
+            const std::string table = json_text(*loaded, "table");
+            out += std::format(
+                "<section class=\"panel notice\" role=\"status\"><p>Loaded <strong>{}</strong> rows "
+                "into {}.</p></section>",
+                web_ui_escape(json_text(*loaded, "rows")),
+                row_link("/train/dataset?" + query + "&database=datasets&name=" +
+                             url_component(table),
+                         table));
+        }
+        const std::size_t load_at = out.size();
         out += "<section class=\"panel\"><h2>Connections</h2>";
         if (connections.empty()) {
             out += "<p>No connections yet. Add the database your data lives in below.</p>";
@@ -3463,8 +3388,8 @@ std::string workspace_content(const WorkspacePage& page) {
                 json_text(service, "phase") == "Ready" && service.value("connected", true);
             std::string action;
             if (kind != "postgres") {
-                action = "<span class=\"muted\">not supported yet: the workspace cannot read " +
-                         web_ui_escape(kind) + "</span>";
+                action = "<span class=\"muted\">The workspace can't read " +
+                         web_ui_escape(kind) + " yet; Postgres works today</span>";
             } else if (!ready) {
                 action = "<span class=\"muted\">starting</span>";
             } else {
@@ -3532,8 +3457,8 @@ std::string workspace_content(const WorkspacePage& page) {
         }
         out +=
             std::format("<p>{}</p>", row_link("/train/query?" + query, "Query your data with SQL"));
-        out += std::format(
-            "<details><summary>Upload a file</summary><form class=\"stack\" method=\"post\" "
+        load += std::format(
+            "<details open><summary>Upload a file</summary><form class=\"stack\" method=\"post\" "
             "action=\"/train/data/upload\" enctype=\"multipart/form-data\">{}<label>File (CSV or "
             "JSONL, up to 16 MiB)<input type=\"file\" name=\"file\" required "
             "accept=\".csv,.jsonl,.ndjson,text/csv\"></label><label>Format<select name=\"format\">"
@@ -3549,8 +3474,8 @@ std::string workspace_content(const WorkspacePage& page) {
                 options += std::format("<option>{}</option>",
                                        web_ui_escape(json_text(connection, "name")));
             }
-            out += std::format(
-                "<details><summary>Pull a dataset</summary><form class=\"stack\" "
+            load += std::format(
+                "<details><summary>Pull a table from a connection</summary><form class=\"stack\" "
                 "method=\"post\" action=\"/train/data/pull\">{}<label>From<select "
                 "name=\"connection\">{}</select></label><label>Query<textarea name=\"query\" "
                 "rows=\"4\" required placeholder=\"SELECT account_id, plan, seats, renewed FROM "
@@ -3575,7 +3500,7 @@ std::string workspace_content(const WorkspacePage& page) {
                                                          ? json_text(generator, "kind")
                                                          : json_text(generator, "title")));
             }
-            out += std::format(
+            load += std::format(
                 "<details><summary>Generate a dataset</summary><form class=\"stack\" "
                 "method=\"post\" "
                 "action=\"/train/data/generate\">{}<label>Generator<select "
@@ -3588,6 +3513,12 @@ std::string workspace_content(const WorkspacePage& page) {
                 options);
         }
         out += "</section>";
+        out.insert(load_at,
+                   "<section class=\"panel\" id=\"load-data\"><h2>Load Data</h2><p class=\"sub\">"
+                   "Bring data into your workspace: upload a file, pull a table from a database "
+                   "you connected below, or generate one. Each becomes a dataset you can train "
+                   "on. <a href=\"/docs/load-data\">How loading data works</a></p>" +
+                   load + "</section>");
     } else if (page.section == "dataset") {
         const nlohmann::json dataset = data.value("get_dataset", nlohmann::json::object());
         std::string columns;
@@ -3621,23 +3552,25 @@ std::string workspace_content(const WorkspacePage& page) {
             hidden("dataset", page.subject),
             row_link(
                 "/train/query?" + query + "&statement=" +
-                    url_component("SELECT * FROM " + database + "." + page.subject + " LIMIT 100"),
+                    url_component("SELECT * FROM " + database + "." + page.subject),
                 "Query it"));
         if (const auto sample = data.find("sample"); sample != data.end()) {
             out += "<section class=\"panel\"><h2>First Rows</h2>" +
                    object_table(sample->value("rows", nlohmann::json::array())) + "</section>";
         }
         if (!partitions.empty()) {
-            out += "<section class=\"panel\"><h2>Partitions</h2>" + object_table(partitions) +
-                   "</section>";
+            // How the workspace stores it: for operators, not the first thing a person reads.
+            out += "<details class=\"panel\"><summary>Storage details (" +
+                   std::to_string(partitions.size()) + " partitions)</summary>" +
+                   object_table(partitions) + "</details>";
         }
     } else if (page.section == "query") {
         const std::string statement = json_text(data, "statement");
         out += std::format(
             "<section class=\"panel\"><form class=\"stack\" method=\"get\" "
             "action=\"/train/query\">{}"
-            "<label>Query<textarea name=\"statement\" rows=\"5\" required placeholder=\"SELECT * "
-            "FROM datasets.accounts LIMIT 100\">{}</textarea></label><label>Database<input "
+            "<label>Query<textarea name=\"statement\" rows=\"5\" required placeholder=\"SELECT plan, "
+            "COUNT(*) FROM datasets.accounts GROUP BY plan\">{}</textarea></label><label>Database<input "
             "name=\"database\" value=\"{}\" placeholder=\"datasets\"></label><button "
             "class=\"button "
             "button-primary\" type=\"submit\">Run</button></form></section>",
@@ -3645,9 +3578,14 @@ std::string workspace_content(const WorkspacePage& page) {
             web_ui_escape(statement),
             web_ui_escape(json_text(data, "database")));
         if (const auto result = data.find("workspace_sql"); result != data.end()) {
-            const nlohmann::json rows = result->value("rows", nlohmann::json::array());
-            out += std::format("<section class=\"panel\"><h2>{} rows</h2>{}</section>",
-                               rows.size(),
+            nlohmann::json rows = result->value("rows", nlohmann::json::array());
+            const std::size_t total = rows.size();
+            if (total > 500) {
+                rows.erase(rows.begin() + 500, rows.end());
+            }
+            out += std::format("<section class=\"panel\"><h2>{} rows</h2>{}{}</section>",
+                               total,
+                               total > 500 ? "<p class=\"sub\">Showing the first 500.</p>" : "",
                                rows.empty() ? std::string("<p>No rows.</p>") : object_table(rows));
         }
     } else if (page.section == "runs") {
@@ -3830,6 +3768,44 @@ std::vector<WebUiCrumb> workspace_trail(const WorkspacePage& page,
 
 } // namespace
 
+std::optional<std::string> web_ui_docs(std::string_view slug, WebUiViewer viewer) {
+    const std::vector<WebUiGuidePage>& pages = web_ui_guide();
+    if (pages.empty()) {
+        return std::nullopt;
+    }
+    const auto found = slug.empty() ? pages.begin()
+                                    : std::ranges::find(pages, slug, &WebUiGuidePage::slug);
+    if (found == pages.end()) {
+        return std::nullopt;
+    }
+    std::string contents;
+    for (const WebUiGuidePage& page : pages) {
+        const std::string href =
+            page.slug == pages.front().slug ? std::string("/docs") : "/docs/" + std::string(page.slug);
+        contents += std::format("<li><a href=\"{}\"{}>{}</a></li>",
+                                href,
+                                page.slug == found->slug ? " aria-current=\"page\"" : "",
+                                web_ui_escape(page.title));
+    }
+    // The next guide in reading order, so the section reads front to back.
+    std::string next;
+    if (const auto after = std::next(found); after != pages.end()) {
+        next = std::format("<p class=\"docs-next\">Next: <a href=\"/docs/{}\">{}</a></p>",
+                           after->slug,
+                           web_ui_escape(after->title));
+    }
+    const std::string content = std::format(
+        "<p class=\"eyebrow\">Docs</p><div class=\"docs\"><nav class=\"docs-contents\" "
+        "aria-label=\"Docs\"><ul>{}</ul></nav><article class=\"docs-page\">{}{}</article></div>",
+        contents,
+        markdown_to_html(found->markdown),
+        next);
+    return web_ui_shell("lake — " + std::string(found->title),
+                        std::vector<WebUiCrumb>{{"Docs", "/docs"}, {std::string(found->title), ""}},
+                        content,
+                        viewer);
+}
+
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     const WorkspaceSection& section = workspace_section(page.section);
     const std::string named =
@@ -3878,6 +3854,8 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
         }
         content += workspace_content(page);
         if (page.section == "projects") {
+            // Tucked away until the Workspaces page exists (lake#265, lake#257).
+            content += "<details class=\"panel\"><summary>Workspace settings</summary>";
             content += workspace_delete_form(
                 page,
                 "Delete Workspace",
@@ -3885,6 +3863,7 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
                 "Nothing else in lake is touched, and you can start a new, empty workspace "
                 "afterwards.",
                 "Delete workspace");
+            content += "</details>";
         }
     }
     if (page.unavailable.empty() && page.section == "data") {
@@ -7059,7 +7038,9 @@ std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer) {
     } else {
         content +=
             "<section class=\"panel\"><h2>Create an MCP Key</h2><p>A lake API token for your "
-            "agent. It acts as you, and never outlives your sign-in.</p>"
+            "agent or script. It acts as you. By default it lasts as long as your sign-in, at most "
+            "30 days; choose <em>Never</em> for a standing key, if your space allows keys that never "
+            "expire. Revoke any key on <a href=\"/tokens\">Tokens</a>.</p>"
             "<form class=\"stack\" method=\"post\" action=\"/developer/mcp/key\">"
             "<fieldset><legend>Access</legend>"
             "<label><input type=\"radio\" name=\"access\" value=\"all\" checked> Every tool</label>"
@@ -7067,7 +7048,10 @@ std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer) {
             "</fieldset><label>Lifetime<select name=\"expires_in_seconds\">"
             "<option value=\"\">As long as my sign-in allows (at most 30 days)</option>"
             "<option value=\"86400\">1 day</option><option value=\"604800\">7 days</option>"
-            "</select></label><button class=\"button button-primary\" type=\"submit\">Create an "
+            "<option value=\"never\">Never (a standing key)</option>"
+            "</select></label><label>Why this key exists<small>Needed for a key that never expires."
+            "</small><input name=\"reason\" placeholder=\"the nightly sync from our data "
+            "warehouse\"></label><button class=\"button button-primary\" type=\"submit\">Create an "
             "MCP key</button></form></section>";
     }
     const std::string claude_code =
@@ -7147,16 +7131,22 @@ std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer) {
 
 std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
     std::string content =
-        "<p class=\"eyebrow\">Ask Orama</p><h1>Ask Orama</h1><p class=\"sub\">The general agent "
-        "for all of lake. It reads what you may read, proposes every change for you to confirm, "
-        "and can hand your request to any agent.</p>";
+        page.embed ? std::string("<p class=\"sub\">Ask about anything in your lake. Changes are "
+                                 "proposed for you to confirm.</p>")
+                   : std::string("<p class=\"eyebrow\">Ask Orama</p><h1>Ask Orama</h1><p "
+                                 "class=\"sub\">Ask about anything in your lake. Ask Orama reads "
+                                 "what you may read, proposes every change for you to confirm, and "
+                                 "brings in the right agent when another does it better.</p>");
+    const std::string stay = page.embed ? hidden("embed", "1") : std::string();
     if (!page.error.empty()) {
         content +=
             std::format("<p class=\"error\" role=\"alert\">{}</p>", web_ui_escape(page.error));
     }
     if (!page.from.empty()) {
         content +=
-            std::format("<p class=\"sub\">About the page {}</p>", row_link(page.from, page.from));
+            std::format("<p class=\"sub\">About the page <a href=\"{}\" target=\"_top\">{}</a></p>",
+                        web_ui_escape(page.from),
+                        web_ui_escape(page.from.substr(0, page.from.find('?'))));
     }
     content += "<section class=\"panel ask-conversation\" aria-live=\"polite\">";
     if (page.messages.empty()) {
@@ -7204,13 +7194,14 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
                     done ? std::string("<p><span class=\"badge\">Confirmed</span></p>")
                          : std::format(
                                "<form class=\"inline\" method=\"post\" action=\"/ask/confirm\">"
-                               "{}{}{}{}{}<button class=\"button button-primary\" "
+                               "{}{}{}{}{}{}<button class=\"button button-primary\" "
                                "type=\"submit\">Confirm</button></form>",
                                hidden("customer_id", page.customer_id),
                                hidden("conversation", page.conversation_id),
                                hidden("message_id", json_text(message, "id")),
                                hidden("index", std::to_string(index)),
-                               hidden("from", page.from)));
+                               hidden("from", page.from),
+                               stay));
             }
         }
         content += "</article>";
@@ -7224,18 +7215,28 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
                                web_ui_escape(json_text(agent, "name")));
     }
     content += std::format(
-        "<section class=\"panel\"><form class=\"stack\" method=\"post\" action=\"/ask/send\">{}{}{}"
+        "<section class=\"panel\"><form class=\"stack\" method=\"post\" action=\"/ask/send\">{}{}{}{}"
         "<label>Talk to<select name=\"agent\">{}</select></label><label>Message<textarea "
         "name=\"message\" rows=\"3\" required placeholder=\"What should I look at first?\">"
         "</textarea></label><button class=\"button button-primary\" type=\"submit\">Send</button>"
-        "</form><p class=\"sub\"><a href=\"/ask?{}&from={}\">Start a new "
+        "</form><p class=\"sub\"><a href=\"/ask?{}&from={}{}\">Start a new "
         "conversation</a></p></section>",
         hidden("customer_id", page.customer_id),
         hidden("conversation", page.conversation_id),
         hidden("from", page.from),
+        stay,
         options,
         customer_query(page.customer_id),
-        url_component(page.from));
+        url_component(page.from),
+        page.embed ? "&embed=1" : "");
+    if (page.embed) {
+        // The panel beside a page: the conversation alone, in lake's styles.
+        return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta "
+               "name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Ask "
+               "Orama</title>" +
+               stylesheet_link() + "</head><body class=\"ask-embedded\"><main>" + content +
+               "</main></body></html>";
+    }
     return web_ui_shell(
         "lake — Ask Orama", std::vector<WebUiCrumb>{{"Ask Orama", ""}}, content, viewer);
 }

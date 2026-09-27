@@ -32,6 +32,9 @@ struct WebUiViewer {
     // called outside a request (tests, error pages built without one); the page title decides
     // then, as it did before the path was carried.
     std::string path;
+    // The request's query string (without '?'), so Ask Orama is told the whole page it was opened
+    // from: which project, pipeline, run or dataset (lake#258).
+    std::string query;
     // The signed-in user's id, so pages can mark the viewer's own personal space.
     std::string user_id;
     // True when Clerk is lake's sign-in (docs/api/clerk.md); lake's own passkey page is then not
@@ -86,6 +89,16 @@ std::string web_ui_shell(std::string_view title,
                          const std::vector<WebUiCrumb>& trail,
                          std::string_view content,
                          WebUiViewer viewer = false);
+
+// The Docs section (lake#252): guides written in docs/guide/*.md and embedded at build time, in
+// reading order. /docs is the first (Getting started); /docs/<slug> the others.
+struct WebUiGuidePage {
+    std::string_view slug, title, markdown;
+};
+const std::vector<WebUiGuidePage>& web_ui_guide();
+// A guide page in the site frame with the guide's own contents list; empty `slug` is the first.
+// Nothing when there is no such page.
+std::optional<std::string> web_ui_docs(std::string_view slug, WebUiViewer viewer);
 
 // Developer → MCP (docs/api/mcp.md): create a key, copy-ready setup for Claude Code, Cursor,
 // Claude Desktop and plain JSON-RPC, the skill and llms.txt, the worked flows, and every tool by
@@ -219,6 +232,8 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = tru
 // first, then every other agent that takes a conversation ({id, name}).
 struct AskPage {
     std::string customer_id, conversation_id, from, agent, error;
+    // In the side panel beside a page (lake#258): no site frame, and its forms stay in the panel.
+    bool embed = false;
     nlohmann::json messages = nlohmann::json::array();
     nlohmann::json agents = nlohmann::json::array();
 };
