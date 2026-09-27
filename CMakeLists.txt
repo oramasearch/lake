@@ -54,6 +54,18 @@ add_custom_command(
   DEPENDS ${LAKE_FONT_FILES} cmake/embed_fonts.cmake
   VERBATIM)
 
+# The Docs section's guides (docs/guide/*.md, lake#252), embedded so /docs needs no files at run time.
+file(GLOB LAKE_GUIDE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/guide/*.md")
+set(LAKE_EMBEDDED_GUIDE_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/web_ui_guide.cpp")
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_GUIDE_CPP}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/docs/guide"
+    "-DOUTPUT_FILE=${LAKE_EMBEDDED_GUIDE_CPP}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_guide.cmake"
+  DEPENDS ${LAKE_GUIDE_FILES} cmake/embed_guide.cmake
+  VERBATIM)
+
 # -----------------------------------------------------------------------------
 # Sibling and vendored modules — libliquid is library-only and provides Capy, Corosio
 # and HTTP to its consumers. Beast2 remains lake's Zetta-shaped serving stack.
@@ -147,6 +159,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 add_library(lake-core STATIC
   src/control/apps.cpp
   ${LAKE_EMBEDDED_FONTS_CPP}
+  ${LAKE_EMBEDDED_GUIDE_CPP}
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/callers.cpp
@@ -160,6 +173,7 @@ add_library(lake-core STATIC
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
   src/api/web_ui.cpp
+  src/api/markdown.cpp
   src/api/oauth.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp

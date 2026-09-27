@@ -318,12 +318,14 @@ TEST(WebUi, HomeSaysDesignTrainAndShip) {
     EXPECT_NE(html.find("<h3>Design</h3>"), std::string::npos);
     EXPECT_NE(html.find("<h3>Train</h3>"), std::string::npos);
     EXPECT_NE(html.find("<h3>Ship</h3>"), std::string::npos);
-    EXPECT_NE(html.find("liquid push"), std::string::npos);
-    EXPECT_NE(html.find("requires access to its source repository"), std::string::npos);
+    EXPECT_NE(html.find("Your data lives in your workspace"), std::string::npos)
+        << "one story about where data lives (lake#256)";
+    EXPECT_EQ(html.find("requires access to its source repository"), std::string::npos);
+    EXPECT_NE(html.find("href=\"/docs\">Read the docs</a>"), std::string::npos);
     EXPECT_NE(html.find("href=\"/sign-up\""), std::string::npos);
     EXPECT_EQ(html.find("href=\"/deployments\""), std::string::npos);
     const auto account = lake::api::web_ui_home(true);
-    EXPECT_NE(account.find("Open your repositories"), std::string::npos);
+    EXPECT_NE(account.find("href=\"/docs\">Getting started</a>"), std::string::npos);
     EXPECT_NE(account.find("href=\"/deployments\""), std::string::npos);
     EXPECT_NE(html.find(lake::api::web_ui_stylesheet_url()), std::string::npos);
     EXPECT_EQ(html.find("href=\"/style.css\""), std::string::npos);

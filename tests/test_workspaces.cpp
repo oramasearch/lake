@@ -607,12 +607,11 @@ TEST(Workspaces, DataPageShowsStorageWithTypedDeleteAndRefreshesWhileChanging) {
     EXPECT_NE(html.find("action=\"/train/data/store-create\""), std::string::npos);
     EXPECT_NE(html.find("<option value=\"volume:cluster\" selected>Volume — cluster disk</option>"),
               std::string::npos);
-    EXPECT_NE(html.find("<option value=\"object:r2\" disabled>Bucket — Cloudflare R2 — not yet: "
-                        "needs R2 enabled on Orama&#39;s Cloudflare account"),
-              std::string::npos)
-        << html;
-    EXPECT_NE(html.find("value=\"network_filesystem:nfs\" disabled"), std::string::npos);
-    EXPECT_NE(html.find("Filesystem — Drive — not yet: phase 3</option>"), std::string::npos);
+    // Only what can be created today; no internal plans or issue numbers (lake#257).
+    EXPECT_EQ(html.find("value=\"object:r2\""), std::string::npos);
+    EXPECT_EQ(html.find("not yet"), std::string::npos);
+    EXPECT_EQ(html.find("lake#196"), std::string::npos);
+    EXPECT_NE(html.find("are coming later.</small>"), std::string::npos);
     EXPECT_NE(html.find("name=\"size_gi\""), std::string::npos);
     EXPECT_EQ(html.find("content=\"3\""), std::string::npos) << "nothing is changing";
 
@@ -734,6 +733,14 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     EXPECT_NE(html.find("action=\"/train/data/upload\" enctype=\"multipart/form-data\""),
               std::string::npos)
         << "a file can be uploaded without any connection";
+    EXPECT_LT(html.find("<h2>Load Data</h2>"), html.find("<h2>Connections</h2>"))
+        << "loading data is the first thing on the page (lake#256)";
+    EXPECT_NE(html.find("<details open><summary>Upload a file"), std::string::npos);
+    page.data["loaded"] = {{"table", "accounts"}, {"rows", "200"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Loaded <strong>200</strong> rows into"), std::string::npos);
+    EXPECT_NE(html.find("name=accounts\">accounts</a>"), std::string::npos);
+    page.data.erase("loaded");
     EXPECT_NE(html.find("type=\"password\" name=\"token\""), std::string::npos);
     EXPECT_EQ(html.find("action=\"/train/data/pull\""), std::string::npos)
         << "no dataset can be pulled before a connection exists";
@@ -1433,7 +1440,8 @@ TEST(Workspaces, DataPageOffersTheSpacesServicesAndServicesWarnBeforeDeletingAUs
     std::string html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("Connect One of Your Services"), std::string::npos);
     EXPECT_NE(html.find(">Refresh</button>"), std::string::npos) << "crm is already connected";
-    EXPECT_NE(html.find("not supported yet: the workspace cannot read valkey"), std::string::npos);
+    EXPECT_NE(html.find("The workspace can't read valkey yet; Postgres works today"),
+              std::string::npos);
     EXPECT_EQ(html.find(">workspace</td>"), std::string::npos)
         << "the workspace itself is not offered";
     EXPECT_NE(html.find("action=\"/train/data/connect-service\""), std::string::npos);
@@ -2067,6 +2075,72 @@ TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
 
     r.w.caller->answers["get_agent"] = {{"id", "n-1"}, {"name", "Native"}, {"runtime", "native"}};
     EXPECT_FALSE(r.call("launch_agent", {{"agent_id", "n-1"}}).ok);
+}
+
+TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {
+    // UX review 2026-09-27: the Agent Factory's approve, Discover's create and reading a
+    // conversation were page-only; REST and MCP now do the same through these.
+    AgentRuns r;
+    for (const char* name : {"create_agent_from_proposal", "create_projects_from_opportunities",
+                             "get_ask_conversation"}) {
+        EXPECT_NE(r.registry.find(name), nullptr) << name;
+    }
+    r.w.caller->answers["create_agent"] = {{"id", "a-9"}};
+    r.w.caller->answers["get_agent"] = {{"id", "a-9"}, {"name", "Renewal watcher"},
+                                        {"runtime", "python"}};
+    const json proposal = {{"type", "python"},
+                           {"storage", "zetta"},
+                           {"agent", {{"name", "Renewal watcher"}, {"purpose", "Flag renewals"},
+                                      {"manifesto", "Company data only."}}},
+                           {"files", json::array({{{"path", "agent.toml"},
+                                                   {"contents", "entrypoint = \"agent.main:run\""}}})}};
+    EXPECT_FALSE(r.call("create_agent_from_proposal",
+                        {{"proposal", proposal}, {"defects", json::array({"no goal"})}})
+                     .ok)
+        << "a proposal with defects is refused";
+    const auto created = r.call("create_agent_from_proposal", {{"proposal", proposal}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["agent_id"], "a-9");
+    EXPECT_EQ(created.value["runtime"], "python");
+    const auto made = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
+        return call.first == "create_agent";
+    });
+    ASSERT_NE(made, r.w.caller->calls.end());
+    EXPECT_EQ(made->second["definition"]["source"], "zetta");
+    EXPECT_EQ(made->second["definition"]["entrypoint"], "agent.main:run");
+    EXPECT_NE(made->second["definition"]["instructions"].get<std::string>().find("Company data only."),
+              std::string::npos)
+        << "instructions.md is written from the agent";
+    EXPECT_FALSE(r.store.list_agent_launches(r.w.customer_id, "a-9", 5)->empty())
+        << "its first check run started";
+    EXPECT_TRUE(created.value.contains("check_launch_id"));
+
+    r.w.caller->answers["create_project"] = {{"name", "x"}};
+    const auto drafted = r.call("create_projects_from_opportunities",
+                                {{"opportunities",
+                                  json::array({{{"intent", "Predict churn next quarter"},
+                                                {"solution", "S-1"}}})}});
+    ASSERT_TRUE(drafted.ok) << drafted.error.message;
+    EXPECT_TRUE(drafted.value["projects"][0].get<std::string>().starts_with("predict-churn-next-quarter-"));
+    EXPECT_FALSE(r.call("create_projects_from_opportunities",
+                        {{"opportunities", json::array({json::object()})}})
+                     .ok)
+        << "an Opportunity needs an intent";
+
+    const std::string conversation = lake::control::new_uuid_v4();
+    ASSERT_TRUE(r.store.append_ask_message(
+        {"", conversation, r.w.customer_id, r.principal.user_id, "user", "hi", nullptr, ""}));
+    lake::api::ApiContext context;
+    context.store = &r.store;
+    context.authorized = true;
+    context.acting_user_id = r.principal.user_id;
+    context.acting_identity = r.principal.taap_id;
+    context.request_id = lake::control::new_uuid_v4();
+    const auto read = liquid::runtime::block_on(r.registry.call_async(
+        "get_ask_conversation", {{"conversation_id", conversation}}, context));
+    ASSERT_TRUE(read && read->ok) << (read ? read->error.message : "");
+    ASSERT_EQ((*read).value["messages"].size(), 1U);
+    EXPECT_EQ((*read).value["messages"][0]["content"], "hi");
 }
 
 TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {

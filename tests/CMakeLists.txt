@@ -5,7 +5,7 @@ if(NOT LAKE_JSONSCHEMA_RESULT EQUAL 0)
   message(FATAL_ERROR "Lake schema conformance tests require Python jsonschema")
 endif()
 
-add_executable(lake-tests test_main.cpp test_web_ui.cpp
+add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
   test_audit_isolation.cpp
   test_instance_origin.cpp
   test_schema_conformance.cpp

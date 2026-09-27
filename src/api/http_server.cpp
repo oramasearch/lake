@@ -326,6 +326,10 @@ boost::http::route_task send_text(boost::http::route_params& route,
     route.status(status);
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, cache_control);
+    if (content_type.starts_with("text/html")) {
+        // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
+        route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
+    }
     stamp_response_headers(route, body);
     auto [send_error] = co_await route.send(body);
     if (send_error)
@@ -4766,6 +4770,8 @@ struct ApiServer::Impl {
             "/sessions",
             "/tokens",
             "/developer/mcp",
+            "/docs",
+            "/docs/:page",
             "/developer/mcp/key",
             "/developer/mcp/skill",
             "/skills/lake/SKILL.md",
@@ -4822,6 +4828,7 @@ struct ApiServer::Impl {
     ApiContext context_for(const boost::http::route_params& route) const {
         ApiContext ctx;
         ctx.request_path = std::string(route.url.path());
+        ctx.request_query = std::string(route.url.encoded_query());
         ctx.store = options.store.get();
         ctx.search = options.search.get();
         ctx.pki = &pki;
@@ -4916,6 +4923,7 @@ struct ApiServer::Impl {
     WebUiViewer viewer_for(const ApiContext& context) const {
         WebUiViewer viewer{context.authorized, context.operator_credential};
         viewer.path = context.request_path;
+        viewer.query = context.request_query;
         viewer.user_id = context.acting_user_id;
         viewer.clerk = clerk.has_value();
         return viewer;
@@ -6364,6 +6372,21 @@ struct ApiServer::Impl {
     }
 
     // Developer → MCP (docs/api/mcp.md).
+    boost::http::route_task serve_docs(boost::http::route_params& route, std::string page) {
+        const ApiContext context = context_for(route);
+        auto rendered = web_ui_docs(page, viewer_for(context));
+        if (!rendered) {
+            auto missing = web_ui_docs("", viewer_for(context));
+            return send_text(route,
+                             boost::http::status::not_found,
+                             missing ? *missing : std::string("no such page"),
+                             "text/html; charset=utf-8",
+                             "no-store");
+        }
+        return send_text(
+            route, boost::http::status::ok, *rendered, "text/html; charset=utf-8", "no-store");
+    }
+
     boost::http::route_task serve_mcp_page(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (!context.authorized) {
@@ -6403,7 +6426,19 @@ struct ApiServer::Impl {
                              {"scopes", std::move(scopes)},
                              {"static", false},
                              {"reason", "created on Developer → MCP"}};
-        if (const std::string expiry = form_field(body, "expires_in_seconds"); !expiry.empty()) {
+        if (const std::string expiry = form_field(body, "expires_in_seconds"); expiry == "never") {
+            // A key that never expires (lake#234) names its tools and says why it exists.
+            input["never_expires"] = true;
+            const std::string reason = form_field(body, "reason");
+            input["reason"] = reason.empty() ? std::string("created on Developer → MCP") : reason;
+            if (!read_only) {
+                nlohmann::json named = nlohmann::json::array();
+                for (const auto& capability : registry.list()) {
+                    named.push_back(capability->name);
+                }
+                input["scopes"] = std::move(named);
+            }
+        } else if (!expiry.empty()) {
             input["expires_in_seconds"] = std::atoi(expiry.c_str());
         }
         const ApiResult result = registry.call("create_token", input, context);
@@ -7560,6 +7595,9 @@ struct ApiServer::Impl {
             } else if (section == "project") {
                 reads = {{"get_project", {{"name", page.subject}}}};
             } else if (section == "data") {
+                if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
+                    page.data["loaded"] = {{"table", loaded}, {"rows", query_value(route, "rows")}};
+                }
                 reads = {{"list_connections", nlohmann::json::object()},
                          {"list_datasets", nlohmann::json::object()},
                          {"list_dataset_generators", nlohmann::json::object()}};
@@ -7597,11 +7635,17 @@ struct ApiServer::Impl {
                     "workspace_sql",
                     {{"customer_id", page.customer_id},
                      {"statement",
+                      // The workspace's SQL has no LIMIT yet (zetta issue filed from the UX
+                      // review), so lake keeps the first rows itself.
                       "SELECT * FROM " + (database.empty() ? std::string("datasets") : database) +
-                          "." + page.subject + " LIMIT 20"}},
+                          "." + page.subject}},
                     context));
                 if (sample.ok) {
-                    page.data["sample"] = sample.value;
+                    nlohmann::json rows = sample.value.value("rows", nlohmann::json::array());
+                    if (rows.is_array() && rows.size() > 20) {
+                        rows.erase(rows.begin() + 20, rows.end());
+                    }
+                    page.data["sample"] = {{"rows", std::move(rows)}};
                 }
             } else if (section == "query") {
                 const std::string statement = query_value(route, "statement");
@@ -7776,6 +7820,10 @@ struct ApiServer::Impl {
         }
         if (!result.ok) {
             back += "&error=" + oauth_url_encode(result.error.message);
+        } else {
+            // Say what arrived, and where (lake#256).
+            back += "&loaded=" + oauth_url_encode(result.value.value("table", std::string())) +
+                    "&rows=" + std::to_string(result.value.value("rows", 0));
         }
         co_return co_await redirect(route, back);
     }
@@ -7837,6 +7885,7 @@ struct ApiServer::Impl {
         auto selection = workspace_selection(context, query_value(route, "customer_id"));
         page.customer_id = selection.customer_id;
         page.from = query_value(route, "from");
+        page.embed = query_value(route, "embed") == "1";
         page.agent = query_value(route, "agent");
         page.error = query_value(route, "error");
         page.conversation_id = query_value(route, "conversation");
@@ -7886,7 +7935,23 @@ struct ApiServer::Impl {
         }
         std::string back = "/ask?customer_id=" + oauth_url_encode(customer_id) +
                            "&conversation=" + oauth_url_encode(conversation) +
-                           "&from=" + oauth_url_encode(from) + "&agent=" + oauth_url_encode(agent);
+                           "&from=" + oauth_url_encode(from) + "&agent=" + oauth_url_encode(agent) +
+                           (form_field(body, "embed") == "1" ? "&embed=1" : "");
+        // The whole page it was opened from, by name (lake#258): its path and each query value,
+        // so "this pipeline" is the pipeline on that page.
+        nlohmann::json page{{"path", from.substr(0, from.find('?'))}};
+        if (const std::size_t mark = from.find('?'); mark != std::string::npos) {
+            std::string_view rest = std::string_view(from).substr(mark + 1);
+            while (!rest.empty()) {
+                const std::size_t amp = rest.find('&');
+                const std::string_view pair = rest.substr(0, amp);
+                const std::size_t equals = pair.find('=');
+                if (equals != std::string_view::npos) {
+                    page[form_decode(pair.substr(0, equals))] = form_decode(pair.substr(equals + 1));
+                }
+                rest = amp == std::string_view::npos ? std::string_view() : rest.substr(amp + 1);
+            }
+        }
         std::string error;
         if (!confirm) {
             const std::string message = form_field(body, "message");
@@ -7904,7 +7969,7 @@ struct ApiServer::Impl {
                                                 {"agent", agent},
                                                 {"message", message},
                                                 {"conversation_id", conversation},
-                                                {"page", {{"path", from}}}},
+                                                {"page", page}},
                                                context));
             if (answered.ok) {
                 const nlohmann::json& value = answered.value;
@@ -8021,29 +8086,6 @@ struct ApiServer::Impl {
 
     // The files of a Python proposal, with instructions.md composed from Studio's boxes when the
     // proposal carries none.
-    static nlohmann::json proposal_files(const nlohmann::json& proposal) {
-        const nlohmann::json agent = proposal.value("agent", nlohmann::json::object());
-        nlohmann::json files = nlohmann::json::array();
-        bool instructions = false;
-        for (const nlohmann::json& file : proposal.value("files", nlohmann::json::array())) {
-            instructions = instructions || file.value("path", std::string()) == "instructions.md";
-            files.push_back({{"path", file.value("path", std::string())},
-                             {"contents", file.value("contents", std::string())}});
-        }
-        if (!instructions) {
-            std::string text = "# " + agent.value("name", std::string()) + "\n\n" +
-                               agent.value("purpose", std::string()) + "\n";
-            if (!agent.value("manifesto", std::string()).empty()) {
-                text += "\n## How you work\n\n" + agent.value("manifesto", std::string()) + "\n";
-            }
-            if (!agent.value("goal", std::string()).empty()) {
-                text += "\n## Your goal\n\n" + agent.value("goal", std::string()) + "\n";
-            }
-            files.push_back({{"path", "instructions.md"}, {"contents", text}});
-        }
-        return files;
-    }
-
     boost::http::route_task serve_factory_form(boost::http::route_params& route, bool approve) {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
@@ -8132,158 +8174,29 @@ struct ApiServer::Impl {
         if (!error.empty()) {
             co_return co_await redirect(route, back + "&error=" + oauth_url_encode(error));
         }
-        context.audit_kind = "agent.factory.approve";
-        context.audit_details = {{"customer_id", customer_id},
-                                 {"proposal_sha256", proposal_digest(proposal)}};
+        // The same capability REST and MCP call (create_agent_from_proposal).
         const nlohmann::json agent = proposal.value("agent", nlohmann::json::object());
-        const control::WorkspaceConfig* config =
-            options.workspaces ? &options.workspaces->config() : nullptr;
-        const bool python = proposal.value("type", std::string()) == "python";
-        nlohmann::json record{{"name", agent.value("name", std::string())},
-                              {"purpose", agent.value("purpose", std::string())},
-                              {"description", agent.value("purpose", std::string())},
-                              {"work_area", agent.value("work_area", nlohmann::json::object())},
-                              {"manifesto", agent.value("manifesto", std::string())},
-                              {"goal", agent.value("goal", std::string())},
-                              {"skills", agent.value("skills", nlohmann::json::array())},
-                              {"trigger", agent.value("trigger", std::string())}};
-        if (!proposal.value("pipelines", nlohmann::json::array()).empty()) {
-            nlohmann::json grants = nlohmann::json::array();
-            for (const nlohmann::json& grant : proposal["pipelines"]) {
-                grants.push_back({{"project", grant.value("project", std::string())},
-                                  {"graph", grant.value("graph", std::string())}});
-            }
-            record["pipelines"] = std::move(grants);
-        }
-        ApiResult created = ApiResult::success(nlohmann::json::object());
-        if (!python) {
-            record["runtime"] = "native";
-            record["model"] = config ? config->base_agent_model : std::string();
-            record["model_name"] = "Orama base model";
-            record["system_prompt"] = agent.value("manifesto", std::string());
-        } else {
-            record["runtime"] = "python";
-            record["model_name"] = config ? config->frontier_model : std::string("gpt-5.5");
-            const nlohmann::json files = proposal_files(proposal);
-            std::string entrypoint;
-            for (const nlohmann::json& file : files) {
-                if (file.value("path", std::string()) == "agent.toml") {
-                    const std::string toml = file.value("contents", std::string());
-                    const auto at = toml.find("entrypoint");
-                    const auto open = toml.find('"', at);
-                    const auto close = toml.find('"', open + 1);
-                    if (at != std::string::npos && open != std::string::npos &&
-                        close != std::string::npos) {
-                        entrypoint = toml.substr(open + 1, close - open - 1);
-                    }
-                }
-            }
-            if (proposal.value("storage", std::string()) == "lake") {
-                // The code goes into a private lake repository; the agent pins its commit.
-                std::string slug;
-                for (const char character : agent.value("name", std::string("agent"))) {
-                    if (std::isalnum(static_cast<unsigned char>(character))) {
-                        slug +=
-                            static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-                    } else if (!slug.empty() && slug.back() != '-') {
-                        slug += '-';
-                    }
-                }
-                while (!slug.empty() && slug.back() == '-') {
-                    slug.pop_back();
-                }
-                const std::string repository_name =
-                    "agent-" + (slug.empty() ? std::string("agent") : slug.substr(0, 40)) + "-" +
-                    control::new_uuid_v4().substr(0, 4);
-                const ApiResult repository = unwrap(co_await workspace_call(
-                    "create_repository",
-                    {{"customer_id", customer_id},
-                     {"name", repository_name},
-                     {"description", "The code of the agent " + agent.value("name", std::string())},
-                     {"visibility", "private"}},
-                    context));
-                if (!repository.ok) {
-                    created = repository;
-                } else {
-                    nlohmann::json operations = nlohmann::json::array();
-                    for (const nlohmann::json& file : files) {
-                        const std::string contents = file.value("contents", std::string());
-                        operations.push_back(
-                            {{"type", "file"},
-                             {"path", file.value("path", std::string())},
-                             {"content", base64_encode(std::as_bytes(std::span(contents)))}});
-                    }
-                    const std::string repository_id = repository.value.value("id", std::string());
-                    const ApiResult committed = unwrap(co_await workspace_call(
-                        "commit_repository_files",
-                        {{"id", repository_id},
-                         {"message",
-                          "The agent " + agent.value("name", std::string()) +
-                              ", as approved in the Agent Factory"},
-                         {"operations", std::move(operations)}},
-                        context));
-                    if (!committed.ok) {
-                        created = committed;
-                    } else {
-                        record["definition"] = {
-                            {"source", "lake"},
-                            {"repository_id", repository_id},
-                            {"revision", committed.value.value("commitOid", std::string())},
-                            {"entrypoint", entrypoint}};
-                    }
-                }
-            } else {
-                std::string instructions;
-                nlohmann::json inline_files = nlohmann::json::array();
-                for (const nlohmann::json& file : files) {
-                    if (file.value("path", std::string()) == "instructions.md") {
-                        instructions = file.value("contents", std::string());
-                    } else {
-                        inline_files.push_back(file);
-                    }
-                }
-                record["definition"] = {{"source", "zetta"},
-                                        {"instructions", instructions},
-                                        {"files", std::move(inline_files)},
-                                        {"entrypoint", entrypoint}};
-            }
-        }
-        std::string agent_id;
-        if (created.ok) {
-            created = unwrap(co_await workspace_call(
-                "workspace_act",
-                {{"customer_id", customer_id}, {"capability", "create_agent"}, {"input", record}},
-                context));
-            agent_id = created.ok ? created.value.value("id", std::string()) : "";
-        }
+        const ApiResult created = unwrap(co_await workspace_call(
+            "create_agent_from_proposal",
+            {{"customer_id", customer_id},
+             {"proposal", proposal},
+             {"defects", answer.value("defects", nlohmann::json::array())}},
+            context));
         if (!created.ok) {
             say("I could not create it: " + created.error.message, {{"created", false}});
             co_return co_await redirect(route,
                                         back + "&error=" + oauth_url_encode(created.error.message));
         }
+        const std::string agent_id = created.value.value("agent_id", std::string());
         std::string note = "Created " + agent.value("name", std::string()) + ".";
-        if (python && !agent.value("trigger", std::string()).empty()) {
-            const ApiResult scheduled =
-                unwrap(co_await workspace_call("schedule_agent",
-                                               {{"customer_id", customer_id},
-                                                {"agent_id", agent_id},
-                                                {"trigger", agent["trigger"]}},
-                                               context));
-            note += scheduled.ok ? " Its trigger is scheduled."
-                                 : " Its trigger was not scheduled: " + scheduled.error.message;
+        if (created.value.contains("scheduled")) {
+            note += created.value.value("scheduled", false)
+                        ? " Its trigger is scheduled."
+                        : " Its trigger was not scheduled: " +
+                              created.value.value("schedule_error", std::string());
         }
-        if (python) {
-            // The first place a new agent runs: a short check job the person can read.
-            const ApiResult checked = unwrap(co_await workspace_call(
-                "launch_agent",
-                {{"customer_id", customer_id},
-                 {"agent_id", agent_id},
-                 {"mode", "job"},
-                 {"input",
-                  "A first check: say in two sentences what you are for and what you "
-                  "can reach."}},
-                context));
-            note += checked.ok ? " A first check run has started." : "";
+        if (created.value.contains("check_launch_id")) {
+            note += " A first check run has started.";
         }
         say(note, {{"created", true}, {"agent_id", agent_id}});
         co_return co_await redirect(route,
@@ -8420,42 +8333,22 @@ struct ApiServer::Impl {
                 result =
                     ApiResult::failure("invalid_input", "The Opportunities did not come back.");
             }
+            nlohmann::json chosen = nlohmann::json::array();
             for (const std::string& pick :
                  result.ok ? form_fields(body, "pick") : std::vector<std::string>{}) {
                 const std::size_t index = static_cast<std::size_t>(std::atoi(pick.c_str()));
-                if (index >= opportunities.size() || !opportunities[index].is_object()) {
-                    continue;
+                if (index < opportunities.size() && opportunities[index].is_object()) {
+                    chosen.push_back(opportunities[index]);
                 }
-                const nlohmann::json& item = opportunities[index];
-                const std::string intent = item.value("intent", std::string());
-                std::string name;
-                for (const char character : intent) {
-                    if (std::isalnum(static_cast<unsigned char>(character))) {
-                        name +=
-                            static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
-                    } else if (!name.empty() && name.back() != '-') {
-                        name += '-';
-                    }
-                    if (name.size() >= 40) {
-                        break;
-                    }
-                }
-                while (!name.empty() && name.back() == '-') {
-                    name.pop_back();
-                }
-                name = (name.empty() ? std::string("opportunity") : name) + "-" +
-                       control::new_uuid_v4().substr(0, 4);
-                const std::string description =
-                    intent + "\n\nSource Opportunity (Auto-Suggest): " +
-                    item.value("solution", std::string()) + ", " +
-                    item.value("methodology", std::string()) + ". " +
-                    item.value("why_this_data_supports_it", std::string());
-                result = unwrap(co_await act(
-                    "create_project",
-                    {{"name", name}, {"description", description}, {"intent", intent}}));
-                if (!result.ok) {
-                    break;
-                }
+            }
+            if (result.ok && chosen.empty()) {
+                result = ApiResult::failure("invalid_input", "Choose at least one Opportunity.");
+            } else if (result.ok) {
+                // The same capability REST and MCP call.
+                result = unwrap(co_await workspace_call(
+                    "create_projects_from_opportunities",
+                    {{"customer_id", customer_id}, {"opportunities", std::move(chosen)}},
+                    context));
             }
         } else if (action == "agent_grant" || action == "agent_revoke") {
             // Pipelines as tools (lake#238): the whole list is written back, so Zetta checks
@@ -12062,6 +11955,23 @@ struct ApiServer::Impl {
     // last handler and nothing answers otherwise — a request must never hang, so
     // this trailing middleware terminates every miss with a 404.
     boost::http::route_task serve_not_found(boost::http::route_params& route) {
+        // A tool called with the wrong method is named, with the method to use (lake#256).
+        const std::string_view path = route.url.path();
+        if (path.starts_with("/v1/")) {
+            const std::string name(path.substr(4));
+            if (const auto capability = registry.find(name); capability != nullptr) {
+                const bool read = capability->kind == CapabilityKind::Read;
+                return send_text(
+                    route,
+                    boost::http::status::method_not_allowed,
+                    error_body("method_not_allowed",
+                               name + (read ? " is a read: call it with GET and a query string"
+                                            : " changes something: call it with POST and a JSON "
+                                              "body")),
+                    "application/json; charset=utf-8",
+                    "no-store");
+            }
+        }
         return send_text(route,
                          boost::http::status::not_found,
                          error_body("not_found", "no such route"),
@@ -12444,6 +12354,21 @@ bool ApiServer::start() {
         http::method::get, "/tokens", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/tokens", impl.serve_tokens(route));
         });
+    // The Docs section (lake#252): public, rendered from the guides embedded at build time.
+    router.add(http::method::get, "/docs", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/docs", impl.serve_docs(route, ""));
+    });
+    router.add(http::method::get,
+               "/docs/:page",
+               [&impl](http::route_params& route) -> http::route_task {
+                   std::string page;
+                   for (const auto& [name, value] : route.params) {
+                       if (name == "page") {
+                           page = value;
+                       }
+                   }
+                   return impl.observe_request(route, "/docs/:page", impl.serve_docs(route, page));
+               });
     router.add(http::method::get,
                "/developer/mcp",
                [&impl](http::route_params& route) -> http::route_task {

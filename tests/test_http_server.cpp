@@ -584,6 +584,20 @@ TEST_P(HttpResponseIsolation, TheMcpPageMakesAKeyThatWorksOverMcp) {
     ASSERT_TRUE(llms.starts_with("HTTP/1.1 200")) << llms.substr(0, 300);
     EXPECT_NE(llms.find("http://localhost/mcp"), std::string::npos);
     EXPECT_NE(llms.find("`create_pipeline` (write)"), std::string::npos);
+    // A tool called with the wrong method says which method to use (lake#256).
+    const std::string wrong = connection->request("GET", "/v1/create_pipeline");
+    EXPECT_TRUE(wrong.starts_with("HTTP/1.1 405")) << wrong.substr(0, 200);
+    EXPECT_NE(wrong.find("call it with POST"), std::string::npos);
+    // The Docs section is public and is never the raw JSON of the artifact route (lake#252).
+    const std::string docs = connection->request("GET", "/docs");
+    ASSERT_TRUE(docs.starts_with("HTTP/1.1 200")) << docs.substr(0, 300);
+    EXPECT_NE(docs.find("Getting started"), std::string::npos);
+    EXPECT_NE(docs.find("Content-Security-Policy: frame-ancestors 'self'"), std::string::npos)
+        << "only lake frames lake's pages";
+    EXPECT_TRUE(connection->request("GET", "/docs/train").starts_with("HTTP/1.1 200"));
+    const std::string missing = connection->request("GET", "/docs/nope");
+    EXPECT_TRUE(missing.starts_with("HTTP/1.1 404")) << missing.substr(0, 200);
+    EXPECT_EQ(missing.find("artifact does not exist"), std::string::npos);
     const std::string full = body_of(connection->request("GET", "/llms-full.txt"));
     EXPECT_TRUE(connection->request("GET", "/developer/mcp").starts_with("HTTP/1.1 302"));
 

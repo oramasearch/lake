@@ -37,7 +37,10 @@ constexpr std::array group_rules{
                   return n == "list_agent_library" || n == "launch_agent" ||
                          n == "list_agent_launches" || n == "stop_agent_launch" ||
                          n == "schedule_agent" || n == "list_agent_schedules" ||
-                         n == "unschedule_agent" || n == "agent_turn";
+                         n == "unschedule_agent" || n == "agent_turn" ||
+                         n == "create_agent_from_proposal" ||
+                         n == "create_projects_from_opportunities" ||
+                         n == "get_ask_conversation";
               }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your Zetta workspace: projects and pipelines, data, runs, models and search "
@@ -165,8 +168,9 @@ std::string how_to_connect(std::string_view origin) {
     return std::format(
         "lake's MCP server is `{0}` (Streamable HTTP, JSON-RPC 2.0, protocol {1}: `initialize`, "
         "`ping`, `tools/list`, `tools/call`). Authenticate with `Authorization: Bearer <key>`: a "
-        "lake API token. Create one on {2}/developer/mcp (or {2}/tokens); a token never outlives "
-        "the sign-in that made it.\n\n"
+        "lake API token. Create one on {2}/developer/mcp (or {2}/tokens). A token lasts as long as "
+        "the sign-in that made it (at most 30 days) unless it is a standing key that never "
+        "expires, which a space must allow and which names its tools and a reason.\n\n"
         "- Claude Code: `claude mcp add --transport http lake {0} --header \"Authorization: "
         "Bearer $LAKE_KEY\"`\n"
         "- REST: every tool is also `{2}/v1/<tool>` (a read is GET with a query string, an "
@@ -261,6 +265,29 @@ const std::vector<Flow>& flows() {
            "`capability: \"approve_plan\"`, `input: {project, graph}`: an edited pipeline must be "
            "approved again"},
           {"run_pipeline", "runs the checks, then the pipeline; answers {gate, run}"}}},
+        {"Load a dataset",
+         "A dataset is a table in your workspace. Upload a CSV or JSONL file's text (up to 16 MiB).",
+         {{"start_workspace", "once per space; poll `workspace_status` until it is ready"},
+          {"workspace_act",
+           "`capability: \"upload_dataset\"`, `input: {table_name, format: \"csv\"|\"jsonl\", "
+           "content}`; answers the rows loaded"},
+          {"workspace_query", "`capability: \"get_dataset\"`, `input: {dataset}`: its columns"},
+          {"workspace_sql", "`statement: \"SELECT … LIMIT 20\"` to look at it"}}},
+        {"Train a model and call it",
+         "Train from a dataset, read the report, publish the model and score new rows.",
+         {{"workspace_act",
+           "`capability: \"create_project\"`, `input: {name, description, intent}`"},
+          {"workspace_act",
+           "`capability: \"capture_intent\"`, `input: {project, text: <what to predict>}`, then "
+           "`capability: \"compile_intent\"`, `input: {project, input_id}`: a pipeline built from "
+           "the sentence"},
+          {"workspace_act", "`capability: \"approve_plan\"`, `input: {project, graph}`"},
+          {"run_pipeline",
+           "`dataset_path: \"datasets.<name>\"`, `holdout_fraction: 0.2`, `model_name`; answers "
+           "{gate, run}"},
+          {"workspace_query", "`capability: \"get_run_report\"`, `input: {run_id}` once it finished"},
+          {"workspace_act", "`capability: \"expose_model\"`, `input: {model: <id>}` to publish it"},
+          {"predict", "`model`, `rows`: scores rows through the published model"}}},
         {"Stand up a Postgres service and connect it",
          "A service is a database, stream or engine lake runs for your space.",
          {{"list_service_kinds", "the kinds, their expected start times, which are preview"},
