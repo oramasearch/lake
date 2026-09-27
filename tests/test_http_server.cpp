@@ -1207,12 +1207,13 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
         {"files",
          nlohmann::json::array({{{"path", "agent/tools.py"}, {"contents", "TOOLS = []\n"}}})},
         {"secret_mount", ""}};
+    // AgentCreator answers words for the person and the structured answer beside them
+    // (agent-creator#1).
     agents_->answer = {
         {"ok", true},
-        {"reply",
-         nlohmann::json(
-             {{"kind", "proposal"}, {"proposal", proposal}, {"defects", nlohmann::json::array()}})
-             .dump()}};
+        {"reply", "I propose an agent named Renewal watcher: Flag renewals at risk."},
+        {"result",
+         {{"kind", "proposal"}, {"proposal", proposal}, {"defects", nlohmann::json::array()}}}};
     const std::string conversation = lake::control::new_uuid_v4();
     const std::string sent =
         connection->request("POST",

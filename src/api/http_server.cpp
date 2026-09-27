@@ -8174,8 +8174,13 @@ struct ApiServer::Impl {
 
     // ---- Train > Agents > Agent Factory (docs/api/agent-factory.md, lake#233) ----
 
-    // AgentCreator answers with one JSON object in its reply: a question or a proposal.
+    // AgentCreator's structured answer, a question or a proposal: its `result` (agent-creator#1),
+    // or, from an AgentCreator that answered before it had one, the JSON in its reply.
     static nlohmann::json creator_answer(const nlohmann::json& turn) {
+        if (const nlohmann::json result = turn.value("result", nlohmann::json());
+            result.is_object() && result.contains("kind")) {
+            return result;
+        }
         nlohmann::json answer =
             nlohmann::json::parse(turn.value("reply", std::string()), nullptr, false);
         return answer.is_object() ? answer : nlohmann::json::object();
