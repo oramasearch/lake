@@ -7463,6 +7463,41 @@ struct ApiServer::Impl {
                 page.state = status.value;
             }
         }
+        if (section == "agent" && page.unavailable.empty() && page.state.value("ready", false)) {
+            // The approved Pipelines this agent could be granted (lake#238).
+            nlohmann::json approved = nlohmann::json::array();
+            const ApiResult projects =
+                unwrap(co_await workspace_call("workspace_query",
+                                               {{"customer_id", page.customer_id},
+                                                {"capability", "list_projects"},
+                                                {"input", nlohmann::json::object()}},
+                                               context));
+            std::size_t read = 0;
+            for (const nlohmann::json& entry :
+                 projects.ok ? projects.value.value("projects", nlohmann::json::array())
+                             : nlohmann::json::array()) {
+                if (++read > 20) {
+                    break;
+                }
+                const std::string project = entry.is_string() ? entry.get<std::string>()
+                                                              : entry.value("name", std::string());
+                const ApiResult got =
+                    unwrap(co_await workspace_call("workspace_query",
+                                                   {{"customer_id", page.customer_id},
+                                                    {"capability", "get_project"},
+                                                    {"input", {{"name", project}}}},
+                                                   context));
+                for (const nlohmann::json& graph :
+                     got.ok ? got.value.value("graphs", nlohmann::json::array())
+                            : nlohmann::json::array()) {
+                    if (graph.value("approval", std::string()) == "approved") {
+                        approved.push_back(
+                            {{"project", project}, {"graph", graph.value("name", std::string())}});
+                    }
+                }
+            }
+            page.data["approved_pipelines"] = std::move(approved);
+        }
         if (section == "agent" && page.unavailable.empty()) {
             const ApiResult launches = unwrap(co_await workspace_call(
                 "list_agent_launches",
@@ -7472,7 +7507,7 @@ struct ApiServer::Impl {
                 page.data["list_agent_launches"] = launches.value;
             }
         }
-        if (section == "agents") {
+        if (section == "agents" || section == "discover") {
             // The Agent Library does not need the workspace (docs/api/train-agents.md).
             const ApiResult library = unwrap(
                 co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
@@ -7661,6 +7696,541 @@ struct ApiServer::Impl {
         co_return co_await redirect(route, back);
     }
 
+    // ---- Ask Orama (docs/api/ask-orama.md, lake#236) ----
+
+    // The conversation's messages as the page shows them.
+    nlohmann::json ask_messages_json(const std::vector<control::AskMessage>& messages) {
+        nlohmann::json out = nlohmann::json::array();
+        for (const control::AskMessage& message : messages) {
+            out.push_back({{"id", message.id},
+                           {"role", message.role},
+                           {"content", message.content},
+                           {"payload", message.payload}});
+        }
+        return out;
+    }
+
+    // Ask Orama first, then every other agent that takes a conversation: the library's running
+    // chat agents and the space's own chat-capable agents.
+    liquid::runtime::task<nlohmann::json> ask_agents(ApiContext& context, std::string customer_id) {
+        nlohmann::json agents =
+            nlohmann::json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}}});
+        const ApiResult library = unwrap(
+            co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
+        if (library.ok) {
+            for (const nlohmann::json& agent :
+                 library.value.value("agents", nlohmann::json::array())) {
+                const std::string key = agent.value("key", std::string());
+                if (key != "agent-ask-orama" && agent.value("chat", false) &&
+                    agent.value("deployed", false)) {
+                    agents.push_back({{"id", key}, {"name", agent.value("name", key)}});
+                }
+            }
+        }
+        const ApiResult own = unwrap(co_await workspace_call("workspace_query",
+                                                             {{"customer_id", customer_id},
+                                                              {"capability", "list_agents"},
+                                                              {"input", nlohmann::json::object()}},
+                                                             context));
+        if (own.ok) {
+            for (const nlohmann::json& agent : own.value.value("agents", nlohmann::json::array())) {
+                if (agent.value("kind", std::string("custom")) != "orama" &&
+                    agent.value("chat_capable", true)) {
+                    agents.push_back({{"id", agent.value("id", std::string())},
+                                      {"name", agent.value("name", std::string())}});
+                }
+            }
+        }
+        co_return agents;
+    }
+
+    boost::http::route_task serve_ask_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized || context.acting_user_id.empty()) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        AskPage page;
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customer_id = selection.customer_id;
+        page.from = query_value(route, "from");
+        page.agent = query_value(route, "agent");
+        page.error = query_value(route, "error");
+        page.conversation_id = query_value(route, "conversation");
+        if (page.conversation_id.empty()) {
+            page.conversation_id = control::new_uuid_v4();
+        } else if (options.store) {
+            if (auto messages = options.store->ask_conversation(
+                    page.conversation_id, context.acting_user_id, 200)) {
+                page.messages = ask_messages_json(*messages);
+            }
+        }
+        if (!page.customer_id.empty() && options.workspaces) {
+            auto agents = co_await ask_agents(context, page.customer_id);
+            if (agents) {
+                page.agents = std::move(*agents);
+            }
+        }
+        if (page.agents.empty()) {
+            page.agents =
+                nlohmann::json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}}});
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_ask(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_ask_form(boost::http::route_params& route, bool confirm) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized || context.acting_user_id.empty() || !options.store) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        std::string conversation = form_field(body, "conversation");
+        if (conversation.empty()) {
+            conversation = control::new_uuid_v4();
+        }
+        const std::string from = form_field(body, "from");
+        std::string agent = form_field(body, "agent");
+        if (agent.empty()) {
+            agent = "agent-ask-orama";
+        }
+        std::string back = "/ask?customer_id=" + oauth_url_encode(customer_id) +
+                           "&conversation=" + oauth_url_encode(conversation) +
+                           "&from=" + oauth_url_encode(from) + "&agent=" + oauth_url_encode(agent);
+        std::string error;
+        if (!confirm) {
+            const std::string message = form_field(body, "message");
+            options.store->append_ask_message({"",
+                                               conversation,
+                                               customer_id,
+                                               context.acting_user_id,
+                                               "user",
+                                               message,
+                                               nullptr,
+                                               ""});
+            const ApiResult answered =
+                unwrap(co_await workspace_call("agent_turn",
+                                               {{"customer_id", customer_id},
+                                                {"agent", agent},
+                                                {"message", message},
+                                                {"conversation_id", conversation},
+                                                {"page", {{"path", from}}}},
+                                               context));
+            if (answered.ok) {
+                const nlohmann::json& value = answered.value;
+                options.store->append_ask_message(
+                    {"",
+                     conversation,
+                     customer_id,
+                     context.acting_user_id,
+                     "assistant",
+                     value.value("reply", std::string()),
+                     {{"agent", agent},
+                      {"proposals", value.value("proposals", nlohmann::json::array())},
+                      {"reads", value.value("reads", nlohmann::json::array())},
+                      {"delegations", value.value("delegations", nlohmann::json::array())},
+                      {"trace_id", value.value("trace_id", std::string())}},
+                     ""});
+            } else {
+                error = answered.error.message;
+            }
+        } else {
+            // Run one proposal the person was shown, as the person. Only a proposal lake stored
+            // for this person's conversation can be confirmed.
+            const std::string message_id = form_field(body, "message_id");
+            const std::size_t index =
+                static_cast<std::size_t>(std::atoi(form_field(body, "index").c_str()));
+            auto messages =
+                options.store->ask_conversation(conversation, context.acting_user_id, 200);
+            nlohmann::json proposal;
+            if (messages) {
+                for (const control::AskMessage& message : *messages) {
+                    const nlohmann::json proposals =
+                        message.payload.is_object()
+                            ? message.payload.value("proposals", nlohmann::json::array())
+                            : nlohmann::json::array();
+                    if (message.id == message_id && index < proposals.size()) {
+                        proposal = proposals[index];
+                    }
+                }
+            }
+            if (!proposal.is_object()) {
+                error = "That proposal is not in this conversation.";
+            } else {
+                const std::string capability = proposal.value("capability", std::string());
+                context.audit_details = {{"ask_confirm", true}, {"conversation_id", conversation}};
+                const ApiResult done = unwrap(co_await workspace_call(
+                    capability, proposal.value("input", nlohmann::json::object()), context));
+                options.store->append_ask_message(
+                    {"",
+                     conversation,
+                     customer_id,
+                     context.acting_user_id,
+                     "assistant",
+                     done.ok ? "Done: " + capability + "."
+                             : "That did not work: " + done.error.message,
+                     {{"agent", "agent-ask-orama"},
+                      {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
+                      {"ok", done.ok}},
+                     ""});
+            }
+        }
+        if (!error.empty()) {
+            back += "&error=" + oauth_url_encode(error);
+        }
+        co_return co_await redirect(route, back);
+    }
+
+    // ---- Train > Agents > Agent Factory (docs/api/agent-factory.md, lake#233) ----
+
+    // AgentCreator answers with one JSON object in its reply: a question or a proposal.
+    static nlohmann::json creator_answer(const nlohmann::json& turn) {
+        nlohmann::json answer =
+            nlohmann::json::parse(turn.value("reply", std::string()), nullptr, false);
+        return answer.is_object() ? answer : nlohmann::json::object();
+    }
+
+    static std::string proposal_digest(const nlohmann::json& proposal) {
+        return control::identity_crypto::sha256_hex(proposal.dump());
+    }
+
+    boost::http::route_task serve_factory_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized || context.acting_user_id.empty()) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        FactoryPage page;
+        page.customer_id =
+            workspace_selection(context, query_value(route, "customer_id")).customer_id;
+        page.error = query_value(route, "error");
+        page.conversation_id = query_value(route, "conversation");
+        if (page.conversation_id.empty()) {
+            page.conversation_id = control::new_uuid_v4();
+        } else if (options.store) {
+            if (auto messages = options.store->ask_conversation(
+                    page.conversation_id, context.acting_user_id, 200)) {
+                page.messages = ask_messages_json(*messages);
+                for (const control::AskMessage& message : *messages) {
+                    if (message.role == "assistant" && message.payload.is_object() &&
+                        message.payload.contains("answer")) {
+                        page.latest = message.payload["answer"];
+                        page.message_id = message.id;
+                    }
+                }
+                if (page.latest.contains("proposal")) {
+                    page.proposal_sha256 = proposal_digest(page.latest["proposal"]);
+                }
+            }
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_factory(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    // The files of a Python proposal, with instructions.md composed from Studio's boxes when the
+    // proposal carries none.
+    static nlohmann::json proposal_files(const nlohmann::json& proposal) {
+        const nlohmann::json agent = proposal.value("agent", nlohmann::json::object());
+        nlohmann::json files = nlohmann::json::array();
+        bool instructions = false;
+        for (const nlohmann::json& file : proposal.value("files", nlohmann::json::array())) {
+            instructions = instructions || file.value("path", std::string()) == "instructions.md";
+            files.push_back({{"path", file.value("path", std::string())},
+                             {"contents", file.value("contents", std::string())}});
+        }
+        if (!instructions) {
+            std::string text = "# " + agent.value("name", std::string()) + "\n\n" +
+                               agent.value("purpose", std::string()) + "\n";
+            if (!agent.value("manifesto", std::string()).empty()) {
+                text += "\n## How you work\n\n" + agent.value("manifesto", std::string()) + "\n";
+            }
+            if (!agent.value("goal", std::string()).empty()) {
+                text += "\n## Your goal\n\n" + agent.value("goal", std::string()) + "\n";
+            }
+            files.push_back({{"path", "instructions.md"}, {"contents", text}});
+        }
+        return files;
+    }
+
+    boost::http::route_task serve_factory_form(boost::http::route_params& route, bool approve) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized || context.acting_user_id.empty() || !options.store) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        std::string conversation = form_field(body, "conversation");
+        if (conversation.empty()) {
+            conversation = control::new_uuid_v4();
+        }
+        const std::string query = "customer_id=" + oauth_url_encode(customer_id);
+        std::string back =
+            "/train/agents/new?" + query + "&conversation=" + oauth_url_encode(conversation);
+        std::string error;
+        const auto say = [&](std::string text, nlohmann::json payload) {
+            options.store->append_ask_message({"",
+                                               conversation,
+                                               customer_id,
+                                               context.acting_user_id,
+                                               "assistant",
+                                               std::move(text),
+                                               std::move(payload),
+                                               ""});
+        };
+        if (!approve) {
+            const std::string message = form_field(body, "message");
+            options.store->append_ask_message({"",
+                                               conversation,
+                                               customer_id,
+                                               context.acting_user_id,
+                                               "user",
+                                               message,
+                                               nullptr,
+                                               ""});
+            const ApiResult turned =
+                unwrap(co_await workspace_call("agent_turn",
+                                               {{"customer_id", customer_id},
+                                                {"agent", "agent-creator"},
+                                                {"message", message},
+                                                {"conversation_id", conversation}},
+                                               context));
+            if (!turned.ok) {
+                error = turned.error.message;
+            } else {
+                const nlohmann::json answer = creator_answer(turned.value);
+                std::string text;
+                if (answer.value("kind", std::string()) == "question") {
+                    text = answer.value("question", std::string());
+                } else if (answer.value("kind", std::string()) == "proposal") {
+                    text = "Here is the agent I propose. Review it below.";
+                } else {
+                    text = turned.value.value("reply", std::string("AgentCreator did not answer."));
+                }
+                say(text, {{"answer", answer}});
+            }
+            if (!error.empty()) {
+                back += "&error=" + oauth_url_encode(error);
+            }
+            co_return co_await redirect(route, back);
+        }
+
+        // Approve and create: only the exact proposal the person was shown, without defects.
+        const std::string message_id = form_field(body, "message_id");
+        nlohmann::json answer;
+        if (auto messages =
+                options.store->ask_conversation(conversation, context.acting_user_id, 200)) {
+            for (const control::AskMessage& message : *messages) {
+                if (message.id == message_id && message.payload.is_object()) {
+                    answer = message.payload.value("answer", nlohmann::json::object());
+                }
+            }
+        }
+        const nlohmann::json proposal =
+            answer.is_object() ? answer.value("proposal", nlohmann::json()) : nlohmann::json();
+        if (!proposal.is_object()) {
+            error = "That proposal is not in this conversation.";
+        } else if (proposal_digest(proposal) != form_field(body, "proposal_sha256")) {
+            error = "The proposal changed since you saw it; review it again.";
+        } else if (!answer.value("defects", nlohmann::json::array()).empty()) {
+            error = "This proposal still has defects.";
+        }
+        if (!error.empty()) {
+            co_return co_await redirect(route, back + "&error=" + oauth_url_encode(error));
+        }
+        context.audit_kind = "agent.factory.approve";
+        context.audit_details = {{"customer_id", customer_id},
+                                 {"proposal_sha256", proposal_digest(proposal)}};
+        const nlohmann::json agent = proposal.value("agent", nlohmann::json::object());
+        const control::WorkspaceConfig* config =
+            options.workspaces ? &options.workspaces->config() : nullptr;
+        const bool python = proposal.value("type", std::string()) == "python";
+        nlohmann::json record{{"name", agent.value("name", std::string())},
+                              {"purpose", agent.value("purpose", std::string())},
+                              {"description", agent.value("purpose", std::string())},
+                              {"work_area", agent.value("work_area", nlohmann::json::object())},
+                              {"manifesto", agent.value("manifesto", std::string())},
+                              {"goal", agent.value("goal", std::string())},
+                              {"skills", agent.value("skills", nlohmann::json::array())},
+                              {"trigger", agent.value("trigger", std::string())}};
+        if (!proposal.value("pipelines", nlohmann::json::array()).empty()) {
+            nlohmann::json grants = nlohmann::json::array();
+            for (const nlohmann::json& grant : proposal["pipelines"]) {
+                grants.push_back({{"project", grant.value("project", std::string())},
+                                  {"graph", grant.value("graph", std::string())}});
+            }
+            record["pipelines"] = std::move(grants);
+        }
+        ApiResult created = ApiResult::success(nlohmann::json::object());
+        if (!python) {
+            record["runtime"] = "native";
+            record["model"] = config ? config->base_agent_model : std::string();
+            record["model_name"] = "Orama base model";
+            record["system_prompt"] = agent.value("manifesto", std::string());
+        } else {
+            record["runtime"] = "python";
+            record["model_name"] = config ? config->frontier_model : std::string("gpt-5.5");
+            const nlohmann::json files = proposal_files(proposal);
+            std::string entrypoint;
+            for (const nlohmann::json& file : files) {
+                if (file.value("path", std::string()) == "agent.toml") {
+                    const std::string toml = file.value("contents", std::string());
+                    const auto at = toml.find("entrypoint");
+                    const auto open = toml.find('"', at);
+                    const auto close = toml.find('"', open + 1);
+                    if (at != std::string::npos && open != std::string::npos &&
+                        close != std::string::npos) {
+                        entrypoint = toml.substr(open + 1, close - open - 1);
+                    }
+                }
+            }
+            if (proposal.value("storage", std::string()) == "lake") {
+                // The code goes into a private lake repository; the agent pins its commit.
+                std::string slug;
+                for (const char character : agent.value("name", std::string("agent"))) {
+                    if (std::isalnum(static_cast<unsigned char>(character))) {
+                        slug +=
+                            static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+                    } else if (!slug.empty() && slug.back() != '-') {
+                        slug += '-';
+                    }
+                }
+                while (!slug.empty() && slug.back() == '-') {
+                    slug.pop_back();
+                }
+                const std::string repository_name =
+                    "agent-" + (slug.empty() ? std::string("agent") : slug.substr(0, 40)) + "-" +
+                    control::new_uuid_v4().substr(0, 4);
+                const ApiResult repository = unwrap(co_await workspace_call(
+                    "create_repository",
+                    {{"customer_id", customer_id},
+                     {"name", repository_name},
+                     {"description", "The code of the agent " + agent.value("name", std::string())},
+                     {"visibility", "private"}},
+                    context));
+                if (!repository.ok) {
+                    created = repository;
+                } else {
+                    nlohmann::json operations = nlohmann::json::array();
+                    for (const nlohmann::json& file : files) {
+                        const std::string contents = file.value("contents", std::string());
+                        operations.push_back(
+                            {{"type", "file"},
+                             {"path", file.value("path", std::string())},
+                             {"content", base64_encode(std::as_bytes(std::span(contents)))}});
+                    }
+                    const std::string repository_id = repository.value.value("id", std::string());
+                    const ApiResult committed = unwrap(co_await workspace_call(
+                        "commit_repository_files",
+                        {{"id", repository_id},
+                         {"message",
+                          "The agent " + agent.value("name", std::string()) +
+                              ", as approved in the Agent Factory"},
+                         {"operations", std::move(operations)}},
+                        context));
+                    if (!committed.ok) {
+                        created = committed;
+                    } else {
+                        record["definition"] = {
+                            {"source", "lake"},
+                            {"repository_id", repository_id},
+                            {"revision", committed.value.value("commitOid", std::string())},
+                            {"entrypoint", entrypoint}};
+                    }
+                }
+            } else {
+                std::string instructions;
+                nlohmann::json inline_files = nlohmann::json::array();
+                for (const nlohmann::json& file : files) {
+                    if (file.value("path", std::string()) == "instructions.md") {
+                        instructions = file.value("contents", std::string());
+                    } else {
+                        inline_files.push_back(file);
+                    }
+                }
+                record["definition"] = {{"source", "zetta"},
+                                        {"instructions", instructions},
+                                        {"files", std::move(inline_files)},
+                                        {"entrypoint", entrypoint}};
+            }
+        }
+        std::string agent_id;
+        if (created.ok) {
+            created = unwrap(co_await workspace_call(
+                "workspace_act",
+                {{"customer_id", customer_id}, {"capability", "create_agent"}, {"input", record}},
+                context));
+            agent_id = created.ok ? created.value.value("id", std::string()) : "";
+        }
+        if (!created.ok) {
+            say("I could not create it: " + created.error.message, {{"created", false}});
+            co_return co_await redirect(route,
+                                        back + "&error=" + oauth_url_encode(created.error.message));
+        }
+        std::string note = "Created " + agent.value("name", std::string()) + ".";
+        if (python && !agent.value("trigger", std::string()).empty()) {
+            const ApiResult scheduled =
+                unwrap(co_await workspace_call("schedule_agent",
+                                               {{"customer_id", customer_id},
+                                                {"agent_id", agent_id},
+                                                {"trigger", agent["trigger"]}},
+                                               context));
+            note += scheduled.ok ? " Its trigger is scheduled."
+                                 : " Its trigger was not scheduled: " + scheduled.error.message;
+        }
+        if (python) {
+            // The first place a new agent runs: a short check job the person can read.
+            const ApiResult checked = unwrap(co_await workspace_call(
+                "launch_agent",
+                {{"customer_id", customer_id},
+                 {"agent_id", agent_id},
+                 {"mode", "job"},
+                 {"input",
+                  "A first check: say in two sentences what you are for and what you "
+                  "can reach."}},
+                context));
+            note += checked.ok ? " A first check run has started." : "";
+        }
+        say(note, {{"created", true}, {"agent_id", agent_id}});
+        co_return co_await redirect(route,
+                                    "/train/agent?" + query + "&id=" + oauth_url_encode(agent_id));
+    }
+
+    // Design > Discover Opportunities: one Auto-Suggest turn over the profile lake builds, shown
+    // on the page (docs/api/discover.md). Nothing is created here.
+    boost::http::route_task serve_discover_scan(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        const ApiResult answered = unwrap(
+            co_await workspace_call("agent_turn",
+                                    {{"customer_id", customer_id},
+                                     {"agent", "agent-autosuggest"},
+                                     {"message", "What could this workspace build from its data?"}},
+                                    context));
+        nlohmann::json extra{{"autosuggest", answered.ok ? answered.value : nlohmann::json()}};
+        if (!answered.ok) {
+            extra["scan_error"] = answered.error.message;
+        }
+        co_return co_await serve_workspace_page(route, "discover", customer_id, std::move(extra));
+    }
+
     boost::http::route_task serve_workspace_form(boost::http::route_params& route,
                                                  std::string action) {
         auto [read_error, body] = co_await read_string_body(route);
@@ -7754,6 +8324,85 @@ struct ApiServer::Impl {
             }
             back = !created.empty() ? "/train/agent?" + query + "&id=" + oauth_url_encode(created)
                                     : "/train/agents?" + query;
+        } else if (action == "discover_create") {
+            // Project drafts from the selected Opportunities, only on the person's confirmation.
+            // Each draft carries its source Opportunity in its description.
+            back = "/design/projects?" + query;
+            const nlohmann::json opportunities =
+                nlohmann::json::parse(form_field(body, "opportunities"), nullptr, false);
+            if (form_field(body, "confirm") != "yes") {
+                result = ApiResult::failure("invalid_input", "Confirm to create the drafts.");
+            } else if (!opportunities.is_array()) {
+                result =
+                    ApiResult::failure("invalid_input", "The Opportunities did not come back.");
+            }
+            for (const std::string& pick :
+                 result.ok ? form_fields(body, "pick") : std::vector<std::string>{}) {
+                const std::size_t index = static_cast<std::size_t>(std::atoi(pick.c_str()));
+                if (index >= opportunities.size() || !opportunities[index].is_object()) {
+                    continue;
+                }
+                const nlohmann::json& item = opportunities[index];
+                const std::string intent = item.value("intent", std::string());
+                std::string name;
+                for (const char character : intent) {
+                    if (std::isalnum(static_cast<unsigned char>(character))) {
+                        name +=
+                            static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+                    } else if (!name.empty() && name.back() != '-') {
+                        name += '-';
+                    }
+                    if (name.size() >= 40) {
+                        break;
+                    }
+                }
+                while (!name.empty() && name.back() == '-') {
+                    name.pop_back();
+                }
+                name = (name.empty() ? std::string("opportunity") : name) + "-" +
+                       control::new_uuid_v4().substr(0, 4);
+                const std::string description =
+                    intent + "\n\nSource Opportunity (Auto-Suggest): " +
+                    item.value("solution", std::string()) + ", " +
+                    item.value("methodology", std::string()) + ". " +
+                    item.value("why_this_data_supports_it", std::string());
+                result = unwrap(co_await act(
+                    "create_project",
+                    {{"name", name}, {"description", description}, {"intent", intent}}));
+                if (!result.ok) {
+                    break;
+                }
+            }
+        } else if (action == "agent_grant" || action == "agent_revoke") {
+            // Pipelines as tools (lake#238): the whole list is written back, so Zetta checks
+            // every grant is still approved and pins each to its approval.
+            const std::string id = form_field(body, "id");
+            back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
+            const ApiResult current = unwrap(co_await workspace_call("workspace_query",
+                                                                     {{"customer_id", customer_id},
+                                                                      {"capability", "get_agent"},
+                                                                      {"input", {{"id", id}}}},
+                                                                     context));
+            if (!current.ok) {
+                result = current;
+            } else {
+                const std::string project = form_field(body, "project");
+                const std::string graph = form_field(body, "graph");
+                nlohmann::json grants = nlohmann::json::array();
+                for (const nlohmann::json& grant :
+                     current.value.value("pipelines", nlohmann::json::array())) {
+                    const bool same = grant.value("project", std::string()) == project &&
+                                      grant.value("graph", std::string()) == graph;
+                    if (!same) {
+                        grants.push_back({{"project", grant.value("project", std::string())},
+                                          {"graph", grant.value("graph", std::string())}});
+                    }
+                }
+                if (action == "agent_grant") {
+                    grants.push_back({{"project", project}, {"graph", graph}});
+                }
+                result = unwrap(co_await act("update_agent", {{"id", id}, {"pipelines", grants}}));
+            }
         } else if (action == "agent_run" || action == "agent_stop") {
             const std::string id = form_field(body, "id");
             back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
@@ -11741,7 +12390,8 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 14>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 15>{{{"/design/projects", "projects"},
+                                                              {"/design/discover", "discover"},
                                                               {"/design/project", "project"},
                                                               {"/design/pipeline", "pipeline"},
                                                               {"/train/agents", "agents"},
@@ -11762,10 +12412,13 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 34>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 37>{
              {{"/workspace/start", "start"},
               {"/train/agents/create", "agent_create"},
               {"/train/agent/run", "agent_run"},
+              {"/train/agent/grant", "agent_grant"},
+              {"/design/discover/create", "discover_create"},
+              {"/train/agent/revoke", "agent_revoke"},
               {"/train/agent/stop", "agent_stop"},
               {"/train/agent/delete", "agent_delete"},
               {"/train/dataset/promote", "dataset_promote"},
@@ -11804,6 +12457,41 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_form(route, action));
                    });
     }
+    router.add(http::method::post,
+               "/design/discover/scan",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/design/discover/scan", impl.serve_discover_scan(route));
+               });
+    router.add(http::method::get,
+               "/train/agents/new",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/train/agents/new", impl.serve_factory_page(route));
+               });
+    router.add(http::method::post,
+               "/train/agents/new/send",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/train/agents/new/send", impl.serve_factory_form(route, false));
+               });
+    router.add(http::method::post,
+               "/train/agents/new/approve",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/train/agents/new/approve", impl.serve_factory_form(route, true));
+               });
+    router.add(http::method::get, "/ask", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/ask", impl.serve_ask_page(route));
+    });
+    router.add(
+        http::method::post, "/ask/send", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/ask/send", impl.serve_ask_form(route, false));
+        });
+    router.add(
+        http::method::post, "/ask/confirm", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/ask/confirm", impl.serve_ask_form(route, true));
+        });
     router.add(http::method::post,
                "/train/data/upload",
                [&impl](http::route_params& route) -> http::route_task {

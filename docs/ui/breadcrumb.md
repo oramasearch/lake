@@ -11,6 +11,9 @@ plain word (`meta`) the top bar showed before.
 | `/design/project?name=retention-review` | Design › Projects › **retention-review** |
 | `/design/pipeline?project=retention-review&graph=churn` | Design › Projects › retention-review › **churn** |
 | `/train/agents`, `/train/agent?id=…` | Train › **Agents**; Train › Agents › **the abbreviated agent id** |
+| `/train/agents/new` | Train › Agents › **Agent Factory** |
+| `/design/discover` | Design › Projects › **Discover Opportunities** |
+| `/ask` | **Ask Orama** |
 | `/train/data`, `/train/query` | Train › **Data**; Train › Data › **Query** |
 | `/train/dataset?name=accounts` | Train › Data › **accounts** |
 | `/train/run?id=3c9e1a2b-…` | Train › Runs › **3c9e1a2b…** (full id on hover) |

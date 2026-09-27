@@ -26,6 +26,15 @@ The model choice decides where the agent runs:
   instructions are composed from the name, purpose, manifesto and goal. It runs on
   `agent-runtime` with the runtime's own tool loop (an empty `entrypoint`).
 
+**Pipelines as tools** (lake#238): the agent page lists the Pipelines granted to the agent, each
+with *Revoke*, and the workspace's **approved** Pipelines not yet granted, each with *Grant*. A grant
+or revoke writes the whole list back through `update_agent`, so Zetta checks every grant is still
+approved and pins each to its approval (`version`). agent-runtime turns each grant into a
+`pipeline_<graph>` tool that gates, runs and reports; Ask Orama can run any approved Pipeline the
+person may run, as a confirmed proposal.
+
+*Build it with the Agent Factory* opens [the Agent Factory](agent-factory.md).
+
 `/train/agent?id=` shows the agent's definition (purpose, engagement, work area, skills, model,
 where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to it as tools, its
 **Unattended Runs**, its training status for a native agent (`agent_training_status`), and
