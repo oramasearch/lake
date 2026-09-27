@@ -12012,7 +12012,8 @@ struct ApiServer::Impl {
     // this trailing middleware terminates every miss with a 404.
     boost::http::route_task serve_not_found(boost::http::route_params& route) {
         // A tool called with the wrong method is named, with the method to use (lake#256).
-        const std::string_view path = route.url.path();
+        // url.path() is a decoded copy: keep it, never a view of it (a view dangled on Linux).
+        const std::string path(route.url.path());
         if (path.starts_with("/v1/")) {
             const std::string name(path.substr(4));
             if (const auto capability = registry.find(name); capability != nullptr) {

@@ -854,7 +854,8 @@ void register_predict_capability(Registry& registry) {
              {"top_k", {{"type", "integer"}, {"minimum", 0}}}},
             json::array({"model", "rows"})),
         .output_schema = {{"type", "object"}},
-        .kind = CapabilityKind::Read,
+        // Rows go in a JSON body, so it is POST; it changes nothing and is authorized as a read.
+        .kind = CapabilityKind::Action,
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,

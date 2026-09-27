@@ -1217,6 +1217,9 @@ TEST(Workspaces, PredictAnswersOnlyThroughAPublishedModel) {
     EXPECT_EQ(w.caller->calls.back().first, "score");
     EXPECT_EQ(w.caller->calls.back().second["model"], "m-1");
     EXPECT_EQ(w.caller->calls.back().second["rows"][0]["support_tickets"], 11);
+    EXPECT_EQ(registry.find("predict")->kind, lake::api::CapabilityKind::Action)
+        << "POST /v1/predict with the rows in a JSON body, as Ship → Models shows";
+    EXPECT_EQ(registry.find("predict")->action, "read") << "authorized as a read";
 }
 
 TEST(Workspaces, ModelsPageNamesScoresPublishesAndShowsHowToCallThem) {
