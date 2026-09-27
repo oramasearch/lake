@@ -1642,8 +1642,8 @@ constexpr std::array<WorkspaceSection, 15> workspace_sections{{
      "Train",
      "Agents",
      "/train/agents",
-     "Build your own agents and read what the unattended ones did. You talk to agents in Ask "
-     "Orama; the Agent Library lists the specialized agents Orama ships."},
+     "Build agents that work for you, run them, and see what they did. Talk to any of them in "
+     "Ask Orama."},
     {"agent", "Train", "Agent", "/train/agents", ""},
     {"data",
      "Train",
@@ -2342,6 +2342,45 @@ std::string gate_panel(const nlohmann::json& gate, std::string_view heading) {
 
 // The pipeline page (docs/design/zetta-parity.md): see, inspect, change, govern and follow one
 // Zetta execution graph.
+// What a run or model's ids are called (lake#255): the page loads `names` (projects and their
+// pipelines by id); an id that is not there belongs to a deleted project.
+std::string project_called(const nlohmann::json& data, const std::string& id) {
+    const nlohmann::json projects =
+        data.value("names", nlohmann::json::object()).value("projects", nlohmann::json::object());
+    return projects.contains(id) ? cell_text(projects[id]) : std::string();
+}
+nlohmann::json graph_called(const nlohmann::json& data, const std::string& id) {
+    const nlohmann::json graphs =
+        data.value("names", nlohmann::json::object()).value("graphs", nlohmann::json::object());
+    return graphs.contains(id) ? graphs[id] : nlohmann::json::object();
+}
+// A pipeline and its project as links, or "a deleted project" when lake no longer has it.
+std::string run_subject(const std::string& query, const nlohmann::json& data,
+                        const std::string& graph_id, const std::string& project_id) {
+    nlohmann::json graph = graph_called(data, graph_id);
+    if (graph.empty() && !data.contains("names")) {
+        // Names were not loaded: show what the run carries.
+        graph = {{"name", graph_id}, {"project", project_id}};
+    }
+    if (graph.empty()) {
+        return "<span class=\"muted\">a pipeline of a deleted project</span>";
+    }
+    const std::string project = json_text(graph, "project");
+    return row_link("/design/pipeline?" + query + "&project=" + url_component(project) +
+                        "&graph=" + url_component(json_text(graph, "name")),
+                    json_text(graph, "name")) +
+           " <span class=\"muted\">in</span> " +
+           row_link("/design/project?" + query + "&name=" + url_component(project), project);
+}
+std::string when(std::string_view timestamp) {
+    // 2026-09-27T13:29:22.572Z → 2026-09-27 13:29 UTC
+    if (timestamp.size() < 16) {
+        return std::string(timestamp);
+    }
+    return std::string(timestamp.substr(0, 10)) + " " + std::string(timestamp.substr(11, 5)) +
+           " UTC";
+}
+
 std::string pipeline_content(const WorkspacePage& page) {
     namespace pl = lake::api::pipeline;
     const std::string query = customer_query(page.customer_id);
@@ -2836,27 +2875,26 @@ std::string agent_library_content(const WorkspacePage& page) {
     const nlohmann::json agents = page.data.value("list_agent_library", nlohmann::json::object())
                                       .value("agents", nlohmann::json::array());
     std::string out =
-        "<section class=\"panel\" id=\"agent-library\"><h2>Agent Library</h2><p class=\"sub\">The "
-        "specialized agents Orama ships. You meet each where it works; Ask Orama can delegate "
-        "to any of them.</p>";
+        "<section class=\"panel\" id=\"agent-library\"><h2>Agent Library</h2><p class=\"sub\">"
+        "Agents Orama provides, each for one job. Use them where they appear below, or just ask "
+        "Orama and it brings in the right one.</p>";
     if (agents.empty()) {
         return out + "<p>The Agent Library is not available.</p></section>";
     }
-    out += "<table><thead><tr><th>Agent</th><th>Where you meet it</th><th>Runs as</th>"
-           "<th>Status</th></tr></thead><tbody>";
+    out += "<table><thead><tr><th>Agent</th><th>What it does for you</th><th>Where to use it</th>"
+           "<th></th></tr></thead><tbody>";
     for (const nlohmann::json& agent : agents) {
-        const std::string runs_as = json_text(agent, "runs_as");
-        const std::string status = json_text(agent, "status");
+        const bool available = json_text(agent, "status") == "Available";
         out += std::format(
-            "<tr><td><span class=\"agent-cell\"><strong>{}</strong><small>{}</small></span></td>"
-            "<td>{}</td><td>{}</td><td><span class=\"badge\">{}</span></td></tr>",
+            "<tr><td><strong>{}</strong></td><td>{}</td><td>{}</td><td><span class=\"badge{}\">{}"
+            "</span></td></tr>",
             web_ui_escape(json_text(agent, "name")),
             web_ui_escape(json_text(agent, "purpose")),
             web_ui_escape(json_text(agent, "used_in")),
-            runs_as == "service"         ? "Its own service"
-            : runs_as == "agent-runtime" ? "agent-runtime"
-                                         : "Offline",
-            web_ui_escape(status));
+            available ? " status-success" : "",
+            available                                     ? std::string("Available")
+            : json_text(agent, "runs_as") == "offline" ? std::string("Not yet available to chat")
+                                                         : std::string("Not available here"));
     }
     return out + "</tbody></table></section>";
 }
@@ -2872,26 +2910,28 @@ std::string agent_create_form(const WorkspacePage& page) {
     return std::format(
         "<section class=\"panel\" id=\"create-agent\"><h2>Create an Agent</h2><p><a "
         "class=\"button\" href=\"/train/agents/new?{}\">Build it with the Agent Factory</a> "
-        "or fill in the boxes below.</p><p class=\"sub\">"
-        "An agent carries a manifesto, a goal and the skills you grant it. Leave the trigger "
-        "empty and it only talks; fill it and it can also run on its own.</p><form "
+        "or fill in the form below.</p><p class=\"sub\">"
+        "An agent does one job for you. Say what the job is, how it should work, what success "
+        "looks like and what it may use. Without a schedule it answers only when you talk to it; "
+        "with one it also runs on its own.</p><form "
         "class=\"stack\" method=\"post\" action=\"/train/agents/create\">{}<label>Name<input "
         "name=\"name\" required maxlength=\"80\" placeholder=\"Renewal watcher\"></label><label>"
-        "Purpose<input name=\"purpose\" required placeholder=\"Flag renewals at risk a month "
-        "ahead\"></label><label>Work area<select name=\"work_area\"><option "
-        "value=\"workspace\">This workspace</option><option value=\"project\">A single "
-        "project</option><option value=\"dataset\">Specific data</option></select></label>"
-        "<label>Project or datasets (for a single project or specific data)<input "
-        "name=\"work_area_detail\" placeholder=\"churn\"></label><label>Manifesto<textarea "
+        "What it's for<input name=\"purpose\" required placeholder=\"Flag renewals at risk a month "
+        "ahead\"></label><label>Where it works<select name=\"work_area\"><option "
+        "value=\"workspace\">Anywhere in this workspace</option><option value=\"project\">One "
+        "project</option><option value=\"dataset\">Specific datasets</option></select></label>"
+        "<label>Which project or datasets (if not the whole workspace)<input "
+        "name=\"work_area_detail\" placeholder=\"churn\"></label><label>Instructions<small>How it "
+        "should work, and what it must never do.</small><textarea "
         "name=\"manifesto\" rows=\"3\" placeholder=\"Answer from company data only. Say when "
-        "evidence is missing rather than estimating.\"></textarea></label><label>Goal<textarea "
-        "name=\"goal\" rows=\"2\" placeholder=\"Every at-risk renewal is flagged a month "
-        "ahead.\"></textarea></label><fieldset><legend>Skills</legend>{}</fieldset><label>Model"
-        "<select name=\"model\"><option value=\"base\">Orama base model (runs in your "
-        "workspace)</option><option value=\"frontier\">Frontier model (runs on "
-        "agent-runtime)</option></select></label><label>Trigger or schedule<input "
-        "name=\"trigger\" placeholder=\"every Monday at 09:00, or when a new dataset "
-        "lands\"></label><button class=\"button button-primary\" type=\"submit\">Create "
+        "evidence is missing rather than estimating.\"></textarea></label><label>What success looks "
+        "like<textarea name=\"goal\" rows=\"2\" placeholder=\"Every at-risk renewal is flagged a "
+        "month ahead.\"></textarea></label><fieldset><legend>What it may do</legend>{}</fieldset>"
+        "<label>Model<select name=\"model\"><option value=\"base\">Orama base model, inside your "
+        "workspace</option><option value=\"frontier\">A frontier model (OpenAI), run by lake"
+        "</option></select></label><label>Runs on its own<small>Leave empty to use it only in "
+        "conversation.</small><input name=\"trigger\" placeholder=\"every Monday at 09:00\">"
+        "</label><button class=\"button button-primary\" type=\"submit\">Create "
         "agent</button></form></section>",
         customer_query(page.customer_id),
         hidden("customer_id", page.customer_id),
@@ -2957,15 +2997,15 @@ std::string agent_content(const WorkspacePage& page) {
     out += row("Purpose", json_text(agent, "purpose"));
     out += row("Engagement", agent_engagement(agent));
     out += row("Work area", area_text);
-    out += row("Skills", agent_skill_labels(agent.value("skills", nlohmann::json::array())));
+    out += row("What it may do", agent_skill_labels(agent.value("skills", nlohmann::json::array())));
     out += row("Model", agent_model_label(agent));
     out += row("Runs",
                runtime == "python"    ? "On agent-runtime"
                : runtime == "service" ? "As its own service"
                                       : "In your workspace");
-    out += row("Manifesto", json_text(agent, "manifesto"));
-    out += row("Goal", json_text(agent, "goal"));
-    out += row("Trigger or schedule", json_text(agent, "trigger"));
+    out += row("Instructions", json_text(agent, "manifesto"));
+    out += row("What success looks like", json_text(agent, "goal"));
+    out += row("Runs on its own", json_text(agent, "trigger"));
     out += row("Status", json_text(agent, "status"));
     out += std::format("</dl><p><a class=\"button\" href=\"/ask?{}&agent={}\">Talk to this "
                        "agent in Ask Orama</a></p></section>",
@@ -3687,18 +3727,22 @@ std::string workspace_content(const WorkspacePage& page) {
         if (runs.empty()) {
             out += "<div class=\"panel empty\">No runs yet. Run a pipeline from a project.</div>";
         } else {
-            out += "<table><thead><tr><th>Run</th><th>Project</th><th>Pipeline</th><th>Status</th>"
-                   "<th>Updated</th></tr></thead><tbody>";
+            out += "<table><thead><tr><th>Pipeline</th><th>Status</th><th>Started</th><th></th>"
+                   "</tr></thead><tbody>";
             for (const nlohmann::json& run : runs) {
                 const std::string id = json_text(run, "id");
+                const std::string status = json_text(run, "status");
                 out += std::format(
-                    "<tr><td>{}</td><td>{}</td><td>{}</td><td><span class=\"badge\">{}</span></td>"
-                    "<td>{}</td></tr>",
-                    row_link("/train/run?" + query + "&id=" + url_component(id), id),
-                    web_ui_escape(json_text(run, "project")),
-                    web_ui_escape(json_text(run, "graph")),
-                    web_ui_escape(json_text(run, "status")),
-                    web_ui_escape(json_text(run, "updated")));
+                    "<tr><td>{}</td><td><span class=\"badge{}\">{}</span></td><td>{}</td><td>{}"
+                    "</td></tr>",
+                    run_subject(query, data, json_text(run, "graph"), json_text(run, "project")),
+                    status == "succeeded" ? " status-success"
+                    : status == "failed"  ? " status-danger"
+                                          : "",
+                    web_ui_escape(status),
+                    web_ui_escape(when(json_text(run, "created"))),
+                    row_link("/train/run?" + query + "&id=" + url_component(id),
+                             status == "failed" ? "Why it failed" : "Report"));
             }
             out += "</tbody></table>";
         }
@@ -3708,12 +3752,12 @@ std::string workspace_content(const WorkspacePage& page) {
         out += std::format("<p>Status: <span class=\"badge\">{}</span></p>",
                            web_ui_escape(status.empty() ? "unknown" : status));
         if (!json_text(run, "graph").empty()) {
-            out += std::format("<p class=\"sub\">Pipeline {} in project {}</p>",
-                               row_link("/design/pipeline?" + query +
-                                            "&project=" + url_component(json_text(run, "project")) +
-                                            "&graph=" + url_component(json_text(run, "graph")),
-                                        json_text(run, "graph")),
-                               web_ui_escape(json_text(run, "project")));
+            out += "<p class=\"sub\">" +
+                   run_subject(query, data, json_text(run, "graph"), json_text(run, "project")) +
+                   (json_text(run, "created").empty()
+                        ? std::string()
+                        : " · started " + web_ui_escape(when(json_text(run, "created")))) +
+                   "</p>";
         }
         if (data.contains("get_run_report")) {
             out += run_report_panel(data.at("get_run_report"));
@@ -3734,31 +3778,84 @@ std::string workspace_content(const WorkspacePage& page) {
             out += "<div class=\"panel empty\">No models yet. Models appear here when a run "
                    "trains one.</div>";
         } else {
-            out += "<table><thead><tr><th>Model</th><th>Kind</th><th>Project</th><th>Run</th>"
-                   "<th>Endpoint</th></tr></thead><tbody>";
+            const nlohmann::json details = data.value("model_details", nlohmann::json::object());
+            const std::string origin =
+                json_text(data, "origin").empty() ? "https://lake.oramadev.net" : json_text(data, "origin");
+            out += "<table><thead><tr><th>Model</th><th>Project</th><th>Trained</th><th>Score</th>"
+                   "<th>Published</th><th></th></tr></thead><tbody>";
+            std::string calls;
             for (const nlohmann::json& model : models) {
-                const std::string name = json_text(model, "name");
-                std::string forms;
-                for (const auto& [expose, label] : std::array<std::pair<bool, std::string_view>, 2>{
-                         {{true, "Publish"}, {false, "Unpublish"}}}) {
-                    forms += std::format("<form class=\"inline\" method=\"post\" "
-                                         "action=\"/ship/models/publish\">{}{}{}<button "
-                                         "type=\"submit\">{}</button></form> ",
-                                         hidden("customer_id", page.customer_id),
-                                         hidden("model", name),
-                                         hidden("publish", expose ? "1" : "0"),
-                                         label);
+                const std::string id = json_text(model, "id");
+                const nlohmann::json detail = details.value(id, nlohmann::json::object());
+                const bool published = detail.value("exposed", false);
+                const nlohmann::json metrics = detail.value("metrics", nlohmann::json::object());
+                // A held-out score when the run measured one; otherwise say it is in-sample.
+                std::string score = "<span class=\"muted\">not measured</span>";
+                for (const char* key : {"held_out_auc", "holdout_auc"}) {
+                    if (metrics.contains(key) && metrics[key].is_number()) {
+                        score = std::format("AUC {:.3f} <small>held out</small>",
+                                            metrics[key].get<double>());
+                        break;
+                    }
                 }
-                out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
-                                   "</tr>",
-                                   web_ui_escape(name),
-                                   web_ui_escape(json_text(model, "kind")),
-                                   web_ui_escape(json_text(model, "project")),
-                                   web_ui_escape(json_text(model, "run")),
-                                   forms);
+                if (score.find("held out") == std::string::npos && metrics.contains("in_sample_auc") &&
+                    metrics["in_sample_auc"].is_number()) {
+                    score = std::format("AUC {:.3f} <small class=\"muted\">in-sample only, not held "
+                                        "out</small>",
+                                        metrics["in_sample_auc"].get<double>());
+                }
+                const std::string project = project_called(data, json_text(model, "project"));
+                out += std::format(
+                    "<tr><td><strong>{}</strong><br><small class=\"muted\"><code>{}</code></small>"
+                    "</td><td>{}</td><td>{}</td><td>{}</td><td><span class=\"badge{}\">{}</span></td>"
+                    "<td><form class=\"inline\" method=\"post\" action=\"/ship/models/publish\">{}{}"
+                    "{}<button type=\"submit\"{}>{}</button></form></td></tr>",
+                    web_ui_escape(json_text(model, "name")),
+                    web_ui_escape(id.substr(0, 8)),
+                    project.empty() ? std::string("<span class=\"muted\">a deleted project</span>")
+                                    : row_link("/design/project?" + query + "&name=" +
+                                                   url_component(project),
+                                               project),
+                    web_ui_escape(when(json_text(model, "created"))),
+                    score,
+                    published ? " status-success" : "",
+                    published ? "published" : "not published",
+                    hidden("customer_id", page.customer_id),
+                    hidden("model", id),
+                    hidden("publish", published ? "0" : "1"),
+                    published ? "" : " class=\"button button-primary\"",
+                    published ? "Unpublish" : "Publish");
+                if (published) {
+                    std::string features;
+                    for (const nlohmann::json& feature :
+                         detail.value("feature_schema", nlohmann::json::object())
+                             .value("features", nlohmann::json::array())) {
+                        features += std::string(features.empty() ? "" : ", ") + "\"" +
+                                    cell_text(feature) + "\": 0";
+                    }
+                    calls += std::format(
+                        "<h3>{} <small class=\"muted\"><code>{}</code></small></h3><pre><code>"
+                        "curl -s {}/v1/predict \\\n  -H \"Authorization: Bearer $LAKE_KEY\" "
+                        "-H 'Content-Type: application/json' \\\n  -d '{{\"customer_id\": \"{}\", "
+                        "\"model\": \"{}\", \"rows\": [{{{}}}]}}'</code></pre>",
+                        web_ui_escape(json_text(model, "name")),
+                        web_ui_escape(id.substr(0, 8)),
+                        web_ui_escape(origin),
+                        web_ui_escape(page.customer_id),
+                        web_ui_escape(id),
+                        web_ui_escape(features));
+                }
             }
-            out += "</tbody></table><p class=\"muted\">A published model answers "
-                   "<code>POST /v1/models/&lt;name&gt;/predict</code> inside your workspace.</p>";
+            out += "</tbody></table>";
+            out += std::format(
+                "<section class=\"panel\" id=\"call-a-model\"><h2>Call a Model from Your Code</h2>"
+                "{}<p>Each row you send is keyed by the model's features; the answer ranks the rows "
+                "by risk with what drives each score. Use a lake key from "
+                "<a href=\"/developer/mcp\">Developer → MCP</a>; from an AI agent it is the MCP tool "
+                "<code>predict</code>. Unpublishing a model stops every outside call at once.</p>"
+                "</section>",
+                calls.empty() ? std::string("<p>Publish a model to call it from outside lake.</p>")
+                               : calls);
         }
     } else if (page.section == "indexes") {
         const nlohmann::json indexes = data.value("list_indexes", nlohmann::json::object())
@@ -3901,13 +3998,24 @@ std::optional<std::string> web_ui_docs(std::string_view slug, WebUiViewer viewer
 
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     const WorkspaceSection& section = workspace_section(page.section);
-    const std::string named =
+    std::string named =
         page.section == "agent"
             ? json_text(page.data.value("get_agent", nlohmann::json::object()), "name")
             : std::string();
+    if (page.section == "run") {
+        // "Run: <uuid>" told a person nothing (lake#255).
+        const nlohmann::json run = page.data.value("get_run", nlohmann::json::object());
+        const std::string pipeline =
+            json_text(graph_called(page.data, json_text(run, "graph")), "name");
+        if (!pipeline.empty()) {
+            named = "of " + pipeline;
+        }
+    }
     const std::string subject = named.empty() ? page.subject : named;
     const std::string title =
-        subject.empty() ? std::string(section.title) : std::string(section.title) + ": " + subject;
+        subject.empty()             ? std::string(section.title)
+        : subject.starts_with("of ") ? std::string(section.title) + " " + subject
+                                     : std::string(section.title) + ": " + subject;
     std::string content = std::format("<p class=\"eyebrow\">{}</p><h1>{}</h1>",
                                       web_ui_escape(section.verb),
                                       web_ui_escape(title));
@@ -7389,7 +7497,8 @@ std::string web_ui_factory(const FactoryPage& page, WebUiViewer viewer) {
         content += std::format(
             "<section class=\"panel\" id=\"proposal\"><h2>Proposed Agent: {}</h2><p>{}</p><dl>"
             "<dt>Type</dt><dd>{} — {}</dd><dt>Stored in</dt><dd>{}</dd><dt>Work area</dt><dd>{} "
-            "{}</dd><dt>Manifesto</dt><dd>{}</dd><dt>Goal</dt><dd>{}</dd><dt>Skills</dt><dd>{}</dd>"
+            "{}</dd><dt>Instructions</dt><dd>{}</dd><dt>What success looks like</dt><dd>{}</dd><dt>What it "
+            "may do</dt><dd>{}</dd>"
             "<dt>Trigger</dt><dd>{}</dd><dt>Pipelines</dt><dd>{}</dd></dl>{}",
             web_ui_escape(json_text(agent, "name")),
             web_ui_escape(json_text(agent, "purpose")),

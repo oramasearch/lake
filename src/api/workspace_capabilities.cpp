@@ -26,7 +26,9 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 25> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 27> workspace_reads = {"server_info",
+                                                              "score",
+                                                              "explain",
                                                               "list_projects",
                                                               "get_project",
                                                               "get_graph",
@@ -830,6 +832,65 @@ void register_search_capabilities(Registry& registry) {
                 co_return ApiResult::failure((*found).error().code, (*found).error().message);
             }
             co_return ApiResult::success(**found);
+        }});
+}
+
+// Predict with one published model (lake#250): the public route a customer calls from outside lake,
+// with a lake key. The model must be published (expose_model); rows are keyed by the model's own
+// feature columns and answered ranked by risk with what drives it (Zetta's `score`).
+void register_predict_capability(Registry& registry) {
+    registry.add(Capability{
+        .name = "predict",
+        .title = "Predict with a published model",
+        .description =
+            "Score rows through one published model of the customer's workspace: `model` is the "
+            "model's id (Ship → Models), `rows` the records to score, each keyed by the model's "
+            "feature columns. Answers every row ranked by risk with its score and the features "
+            "that drive it. A model that is not published is refused; publish it with "
+            "workspace_act expose_model.",
+        .input_schema = customer_input_schema(
+            {{"model", {{"type", "string"}}},
+             {"rows", {{"type", "array"}, {"items", {{"type", "object"}}}, {"minItems", 1}}},
+             {"top_k", {{"type", "integer"}, {"minimum", 0}}}},
+            json::array({"model", "rows"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            const std::string model = input.at("model");
+            set_audit(context, "model.predict", input, "score");
+            auto described = co_await context.workspaces->call(
+                customer, "get_model", true, {{"model_id", model}});
+            if (!described) {
+                co_return ApiResult::failure("store_unavailable", described.error().message);
+            }
+            if (!*described) {
+                co_return ApiResult::failure(
+                    "not_found", "no model " + model + " (use its id from Ship → Models)", "/model");
+            }
+            if (!(**described).value("exposed", false)) {
+                co_return ApiResult::failure(
+                    "invalid_input", "model " + model + " is not published", "/model");
+            }
+            json score{{"model", model}, {"rows", input.at("rows")}};
+            if (input.contains("top_k")) {
+                score["top_k"] = input["top_k"];
+            }
+            auto scored = co_await context.workspaces->call(customer, "score", true, score);
+            if (!scored) {
+                co_return ApiResult::failure("store_unavailable", scored.error().message);
+            }
+            if (!*scored) {
+                co_return ApiResult::failure((*scored).error().code, (*scored).error().message);
+            }
+            co_return ApiResult::success(**scored);
         }});
 }
 
@@ -2339,6 +2400,7 @@ void register_workspace_capabilities(Registry& registry) {
     register_parity_capabilities(registry);
     register_connect_capabilities(registry);
     register_search_capabilities(registry);
+    register_predict_capability(registry);
     registry.add(Capability{
         .name = "workspace_status",
         .title = "Workspace status",
