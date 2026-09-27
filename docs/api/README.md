@@ -140,7 +140,7 @@ phase 1, lake#196), with their capabilities and the Train → Data → Storage p
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
 | `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships and whether this lake runs it | [train-agents.md](train-agents.md) |
-| `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent` | action / read | customer, agent, mode, input, trigger | run, follow, stop and schedule Python agents on agent-runtime | [agent-launches.md](agent-launches.md) |
+| `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |
 | `agent_turn` | action | customer, agent, message | one conversation turn with any agent: library, native or Python | [agent-launches.md](agent-launches.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |

@@ -739,7 +739,7 @@ TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     EXPECT_EQ(store->get_store(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
-// Agent launches, their credential, schedules and Ask Orama messages against the production store
+// Agent launches, their credential, cron schedules and Ask Orama messages against the production store
 // (docs/api/agent-launches.md, lake#231).
 TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
@@ -801,18 +801,76 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     ASSERT_TRUE(store->withdraw_agent_launch(launch->id));
     EXPECT_FALSE(store->context_for(credential)) << "a stopped launch's credential stops too";
 
-    ASSERT_TRUE(store->put_agent_schedule(
-        {customer->id, "a-1", "Watcher", "hourly", 1000, 0, user->id, user->taap_id}));
-    auto due = store->due_agent_schedules(1000);
-    ASSERT_TRUE(due);
-    EXPECT_TRUE(std::ranges::any_of(
-        *due, [&](const auto& s) { return s.agent_id == "a-1" && s.customer_id == customer->id; }));
-    ASSERT_TRUE(store->mark_agent_schedule_run(customer->id, "a-1", 1000, 4600));
-    due = store->due_agent_schedules(1001);
-    EXPECT_FALSE(
-        std::ranges::any_of(*due, [&](const auto& s) { return s.customer_id == customer->id; }));
-    ASSERT_TRUE(store->put_agent_schedule(
-        {customer->id, "a-1", "Watcher", "", 0, 0, user->id, user->taap_id}));
+    // Cron schedules: several per agent, each with its own slug and credential (migration 0031).
+    const auto weekly = store->create_agent_cron_schedule({.customer_id = customer->id,
+                                                           .agent_id = "a-1",
+                                                           .agent_name = "Watcher",
+                                                           .cron = "0 9 * * 1",
+                                                           .description = "every monday at 09:00",
+                                                           .input = json{{"week", 39}},
+                                                           .scopes =
+                                                               lake::control::agent_launch_scopes,
+                                                           .created_by_user_id = user->id,
+                                                           .created_by_taap_id = user->taap_id});
+    ASSERT_TRUE(weekly) << weekly.error().message;
+    const auto nightly = store->create_agent_cron_schedule({.customer_id = customer->id,
+                                                            .agent_id = "a-1",
+                                                            .agent_name = "Watcher",
+                                                            .cron = "30 2 * * *",
+                                                            .time_zone = "America/Toronto",
+                                                            .scopes =
+                                                                lake::control::agent_launch_scopes,
+                                                            .created_by_user_id = user->id,
+                                                            .created_by_taap_id = user->taap_id});
+    ASSERT_TRUE(nightly) << nightly.error().message;
+    EXPECT_EQ(weekly->slug, lake::control::managed_service_slug("as", weekly->id));
+    EXPECT_EQ(weekly->time_zone, "Etc/UTC");
+    EXPECT_EQ(nightly->time_zone, "America/Toronto");
+    listener.await_notification(5, 0);
+    EXPECT_NE(std::ranges::find(notified, weekly->id), notified.end());
+    auto schedules = store->list_agent_cron_schedules(customer->id, "a-1");
+    ASSERT_TRUE(schedules && schedules->size() == 2U);
+    EXPECT_EQ(schedules->front().id, weekly->id) << "oldest first";
+
+    const std::string schedule_credential =
+        "las." + weekly->id + ".0123456789abcdef0123456789abcdef";
+    EXPECT_FALSE(store->context_for(schedule_credential));
+    const std::string run_id = lake::control::new_uuid_v4();
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO agent_cron_schedule_status (schedule_id, phase, message, "
+                       "last_schedule_at, credential_sha256, observed_generation) VALUES "
+                       "($1::uuid, 'Ready', 'scheduled', now(), $2, 1)",
+                       weekly->id,
+                       lake::control::identity_crypto::sha256_hex(schedule_credential));
+        tx.exec_params("INSERT INTO agent_cron_runs (id, schedule_id, job_name, phase, message, "
+                       "exit_code, result) VALUES ($1::uuid, $2::uuid, 'lake-as-x-1', "
+                       "'Succeeded', 'finished', 0, '{\"reply\":\"3 at risk\"}'::jsonb)",
+                       run_id,
+                       weekly->id);
+        tx.commit();
+    }
+    const auto scheduled_acting = store->context_for(schedule_credential);
+    ASSERT_TRUE(scheduled_acting) << scheduled_acting.error().message;
+    EXPECT_EQ(scheduled_acting->user_id, user->id);
+    EXPECT_EQ(scheduled_acting->kind, "agent_schedule");
+    const auto got = store->get_agent_cron_schedule(weekly->id);
+    ASSERT_TRUE(got);
+    EXPECT_EQ(got->phase, "Ready");
+    EXPECT_FALSE(got->last_schedule_at.empty());
+    const auto runs = store->list_agent_cron_runs(customer->id, "a-1", 10);
+    ASSERT_TRUE(runs && runs->size() == 1U);
+    EXPECT_EQ(runs->front().id, run_id);
+    EXPECT_EQ(runs->front().trigger, "schedule");
+    EXPECT_EQ(runs->front().exit_code, 0);
+    EXPECT_EQ(runs->front().result["reply"], "3 at risk");
+    EXPECT_EQ(runs->front().input["week"], 39);
+    ASSERT_TRUE(store->withdraw_agent_cron_schedule(weekly->id));
+    EXPECT_FALSE(store->context_for(schedule_credential)) << "a removed schedule's credential stops";
+    EXPECT_FALSE(store->withdraw_agent_cron_schedule(weekly->id)) << "already removed";
+    schedules = store->list_agent_cron_schedules(customer->id, "a-1");
+    ASSERT_TRUE(schedules && schedules->size() == 1U);
 
     const std::string conversation = lake::control::new_uuid_v4();
     ASSERT_TRUE(store->append_ask_message(

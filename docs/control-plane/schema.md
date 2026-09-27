@@ -435,3 +435,14 @@ credential), `agent_schedules` (one per agent, its next run) and `ask_messages` 
 conversations, read back only by the person who had them). Idempotent; guard `agents_guard`. The
 operator vendors it and selects that guard before a binary that launches agents is deployed.
 Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md).
+
+## Agent cron schedules migration
+
+`0031_agent_cron_schedules` adds `agent_cron_schedules` (written by lake: any number per agent,
+each with its five-field `cron`, `time_zone`, `input`, scopes, `as-` slug, desired and generation),
+`agent_cron_schedule_status` (written by the operator: phase, message, last firing and the
+**SHA-256** of the schedule's credential) and `agent_cron_runs` (written by the operator: one row
+per Job each schedule's CronJob started). It retires `agent_schedules` without dropping it: lake no
+longer reads it, and dropping it is a separate, deliberate change. Idempotent; guard
+`agent_cron_guard`. The operator vendors it and selects that guard before a binary that schedules
+through CronJobs is deployed. Contract: [`../api/agent-launches.md`](../api/agent-launches.md).

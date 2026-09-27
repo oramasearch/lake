@@ -1757,46 +1757,66 @@ struct AgentRuns {
 
 } // namespace
 
-TEST(AgentRuns, TriggersBecomeTheirNextRunInUtc) {
-    // 2026-09-28 was a Monday; 10:00 UTC.
-    const std::int64_t monday = 1790589600;
-    using lake::control::next_run;
-    EXPECT_EQ(next_run("every 15 minutes", monday), monday + 900);
-    EXPECT_EQ(next_run("every 1 minute", monday), monday + 300) << "at most every five minutes";
-    EXPECT_EQ(next_run("hourly", monday), monday + 3600);
-    EXPECT_EQ(next_run("Every 2 days", monday), monday + 2 * 86400);
-    EXPECT_EQ(next_run("every day at 09:00", monday), monday + 23 * 3600);
-    EXPECT_EQ(next_run("every Monday at 11:30", monday), monday + 5400);
-    EXPECT_EQ(next_run("every Monday at 09:00", monday), monday + 7 * 86400 - 3600);
-    EXPECT_EQ(next_run("every weekday at 09:00", monday + 4 * 86400), monday + 7 * 86400 - 3600)
-        << "Friday's next weekday run is Monday";
-    EXPECT_FALSE(next_run("when a new dataset lands", monday));
-    EXPECT_FALSE(next_run("every day at 25:00", monday));
+TEST(AgentRuns, TriggersBecomeCronExpressions) {
+    using lake::control::trigger_cron;
+    EXPECT_EQ(trigger_cron("every 15 minutes"), "*/15 * * * *");
+    EXPECT_FALSE(trigger_cron("every 1 minute")) << "at most every five minutes";
+    EXPECT_EQ(trigger_cron("every 120 minutes"), "0 */2 * * *");
+    EXPECT_EQ(trigger_cron("hourly"), "0 * * * *");
+    EXPECT_EQ(trigger_cron("Every 2 days"), "0 0 */2 * *");
+    EXPECT_EQ(trigger_cron("every day at 09:00"), "0 9 * * *");
+    EXPECT_EQ(trigger_cron("every Monday at 11:30"), "30 11 * * 1");
+    EXPECT_EQ(trigger_cron("every weekday at 09:05"), "5 9 * * 1-5");
+    EXPECT_FALSE(trigger_cron("when a new dataset lands"));
+    EXPECT_FALSE(trigger_cron("every day at 25:00"));
 }
 
-TEST(AgentRuns, TheSchedulerFiresDueSchedulesAsJobsAndMovesThem) {
-    auto store = std::make_shared<lake::control::InMemoryStore>();
-    const auto session = store->sign_in_clerk(minted("scheduler"));
-    const auto principal = store->context_for(session->secret);
-    const std::string customer_id = store->list_customers(10, principal->user_id)->front().id;
-    ASSERT_TRUE(store->put_agent_schedule({customer_id,
-                                           "a-1",
-                                           "Watcher",
-                                           "every 2 hours",
-                                           1000,
-                                           0,
-                                           principal->user_id,
-                                           principal->taap_id}));
-    lake::control::AgentScheduler scheduler(store, std::chrono::seconds{60});
-    EXPECT_EQ(scheduler.tick(999), 0U) << "not yet due";
-    EXPECT_EQ(scheduler.tick(1000), 1U);
-    const auto launches = store->list_agent_launches(customer_id, "a-1", 10);
-    ASSERT_EQ(launches->size(), 1U);
-    EXPECT_EQ(launches->front().mode, "job");
-    EXPECT_EQ(launches->front().trigger, "schedule");
-    EXPECT_EQ(launches->front().created_by_user_id, principal->user_id);
-    EXPECT_EQ(scheduler.tick(1001), 0U) << "moved to its next run";
-    EXPECT_EQ(scheduler.tick(1000 + 7200 + 1), 1U);
+TEST(AgentRuns, CronExpressionsAreCheckedAsACronJobWouldTakeThem) {
+    using lake::control::normalize_cron;
+    EXPECT_EQ(normalize_cron("0  9 * *   1-5"), "0 9 * * 1-5");
+    EXPECT_EQ(normalize_cron("@weekly"), "0 0 * * 0");
+    EXPECT_EQ(normalize_cron("*/5 * * * *"), "*/5 * * * *");
+    EXPECT_EQ(normalize_cron("0,30 8-18 * jan-jun MON"), "0,30 8-18 * jan-jun MON");
+    EXPECT_FALSE(normalize_cron("* * * * *")) << "every minute is too often";
+    EXPECT_FALSE(normalize_cron("0,58 * * * *")) << "58 and the next hour's 0 are two minutes apart";
+    EXPECT_FALSE(normalize_cron("0 24 * * *"));
+    EXPECT_FALSE(normalize_cron("0 9 * *"));
+    EXPECT_FALSE(normalize_cron("0 9 0 * *")) << "days of the month start at 1";
+    EXPECT_FALSE(normalize_cron("0 9 * * 1; rm"));
+}
+
+TEST(AgentRuns, AScheduleCredentialActsAsWhoeverSetTheSchedule) {
+    lake::control::InMemoryStore store;
+    const auto session = store.sign_in_clerk(minted("scheduler"));
+    const auto principal = store.context_for(session->secret);
+    const std::string customer_id = store.list_customers(10, principal->user_id)->front().id;
+    const auto schedule = store.create_agent_cron_schedule({.customer_id = customer_id,
+                                                            .agent_id = "a-1",
+                                                            .agent_name = "Watcher",
+                                                            .cron = "0 9 * * 1",
+                                                            .scopes =
+                                                                lake::control::agent_launch_scopes,
+                                                            .created_by_user_id =
+                                                                principal->user_id,
+                                                            .created_by_taap_id =
+                                                                principal->taap_id});
+    ASSERT_TRUE(schedule) << schedule.error().message;
+    EXPECT_EQ(schedule->slug, lake::control::managed_service_slug("as", schedule->id));
+    EXPECT_EQ(schedule->time_zone, "Etc/UTC");
+    const std::string credential = "las." + schedule->id + ".0123456789abcdef0123456789abcdef";
+    EXPECT_FALSE(store.context_for(credential)) << "not before the operator reports its digest";
+    ASSERT_TRUE(store.set_agent_cron_schedule_status(
+        schedule->id, "Ready", "", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto acting = store.context_for(credential);
+    ASSERT_TRUE(acting) << acting.error().message;
+    EXPECT_EQ(acting->user_id, principal->user_id);
+    EXPECT_EQ(acting->kind, "agent_schedule");
+    EXPECT_EQ(acting->scopes, lake::control::agent_launch_scopes);
+    EXPECT_FALSE(store.context_for("lal." + schedule->id + ".0123456789abcdef0123456789abcdef"))
+        << "a schedule's credential is not a launch's";
+    ASSERT_TRUE(store.withdraw_agent_cron_schedule(schedule->id));
+    EXPECT_FALSE(store.context_for(credential)) << "a removed schedule's credential stops too";
+    EXPECT_FALSE(store.withdraw_agent_cron_schedule(schedule->id)) << "already removed";
 }
 
 TEST(AgentRuns, ALaunchCredentialActsAsTheLauncherWithTheLaunchScopes) {
@@ -1841,13 +1861,59 @@ TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
     ASSERT_TRUE(stopped.ok) << stopped.error.message;
     EXPECT_EQ(stopped.value["desired"], "absent");
 
+    // Several schedules per agent, each its own CronJob in the operator's hands.
     const auto scheduled =
         r.call("schedule_agent", {{"agent_id", "a-1"}, {"trigger", "every Monday at 09:00"}});
     ASSERT_TRUE(scheduled.ok) << scheduled.error.message;
-    EXPECT_TRUE(scheduled.value["next_run_unix"].is_number());
+    EXPECT_EQ(scheduled.value["cron"], "0 9 * * 1");
+    EXPECT_EQ(scheduled.value["description"], "every Monday at 09:00");
+    EXPECT_EQ(scheduled.value["input"]["trigger"], "every Monday at 09:00");
+    const auto nightly = r.call("schedule_agent",
+                                {{"agent_id", "a-1"},
+                                 {"cron", "30 2 * * *"},
+                                 {"time_zone", "America/Toronto"},
+                                 {"input", "the nightly churn check"}});
+    ASSERT_TRUE(nightly.ok) << nightly.error.message;
+    EXPECT_EQ(nightly.value["time_zone"], "America/Toronto");
+    EXPECT_EQ(nightly.value["input"], "the nightly churn check");
+    auto schedules = r.call("list_agent_schedules", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(schedules.ok) << schedules.error.message;
+    ASSERT_EQ(schedules.value["schedules"].size(), 2U);
+    EXPECT_NE(schedules.value["schedules"][0]["slug"], schedules.value["schedules"][1]["slug"]);
+
+    // The runs a CronJob starts sit beside the manual launches.
+    ASSERT_TRUE(r.w.store->put_agent_cron_run(nightly.value["id"],
+                                              lake::control::new_uuid_v4(),
+                                              "prod-as-0123456789ab-29000000",
+                                              "Succeeded",
+                                              "finished",
+                                              0,
+                                              json{{"reply", "3 at risk"}}));
+    const auto runs = r.call("list_agent_launches", {{"agent_id", "a-1"}});
+    ASSERT_EQ(runs.value["launches"].size(), 2U);
+    const auto run = std::ranges::find_if(runs.value["launches"], [](const json& launch) {
+        return launch["trigger"] == "schedule";
+    });
+    ASSERT_NE(run, runs.value["launches"].end());
+    EXPECT_EQ((*run)["result"]["reply"], "3 at risk");
+    EXPECT_EQ((*run)["input"], "the nightly churn check");
+
+    const auto removed = r.call("unschedule_agent", {{"schedule_id", scheduled.value["id"]}});
+    ASSERT_TRUE(removed.ok) << removed.error.message;
+    EXPECT_EQ(removed.value["desired"], "absent");
+    schedules = r.call("list_agent_schedules", {{"agent_id", "a-1"}});
+    ASSERT_EQ(schedules.value["schedules"].size(), 1U);
+
     const auto vague = r.call("schedule_agent", {{"agent_id", "a-1"}, {"trigger", "sometimes"}});
     ASSERT_FALSE(vague.ok);
     EXPECT_NE(vague.error.message.find("cannot place"), std::string::npos);
+    const auto hurried = r.call("schedule_agent", {{"agent_id", "a-1"}, {"cron", "* * * * *"}});
+    ASSERT_FALSE(hurried.ok);
+    EXPECT_NE(hurried.error.message.find("five minutes"), std::string::npos);
+    EXPECT_FALSE(r.call("schedule_agent", {{"agent_id", "a-1"}}).ok) << "cron or trigger";
+    EXPECT_FALSE(r.call("schedule_agent",
+                        {{"agent_id", "a-1"}, {"cron", "0 9 * * *"}, {"time_zone", "$(x)"}})
+                     .ok);
 
     r.w.caller->answers["get_agent"] = {{"id", "n-1"}, {"name", "Native"}, {"runtime", "native"}};
     EXPECT_FALSE(r.call("launch_agent", {{"agent_id", "n-1"}}).ok);

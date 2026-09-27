@@ -7506,6 +7506,13 @@ struct ApiServer::Impl {
             if (launches.ok) {
                 page.data["list_agent_launches"] = launches.value;
             }
+            const ApiResult schedules = unwrap(co_await workspace_call(
+                "list_agent_schedules",
+                {{"customer_id", page.customer_id}, {"agent_id", page.subject}},
+                context));
+            if (schedules.ok) {
+                page.data["list_agent_schedules"] = schedules.value;
+            }
         }
         if (section == "agents" || section == "discover") {
             // The Agent Library does not need the workspace (docs/api/train-agents.md).
@@ -8403,6 +8410,30 @@ struct ApiServer::Impl {
                 }
                 result = unwrap(co_await act("update_agent", {{"id", id}, {"pipelines", grants}}));
             }
+        } else if (action == "agent_schedule" || action == "agent_unschedule") {
+            const std::string id = form_field(body, "id");
+            back = "/train/agent?" + query + "&id=" + oauth_url_encode(id) + "#agent-schedules";
+            if (action == "agent_schedule") {
+                const std::string when = form_field(body, "when");
+                // Five fields or an @macro is cron; anything else is Studio's plain words.
+                const bool cron = when.starts_with('@') ||
+                                  std::ranges::count(when, ' ') >= 4 &&
+                                      when.find_first_not_of("0123456789*/,- ") ==
+                                          std::string::npos;
+                nlohmann::json input{{"customer_id", customer_id},
+                                     {"agent_id", id},
+                                     {cron ? "cron" : "trigger", when}};
+                const std::string task = form_field(body, "input");
+                if (!task.empty()) {
+                    input["input"] = task;
+                }
+                result = unwrap(co_await workspace_call("schedule_agent", input, context));
+            } else {
+                result = unwrap(co_await workspace_call(
+                    "unschedule_agent",
+                    {{"customer_id", customer_id}, {"schedule_id", form_field(body, "schedule_id")}},
+                    context));
+            }
         } else if (action == "agent_run" || action == "agent_stop") {
             const std::string id = form_field(body, "id");
             back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
@@ -8429,6 +8460,22 @@ struct ApiServer::Impl {
                 back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
             } else {
                 result = unwrap(co_await act("delete_agent", {{"id", id}}));
+                if (result.ok) {
+                    // No CronJob outlives its agent.
+                    const ApiResult schedules = unwrap(co_await workspace_call(
+                        "list_agent_schedules",
+                        {{"customer_id", customer_id}, {"agent_id", id}},
+                        context));
+                    for (const nlohmann::json& schedule :
+                         schedules.ok ? schedules.value.value("schedules", nlohmann::json::array())
+                                      : nlohmann::json::array()) {
+                        co_await workspace_call(
+                            "unschedule_agent",
+                            {{"customer_id", customer_id},
+                             {"schedule_id", schedule.value("id", std::string())}},
+                            context);
+                    }
+                }
                 back = result.ok ? "/train/agents?" + query
                                  : "/train/agent?" + query + "&id=" + oauth_url_encode(id);
             }
@@ -12412,7 +12459,7 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 37>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 39>{
              {{"/workspace/start", "start"},
               {"/train/agents/create", "agent_create"},
               {"/train/agent/run", "agent_run"},
@@ -12420,6 +12467,8 @@ bool ApiServer::start() {
               {"/design/discover/create", "discover_create"},
               {"/train/agent/revoke", "agent_revoke"},
               {"/train/agent/stop", "agent_stop"},
+              {"/train/agent/schedule", "agent_schedule"},
+              {"/train/agent/unschedule", "agent_unschedule"},
               {"/train/agent/delete", "agent_delete"},
               {"/train/dataset/promote", "dataset_promote"},
               {"/train/data/generate", "dataset_generate"},

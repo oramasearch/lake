@@ -1250,6 +1250,44 @@ json launch_json(const control::AgentLaunch& launch) {
             {"created_by_taap_id", launch.created_by_taap_id}};
 }
 
+json schedule_json(const control::AgentCronSchedule& schedule) {
+    return {{"id", schedule.id},
+            {"customer_id", schedule.customer_id},
+            {"agent_id", schedule.agent_id},
+            {"agent_name", schedule.agent_name},
+            {"cron", schedule.cron},
+            {"time_zone", schedule.time_zone},
+            {"description", schedule.description},
+            {"input", schedule.input},
+            {"slug", schedule.slug},
+            {"desired", schedule.desired},
+            {"phase", schedule.phase},
+            {"message", schedule.message},
+            {"last_schedule_at", schedule.last_schedule_at},
+            {"created_at", schedule.created_at},
+            {"created_by_taap_id", schedule.created_by_taap_id}};
+}
+
+// Read on the customer, for the list_ capabilities, which authorize themselves.
+std::optional<ApiResult> authorize_customer_read(const json& input, ApiContext& context) {
+    const auto object = customer_object(input, context);
+    if (!object) {
+        return ApiResult::failure(object.error().code, object.error().message, object.error().path);
+    }
+    if (context.acting_identity == "admin") {
+        return std::nullopt;
+    }
+    const auto decision = control::authorize(
+        *context.store, context.acting_identity, *object, "read", context.authorization_cache);
+    if (!decision) {
+        return ApiResult::failure(decision.error().code, decision.error().message);
+    }
+    if (!decision->allowed) {
+        return ApiResult::failure("unauthorized", "principal is not allowed to read the customer");
+    }
+    return std::nullopt;
+}
+
 void agent_audit(ApiContext& context,
                  std::string kind,
                  const std::string& customer_id,
@@ -1274,7 +1312,8 @@ turn_key(ApiContext& context, const std::string& agent, std::vector<std::string>
                             std::move(scopes),
                             900,
                             false};
-    if (context.session_credential && !context.credential_session_id.starts_with("launch:")) {
+    if (context.session_credential && !context.credential_session_id.starts_with("launch:") &&
+        !context.credential_session_id.starts_with("schedule:")) {
         token.parent_session_id = context.credential_session_id;
     }
     auto issued = context.store->create_token(token);
@@ -1398,33 +1437,31 @@ void register_agent_run_capabilities(Registry& registry) {
             if (!context.store) {
                 return unavailable();
             }
-            const auto object = customer_object(input, context);
-            if (!object) {
-                return ApiResult::failure(
-                    object.error().code, object.error().message, object.error().path);
+            if (auto refused = authorize_customer_read(input, context)) {
+                return *refused;
             }
-            if (context.acting_identity != "admin") {
-                const auto decision = control::authorize(*context.store,
-                                                         context.acting_identity,
-                                                         *object,
-                                                         "read",
-                                                         context.authorization_cache);
-                if (!decision) {
-                    return ApiResult::failure(decision.error().code, decision.error().message);
-                }
-                if (!decision->allowed) {
-                    return ApiResult::failure("unauthorized",
-                                              "principal is not allowed to read the customer");
-                }
-            }
-            auto listed = context.store->list_agent_launches(input.at("customer_id"),
-                                                             input.value("agent_id", std::string()),
-                                                             input.value("limit", 50));
+            const std::string customer_id = input.at("customer_id");
+            const std::string agent_id = input.value("agent_id", std::string());
+            const int limit = input.value("limit", 50);
+            auto listed = context.store->list_agent_launches(customer_id, agent_id, limit);
             if (!listed) {
                 return ApiResult::failure(listed.error().code, listed.error().message);
             }
+            // The runs the schedules' CronJobs started sit beside the launches, newest first.
+            auto scheduled = context.store->list_agent_cron_runs(customer_id, agent_id, limit);
+            if (!scheduled) {
+                return ApiResult::failure(scheduled.error().code, scheduled.error().message);
+            }
+            std::vector<control::AgentLaunch> runs = std::move(*listed);
+            runs.insert(runs.end(), scheduled->begin(), scheduled->end());
+            std::ranges::stable_sort(runs, [](const auto& left, const auto& right) {
+                return left.created_at > right.created_at;
+            });
+            if (limit > 0 && static_cast<int>(runs.size()) > limit) {
+                runs.resize(static_cast<std::size_t>(limit));
+            }
             json launches = json::array();
-            for (const control::AgentLaunch& launch : *listed) {
+            for (const control::AgentLaunch& launch : runs) {
                 launches.push_back(launch_json(launch));
             }
             return ApiResult::success({{"launches", std::move(launches)}});
@@ -1463,12 +1500,20 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "schedule_agent",
         .title = "Schedule an agent",
-        .description = "Run a Python agent unattended on its trigger: every N minutes, hours or "
-                       "days, hourly, daily, weekly, every day at HH:MM, every <weekday> at HH:MM "
-                       "(UTC). An empty trigger removes the schedule.",
+        .description =
+            "Add a cron schedule to a Python agent: it runs as a job on every tick, as whoever "
+            "set the schedule. An agent may have several; each is its own Kubernetes CronJob, "
+            "which the Orama operator runs. Give `cron` (five fields, or @hourly, @daily, "
+            "@weekly, @monthly) or `trigger` in plain words (every N minutes, hours or days, "
+            "hourly, daily, weekly, every day|weekday|<weekday> at HH:MM). At most once every "
+            "five minutes; `time_zone` is an IANA zone, UTC by default.",
         .input_schema = customer_agent_schema(
-            {{"agent_id", {{"type", "string"}}}, {"trigger", {{"type", "string"}}}},
-            json::array({"agent_id", "trigger"})),
+            {{"agent_id", {{"type", "string"}}},
+             {"cron", {{"type", "string"}}},
+             {"trigger", {{"type", "string"}}},
+             {"time_zone", {{"type", "string"}}},
+             {"input", {{"description", "what each run is asked to do"}}}},
+            json::array({"agent_id"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -1481,50 +1526,130 @@ void register_agent_run_capabilities(Registry& registry) {
             }
             const std::string customer_id = input.at("customer_id");
             const std::string agent_id = input.at("agent_id");
-            const std::string trigger = input.at("trigger");
+            const std::string trigger = input.value("trigger", std::string());
+            std::string cron = input.value("cron", std::string());
+            if (cron.empty() == trigger.empty()) {
+                co_return ApiResult::failure(
+                    "invalid_input", "give either cron or trigger", cron.empty() ? "" : "/cron");
+            }
+            if (cron.empty()) {
+                const auto translated = control::trigger_cron(trigger);
+                if (!translated) {
+                    co_return ApiResult::failure(
+                        "invalid_input",
+                        "lake cannot place '" + trigger +
+                            "' in time; use every N minutes, hours or days, daily, weekly, every "
+                            "<day> at HH:MM, or a cron expression",
+                        "/trigger");
+                }
+                cron = *translated;
+            }
+            const auto normalized = control::normalize_cron(cron);
+            if (!normalized) {
+                co_return ApiResult::failure("invalid_input", normalized.error(), "/cron");
+            }
+            const std::string time_zone = input.value("time_zone", std::string("Etc/UTC"));
+            if (time_zone.empty() || time_zone.size() > 64 ||
+                time_zone.find_first_not_of(
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_+-") !=
+                    std::string::npos) {
+                co_return ApiResult::failure(
+                    "invalid_input", "time_zone is an IANA zone such as Etc/UTC", "/time_zone");
+            }
             auto agent = answered(
                 co_await zetta_call(context, customer_id, "get_agent", {{"id", agent_id}}));
             if (!agent) {
                 co_return agent.error();
             }
-            const auto now = std::chrono::duration_cast<std::chrono::seconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
-            std::optional<std::int64_t> next;
-            if (!trigger.empty()) {
-                if (agent->value("runtime", std::string("native")) != "python") {
-                    co_return ApiResult::failure("invalid_input",
-                                                 "only Python agents run unattended on a trigger");
-                }
-                next = control::next_run(trigger, now);
-                if (!next) {
-                    co_return ApiResult::failure(
-                        "invalid_input",
-                        "lake cannot place '" + trigger +
-                            "' in time; use every N minutes, "
-                            "hours or days, daily, weekly, or every <day> at HH:MM",
-                        "/trigger");
-                }
+            if (agent->value("runtime", std::string("native")) != "python") {
+                co_return ApiResult::failure("invalid_input",
+                                             "only Python agents run unattended on a schedule");
+            }
+            json run_input = input.value("input", json(nullptr));
+            if (run_input.is_null()) {
+                run_input = {{"trigger", trigger.empty() ? *normalized : trigger}};
             }
             agent_audit(context,
                         "agent.schedule",
                         customer_id,
-                        {{"agent_id", agent_id}, {"trigger", trigger}});
-            auto stored = context.store->put_agent_schedule(
-                control::AgentSchedule{customer_id,
-                                       agent_id,
-                                       agent->value("name", std::string()),
-                                       trigger,
-                                       next.value_or(0),
-                                       0,
-                                       context.acting_user_id,
-                                       context.acting_identity});
+                        {{"agent_id", agent_id}, {"cron", *normalized}, {"time_zone", time_zone}});
+            auto stored = context.store->create_agent_cron_schedule(
+                control::NewAgentCronSchedule{.customer_id = customer_id,
+                                              .agent_id = agent_id,
+                                              .agent_name = agent->value("name", std::string()),
+                                              .cron = *normalized,
+                                              .time_zone = time_zone,
+                                              .description = trigger,
+                                              .input = std::move(run_input),
+                                              .scopes = control::agent_launch_scopes,
+                                              .created_by_user_id = context.acting_user_id,
+                                              .created_by_taap_id = context.acting_identity});
             if (!stored) {
                 co_return ApiResult::failure(stored.error().code, stored.error().message);
             }
-            co_return ApiResult::success({{"agent_id", agent_id},
-                                          {"trigger", trigger},
-                                          {"next_run_unix", next ? json(*next) : json(nullptr)}});
+            co_return ApiResult::success(schedule_json(*stored));
+        }});
+    registry.add(Capability{
+        .name = "list_agent_schedules",
+        .title = "List agent schedules",
+        .description = "The cron schedules of the space's agents (or one agent's), oldest first, "
+                       "with the operator's phase and when each last fired.",
+        .input_schema =
+            customer_agent_schema({{"agent_id", {{"type", "string"}}}}, json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .authorizes_candidates = true,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return unavailable();
+            }
+            if (auto refused = authorize_customer_read(input, context)) {
+                return *refused;
+            }
+            auto listed = context.store->list_agent_cron_schedules(
+                input.at("customer_id"), input.value("agent_id", std::string()));
+            if (!listed) {
+                return ApiResult::failure(listed.error().code, listed.error().message);
+            }
+            json schedules = json::array();
+            for (const control::AgentCronSchedule& schedule : *listed) {
+                schedules.push_back(schedule_json(schedule));
+            }
+            return ApiResult::success({{"schedules", std::move(schedules)}});
+        }});
+    registry.add(Capability{
+        .name = "unschedule_agent",
+        .title = "Remove an agent schedule",
+        .description = "Remove one cron schedule: the operator deletes its CronJob, which stops "
+                       "a run under way. Results already written stay in list_agent_launches.",
+        .input_schema = customer_agent_schema({{"schedule_id", {{"type", "string"}}}},
+                                              json::array({"schedule_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            auto schedule = context.store->get_agent_cron_schedule(input.at("schedule_id"));
+            if (!schedule || schedule->customer_id != customer_id) {
+                return ApiResult::failure("not_found", "no such schedule in this space");
+            }
+            agent_audit(context,
+                        "agent.unschedule",
+                        customer_id,
+                        {{"schedule_id", schedule->id}, {"agent_id", schedule->agent_id}});
+            auto removed = context.store->withdraw_agent_cron_schedule(schedule->id);
+            if (!removed) {
+                return ApiResult::failure(removed.error().code, removed.error().message);
+            }
+            return ApiResult::success(schedule_json(*removed));
         }});
     registry.add(Capability{
         .name = "agent_turn",

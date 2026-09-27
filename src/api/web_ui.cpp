@@ -3027,6 +3027,50 @@ std::string agent_content(const WorkspacePage& page) {
     }
     out += "</section>";
 
+    if (runtime == "python") {
+        out += "<section class=\"panel\" id=\"agent-schedules\"><h2>Schedules</h2><p "
+               "class=\"sub\">Each schedule is its own Kubernetes CronJob: every tick runs this "
+               "agent once, as you, with what you ask it here.</p>";
+        const nlohmann::json schedules =
+            page.data.value("list_agent_schedules", nlohmann::json::object())
+                .value("schedules", nlohmann::json::array());
+        if (schedules.empty()) {
+            out += "<p>No schedules. It runs when you run it.</p>";
+        } else {
+            out += "<table><thead><tr><th>When</th><th>Cron</th><th>Asked</th><th>Status</th>"
+                   "<th>Last fired</th><th></th></tr></thead><tbody>";
+            for (const nlohmann::json& schedule : schedules) {
+                const std::string phase = json_text(schedule, "phase");
+                const nlohmann::json asked = schedule.value("input", nlohmann::json());
+                out += std::format(
+                    "<tr><td>{}</td><td><code>{}</code> <small>{}</small></td><td>{}</td><td><span "
+                    "class=\"badge\">{}</span> <small>{}</small></td><td>{}</td><td><form "
+                    "class=\"inline\" method=\"post\" action=\"/train/agent/unschedule\">{}{}{}"
+                    "<button type=\"submit\">Remove</button></form></td></tr>",
+                    web_ui_escape(json_text(schedule, "description")),
+                    web_ui_escape(json_text(schedule, "cron")),
+                    web_ui_escape(json_text(schedule, "time_zone")),
+                    web_ui_escape(asked.is_string() ? asked.get<std::string>()
+                                                    : std::string()),
+                    web_ui_escape(phase.empty() ? std::string("Pending") : phase),
+                    web_ui_escape(json_text(schedule, "message")),
+                    web_ui_escape(json_text(schedule, "last_schedule_at")),
+                    hidden("customer_id", page.customer_id),
+                    hidden("id", json_text(agent, "id")),
+                    hidden("schedule_id", json_text(schedule, "id")));
+            }
+            out += "</tbody></table>";
+        }
+        out += std::format(
+            "<form class=\"stack\" method=\"post\" action=\"/train/agent/schedule\">{}{}<label>"
+            "When<input name=\"when\" required placeholder=\"every monday at 09:00, or 0 9 * * "
+            "1\"></label><label>Ask it<input name=\"input\" placeholder=\"What should each run "
+            "do?\"></label><button class=\"button\" type=\"submit\">Add schedule</button>"
+            "</form></section>",
+            hidden("customer_id", page.customer_id),
+            hidden("id", json_text(agent, "id")));
+    }
+
     out += "<section class=\"panel\" id=\"agent-runs\"><h2>Unattended Runs</h2>";
     const nlohmann::json launches = page.data.value("list_agent_launches", nlohmann::json::object())
                                         .value("launches", nlohmann::json::array());
@@ -3051,7 +3095,8 @@ std::string agent_content(const WorkspacePage& page) {
             const std::string status = !present ? std::string("Stopped")
                                                 : (phase.empty() ? std::string("Pending") : phase);
             std::string stop;
-            if (live) {
+            // A scheduled run belongs to its CronJob; removing the schedule stops the next ones.
+            if (live && json_text(launch, "trigger") != "schedule") {
                 stop = std::format("<form class=\"inline\" method=\"post\" "
                                    "action=\"/train/agent/stop\">{}{}{}<button "
                                    "type=\"submit\">Stop</button></form>",

@@ -267,21 +267,27 @@ struct ManagedStore {
     std::string phase, message, endpoint; // empty until the operator reports
     std::int64_t observed_generation = 0;
 };
-// A launch credential is `lal.<launch id>.<secret>`: the Orama operator generates it for the pod
-// and writes its SHA-256 into agent_launch_status; lake compares digests and never stores it.
+// A launch credential is `lal.<launch id>.<secret>`, a schedule's `las.<schedule id>.<secret>`:
+// the Orama operator generates it for the pod and writes its SHA-256 into the status row it owns
+// (agent_launch_status, agent_cron_schedule_status); lake compares digests and never stores it.
 inline constexpr std::string_view agent_launch_credential_prefix = "lal.";
+inline constexpr std::string_view agent_schedule_credential_prefix = "las.";
 inline std::optional<std::pair<std::string, std::string>>
-parse_agent_launch_credential(std::string_view secret) {
-    if (!secret.starts_with(agent_launch_credential_prefix)) {
+parse_agent_credential(std::string_view secret, std::string_view prefix) {
+    if (!secret.starts_with(prefix)) {
         return std::nullopt;
     }
-    secret.remove_prefix(agent_launch_credential_prefix.size());
+    secret.remove_prefix(prefix.size());
     const std::size_t dot = secret.find('.');
     if (dot != 36 || secret.size() < dot + 33) {
         return std::nullopt;
     }
     return std::pair<std::string, std::string>{std::string(secret.substr(0, dot)),
                                                std::string(secret.substr(dot + 1))};
+}
+inline std::optional<std::pair<std::string, std::string>>
+parse_agent_launch_credential(std::string_view secret) {
+    return parse_agent_credential(secret, agent_launch_credential_prefix);
 }
 inline bool constant_time_hex_equal(std::string_view left, std::string_view right) {
     if (left.size() != right.size() || left.empty()) {
@@ -316,11 +322,24 @@ struct NewAgentLaunch {
     std::vector<std::string> scopes;
     std::string created_by_user_id, created_by_taap_id;
 };
-// An agent's trigger or schedule as lake runs it (docs/api/agent-launches.md): the next time it is
-// due, in Unix seconds, and who set it (the launch acts as them).
-struct AgentSchedule {
-    std::string customer_id, agent_id, agent_name, trigger;
-    std::int64_t next_run_unix = 0, last_run_unix = 0;
+// One cron schedule of a Python agent (docs/api/agent-launches.md): an agent may have several.
+// lake writes the desired schedule (agent_cron_schedules, migration 0031); the Orama operator makes
+// each present one a Kubernetes CronJob and writes agent_cron_schedule_status, and one
+// agent_cron_runs row per Job the CronJob starts. Every run acts as whoever set the schedule.
+struct AgentCronSchedule {
+    std::string id, customer_id, agent_id, agent_name, cron, time_zone, description, slug, desired;
+    nlohmann::json input = nullptr;
+    std::vector<std::string> scopes;
+    std::int64_t generation = 1;
+    std::string created_by_user_id, created_by_taap_id, created_at, updated_at;
+    std::string phase, message, last_schedule_at; // empty until the operator reports
+    std::string credential_sha256;
+    std::int64_t observed_generation = 0;
+};
+struct NewAgentCronSchedule {
+    std::string customer_id, agent_id, agent_name, cron, time_zone, description;
+    nlohmann::json input = nullptr;
+    std::vector<std::string> scopes;
     std::string created_by_user_id, created_by_taap_id;
 };
 // One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). Kept in lake because
@@ -844,13 +863,17 @@ public:
     virtual Result<std::vector<AgentLaunch>>
     list_agent_launches(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
     virtual Result<AgentLaunch> withdraw_agent_launch(const std::string& id) = 0;
-    // Schedules: one per (customer, agent); an empty trigger removes it.
-    virtual Result<void> put_agent_schedule(const AgentSchedule&) = 0;
-    virtual Result<std::vector<AgentSchedule>> due_agent_schedules(std::int64_t now_unix) = 0;
-    virtual Result<void> mark_agent_schedule_run(const std::string& customer_id,
-                                                 const std::string& agent_id,
-                                                 std::int64_t ran_unix,
-                                                 std::int64_t next_run_unix) = 0;
+    // Cron schedules: any number per agent. Creating or withdrawing one NOTIFYs lake_services.
+    virtual Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) = 0;
+    virtual Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) = 0;
+    // Present schedules, oldest first; an empty agent_id lists every agent's.
+    virtual Result<std::vector<AgentCronSchedule>>
+    list_agent_cron_schedules(const std::string& customer_id, const std::string& agent_id) = 0;
+    // Marks a schedule absent so the operator deletes its CronJob. Refuses one already absent.
+    virtual Result<AgentCronSchedule> withdraw_agent_cron_schedule(const std::string& id) = 0;
+    // The runs the schedules' CronJobs started, as launches (trigger "schedule"), newest first.
+    virtual Result<std::vector<AgentLaunch>>
+    list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
     // Ask Orama conversations (lake#236), only ever read back by the person who had them.
     virtual Result<AskMessage> append_ask_message(const AskMessage&) = 0;
     virtual Result<std::vector<AskMessage>>

@@ -1,6 +1,6 @@
 # Running and talking to agents
 
-**Status: implemented 2026-09-27 (lake#231, epic lake#228).** How lake runs user-created Python
+**Status: implemented 2026-09-27 (lake#231, epic lake#228); cron schedules as CronJobs 2026-09-27.** How lake runs user-created Python
 agents on `agent-runtime`, fires their schedules, and delivers one conversation turn to any agent,
 from the Agent Library's specialized agents to the ones people build.
 
@@ -25,13 +25,34 @@ stopped (`desired = absent`) or not yet reported has no usable credential.
 
 ## Schedules
 
-`schedule_agent` stores a Python agent's trigger in `agent_schedules` with its next run. lake's
-scheduler (`control::AgentScheduler`, every `LAKE_AGENT_SCHEDULER_SECONDS`, default 60) launches a
-`job` for each due schedule, acting as whoever set it, and moves it to its next run. Understood
-triggers, in UTC: `every N minutes|hours|days` (at least five minutes), `hourly`, `daily`,
-`weekly`, `every day at HH:MM`, `every weekday at HH:MM`, `every <weekday> at HH:MM`. A trigger lake
-cannot place in time is refused when it is set. Creating a Python agent with a trigger in Train →
-Agents schedules it.
+A Python agent may have **any number of cron schedules**, and **each is its own Kubernetes
+CronJob**. The schedule is desired state in lake's Postgres, as launches are: lake writes it, the
+Orama operator reconciles it. lake fires nothing itself.
+
+| Table (migration `0031_agent_cron_schedules`) | Written by | What it holds |
+|---|---|---|
+| `agent_cron_schedules` | lake | agent, `cron` (five fields), `time_zone` (IANA, default `Etc/UTC`), the plain-words `description` it came from, the `input` each run is handed, scopes, `as-` slug, desired, generation, who set it |
+| `agent_cron_schedule_status` | the operator | phase, message, when the CronJob last fired, the **SHA-256** of the schedule's credential |
+| `agent_cron_runs` | the operator | one row per Job the CronJob started (keyed by the Job's uid): phase, message, exit code, result |
+
+For each present schedule the operator runs a CronJob named `<lake>-<slug>` (`concurrencyPolicy:
+Forbid`, a Job template like a job launch's: `backoffLimit: 0`, the runtime image, `AGENT_MODE=job`,
+the schedule's `input` as `AGENT_INPUT`). Every run authenticates with the schedule's credential,
+`las.<schedule id>.<secret>`, which the operator generates into a Secret the pod reads; lake
+resolves it by comparing digests (`context_for`) and it acts as **the person who set the schedule**,
+limited to the launch scopes. Removing a schedule (`desired = absent`) makes the operator delete the
+CronJob (and with it a run under way) and the credential, which stops resolving at once; the runs
+already written stay.
+
+`schedule_agent` takes either `cron` (five fields, or `@hourly`, `@daily`, `@weekly`, `@monthly`,
+`@yearly`) or `trigger` in Studio's plain words, which lake turns into cron: `every N minutes`
+(5–59, or whole hours), `every N hours|days`, `hourly`, `daily`, `weekly`, `every day|weekday|<weekday>
+at HH:MM`. lake checks each field's range and refuses a schedule that could fire more often than
+once every five minutes. Creating a Python agent with a trigger in Train → Agents (or through the
+Agent Factory) adds its first schedule; deleting the agent removes all of them.
+
+The per-agent `agent_schedules` table of 0030 and lake's in-process scheduler are retired: the
+table is no longer read, and is left for a deliberate drop.
 
 ## Turns
 
@@ -55,12 +76,14 @@ service.
 | Capability | Kind | Authorization | What it does |
 |---|---|---|---|
 | `launch_agent` | action | `write` on the customer | `{agent_id, mode: job\|service, input?}`; Python agents only |
-| `list_agent_launches` | read | `read` | `{agent_id?, limit?}`, newest first, with phase, message, exit code and result |
+| `list_agent_launches` | read | `read` | `{agent_id?, limit?}`, newest first, with phase, message, exit code and result; the schedules' runs are included (trigger `schedule`) |
 | `stop_agent_launch` | action | `write` | `{launch_id}`; the operator removes the Job or Deployment |
-| `schedule_agent` | action | `write` | `{agent_id, trigger}`; empty removes; Python agents only |
+| `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only |
+| `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with the operator's phase and last firing |
+| `unschedule_agent` | action | `write` | `{schedule_id}`; the operator deletes its CronJob |
 | `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?}` |
 
-Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.turn`.
+Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.turn`.
 
 ## Configuration
 
@@ -69,12 +92,14 @@ Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.turn`.
 | `LAKE_AGENT_ENDPOINTS` | the library agents this lake runs, `key=url,...` (operator) |
 | `LAKE_INTERNAL_URL` | lake's in-cluster address, handed to agents |
 | `LAKE_AGENT_SERVICE_TOKEN` | the bearer lake presents to agent services |
-| `LAKE_AGENT_SCHEDULER_SECONDS` | schedule poll interval (default 60) |
 
 ## Train → Agents
 
-An agent's page lists its runs (started, how, mode, status, result, *Stop*), refreshes every five
-seconds while one is starting, and for a Python agent offers **Run now** with an input. *Talk to this
+An agent's page lists its runs (started, how, mode, status, result, *Stop*; a scheduled run has no
+*Stop*, its schedule does), refreshes every five seconds while one is starting, and for a Python
+agent offers **Run now** with an input and a **Schedules** panel: every schedule with its words,
+cron, zone, what it asks, the operator's status and last firing, a *Remove* button, and a form that
+takes plain words or a cron expression. *Talk to this
 agent in Ask Orama* opens the conversation.
 
 ## Verify
@@ -83,7 +108,8 @@ agent in Ask Orama* opens the conversation.
 ctest --test-dir build -R 'AgentRuns|PostgresAgentLaunches'
 ```
 
-`AgentRuns.TriggersBecomeTheirNextRunInUtc`, `…TheSchedulerFiresDueSchedulesAsJobsAndMovesThem`,
+`AgentRuns.TriggersBecomeCronExpressions`, `…CronExpressionsAreCheckedAsACronJobWouldTakeThem`,
+`…AScheduleCredentialActsAsWhoeverSetTheSchedule`,
 `…ALaunchCredentialActsAsTheLauncherWithTheLaunchScopes`,
 `…LaunchStopAndScheduleAPythonAgentButNeverANativeOne`,
 `…AgentTurnReachesLibraryNativeAndPythonAgents`, and
