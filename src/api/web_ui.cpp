@@ -2204,7 +2204,10 @@ std::string run_report_panel(const nlohmann::json& report) {
         dataset != report.end() && dataset->is_object()) {
         out += "<h3>What It Learned From</h3><dl>";
         for (const auto& [key, value] : dataset->items()) {
-            out += "<dt>" + web_ui_escape(key) + "</dt><dd>" +
+            const std::string label = key == "source"     ? std::string("trained on")
+                                      : key == "not_used" ? std::string("columns not used")
+                                                          : key;
+            out += "<dt>" + web_ui_escape(label) + "</dt><dd>" +
                    web_ui_escape(value.is_array()
                                      ? [&] {
                                            std::string joined;
@@ -3380,10 +3383,28 @@ std::string workspace_content(const WorkspacePage& page) {
             "method=\"post\" action=\"/design/project/compile\">{}{}<label>What should it predict "
             "or answer?<textarea name=\"intent\" rows=\"3\" required placeholder=\"Predict which "
             "accounts will churn in the next 90 days, with the reasons\"></textarea></label>"
+            "<label>From data<select name=\"dataset\"><option value=\"\">Let the builder describe "
+            "its sources</option>{}</select><small>Choose a dataset and the pipeline reads it, and "
+            "its runs train on it.</small></label>"
             "<button class=\"button button-primary\" type=\"submit\">Build pipeline</button>"
             "</form></section>",
             hidden("customer_id", page.customer_id),
-            hidden("project", page.subject));
+            hidden("project", page.subject),
+            [&] {
+                std::string options;
+                for (const nlohmann::json& dataset :
+                     data.value("list_datasets", nlohmann::json::object())
+                         .value("datasets", nlohmann::json::array())) {
+                    const std::string database = json_text(dataset, "database").empty()
+                                                     ? std::string("datasets")
+                                                     : json_text(dataset, "database");
+                    const std::string path = database + "." + json_text(dataset, "name");
+                    options += std::format("<option value=\"{}\">{}</option>",
+                                           web_ui_escape(path),
+                                           web_ui_escape(json_text(dataset, "name")));
+                }
+                return options;
+            }());
         // Other ways to make a pipeline (docs/design/zetta-parity.md).
         out += std::format(
             "<section class=\"panel\"><h2>Other Ways to Start a Pipeline</h2><div "
@@ -3758,6 +3779,21 @@ std::string workspace_content(const WorkspacePage& page) {
                         ? std::string()
                         : " · started " + web_ui_escape(when(json_text(run, "created")))) +
                    "</p>";
+        }
+        // What the run says about itself (lake#251, lake#253): a structural run trained
+        // nothing; a connect step that was not read says so.
+        std::string said;
+        for (const nlohmann::json& log : run.value("logs", nlohmann::json::array())) {
+            const std::string message = json_text(log, "message");
+            if (message.starts_with("structural:")) {
+                said += "<p><strong>Nothing was trained.</strong> " +
+                        web_ui_escape(message.substr(12)) + ".</p>";
+            } else if (message.find(" was not read: ") != std::string::npos) {
+                said += "<p>" + web_ui_escape(message.substr(message.find(' ') + 1)) + ".</p>";
+            }
+        }
+        if (!said.empty()) {
+            out += "<section class=\"panel notice\" role=\"status\">" + said + "</section>";
         }
         if (data.contains("get_run_report")) {
             out += run_report_panel(data.at("get_run_report"));

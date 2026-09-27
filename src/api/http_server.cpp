@@ -7593,7 +7593,8 @@ struct ApiServer::Impl {
             if (section == "projects") {
                 reads = {{"list_projects", nlohmann::json::object()}};
             } else if (section == "project") {
-                reads = {{"get_project", {{"name", page.subject}}}};
+                reads = {{"get_project", {{"name", page.subject}}},
+                         {"list_datasets", nlohmann::json::object()}};
             } else if (section == "data") {
                 if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
                     page.data["loaded"] = {{"table", loaded}, {"rows", query_value(route, "rows")}};
@@ -8826,6 +8827,61 @@ struct ApiServer::Impl {
                     input["input_id"] = input_id;
                 }
                 result = unwrap(co_await act("compile_intent", std::move(input)));
+            }
+            // Built from the data the person chose (lake#251): the builder describes its own
+            // sources, so its first connect step is pointed at that dataset and the connect
+            // steps that read nothing are removed; the run form then trains on it.
+            const std::string chosen = form_field(body, "dataset");
+            const std::string built_graph =
+                result.ok ? result.value.value("name", result.value.value("graph", std::string()))
+                          : std::string();
+            if (result.ok && !chosen.empty() && !built_graph.empty()) {
+                const ApiResult graph = unwrap(co_await workspace_call(
+                    "workspace_query",
+                    {{"customer_id", customer_id},
+                     {"capability", "get_graph"},
+                     {"input", {{"project", project}, {"graph", built_graph}}}},
+                    context));
+                const std::size_t dot = chosen.find('.');
+                nlohmann::json edits = nlohmann::json::array();
+                bool pointed = false;
+                for (const nlohmann::json& node :
+                     graph.ok ? graph.value.value("nodes", nlohmann::json::array())
+                              : nlohmann::json::array()) {
+                    if (node.value("kind", std::string()) != "connect") {
+                        continue;
+                    }
+                    const std::string id = node.value("id", std::string());
+                    if (!pointed) {
+                        edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "source"},
+                                         {"value", chosen.substr(0, dot)}});
+                        edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "table"},
+                                         {"value", dot == std::string::npos ? chosen
+                                                                            : chosen.substr(dot + 1)}});
+                        edits.push_back({{"op", "rename_step"}, {"step", id},
+                                         {"name", "Load " + chosen}});
+                        pointed = true;
+                    } else {
+                        edits.push_back({{"op", "remove_step"}, {"step", id}});
+                    }
+                }
+                if (!edits.empty()) {
+                    const ApiResult edited = unwrap(co_await workspace_call(
+                        "edit_pipeline",
+                        {{"customer_id", customer_id},
+                         {"project", project},
+                         {"graph", built_graph},
+                         {"edits", std::move(edits)}},
+                        context));
+                    if (!edited.ok) {
+                        result = edited;
+                    }
+                }
+                if (result.ok) {
+                    back = "/design/pipeline?" + query + "&project=" + oauth_url_encode(project) +
+                           "&graph=" + oauth_url_encode(built_graph) +
+                           "&dataset=" + oauth_url_encode(chosen) + "#run";
+                }
             }
         } else if (action == "approve") {
             const std::string project = form_field(body, "project");

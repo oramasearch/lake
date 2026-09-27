@@ -111,3 +111,41 @@ TEST(WebUi, AskOramaOpensBesideThePageAndKnowsWhichPageItIs) {
         << "its forms stay in the panel";
     EXPECT_NE(embedded.find("target=\"_top\">/design/pipeline</a>"), std::string::npos);
 }
+
+TEST(WebUi, ARunSaysWhatItReadAndWhenNothingWasTrained) {
+    // lake#251, lake#253: a structural run and an unread connect step are said on the run.
+    lake::api::WorkspacePage page;
+    page.section = "run";
+    page.customer_id = "c-1";
+    page.subject = "r-1";
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["get_run"] = {
+        {"status", "succeeded"},
+        {"logs",
+         nlohmann::json::array(
+             {{{"level", "warn"},
+               {"message", "structural: this pipeline is not churn-shaped, so its steps ran "
+                           "without training or scoring anything"}},
+              {{"level", "info"},
+               {"message", "connect: Load usage was not read: this run trained on datasets.a"}}})}};
+    page.data["get_run_report"] = {
+        {"dataset", {{"source", "datasets.a"}, {"not_used", nlohmann::json::array({"'plan'"})}}}};
+    const std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<strong>Nothing was trained.</strong>"), std::string::npos);
+    EXPECT_NE(html.find("Load usage was not read: this run trained on datasets.a"),
+              std::string::npos);
+    EXPECT_NE(html.find("<dt>trained on</dt><dd>datasets.a</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>columns not used</dt>"), std::string::npos);
+
+    page.section = "project";
+    page.subject = "retention";
+    page.data = {{"get_project", {{"name", "retention"}, {"graphs", nlohmann::json::array()}}},
+                 {"list_datasets",
+                  {{"datasets",
+                    nlohmann::json::array({{{"name", "accounts"}, {"database", "datasets"}}})}}}};
+    const std::string project = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(project.find("<select name=\"dataset\">"), std::string::npos)
+        << "Build a Pipeline can start from the person's own data";
+    EXPECT_NE(project.find("<option value=\"datasets.accounts\">accounts</option>"),
+              std::string::npos);
+}
