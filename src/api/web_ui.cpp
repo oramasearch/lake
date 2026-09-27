@@ -2403,6 +2403,73 @@ std::string pipeline_content(const WorkspacePage& page) {
         out += gate_panel(deployed->value("gate", nlohmann::json::object()), "Its Checks");
     }
 
+    // A change the Project Agent proposed (lake#249): what it would do, the graph after, and Apply.
+    if (const auto proposed = page.data.find("proposal");
+        proposed != page.data.end() && proposed->is_object()) {
+        const nlohmann::json& proposal = *proposed;
+        std::string steps, problems;
+        for (const nlohmann::json& step : proposal.value("steps", nlohmann::json::array())) {
+            steps += "<li>" + web_ui_escape(cell_text(step)) + "</li>";
+        }
+        for (const nlohmann::json& problem : proposal.value("problems", nlohmann::json::array())) {
+            problems += "<li>" + web_ui_escape(cell_text(problem)) + "</li>";
+        }
+        const nlohmann::json run = proposal.value("run", nlohmann::json::object());
+        std::string settings;
+        if (!json_text(run, "dataset").empty()) {
+            settings += "<li>Train on <code>" + web_ui_escape(json_text(run, "dataset")) +
+                        "</code></li>";
+        }
+        if (run.contains("holdout") && run["holdout"].is_number()) {
+            settings += std::format("<li>Hold out {:.0f}% of rows for measuring</li>",
+                                    run["holdout"].get<double>() * 100);
+        }
+        nlohmann::json after = proposal.value("after", nlohmann::json::object());
+        if (after.is_object()) {
+            after["name"] = graph.name;
+        }
+        const auto drawn = pl::from_json(after);
+        const bool applicable = problems.empty() && !steps.empty();
+        out += std::format(
+            "<section class=\"panel notice\" id=\"proposal\"><h2>Proposed by the Project Agent"
+            "</h2><p>{}</p><p class=\"sub\">Nothing has changed yet. Applying saves these edits; "
+            "the pipeline then needs approval again before it runs.</p>{}{}{}{}"
+            "<div class=\"actions\">{}<a class=\"button\" href=\"{}\">Discard</a></div></section>",
+            web_ui_escape(json_text(proposal, "summary")),
+            steps.empty() ? std::string("<p>No edits to the graph.</p>")
+                          : "<h3>Edits</h3><ol>" + steps + "</ol>",
+            settings.empty() ? std::string() : "<h3>Run settings</h3><ul>" + settings + "</ul>",
+            problems.empty() ? std::string()
+                             : "<h3>Why it cannot be applied</h3><ul>" + problems + "</ul>",
+            drawn && !drawn->steps.empty()
+                ? "<h3>After</h3><div class=\"pipeline-canvas\">" +
+                      pl::render_svg(*drawn, {}, "", base + "&step=") + "</div>"
+                : std::string(),
+            applicable
+                ? std::format("<form class=\"inline\" method=\"post\" "
+                              "action=\"/design/pipeline/apply\">{}{}{}{}<button class=\"button "
+                              "button-primary\" type=\"submit\">Apply</button></form>",
+                              common(),
+                              hidden("edits", proposal.value("edits", nlohmann::json::array()).dump()),
+                              hidden("dataset", json_text(run, "dataset")),
+                              hidden("holdout",
+                                     run.contains("holdout") && run["holdout"].is_number()
+                                         ? std::format("{}", run["holdout"].get<double>())
+                                         : std::string()))
+                : std::string(),
+            base);
+    }
+
+    // Ask the Project Agent for a change instead of editing by hand (lake#249).
+    out += std::format(
+        "<section class=\"panel\"><h2>Ask the Project Agent</h2><form class=\"stack\" "
+        "method=\"post\" action=\"/design/pipeline/ask\">{}<label>What should change?<textarea "
+        "name=\"request\" rows=\"3\" required placeholder=\"Train on ux_review_churn only and hold "
+        "out 20% of rows\"></textarea></label><button class=\"button button-primary\" "
+        "type=\"submit\">Propose a change</button></form><p class=\"muted\">It reads your data and "
+        "proposes edits for you to review; nothing changes until you apply them.</p></section>",
+        common());
+
     // See it.
     out += "<section class=\"panel\"><h2>Graph</h2>";
     out += graph.steps.empty()
@@ -2434,7 +2501,7 @@ std::string pipeline_content(const WorkspacePage& page) {
         }
         out += std::format(
             "<section class=\"panel\"><h2>Step {}</h2><dl><dt>Id</dt><dd><code>{}</code></dd>"
-            "<dt>Kind</dt><dd>{}</dd><dt>Last run</dt><dd>{}</dd><dt>From</dt><dd><ul>{}</ul></dd>"
+            "<dt>Kind</dt><dd>{}</dd>{}<dt>Last run</dt><dd>{}</dd><dt>From</dt><dd><ul>{}</ul></dd>"
             "<dt>To</dt><dd><ul>{}</ul></dd></dl><div class=\"pipeline-edit\">"
             "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/edit\">{}{}{}<label>"
             "Name<input name=\"name\" required value=\"{}\"></label><button type=\"submit\">"
@@ -2451,6 +2518,16 @@ std::string pipeline_content(const WorkspacePage& page) {
             web_ui_escape(step->name),
             web_ui_escape(step->id),
             web_ui_escape(step->kind),
+            [&] {
+                std::string settings;
+                for (const auto& [key, value] : step->attributes.items()) {
+                    settings += "<dt>" + web_ui_escape(key) + "</dt><dd><code>" +
+                                web_ui_escape(value.is_string() ? value.get<std::string>()
+                                                                : value.dump()) +
+                                "</code></dd>";
+                }
+                return settings;
+            }(),
             web_ui_escape(status.contains(step->id) ? status.at(step->id) : "not in the last run"),
             incoming.empty() ? "<li class=\"muted\">nothing</li>" : incoming,
             outgoing.empty() ? "<li class=\"muted\">nothing</li>" : outgoing,
@@ -2530,11 +2607,24 @@ std::string pipeline_content(const WorkspacePage& page) {
         const std::string name = json_text(dataset, "name");
         const std::string database = json_text(dataset, "database");
         const std::string path = database.empty() ? name : database + "." + name;
-        datasets += std::format(
-            "<option value=\"{}\">{}</option>", web_ui_escape(path), web_ui_escape(path));
+        datasets += std::format("<option value=\"{}\"{}>{}</option>",
+                                web_ui_escape(path),
+                                path == json_text(page.data, "run_dataset") ? " selected" : "",
+                                web_ui_escape(path));
+    }
+    // A real hold-out by default, so a run reports a held-out score (lake#254), and a model name
+    // that is this pipeline's own, never a constant every pipeline shares.
+    const std::string holdout = json_text(page.data, "run_holdout").empty()
+                                    ? std::string("0.2")
+                                    : json_text(page.data, "run_holdout");
+    std::string model_name;
+    for (const char c : page.project + "_" + graph.name) {
+        model_name += std::isalnum(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(
+                                                                        static_cast<unsigned char>(c)))
+                                                                  : '_';
     }
     out += std::format(
-        "<section class=\"panel\"><h2>Approve, Check, Run and Deploy</h2><div "
+        "<section class=\"panel\" id=\"run\"><h2>Approve, Check, Run and Deploy</h2><div "
         "class=\"pipeline-edit\">{}"
         "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/gate\">{}<p>Run Zetta's "
         "correctness checks without running anything.</p><button type=\"submit\">Check</button>"
@@ -2542,8 +2632,9 @@ std::string pipeline_content(const WorkspacePage& page) {
         "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/run\">{}<label>Train on"
         "<select name=\"dataset_path\"><option value=\"\">the pipeline's own source</option>{}"
         "</select></label><label>Hold out for measuring<input name=\"holdout_fraction\" "
-        "type=\"number\" min=\"0\" max=\"0.9\" step=\"0.05\" placeholder=\"0.2\"></label>"
-        "<label>Model name<input name=\"model_name\" placeholder=\"churn_model\"></label><button "
+        "type=\"number\" min=\"0\" max=\"0.9\" step=\"0.05\" value=\"{}\"><small>The share of "
+        "rows kept out of training to measure the model; 0 measures nothing.</small></label>"
+        "<label>Model name<input name=\"model_name\" value=\"{}\"></label><button "
         "class=\"button button-primary\" type=\"submit\"{}>Check and run</button></form>"
         "<form class=\"stack\" method=\"post\" action=\"/design/pipeline/deploy\">{}<p>Place it "
         "in the workspace behind its checks.</p><button type=\"submit\"{}>Deploy</button></form>"
@@ -2557,6 +2648,8 @@ std::string pipeline_content(const WorkspacePage& page) {
         common(),
         common(),
         datasets,
+        web_ui_escape(holdout),
+        web_ui_escape(model_name),
         approved ? "" : " disabled",
         common(),
         approved ? "" : " disabled");
@@ -7179,6 +7272,16 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
                 content += std::format("<p class=\"sub\">Asked {}: {}</p>",
                                        web_ui_escape(json_text(delegation, "agent")),
                                        web_ui_escape(json_text(delegation, "request")));
+                // A Project Agent proposal waits on its pipeline page (lake#249).
+                const nlohmann::json answered =
+                    delegation.is_object() ? delegation.value("answer", nlohmann::json()) : nullptr;
+                const std::string review =
+                    answered.is_object() ? json_text(answered, "review_url") : std::string();
+                if (review.starts_with("/design/pipeline?")) {
+                    content += std::format("<p><a class=\"button button-primary\" href=\"{}"
+                                           "#proposal\">Review the proposed change</a></p>",
+                                           web_ui_escape(review));
+                }
             }
             const nlohmann::json proposals = payload.value("proposals", nlohmann::json::array());
             for (std::size_t index = 0; index < proposals.size(); ++index) {

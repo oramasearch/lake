@@ -995,6 +995,26 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
     EXPECT_EQ(renamed.value["name"], "churn v2");
     EXPECT_EQ(w.caller->calls.back().second["new_name"], "churn v2");
     EXPECT_TRUE(registry.find("edit_pipeline") != nullptr) << "REST, OpenAPI and MCP render it";
+
+    // A proposal is applied as one save: every edit or none (lake#249).
+    const auto applied = call({{"edits",
+                                json::array({{{"op", "set_attribute"},
+                                              {"step", "pull"},
+                                              {"name", "table"},
+                                              {"value", "ux_review_churn"}},
+                                             {{"op", "remove_step"}, {"step", "train"}}})}});
+    ASSERT_TRUE(applied.ok) << applied.error.message;
+    const json batch = w.caller->calls.back().second;
+    EXPECT_EQ(batch["nodes"].size(), 1U);
+    EXPECT_EQ(batch["nodes"][0]["attributes"]["table"], "ux_review_churn");
+    const std::size_t saves = w.caller->calls.size();
+    const auto half = call({{"edits",
+                             json::array({{{"op", "rename_step"}, {"step", "pull"}, {"name", "P"}},
+                                          {{"op", "remove_step"}, {"step", "nope"}}})}});
+    ASSERT_FALSE(half.ok);
+    EXPECT_NE(half.error.message.find("edit 2"), std::string::npos);
+    EXPECT_EQ(w.caller->calls.size(), saves + 1) << "read, refused, nothing saved";
+    EXPECT_FALSE(call(json::object()).ok) << "an op or edits";
 }
 
 TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
@@ -1051,6 +1071,40 @@ TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
             << op;
     }
     EXPECT_NE(html.find("/train/run?customer_id="), std::string::npos) << "its runs link out";
+    EXPECT_NE(html.find("action=\"/design/pipeline/ask\""), std::string::npos)
+        << "the Project Agent can be asked for a change";
+    EXPECT_NE(html.find("name=\"holdout_fraction\" type=\"number\" min=\"0\" max=\"0.9\" "
+                        "step=\"0.05\" value=\"0.2\""),
+              std::string::npos)
+        << "a real hold-out by default, not a placeholder";
+    EXPECT_NE(html.find("name=\"model_name\" value=\"retention_churn\""), std::string::npos)
+        << "the model is named after this pipeline";
+    EXPECT_EQ(html.find("Proposed by the Project Agent"), std::string::npos);
+
+    // A proposal to review: the edits in words, the graph after, Apply and Discard.
+    page.data["proposal"] = {
+        {"summary", "Train on accounts only"},
+        {"steps", json::array({"Remove step pull and its edges"})},
+        {"edits", json::array({{{"op", "remove_step"}, {"step", "pull"}}})},
+        {"run", {{"dataset", "datasets.accounts"}, {"holdout", 0.25}}},
+        {"problems", json::array()},
+        {"after",
+         {{"nodes", json::array({{{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
+          {"edges", json::array()}}}};
+    page.data["run_dataset"] = "datasets.accounts";
+    const std::string reviewed = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(reviewed.find("Proposed by the Project Agent"), std::string::npos);
+    EXPECT_NE(reviewed.find("Remove step pull and its edges"), std::string::npos);
+    EXPECT_NE(reviewed.find("Hold out 25% of rows"), std::string::npos);
+    EXPECT_NE(reviewed.find("action=\"/design/pipeline/apply\""), std::string::npos);
+    EXPECT_NE(reviewed.find("<option value=\"datasets.accounts\" selected>"), std::string::npos);
+    page.data["proposal"]["problems"] = json::array({"edit 1: there is no step pull"});
+    const std::string refused = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(refused.find("Why it cannot be applied"), std::string::npos);
+    EXPECT_EQ(refused.find("action=\"/design/pipeline/apply\""), std::string::npos)
+        << "a proposal that would not apply cannot be applied";
+    page.data.erase("proposal");
+    page.data.erase("run_dataset");
 
     page.section = "run";
     page.subject = "r1";
@@ -2016,6 +2070,37 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     ASSERT_TRUE(built.ok) << built.error.message;
     EXPECT_EQ(std::get<2>(r.agents.turns.back())["zetta_base_url"],
               "http://lake.internal:4900/workspaces/" + r.w.customer_id + "/zetta");
+
+    // A change to an existing pipeline: the agent is handed the graph, and its proposal is kept
+    // for review on the pipeline page (lake#249).
+    r.w.caller->answers["get_graph"] = {{"name", "churn"},
+                                        {"nodes", json::array({{{"id", "pull"}, {"kind", "connect"},
+                                                                {"name", "Pull"}}})},
+                                        {"edges", json::array()}};
+    r.agents.answer = {{"ok", true},
+                       {"result",
+                        {{"kind", "proposal"},
+                         {"reply", "Proposed, not applied: rename"},
+                         {"proposal",
+                          {{"project", "retention"},
+                           {"graph", "churn"},
+                           {"edits", json::array({{{"op", "rename"}, {"name", "churn v2"}}})}}}}}};
+    const auto proposed = r.call("agent_turn",
+                                 {{"agent", "agent-project"},
+                                  {"message", "rename it"},
+                                  {"context", {{"project", "retention"}, {"graph", "churn"}}}});
+    ASSERT_TRUE(proposed.ok) << proposed.error.message;
+    EXPECT_EQ(std::get<2>(r.agents.turns.back())["context"]["pipeline"]["nodes"][0]["id"], "pull");
+    const std::string review = proposed.value["review_url"];
+    ASSERT_NE(review.find("/design/pipeline?customer_id=" + r.w.customer_id +
+                          "&project=retention&graph=churn&proposal="),
+              std::string::npos)
+        << review;
+    const auto kept = r.store.ask_conversation(review.substr(review.rfind('=') + 1),
+                                               r.principal.user_id, 5);
+    ASSERT_TRUE(kept && kept->size() == 1U);
+    EXPECT_EQ(kept->front().payload["proposal"]["edits"][0]["op"], "rename");
+    r.agents.answer = {{"ok", true}, {"reply", "done"}};
 
     r.w.caller->answers["list_datasets"] = {{"datasets", json::array({{{"name", "accounts"}}})}};
     r.w.caller->answers["get_dataset"] = {{"columns", json::array({{{"name", "churned"}}})}};
