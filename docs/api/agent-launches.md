@@ -41,7 +41,8 @@ the schedule's `input` as `AGENT_INPUT`). Every run authenticates with the sched
 `las.<schedule id>.<secret>`, which the operator generates into a Secret the pod reads; lake
 resolves it by comparing digests (`context_for`) and it acts as **the person who set the schedule**,
 limited to the launch scopes. Removing a schedule (`desired = absent`) makes the operator delete the
-CronJob and the credential, which stops resolving at once; runs already written stay.
+CronJob (and with it a run under way) and the credential, which stops resolving at once; the runs
+already written stay.
 
 `schedule_agent` takes either `cron` (five fields, or `@hourly`, `@daily`, `@weekly`, `@monthly`,
 `@yearly`) or `trigger` in Studio's plain words, which lake turns into cron: `every N minutes`

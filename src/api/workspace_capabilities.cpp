@@ -1623,8 +1623,8 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "unschedule_agent",
         .title = "Remove an agent schedule",
-        .description = "Remove one cron schedule: the operator deletes its CronJob. Runs already "
-                       "started finish; their results stay in list_agent_launches.",
+        .description = "Remove one cron schedule: the operator deletes its CronJob, which stops "
+                       "a run under way. Results already written stay in list_agent_launches.",
         .input_schema = customer_agent_schema({{"schedule_id", {{"type", "string"}}}},
                                               json::array({"schedule_id"})),
         .output_schema = {{"type", "object"}},
