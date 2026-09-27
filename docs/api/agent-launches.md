@@ -61,7 +61,7 @@ table is no longer read, and is left for a deliberate drop.
 | Agent | Where the turn goes | What it is handed |
 |---|---|---|
 | **Ask Orama** (`agent-ask-orama`) | its service, `LAKE_AGENT_ENDPOINTS` | a key for this turn derived from the person's credential, carrying **every read capability and `agent_turn`, never an action**, and `lake_url` |
-| **Project Agent** (`agent-project`) | its service | a turn key limited to `workspace_query` / `workspace_openapi`, and `zetta_base_url` = lake's agent path for the workspace |
+| **Project Agent** (`agent-project`) | its service | a turn key limited to `workspace_query` / `workspace_openapi`, and `zetta_base_url` = lake's agent path for the workspace. A `context` naming `project` and `graph` is a **change request**: lake adds the graph as it is (`pipeline`), the agent answers with a proposal (agent-project edit mode), and lake keeps it as an Ask Orama message and returns `review_url` (the pipeline page with `&proposal=`), where the person applies it (lake#249) |
 | **Auto-Suggest** (`agent-autosuggest`) | its service | the workspace's profile, which lake builds (`list_datasets`, then `get_dataset` for up to twelve); no key: it reads nothing itself |
 | **AgentCreator** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
 | a **native** agent of the space | the workspace's `chat` (`GET`) | the message |

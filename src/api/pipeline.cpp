@@ -71,7 +71,11 @@ std::expected<Graph, std::string> from_json(const nlohmann::json& value) {
         if (!node.is_object()) {
             return std::unexpected(std::string("a step is not an object"));
         }
-        graph.steps.push_back({text(node, "id"), text(node, "kind"), text(node, "name")});
+        nlohmann::json attributes = node.value("attributes", nlohmann::json::object());
+        graph.steps.push_back({text(node, "id"),
+                               text(node, "kind"),
+                               text(node, "name"),
+                               attributes.is_object() ? attributes : nlohmann::json::object()});
     }
     for (const nlohmann::json& edge : value.value("edges", nlohmann::json::array())) {
         if (!edge.is_object()) {
@@ -85,7 +89,10 @@ std::expected<Graph, std::string> from_json(const nlohmann::json& value) {
 nlohmann::json steps_json(const Graph& graph) {
     nlohmann::json out = nlohmann::json::array();
     for (const Step& step : graph.steps) {
-        out.push_back({{"id", step.id}, {"kind", step.kind}, {"name", step.name}});
+        out.push_back({{"id", step.id},
+                       {"kind", step.kind},
+                       {"name", step.name},
+                       {"attributes", step.attributes}});
     }
     return out;
 }
@@ -212,6 +219,19 @@ std::expected<Graph, std::string> apply(Graph graph, const Edit& edit) {
         if (graph.edges.size() == before) {
             return std::unexpected("there is no edge from " + edit.from + " to " + edit.to);
         }
+    } else if (edit.op == "set_attribute") {
+        const auto step = find(edit.step);
+        if (step == graph.steps.end()) {
+            return std::unexpected("there is no step " + edit.step);
+        }
+        if (edit.name.empty()) {
+            return std::unexpected("name the attribute to set");
+        }
+        if (edit.value.is_null()) {
+            step->attributes.erase(edit.name);
+        } else {
+            step->attributes[edit.name] = edit.value;
+        }
     } else if (edit.op == "rename") {
         if (edit.name.empty()) {
             return std::unexpected("a pipeline needs a name");
@@ -219,6 +239,48 @@ std::expected<Graph, std::string> apply(Graph graph, const Edit& edit) {
         graph.name = edit.name;
     } else {
         return std::unexpected("unknown edit '" + edit.op + "'");
+    }
+    if (std::string problem = validate(graph); !problem.empty()) {
+        return std::unexpected(std::move(problem));
+    }
+    return graph;
+}
+
+Edit edit_from_json(const nlohmann::json& value) {
+    Edit edit{.op = text(value, "op"),
+              .step = text(value, "step"),
+              .kind = text(value, "kind"),
+              .name = text(value, "name"),
+              .from = text(value, "from"),
+              .to = text(value, "to")};
+    if (value.is_object() && value.contains("value")) {
+        edit.value = value["value"];
+    }
+    return edit;
+}
+
+std::expected<Graph, std::string> apply_all(Graph graph, const nlohmann::json& edits) {
+    if (!edits.is_array() || edits.empty()) {
+        return std::unexpected(std::string("there are no edits to apply"));
+    }
+    std::size_t position = 0;
+    for (const nlohmann::json& value : edits) {
+        ++position;
+        if (!value.is_object()) {
+            return std::unexpected("edit " + std::to_string(position) + " is not an object");
+        }
+        Edit edit = edit_from_json(value);
+        // An added step takes the id the edit names, so later edits can refer to it.
+        const std::string wanted = text(value, "id");
+        auto applied = apply(std::move(graph), edit);
+        if (!applied) {
+            return std::unexpected("edit " + std::to_string(position) + " (" + edit.op +
+                                   "): " + applied.error());
+        }
+        graph = std::move(*applied);
+        if (edit.op == "add_step" && !wanted.empty() && graph.step(wanted) == nullptr) {
+            graph.steps.back().id = wanted;
+        }
     }
     if (std::string problem = validate(graph); !problem.empty()) {
         return std::unexpected(std::move(problem));

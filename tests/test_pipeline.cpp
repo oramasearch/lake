@@ -15,10 +15,16 @@ json churn() {
             {"project", "retention"},
             {"approval", "approved"},
             {"nodes",
-             json::array({{{"id", "pull"}, {"kind", "connect"}, {"name", "Pull accounts"}},
-                          {{"id", "tidy"}, {"kind", "clean"}, {"name", "Tidy"}},
-                          {{"id", "train"}, {"kind", "model"}, {"name", "Train churn"}},
-                          {{"id", "rank"}, {"kind", "serve"}, {"name", "Rank at risk"}}})},
+             json::array({{{"id", "pull"},
+                           {"kind", "connect"},
+                           {"name", "Pull accounts"},
+                           {"attributes", {{"source", "warehouse"}, {"table", "customers"}}}},
+                          {{"id", "tidy"}, {"kind", "clean"}, {"name", "Tidy"}, {"attributes", json::object()}},
+                          {{"id", "train"},
+                           {"kind", "model"},
+                           {"name", "Train churn"},
+                           {"attributes", {{"target", "churned"}, {"algo", "gradient_boosting"}}}},
+                          {{"id", "rank"}, {"kind", "serve"}, {"name", "Rank at risk"}, {"attributes", json::object()}}})},
             {"edges",
              json::array({{{"from", "pull"}, {"to", "tidy"}, {"kind", "data_flow"}},
                           {{"from", "tidy"}, {"to", "train"}, {"kind", "data_flow"}},
@@ -120,4 +126,47 @@ TEST(Pipeline, RendersLanesStepsEdgesStatusAndSelection) {
     hostile["nodes"][0]["name"] = "<script>alert(1)</script>";
     const std::string escaped = pl::render_svg(*pl::from_json(hostile), {}, "", "?step=");
     EXPECT_EQ(escaped.find("<script>"), std::string::npos);
+}
+
+TEST(Pipeline, EveryEditKeepsWhatEachStepDoes) {
+    // Found by the UX review 2026-09-27: saving a renamed step dropped every step's source, table,
+    // target and algorithm, silently changing what the pipeline runs.
+    auto renamed = pl::apply(parsed(), {.op = "rename_step", .step = "tidy", .name = "Clean"});
+    ASSERT_TRUE(renamed) << renamed.error();
+    const json saved = pl::steps_json(*renamed);
+    EXPECT_EQ(saved[0]["attributes"]["table"], "customers");
+    EXPECT_EQ(saved[2]["attributes"]["algo"], "gradient_boosting");
+}
+
+TEST(Pipeline, SetAttributeChangesOrClearsOneSetting) {
+    auto pointed = pl::apply(parsed(),
+                             {.op = "set_attribute", .step = "pull", .name = "table",
+                              .value = "ux_review_churn"});
+    ASSERT_TRUE(pointed) << pointed.error();
+    EXPECT_EQ(pointed->step("pull")->attributes["table"], "ux_review_churn");
+    auto cleared = pl::apply(*pointed, {.op = "set_attribute", .step = "pull", .name = "source"});
+    ASSERT_TRUE(cleared);
+    EXPECT_FALSE(cleared->step("pull")->attributes.contains("source"));
+    EXPECT_FALSE(pl::apply(parsed(), {.op = "set_attribute", .step = "nope", .name = "x"}));
+    EXPECT_FALSE(pl::apply(parsed(), {.op = "set_attribute", .step = "pull"}));
+}
+
+TEST(Pipeline, ApplyAllRunsEditsInOrderAllOrNothing) {
+    const json edits = json::array({{{"op", "add_step"}, {"kind", "act"}, {"name", "Notify"},
+                                     {"id", "notify"}},
+                                    {{"op", "add_edge"}, {"from", "rank"}, {"to", "notify"}},
+                                    {{"op", "set_attribute"}, {"step", "train"},
+                                     {"name", "target"}, {"value", "cancelled"}}});
+    auto applied = pl::apply_all(parsed(), edits);
+    ASSERT_TRUE(applied) << applied.error();
+    ASSERT_NE(applied->step("notify"), nullptr) << "a later edit can use the id the add named";
+    EXPECT_EQ(applied->edges.back().to, "notify");
+    EXPECT_EQ(applied->step("train")->attributes["target"], "cancelled");
+
+    const auto refused = pl::apply_all(
+        parsed(), json::array({{{"op", "remove_step"}, {"step", "tidy"}},
+                               {{"op", "remove_edge"}, {"from", "tidy"}, {"to", "train"}}}));
+    ASSERT_FALSE(refused);
+    EXPECT_NE(refused.error().find("edit 2 (remove_edge)"), std::string::npos) << refused.error();
+    EXPECT_FALSE(pl::apply_all(parsed(), json::array()));
 }
