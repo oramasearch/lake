@@ -137,6 +137,14 @@ a:hover {
   min-height: 100vh;
   display: grid;
   grid-template-columns: var(--lake-sidebar-width) minmax(0, 1fr);
+  /* The sidebar is sticky and one viewport tall; its column is painted here so the surface and
+     its border run the full height of a long page. */
+  background: linear-gradient(
+    to right,
+    var(--lake-surface) calc(var(--lake-sidebar-width) - var(--lake-border-width)),
+    var(--lake-border-subtle) 0 var(--lake-sidebar-width),
+    transparent 0
+  );
 }
 .sidebar {
   position: sticky;
@@ -1384,6 +1392,7 @@ dd {
 @media (max-width: 58rem) {
   .app-shell {
     display: block;
+    background: none;
   }
   .sidebar {
     position: static;
