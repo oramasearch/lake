@@ -44,7 +44,8 @@ constexpr std::array group_rules{
               "indexes. workspace_query and workspace_act reach every allowed Zetta capability.",
               [](std::string_view n) {
                   return contains_any(n, {"pipeline"}) || n.starts_with("workspace_") ||
-                         n == "start_workspace" || n == "delete_workspace" || n == "search_index";
+                         n == "start_workspace" || n == "delete_workspace" || n == "search_index" ||
+                         n == "predict";
               }},
     GroupRule{"Services",
               "Databases, streams and engines lake runs for you (Postgres, Zetta, Kafka, "

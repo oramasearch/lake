@@ -7621,6 +7621,40 @@ struct ApiServer::Impl {
                     reads.push_back({"search", std::move(search)});
                 }
             }
+            // Runs and models name their project and pipeline by id; lake shows names (lake#255).
+            if (section == "runs" || section == "run" || section == "models") {
+                nlohmann::json names{{"projects", nlohmann::json::object()},
+                                     {"graphs", nlohmann::json::object()}};
+                const ApiResult listed =
+                    unwrap(co_await workspace_call("workspace_query",
+                                                   {{"customer_id", page.customer_id},
+                                                    {"capability", "list_projects"},
+                                                    {"input", nlohmann::json::object()}},
+                                                   context));
+                for (const nlohmann::json& project :
+                     listed.ok ? listed.value.value("projects", nlohmann::json::array())
+                               : nlohmann::json::array()) {
+                    if (!project.is_string()) {
+                        continue;
+                    }
+                    const ApiResult got =
+                        unwrap(co_await workspace_call("workspace_query",
+                                                       {{"customer_id", page.customer_id},
+                                                        {"capability", "get_project"},
+                                                        {"input", {{"name", project}}}},
+                                                       context));
+                    if (!got.ok) {
+                        continue;
+                    }
+                    names["projects"][got.value.value("id", std::string())] = project;
+                    for (const nlohmann::json& graph :
+                         got.value.value("graphs", nlohmann::json::array())) {
+                        names["graphs"][graph.value("id", std::string())] = {
+                            {"name", graph.value("name", std::string())}, {"project", project}};
+                    }
+                }
+                page.data["names"] = std::move(names);
+            }
             for (std::size_t index = 0; index < reads.size(); ++index) {
                 auto& [capability, input] = reads[index];
                 const ApiResult result =
@@ -7640,6 +7674,28 @@ struct ApiServer::Impl {
                     page.error = result.error.message;
                 }
             }
+        }
+        // Each model's measures and whether it is published (lake#250, lake#255).
+        if (section == "models") {
+            std::size_t read = 0;
+            for (const nlohmann::json& model :
+                 page.data.value("list_models", nlohmann::json::object())
+                     .value("models", nlohmann::json::array())) {
+                if (++read > 50) {
+                    break;
+                }
+                const std::string id = model.value("id", std::string());
+                const ApiResult got =
+                    unwrap(co_await workspace_call("workspace_query",
+                                                   {{"customer_id", page.customer_id},
+                                                    {"capability", "get_model"},
+                                                    {"input", {{"model_id", id}}}},
+                                                   context));
+                if (got.ok) {
+                    page.data["model_details"][id] = got.value;
+                }
+            }
+            page.data["origin"] = public_origin(route);
         }
         for (auto& [key, value] : extra.items()) {
             page.data[key] = value;

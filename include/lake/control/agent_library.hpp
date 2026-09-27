@@ -24,52 +24,49 @@ struct LibraryAgent {
 inline constexpr std::array<LibraryAgent, 7> agent_library{{
     {"agent-ask-orama",
      "Ask Orama",
-     "The general agent for all of lake. It works as the signed-in person and can delegate to any "
-     "agent as a subagent, including the ones you build.",
-     "The Ask Orama panel on every page",
+     "Answers questions about anything in your lake and hands work to the right agent, including "
+     "the ones you build. It never changes anything until you confirm.",
+     "Ask Orama, at the top of every page",
      "service",
      true},
     {"agent-project",
      "Project Agent",
-     "Builds and changes Pipelines by calling tools, from a project's intent and the data it can "
-     "reach.",
-     "Design: Create a Solution and revised plans; Ask Orama's subagent for anything "
-     "Pipeline-shaped",
+     "Builds a pipeline from what you want to predict, and proposes changes to an existing one "
+     "for you to review and apply.",
+     "Design → a project → Build a Pipeline; on a pipeline, Ask the Project Agent",
      "service",
      true},
     {"agent-autosuggest",
      "Auto-Suggest",
-     "Reads a Workspace Profile and recommends the Opportunities worth building, ranked, each "
-     "one a prompt that can become a Project.",
-     "Design: Discover Opportunities; Ask Orama's subagent for what could I build",
+     "Looks at your data and suggests projects worth building, best first. You pick which "
+     "become projects.",
+     "Design → Projects → Discover Opportunities",
      "service",
      true},
     {"agent-creator",
      "AgentCreator",
-     "Proposes a new agent from a conversation and creates it only after you approve the "
-     "proposal.",
-     "Train: Agents, Create with the Agent Factory",
+     "Designs a new agent with you in a conversation, and creates it only when you approve.",
+     "Train → Agents → Build it with the Agent Factory",
      "agent-runtime",
      true},
     {"agent-eval-generator",
      "Eval Generator",
-     "Researches a role and a pain point and writes an evaluation profile: a situation plus its "
-     "real data, the test set the other agents are scored against.",
-     "Offline: how Orama measures its agents",
+     "Writes realistic test cases for agents: a role, its problem and real-looking data, which "
+     "Orama's agents are scored against.",
+     "Used by Orama to measure its agents; not yet available to chat",
      "offline",
      false},
     {"agent-autosuggest-corpus",
      "Auto-Suggest Corpus Generator",
-     "Generates the situations and correct recommendations Auto-Suggest learns from, never "
-     "overlapping the evaluation set.",
-     "Offline: training data for Auto-Suggest",
+     "Writes the examples Auto-Suggest learns from, kept apart from the test cases.",
+     "Used by Orama to train Auto-Suggest; not yet available to chat",
      "offline",
      false},
     {"agent-project-corpus",
      "Project Corpus Generator",
-     "Records tool-calling trajectories that build Pipelines against a live node, the examples "
-     "the Project Agent learns from.",
-     "Offline: training data for the Project Agent",
+     "Records worked examples of building pipelines on real data, which the Project Agent learns "
+     "from.",
+     "Used by Orama to train the Project Agent; not yet available to chat",
      "offline",
      false},
 }};
