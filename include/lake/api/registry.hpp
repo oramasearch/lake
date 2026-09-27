@@ -121,6 +121,9 @@ struct ApiContext {
     control::agents::Service* agents = nullptr;
     control::PlatformService* platform = nullptr;
     control::WorkspaceService* workspaces = nullptr;
+    // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS: the instance-wide switch over every customer's opt-in
+    // to keys and tokens that never expire (lake#234).
+    bool non_expiring_credentials_allowed = true;
     transparency::Service* transparency = nullptr;
     transparency::CheckpointService* checkpoints = nullptr;
     transparency::TiledLog* transparency_log = nullptr;

@@ -1431,3 +1431,18 @@ CREATE TABLE IF NOT EXISTS stores_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0028_stores') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- Credentials that never expire (migration 0029, lake#234): a customer's opt-in, off by default,
+-- and revocation for agent session keys. A never-expiring agent key stores expires_at =
+-- 'infinity', which satisfies agent_sessions_expiry_check. See docs/api/agents.md and
+-- docs/api/identity.md.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS allow_non_expiring_credentials boolean NOT NULL DEFAULT false;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS revoked_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS credentials_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0029_non_expiring_credentials') ON CONFLICT DO NOTHING;

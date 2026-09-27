@@ -1,5 +1,7 @@
 #include "lake/api/capabilities.hpp"
 
+#include <optional>
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -101,6 +103,8 @@ json session_output(const control::AgentSession& session) {
             {"durable_agent_taap_id", session.durable_agent_taap_id},
             {"expires_at", session.expires_at},
             {"issued_at", session.issued_at},
+            {"never_expires", session.never_expires()},
+            {"revoked_at", session.revoked_at},
             {"public_key", session.public_key},
             {"scopes", session.scopes},
             {"session_taap_id", session.session_taap_id},
@@ -122,6 +126,27 @@ void set_audit_fields(ApiContext& context,
     context.audit_details = {{"operation", operation}};
 }
 
+// Why a never-expiring credential is refused for this customer, or nothing when it is allowed:
+// the instance switch first, then the customer's opt-in (lake#234).
+std::optional<ApiResult> non_expiring_refusal(ApiContext& context, const std::string& customer_id) {
+    if (!context.non_expiring_credentials_allowed) {
+        return ApiResult::failure("unauthorized",
+                                  "this lake does not allow credentials that never expire "
+                                  "(LAKE_ALLOW_NON_EXPIRING_CREDENTIALS)");
+    }
+    auto allowed = context.store->customer_allows_non_expiring_credentials(customer_id);
+    if (!allowed) {
+        return from_store_error(allowed.error());
+    }
+    if (!*allowed) {
+        return ApiResult::failure("unauthorized",
+                                  "credentials that never expire are off for this space; an "
+                                  "admin turns on allow_non_expiring_credentials with "
+                                  "set_customer_credential_policy");
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 void register_agent_capabilities(Registry& registry) {
@@ -137,6 +162,11 @@ void register_agent_capabilities(Registry& registry) {
                {"dispatcher_taap_id", {{"type", "string"}}},
                {"durable_agent_taap_id", {{"type", "string"}}},
                {"lifetime_seconds", {{"type", "integer"}}},
+               {"never_expires",
+                {{"type", "boolean"},
+                 {"description",
+                  "a key with no expiry, still revocable; only when the customer allows "
+                  "non-expiring credentials (lake#234)"}}},
                {"scopes", {{"type", "array"}}}}},
              {"required",
               json::array(
@@ -170,13 +200,20 @@ void register_agent_capabilities(Registry& registry) {
                 scopes.push_back(input.at("scopes")[index].get<std::string>());
             }
             const int lifetime = input.value("lifetime_seconds", 900);
+            const bool never_expires = input.value("never_expires", false);
+            if (never_expires) {
+                if (auto refused = non_expiring_refusal(context, customer_id)) {
+                    return *refused;
+                }
+            }
             auto minted = context.agents->mint(
                 *context.store,
                 {.customer_id = customer_id,
                  .durable_agent_taap_id = durable_agent,
                  .dispatcher_taap_id = input.at("dispatcher_taap_id").get<std::string>(),
                  .scopes = std::move(scopes),
-                 .lifetime_seconds = lifetime},
+                 .lifetime_seconds = lifetime,
+                 .never_expires = never_expires},
                 {.configured_seed = context.identity_seed, .instance_kek = context.instance_kek});
             if (!minted) {
                 return from_agent_error(minted.error());
@@ -196,6 +233,7 @@ void register_agent_capabilities(Registry& registry) {
             context.audit_object = "agent_session/" + stored->id;
             context.audit_details = {{"durable_agent_taap_id", durable_agent},
                                      {"expires_at", stored->expires_at},
+                                     {"never_expires", stored->never_expires()},
                                      {"operation", "mint"},
                                      {"session_taap_id", stored->session_taap_id},
                                      {"transparency_index", stored->transparency_index}};
@@ -253,6 +291,66 @@ void register_agent_capabilities(Registry& registry) {
             json output = session_output(*session);
             output["verified"] = true;
             return ApiResult::success(std::move(output));
+        }});
+    registry.add(Capability{
+        .name = "revoke_agent_session",
+        .title = "Revoke agent session key",
+        .description = "Revoke one agent session key, expiring or not. A revoked key never "
+                       "verifies again.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"agent_session_id", {{"type", "string"}}},
+                           {"customer_id", {{"type", "string"}}}}},
+                         {"required", json::array({"agent_session_id", "customer_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = output_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const std::string customer_id = input.at("customer_id").get<std::string>();
+            const std::string session_id = input.at("agent_session_id").get<std::string>();
+            set_audit_fields(context, customer_id, "agent_session/" + session_id, "revoke");
+            auto revoked = context.store->revoke_agent_session(customer_id, session_id);
+            if (!revoked) {
+                return from_store_error(revoked.error());
+            }
+            return ApiResult::success(session_output(*revoked));
+        }});
+    registry.add(Capability{
+        .name = "set_customer_credential_policy",
+        .title = "Allow credentials that never expire",
+        .description =
+            "Turn a customer's opt-in to never-expiring agent keys and API tokens on or off "
+            "(off by default). Existing never-expiring credentials keep working until revoked.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"allow_non_expiring_credentials", {{"type", "boolean"}}}}},
+                         {"required",
+                          json::array({"customer_id", "allow_non_expiring_credentials"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const std::string customer_id = input.at("customer_id").get<std::string>();
+            const bool allowed = input.at("allow_non_expiring_credentials").get<bool>();
+            context.audit_kind = "customer.credential_policy";
+            context.audit_object = "customer/" + customer_id;
+            context.audit_details = {{"customer_id", customer_id},
+                                     {"allow_non_expiring_credentials", allowed}};
+            auto set = context.store->set_customer_non_expiring_credentials(customer_id, allowed);
+            if (!set) {
+                return from_store_error(set.error());
+            }
+            return ApiResult::success(
+                {{"customer_id", customer_id},
+                 {"allow_non_expiring_credentials", allowed},
+                 {"instance_allows", context.non_expiring_credentials_allowed}});
         }});
 }
 

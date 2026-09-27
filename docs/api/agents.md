@@ -17,7 +17,7 @@ both identities remain visible in the stored record and signed audit trail.
 | `mint_agent_session_key` | `write` on the customer | `customer_id`, durable and dispatcher TAAP identities, non-empty unique `scopes`, optional `lifetime_seconds` | Session UUID and TAAP identity, base64url public key and one-use private seed, expiry, `delegation/1` attestation, log index and root |
 | `verify_agent_session_drip` | `read` on the customer | Customer and session UUID, base64url canonical drip body, base64url canonical TAAP signature object | `verified: true`, durable, dispatcher and session identities, scopes, expiry, delegation, and log commitment |
 
-The lifetime defaults to 900 seconds and cannot exceed 900 seconds. The server checks expiry
+The lifetime defaults to 900 seconds and cannot exceed 900 seconds, unless the key never expires (below). The server checks expiry
 before signature verification. A signature made with the session key is accepted only when its
 TAAP purpose is `drip`, its signing key identifier is the session TAAP identity, and its Ed25519
 signature covers the supplied canonical body under the `TAAP/1 drip` domain. Callers apply the
@@ -26,6 +26,27 @@ returned scopes to the drip operation they intend to perform.
 The input and output binary values use unpadded base64url. The returned private value is the
 32-byte Ed25519 seed. It is deliberately absent from later reads, audit details, and the
 `agent_sessions` table.
+
+## Keys that never expire (lake#234)
+
+`mint_agent_session_key` with `never_expires: true` mints a key with no expiry (`expires_at:
+"never"`, stored as `'infinity'`). It is bound to its durable and dispatcher identities and
+transparency-logged exactly like a short-lived key, and it stays **revocable**:
+`revoke_agent_session` (`write` on the customer; input `customer_id`, `agent_session_id`) sets
+`revoked_at`, and `verify_agent_session_drip` refuses a revoked key with *agent session key has been
+revoked* from then on, expiring or not.
+
+A never-expiring key is allowed only when both switches are on:
+
+| Switch | Where | Default |
+|---|---|---|
+| The customer's opt-in | `set_customer_credential_policy` (`admin` on the customer): `{customer_id, allow_non_expiring_credentials}`; audit kind `customer.credential_policy` | off |
+| The instance | `LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false` refuses every never-expiring key and token, whatever the customer chose | on |
+
+A refusal names the switch that refused it. The mint's audit details carry `never_expires`.
+Long-running agent services use these keys so they do not stop when a 900-second key ages out
+(lake#231). Verify: `AgentSessions.NeverExpiringKeysNeedTheOptInAndStayRevocable` and its Postgres
+twin.
 
 ## Delegation and transparency
 

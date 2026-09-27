@@ -86,6 +86,8 @@ int usage() {
         "  LAKE_AGENT_ENDPOINTS lists the Agent Library agents this lake runs (key=url,...)");
     std::println("  LAKE_BASE_AGENT_MODEL is the base-agent checkpoint inside a workspace");
     std::println("  LAKE_AGENT_MODEL is the frontier model Python agents run on (default gpt-4o)");
+    std::println(
+        "  LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false refuses never-expiring keys and tokens");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -279,6 +281,8 @@ int main(int argc, char** argv) {
         }
         workspace_config.max_per_customer = parsed;
     }
+    opts.allow_non_expiring_credentials =
+        env_or("LAKE_ALLOW_NON_EXPIRING_CREDENTIALS", "true") != "false";
     const bool workspaces_configured = workspace_config.configured() && opts.store != nullptr;
     if (workspaces_configured) {
         if (!platform_transport_required) {

@@ -1564,8 +1564,21 @@ AgentSession agent_session_of(const pqxx::row& row) {
         row[9].as<std::string>(),
         row[10].as<std::int64_t>(),
         row[11].as<std::string>(),
-        row[12].as<std::string>()};
+        row[12].as<std::string>(),
+        row.size() > 13 ? row[13].as<std::string>() : std::string()};
 }
+
+// The agent_sessions columns agent_session_of reads. A never-expiring key is stored with
+// expires_at = 'infinity' (lake#234) and read back as expires_unix 0 and expires_at "never".
+constexpr const char* agent_session_columns =
+    "id::text, customer_id::text, durable_agent_taap_id, dispatcher_taap_id, "
+    "session_taap_id, public_key, array_to_json(scopes)::text, attestation, "
+    "transparency_index, transparency_root, "
+    "CASE WHEN expires_at = 'infinity' THEN 0 ELSE extract(epoch from expires_at)::bigint END, "
+    "to_char(issued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+    "CASE WHEN expires_at = 'infinity' THEN 'never' ELSE "
+    "to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') END, "
+    "coalesce(to_char(revoked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
 
 constexpr const char* device_columns =
     "devices.id::text, devices.user_id::text, devices.name, "
@@ -5836,24 +5849,21 @@ public:
         if (input.id.empty() || input.customer_id.empty() || input.durable_agent_taap_id.empty() ||
             input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||
             input.public_key.empty() || input.scopes.empty() || input.attestation.empty() ||
-            input.transparency_root.empty() || input.expires_unix <= 0 || input.issued_at.empty() ||
-            input.expires_at.empty()) {
+            input.transparency_root.empty() || input.issued_at.empty() ||
+            input.expires_at.empty() ||
+            (input.expires_at == "never" ? input.expires_unix != 0 : input.expires_unix <= 0)) {
             return std::unexpected(StoreError{"invalid_input", "agent session record is invalid"});
         }
         return with_tx<AgentSession>([&](pqxx::work& tx) -> Result<AgentSession> {
             const pqxx::result rows = tx.exec_params(
-                "INSERT INTO agent_sessions "
-                "(id, customer_id, durable_agent_taap_id, dispatcher_taap_id, session_taap_id, "
-                "public_key, scopes, attestation, transparency_index, transparency_root, "
-                "issued_at, expires_at) VALUES "
-                "($1::uuid, $2::uuid, $3, $4, $5, $6, "
-                "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, $9, $10, "
-                "$11::timestamptz, $12::timestamptz) RETURNING "
-                "id::text, customer_id::text, durable_agent_taap_id, dispatcher_taap_id, "
-                "session_taap_id, public_key, array_to_json(scopes)::text, attestation, "
-                "transparency_index, transparency_root, extract(epoch from expires_at)::bigint, "
-                "to_char(issued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-                "to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
+                std::string("INSERT INTO agent_sessions "
+                            "(id, customer_id, durable_agent_taap_id, dispatcher_taap_id, "
+                            "session_taap_id, public_key, scopes, attestation, "
+                            "transparency_index, transparency_root, issued_at, expires_at) VALUES "
+                            "($1::uuid, $2::uuid, $3, $4, $5, $6, "
+                            "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, $9, $10, "
+                            "$11::timestamptz, $12::timestamptz) RETURNING ") +
+                    agent_session_columns,
                 input.id,
                 input.customer_id,
                 input.durable_agent_taap_id,
@@ -5865,7 +5875,7 @@ public:
                 input.transparency_index,
                 input.transparency_root,
                 input.issued_at,
-                input.expires_at);
+                input.expires_at == "never" ? std::string("infinity") : input.expires_at);
             return agent_session_of(rows[0]);
         });
     }
@@ -5876,21 +5886,62 @@ public:
             return std::unexpected(StoreError{"invalid_input", "agent session id is required"});
         }
         return with_tx<AgentSession>([&](pqxx::work& tx) -> Result<AgentSession> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + agent_session_columns +
+                                   " FROM agent_sessions "
+                                   "WHERE customer_id = $1::uuid AND id = $2::uuid",
+                               customer_id,
+                               id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "agent session does not exist"});
+            }
+            return agent_session_of(rows[0]);
+        });
+    }
+
+    Result<AgentSession> revoke_agent_session(const std::string& customer_id,
+                                              const std::string& id) override {
+        if (customer_id.empty() || id.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "agent session id is required"});
+        }
+        return with_tx<AgentSession>([&](pqxx::work& tx) -> Result<AgentSession> {
             const pqxx::result rows = tx.exec_params(
-                "SELECT id::text, customer_id::text, durable_agent_taap_id, "
-                "dispatcher_taap_id, session_taap_id, public_key, "
-                "array_to_json(scopes)::text, attestation, transparency_index, "
-                "transparency_root, extract(epoch from expires_at)::bigint, "
-                "to_char(issued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-                "to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') "
-                "FROM agent_sessions "
-                "WHERE customer_id = $1::uuid AND id = $2::uuid",
+                std::string("UPDATE agent_sessions SET revoked_at = coalesce(revoked_at, now()) "
+                            "WHERE customer_id = $1::uuid AND id = $2::uuid RETURNING ") +
+                    agent_session_columns,
                 customer_id,
                 id);
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "agent session does not exist"});
             }
             return agent_session_of(rows[0]);
+        });
+    }
+
+    Result<bool> customer_allows_non_expiring_credentials(const std::string& customer_id) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT allow_non_expiring_credentials FROM customers WHERE id = $1::uuid",
+                customer_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "customer does not exist"});
+            }
+            return rows[0][0].as<bool>();
+        });
+    }
+
+    Result<void> set_customer_non_expiring_credentials(const std::string& customer_id,
+                                                       bool allowed) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE customers SET allow_non_expiring_credentials = $2 WHERE id = $1::uuid "
+                "RETURNING id",
+                customer_id,
+                allowed);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "customer does not exist"});
+            }
+            return {};
         });
     }
 

@@ -3718,8 +3718,10 @@ Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& 
     if (input.id.empty() || input.durable_agent_taap_id.empty() ||
         input.dispatcher_taap_id.empty() || input.session_taap_id.empty() ||
         input.public_key.empty() || input.scopes.empty() || input.attestation.empty() ||
-        input.transparency_root.empty() || input.expires_unix <= 0 || input.issued_at.empty() ||
-        input.expires_at <= input.issued_at) {
+        input.transparency_root.empty() || input.issued_at.empty() ||
+        (input.expires_at == "never"
+             ? input.expires_unix != 0
+             : (input.expires_unix <= 0 || input.expires_at <= input.issued_at))) {
         return std::unexpected(StoreError{"invalid_input", "agent session record is invalid"});
     }
     if (std::ranges::any_of(agent_sessions_, [&](const AgentSession& value) {
@@ -3742,6 +3744,48 @@ Result<AgentSession> InMemoryStore::create_agent_session(const NewAgentSession& 
                         input.expires_at};
     agent_sessions_.push_back(record);
     return record;
+}
+
+Result<AgentSession> InMemoryStore::revoke_agent_session(const std::string& customer_id,
+                                                         const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto session = std::ranges::find_if(agent_sessions_, [&](const AgentSession& value) {
+        return value.id == id && value.customer_id == customer_id;
+    });
+    if (session == agent_sessions_.end()) {
+        return std::unexpected(StoreError{"not_found", "agent session does not exist"});
+    }
+    if (session->revoked_at.empty()) {
+        session->revoked_at =
+            std::format("{:%FT%TZ}",
+                        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    }
+    return *session;
+}
+
+Result<bool>
+InMemoryStore::customer_allows_non_expiring_credentials(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& value) { return value.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "customer does not exist"});
+    }
+    return non_expiring_customers_.contains(customer_id);
+}
+
+Result<void> InMemoryStore::set_customer_non_expiring_credentials(const std::string& customer_id,
+                                                                  bool allowed) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& value) { return value.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "customer does not exist"});
+    }
+    if (allowed) {
+        non_expiring_customers_.insert(customer_id);
+    } else {
+        non_expiring_customers_.erase(customer_id);
+    }
+    return {};
 }
 
 Result<AgentSession> InMemoryStore::get_agent_session(const std::string& customer_id,

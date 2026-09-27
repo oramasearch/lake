@@ -6067,7 +6067,7 @@ std::string web_ui_tokens(const std::vector<control::Session>& sessions,
         R"html(<div class="panel"><form class="stack" method="post" action="/identity/token/create">
 <label>Name<input type="text" name="name" required></label><label>Capability scopes, comma separated<input type="text" name="scopes" required></label>
 <label>Expiry in seconds (leave empty for as long as this session allows, at most 30 days)<input type="number" name="expires_in_seconds" min="1"></label>
-<label><span><input type="checkbox" name="static" value="true"> Static exception</span></label><label>Reason for a static token<input type="text" name="reason"></label>
+<label><span><input type="checkbox" name="static" value="true"> Static exception</span></label><label><span><input type="checkbox" name="never_expires" value="true"> Never expires (survives sign-out; needs your space's opt-in, a reason and named scopes)</span></label><label>Reason for a static or never-expiring token<input type="text" name="reason"></label>
 <button class="primary" type="submit">Create token</button></form></div><h2>Existing Tokens</h2>
 <table><thead><tr><th>Name</th><th>Kind</th><th>Scopes</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>)html";
     std::size_t count = 0;
@@ -6081,19 +6081,23 @@ std::string web_ui_tokens(const std::vector<control::Session>& sessions,
                 scopes += ", ";
             scopes += scope;
         }
-        content +=
-            std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><form "
-                        "class=\"inline\" method=\"post\" "
-                        "action=\"/identity/session/revoke\"><input type=\"hidden\" "
-                        "name=\"session_id\" value=\"{}\"><input type=\"hidden\" "
-                        "name=\"return_to\" value=\"/tokens\"><button "
-                        "type=\"submit\">Revoke</button></form></td></tr>",
-                        web_ui_escape(session.name),
-                        web_ui_escape(session.kind),
-                        web_ui_escape(scopes),
-                        web_ui_escape(session.expires_at),
-                        state_badge(session.revoked_at.empty()),
-                        web_ui_escape(session.id));
+        content += std::format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><form "
+            "class=\"inline\" method=\"post\" "
+            "action=\"/identity/session/revoke\"><input type=\"hidden\" "
+            "name=\"session_id\" value=\"{}\"><input type=\"hidden\" "
+            "name=\"return_to\" value=\"/tokens\"><button "
+            "type=\"submit\">Revoke</button></form></td></tr>",
+            web_ui_escape(session.name),
+            web_ui_escape(session.kind),
+            web_ui_escape(scopes),
+            session.expires_at.empty()
+                ? "Never expires" + (session.reason.empty()
+                                         ? std::string()
+                                         : " <small>" + web_ui_escape(session.reason) + "</small>")
+                : web_ui_escape(session.expires_at),
+            state_badge(session.revoked_at.empty()),
+            web_ui_escape(session.id));
     }
     if (count == 0)
         content += "<tr><td colspan=\"6\" class=\"empty\">No API tokens.</td></tr>";

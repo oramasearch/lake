@@ -301,7 +301,8 @@ Result<void> validate(const MintRequest& request) {
         !valid_taap_id(request.dispatcher_taap_id) || request.scopes.empty()) {
         return std::unexpected(Error{"invalid_input", "agent session fields are required"});
     }
-    if (request.lifetime_seconds <= 0 || request.lifetime_seconds > 900) {
+    if (!request.never_expires &&
+        (request.lifetime_seconds <= 0 || request.lifetime_seconds > 900)) {
         return std::unexpected(
             Error{"invalid_input", "agent session lifetime must be at most fifteen minutes"});
     }
@@ -334,7 +335,8 @@ Result<MintedSession> Service::mint(Store& store,
     const auto issued = clock_();
     const auto expires = issued + std::chrono::seconds(request.lifetime_seconds);
     const std::string issued_at = std::format("{:%FT%TZ}", issued);
-    const std::string expires_at = std::format("{:%FT%TZ}", expires);
+    const std::string expires_at =
+        request.never_expires ? std::string("never") : std::format("{:%FT%TZ}", expires);
     std::array<std::uint8_t, 32> seed{};
     auto key = generate_key(seed);
     if (!key) {
@@ -374,7 +376,7 @@ Result<MintedSession> Service::mint(Store& store,
         .public_key = *encoded_public_key,
         .scopes = request.scopes,
         .attestation = *attestation,
-        .expires_unix = expires.time_since_epoch().count(),
+        .expires_unix = request.never_expires ? 0 : expires.time_since_epoch().count(),
         .issued_at = issued_at,
         .expires_at = expires_at,
     };
@@ -384,7 +386,10 @@ Result<MintedSession> Service::mint(Store& store,
 Result<VerifiedDrip> Service::verify_drip(const AgentSession& session,
                                           std::span<const std::byte> canonical_body,
                                           std::span<const std::byte> encoded_signature) const {
-    if (clock_().time_since_epoch().count() >= session.expires_unix) {
+    if (!session.revoked_at.empty()) {
+        return std::unexpected(Error{"unauthorized", "agent session key has been revoked"});
+    }
+    if (!session.never_expires() && clock_().time_since_epoch().count() >= session.expires_unix) {
         return std::unexpected(Error{"unauthorized", "agent session key has expired"});
     }
     if (canonical_body.empty() || encoded_signature.empty()) {

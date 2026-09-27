@@ -378,6 +378,52 @@ TEST_P(TokenAttenuation, ScopeLifetimeAndRecursiveRevocation) {
     }
 }
 
+// lake#234: a signed-in person may create a token that never expires, only when their space opts
+// in, with a reason and named scopes. It is a standing credential: signing out does not end it,
+// revoking it does.
+TEST_P(TokenAttenuation, NeverExpiringTokensNeedTheOptInAndSurviveSignOut) {
+    const std::string user_id = browser_.at("session").at("user_id");
+    const auto customers = store_->list_customers(10, user_id);
+    ASSERT_TRUE(customers && !customers->empty());
+    const std::string customer_id = customers->front().id;
+    const json standing{{"name", "ci deploy"},
+                        {"scopes", {"list_sessions"}},
+                        {"never_expires", true},
+                        {"reason", "the release pipeline"}};
+    denied(browser_,
+           standing,
+           "credentials that never expire are off for your space; turn on "
+           "allow_non_expiring_credentials with set_customer_credential_policy");
+    ASSERT_TRUE(store_->set_customer_non_expiring_credentials(customer_id, true));
+    json wildcard = standing;
+    wildcard["scopes"] = {"*"};
+    const auto refused = call("create_token", wildcard, browser_.at("secret"));
+    ASSERT_FALSE(refused.at("ok").get<bool>());
+    EXPECT_EQ(refused.at("error").at("code"), "invalid_input");
+    json no_reason = standing;
+    no_reason.erase("reason");
+    EXPECT_FALSE(call("create_token", no_reason, browser_.at("secret")).at("ok").get<bool>());
+
+    const auto issued = call("create_token", standing, browser_.at("secret"));
+    ASSERT_TRUE(issued.at("ok").get<bool>()) << issued.dump();
+    const json token = issued.at("value");
+    secrets_.push_back(token.at("secret"));
+    const auto principal = store_->context_for(token.at("secret"));
+    ASSERT_TRUE(principal);
+    EXPECT_FALSE(principal->expires_at_unix) << "no expiry";
+
+    // Signing out ends the browser session, not the standing token.
+    const auto signed_out =
+        call("revoke_session", {{"id", browser_.at("session").at("id")}}, browser_.at("secret"));
+    ASSERT_TRUE(signed_out.at("ok").get<bool>());
+    EXPECT_FALSE(store_->context_for(browser_.at("secret")));
+    EXPECT_TRUE(store_->context_for(token.at("secret")));
+    EXPECT_TRUE(call("list_sessions", json::object(), token.at("secret")).at("ok").get<bool>());
+
+    ASSERT_TRUE(store_->revoke_session(user_id, token.at("session").at("id")));
+    EXPECT_FALSE(store_->context_for(token.at("secret")));
+}
+
 TEST_P(TokenAttenuation, WildcardStaticAndDeviceAuthority) {
     const auto wildcard = issue(browser_, {"*"}, 600);
     const auto wildcard_child = issue(wildcard, {"*"}, 300);

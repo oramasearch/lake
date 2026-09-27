@@ -4826,6 +4826,7 @@ struct ApiServer::Impl {
         ctx.agents = &agents;
         ctx.platform = options.platform.get();
         ctx.workspaces = options.workspaces.get();
+        ctx.non_expiring_credentials_allowed = options.allow_non_expiring_credentials;
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
@@ -6836,6 +6837,9 @@ struct ApiServer::Impl {
                              {"scopes", comma_separated(form_field(body, "scopes"))},
                              {"static", form_field(body, "static") == "true"},
                              {"reason", form_field(body, "reason")}};
+        if (form_field(body, "never_expires") == "true") {
+            input["never_expires"] = true;
+        }
         if (const std::string expiry = form_field(body, "expires_in_seconds"); !expiry.empty()) {
             input["expires_in_seconds"] = std::atoi(expiry.c_str());
         }
