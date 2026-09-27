@@ -788,10 +788,18 @@ dd {
 .ask-reply > :first-child {
   margin-top: 0;
 }
+.ask-reply .markdown-body {
+  max-width: none;
+}
 .ask-reply table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
+}
+/* A page table's header sticks under the top bar; inside this scrolling table that offset would
+   be measured from the table and lay the header over the first row. */
+.ask-reply th {
+  position: static;
 }
 /* A checkbox sits beside its words, never stretched across a grid label's row. */
 form label:has(> input[type='checkbox']),
