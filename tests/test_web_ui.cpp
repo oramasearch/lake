@@ -715,6 +715,8 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     repo.retention_until = "2026-10-03T00:00:00Z";
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
 
+    repo.deleted_at.clear();
+    repo.retention_until.clear();
     const lake::api::RepositoryHomeData data{
         .refs = {{"main", "blake3:123456789012345678901234567890"}},
         .tree = {{"README.md", "blob", "blob-1", 0644, "node-1", 48, 32},
@@ -738,6 +740,26 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     EXPECT_NE(home.find("C++"), std::string::npos);
     EXPECT_NE(home.find("Markdown"), std::string::npos);
     EXPECT_NE(home.find("Effective Access"), std::string::npos);
+    EXPECT_NE(home.find("action=\"/repository/build\""), std::string::npos);
+    EXPECT_NE(home.find("Build image"), std::string::npos);
+}
+
+TEST(WebUi, BuildPagesRenderLiveHistoryWithoutExposingCredentials) {
+    const nlohmann::json catalog{
+        {"oci", {{{"name", "ada/service"}, {"versions", nlohmann::json::array({"latest"})}}}},
+        {"npm", nlohmann::json::array()},
+        {"python", nlohmann::json::array()}};
+    const nlohmann::json builds = nlohmann::json::array({{{"id", "build-1"},
+                                                          {"repository", "repo-1"},
+                                                          {"target", "registry/ada/service:latest"},
+                                                          {"phase", "Running"},
+                                                          {"digest", ""}}});
+    const std::string packages =
+        lake::api::web_ui_packages(catalog, true, "https://lake.test", true, builds, "customer-1");
+    EXPECT_NE(packages.find("ada/service"), std::string::npos);
+    EXPECT_NE(packages.find("data-build-id=\"build-1\""), std::string::npos);
+    EXPECT_NE(packages.find("receive_build_events"), std::string::npos);
+    EXPECT_EQ(packages.find("token_hashes"), std::string::npos);
 }
 
 TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
@@ -1351,11 +1373,17 @@ TEST(WebUi, ShipAppsRenderControlsMaskedSecretsAndLiveEvents) {
                           {"path", "."},
                           {"entrypoint", ""}}}}}}};
     detail.builds_available = true;
-    detail.builds = {{{"id", "build-1"}, {"status", "running"}, {"revision", "main"}}};
+    detail.builds = {{{"id", "build-1"},
+                      {"phase", "Building"},
+                      {"revision", "main"},
+                      {"target", "lake.test/customer-1/customer-portal:build-1"},
+                      {"logs", {{"lines", nlohmann::json::array({"step one"})}}}}};
     const std::string app = lake::api::web_ui_app(detail, true);
     EXPECT_NE(app.find("action=\"/ship/app/restart\""), std::string::npos);
     EXPECT_NE(app.find("action=\"/ship/app/rollback\""), std::string::npos);
     EXPECT_NE(app.find("build-1"), std::string::npos);
+    EXPECT_NE(app.find("Building"), std::string::npos);
+    EXPECT_NE(app.find("step one"), std::string::npos);
     EXPECT_NE(app.find("receive_build_events"), std::string::npos);
     EXPECT_NE(app.find("••••••"), std::string::npos);
     EXPECT_EQ(app.find("secret/app-token"), std::string::npos);

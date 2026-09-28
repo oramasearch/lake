@@ -1499,7 +1499,7 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
         "service_connection", "list_service_kinds", "list_store_providers", "list_stores",
         "create_store",       "delete_store",       "store_connection",     "connect_service",
         "search_index",       "edit_pipeline",      "get_pipeline",         "run_pipeline",
-        "create_pipeline"};
+        "create_pipeline",    "start_solution",     "confirm_solution"};
     const json openapi = lake::api::openapi_document(registry, "test");
     const auto tools = json::parse(
         *liquid::runtime::block_on(lake::api::mcp_dispatch_async(
@@ -1767,14 +1767,29 @@ TEST(Workspaces, AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet) {
         EXPECT_TRUE(completed);
         return std::move(*completed);
     };
-    for (const std::string_view read : {"list_agents", "get_agent", "agent_training_status"}) {
+    for (const std::string_view read : {"list_agents",
+                                        "get_agent",
+                                        "agent_training_status",
+                                        "get_policy",
+                                        "get_experiment",
+                                        "list_ledger",
+                                        "get_monitor",
+                                        "get_roi_readout"}) {
         const auto result = call(
             "workspace_query", {{"customer_id", w.customer_id}, {"capability", std::string(read)}});
         EXPECT_TRUE(result.ok) << read << ": " << result.error.message;
         EXPECT_TRUE(w.caller->read) << read;
     }
-    for (const std::string_view action :
-         {"create_agent", "update_agent", "delete_agent", "set_training_schedule", "agent_run"}) {
+    for (const std::string_view action : {"create_agent",
+                                          "update_agent",
+                                          "delete_agent",
+                                          "set_training_schedule",
+                                          "agent_run",
+                                          "update_policy",
+                                          "decide",
+                                          "approve_decision",
+                                          "record_outcome",
+                                          "run_solution"}) {
         const auto result = call(
             "workspace_act", {{"customer_id", w.customer_id}, {"capability", std::string(action)}});
         EXPECT_TRUE(result.ok) << action << ": " << result.error.message;
@@ -1976,7 +1991,11 @@ struct AgentRuns {
         context.scopes = principal.scopes;
         context.pool_id = "lake";
         context.request_id = lake::control::new_uuid_v4();
-        input["customer_id"] = w.customer_id;
+        const auto capability = registry.find(name);
+        if (capability != nullptr &&
+            capability->input_schema.value("properties", json::object()).contains("customer_id")) {
+            input["customer_id"] = w.customer_id;
+        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -2207,7 +2226,10 @@ TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {
     // UX review 2026-09-27: the Agent Factory's approve, Discover's create and reading a
     // conversation were page-only; REST and MCP now do the same through these.
     AgentRuns r;
-    for (const char* name : {"create_agent_from_proposal", "create_projects_from_opportunities",
+    for (const char* name : {"create_agent_from_proposal",
+                             "create_projects_from_opportunities",
+                             "start_solution",
+                             "confirm_solution",
                              "get_ask_conversation"}) {
         EXPECT_NE(r.registry.find(name), nullptr) << name;
     }
@@ -2320,6 +2342,145 @@ TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {
     ASSERT_TRUE(read && read->ok) << (read ? read->error.message : "");
     ASSERT_EQ((*read).value["messages"].size(), 1U);
     EXPECT_EQ((*read).value["messages"][0]["content"], "hi");
+}
+
+TEST(AgentRuns, APersonStartsAndConfirmsTheProjectAgentsSolutionFoundation) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-project", "http://project:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    r.w.caller->answers["create_project"] = {{"name", "retention"}};
+    r.w.caller->answers["get_project"] = {{"name", "retention"}, {"graphs", json::array()}};
+    r.w.caller->answers["create_solution"] = {{"project", "retention"},
+                                              {"solution", "S-1"},
+                                              {"level", 1},
+                                              {"graph", "S-1 CL-1"},
+                                              {"policy_id", "policy-1"},
+                                              {"experiment_id", "experiment-1"},
+                                              {"monitor_id", "monitor-1"},
+                                              {"readout_id", "readout-1"}};
+
+    const auto started =
+        r.call("start_solution",
+               {{"project", "retention"},
+                {"solution", "S-1"},
+                {"level", 1},
+                {"dataset", "datasets.customers"},
+                {"delivery",
+                 {{"kind", "webhook"},
+                  {"endpoint", "https://crm.example.test/tasks"},
+                  {"owner", "retention-team"}}},
+                {"roi_model",
+                 {{"value_per_outcome", 125.0}, {"investment", 4000.0}, {"currency", "USD"}}}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const std::string task_id = started.value["task_id"];
+    const auto task = r.store.get_agent_task(task_id);
+    ASSERT_TRUE(task);
+    EXPECT_EQ(task->kind, "solution:retention");
+    EXPECT_EQ(task->body["context"]["dataset"], "datasets.customers");
+    EXPECT_EQ(task->body["context"]["roi_model"]["investment"], 4000.0);
+    EXPECT_EQ(std::ranges::find(task->scopes, "workspace_act"), task->scopes.end())
+        << "the proposing agent cannot create or run the solution";
+    EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
+        return call.first == "create_solution";
+    })) << "Start only asks for a proposal";
+
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        task_id,
+        "Succeeded",
+        "",
+        "",
+        {{"ok", true},
+         {"result",
+          {{"foundation",
+            {{"sources",
+              {{"source", "invented"},
+               {"table", "invented"},
+               {"M-2", {{"source", "crm"}, {"record_id", "id"}, {"name", "account"}}}}},
+             {"snapshot",
+              {{"database", "datasets"},
+               {"source_table", "customers"},
+               {"target_table", "retention_snapshot"},
+               {"entity_column", "entity_id"},
+               {"time_column", "observed_at"},
+               {"as_of", "2026-09-28T00:00:00Z"}}},
+             {"dataset",
+              {{"entity_column", "entity_id"},
+               {"label_column", "retained"},
+               {"feature_columns", json::array({"usage"})}}},
+             {"decision_source",
+              {{"methodology", "M-2"}, {"entity_column", "record_id"}, {"score_column", "risk"}}},
+             {"predicates",
+              {{"in_collections", "in_collections"},
+               {"open_complaint", "open_complaint"},
+               {"vulnerable", "vulnerable"}}}}}}}}));
+
+    const auto confirmed =
+        r.call("confirm_solution",
+               {{"task_id", task_id},
+                {"edits", {{"dataset", {{"feature_columns", json::array({"usage", "tenure"})}}}}}});
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    EXPECT_FALSE(confirmed.value["actions_blocked"]);
+    const auto created = std::ranges::find_if(
+        r.w.caller->calls, [](const auto& call) { return call.first == "create_solution"; });
+    ASSERT_NE(created, r.w.caller->calls.end());
+    const json& input = created->second;
+    EXPECT_EQ(input["sources"]["source"], "datasets")
+        << "the person's selected dataset wins over an agent change";
+    EXPECT_EQ(input["sources"]["table"], "customers");
+    EXPECT_EQ(input["sources"]["M-2"]["record_id"], "id");
+    EXPECT_EQ(input["sources"]["policy_predicates"]["vulnerable"], "vulnerable");
+    EXPECT_TRUE(input["sources"]["missing_policy_predicates"].empty());
+    EXPECT_EQ(input["foundation"]["delivery"]["owner"], "retention-team");
+    EXPECT_EQ(input["foundation"]["roi_model"]["value_per_outcome"], 125.0);
+    EXPECT_EQ(input["foundation"]["dataset"]["feature_columns"], json::array({"usage", "tenure"}));
+    EXPECT_FALSE(input["foundation"].contains("predicates"))
+        << "proposal evidence is not sent to the engine's closed foundation schema";
+
+    const auto guarded =
+        r.call("start_solution",
+               {{"project", "guarded"},
+                {"solution", "S-1"},
+                {"level", 1},
+                {"dataset", "datasets.customers"},
+                {"delivery",
+                 {{"kind", "webhook"},
+                  {"endpoint", "https://crm.example.test/tasks"},
+                  {"owner", "retention-team"}}},
+                {"roi_model",
+                 {{"value_per_outcome", 125.0}, {"investment", 4000.0}, {"currency", "USD"}}}});
+    ASSERT_TRUE(guarded.ok) << guarded.error.message;
+    const std::string guarded_task_id = guarded.value["task_id"];
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        guarded_task_id,
+        "Succeeded",
+        "",
+        "",
+        {{"ok", true},
+         {"result",
+          {{"foundation",
+            {{"sources", {{"M-2", {{"source", "crm"}, {"record_id", "id"}, {"name", "account"}}}}},
+             {"snapshot",
+              {{"database", "datasets"},
+               {"source_table", "customers"},
+               {"target_table", "retention_snapshot"},
+               {"entity_column", "entity_id"},
+               {"time_column", "observed_at"},
+               {"as_of", "2026-09-28T00:00:00Z"}}},
+             {"dataset",
+              {{"entity_column", "entity_id"},
+               {"label_column", "retained"},
+               {"feature_columns", json::array({"usage"})}}},
+             {"predicates",
+              {{"in_collections", "in_collections"}, {"open_complaint", "open_complaint"}}},
+             {"missing_predicates", json::array({"vulnerable"})}}}}}}));
+    const auto blocked = r.call("confirm_solution", {{"task_id", guarded_task_id}});
+    ASSERT_TRUE(blocked.ok) << blocked.error.message;
+    EXPECT_TRUE(blocked.value["actions_blocked"]);
+    EXPECT_EQ(blocked.value["missing_predicates"], json::array({"vulnerable"}));
+    EXPECT_EQ(r.w.caller->calls.back().first, "create_solution");
+    EXPECT_EQ(r.w.caller->calls.back().second["sources"]["missing_policy_predicates"],
+              json::array({"vulnerable"}));
 }
 
 TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {

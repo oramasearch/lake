@@ -27,6 +27,7 @@ void register_application_capabilities(Registry& registry);
 void register_agent_capabilities(Registry& registry);
 void register_platform_capabilities(Registry& registry);
 void register_web_app_capabilities(Registry& registry);
+void register_build_capabilities(Registry& registry);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // Running and talking to agents (docs/api/agent-launches.md): launch_agent, list_agent_launches,
@@ -82,5 +83,11 @@ liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
 // when the project has no pipeline, otherwise its first unapproved pipeline pointed at the design's
 // dataset with the design's target and model.
 liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::AgentTask task);
+// Confirm a finished Project Agent solution proposal (kind "solution:<project>") by calling the
+// engine's create_solution once. `edits` is a JSON merge patch over result.foundation. The agent
+// never creates the solution itself; only this person-confirmed path does.
+liquid::runtime::task<ApiResult> settle_solution(ApiContext& context,
+                                                 control::AgentTask task,
+                                                 nlohmann::json edits = nlohmann::json::object());
 
 } // namespace lake::api

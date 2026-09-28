@@ -193,6 +193,12 @@ public:
                                     bool ready,
                                     std::string message,
                                     std::int64_t observed_generation);
+    Result<std::vector<Build>> list_builds(const std::string& customer_id) override;
+    Result<Build> get_build(const std::string& id) override;
+    Result<Build> create_build(const NewBuild&) override;
+    Result<Build> cancel_build(const std::string& id) override;
+    // The production operator updates these columns directly after reconciling the Job.
+    Result<void> set_build_status(const std::string& id, BuildStatus status);
     Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) override;
     Result<ManagedStore> get_store(const std::string& id) override;
     Result<ManagedStore> create_store(const NewManagedStore&) override;
@@ -499,6 +505,7 @@ private:
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
     std::vector<WebApp> web_apps_;
+    std::vector<Build> builds_;
     std::vector<ManagedStore> stores_;
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;

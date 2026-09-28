@@ -602,6 +602,19 @@ public:
     control::Result<void> purge_deleted_web_apps() override {
         return call("purge_deleted_web_apps", [&] { return store_->purge_deleted_web_apps(); });
     }
+    control::Result<std::vector<control::Build>>
+    list_builds(const std::string& customer_id) override {
+        return call("list_builds", [&] { return store_->list_builds(customer_id); });
+    }
+    control::Result<control::Build> get_build(const std::string& id) override {
+        return call("get_build", [&] { return store_->get_build(id); });
+    }
+    control::Result<control::Build> create_build(const control::NewBuild& value) override {
+        return call("create_build", [&] { return store_->create_build(value); });
+    }
+    control::Result<control::Build> cancel_build(const std::string& id) override {
+        return call("cancel_build", [&] { return store_->cancel_build(id); });
+    }
     control::Result<std::vector<control::ManagedStore>>
     list_stores(const std::string& customer_id) override {
         return call("list_stores", [&] { return store_->list_stores(customer_id); });

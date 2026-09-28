@@ -29,3 +29,7 @@ PostgreSQL stores enforce live name/host uniqueness and app/replica quotas; desi
 generation and PostgreSQL notifies `lake_apps`. The operator writes token hashes only; Lake checks
 purpose, current binding and target, and purges rows after Deleted acknowledgement. See
 `docs/control-plane/web-apps.md`.
+
+`builds.cpp` defines build JSON plus source, push and event token purposes. Memory and PostgreSQL
+stores insert queued rows, retain operator observations and notify `lake_builds` on create/cancel.
+See `docs/control-plane/builds.md`.

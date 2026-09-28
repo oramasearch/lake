@@ -45,3 +45,6 @@ source repository/revision reads, customer workspace reads, or one app's event p
 ApplicationAgent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
 turn, repository/App writes only when the reviewed proposal is present. `http_server.cpp` and
 `web_ui.cpp` display and hash that stored proposal before starting the confirmed turn.
+`build_capabilities.cpp` owns customer-scoped build creation, app image builds, status,
+cancellation and retained Zetta progress. Build source and event credentials are rechecked against
+the current row on every call. See `docs/api/builds.md`.

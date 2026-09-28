@@ -35,6 +35,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -1075,8 +1076,8 @@ TEST_P(HttpResponseIsolation, GrantingAPipelineWritesTheWholeListBackToZetta) {
     EXPECT_EQ(std::get<2>(workspace_caller_->calls.back())["pipelines"], nlohmann::json::array());
 }
 
-// lake#290/#291: Design → Methodologies and Design → Solutions list the engine's registries, and a
-// solution starts as a project with its composed pipeline.
+// lake#290/#291/#292: Design lists the engine registries; a solution starts with the person's
+// business inputs, then the Project Agent's editable foundation is confirmed before creation.
 TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolution) {
     auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
     if (memory == nullptr) {
@@ -1115,6 +1116,9 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
     EXPECT_NE(methods.find("Not yet"), std::string::npos);
     EXPECT_NE(methods.find("href=\"/design/methodologies\""), std::string::npos) << "in the nav";
     EXPECT_NE(methods.find("href=\"/design/solutions\""), std::string::npos) << "in the nav";
+    // The page's own nav item is the current one, not Projects (Steve, 2026-09-28).
+    EXPECT_NE(methods.find("href=\"/design/methodologies\" aria-current=\"page\""), std::string::npos);
+    EXPECT_EQ(methods.find("href=\"/design/projects\" aria-current=\"page\""), std::string::npos);
     const std::string one = connection->request(
         "GET", "/design/methodology?customer_id=" + customer_id + "&id=M-3", "", cookie);
     EXPECT_NE(one.find("silhouette"), std::string::npos);
@@ -1132,31 +1136,243 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
               {{"id", "B-1"}, {"name", "Dynamic Pricing & Discount Governance"},
                {"status", "sketch"}, {"runnable", false}}})}};
     workspace_caller_->answers["get_solution"] = {
-        {"id", "S-1"}, {"name", "Churn & Retention"}, {"promise", "Which customers will leave"},
-        {"methodologies", nlohmann::json::array({"M-1", "M-2", "M-3"})},
-        {"action_patterns", nlohmann::json::array({"tasks in CRM", "driver report"})},
-        {"latency", "L1"}, {"runnable", true},
-        {"levels", nlohmann::json::array({{{"id", "CL-1"}, {"name", "Propensity core"}}})}};
+        {"solution",
+         {{"id", "S-1"}, {"name", "Churn & Retention"}, {"promise", "Which customers will leave"},
+          {"composition",
+           nlohmann::json::array({{{"methodology", "M-1"}, {"minimum_level", 1}},
+                                  {{"methodology", "M-5"}, {"minimum_level", 2}}})},
+          {"action_patterns", nlohmann::json::array({"tasks in CRM", "driver report"})},
+          {"latency_classes", nlohmann::json::array({"L1"})}, {"runnable", true},
+          {"required_data_roles", nlohmann::json::array({{{"role", "entity"}}})},
+          {"capability_levels",
+           nlohmann::json::array({{{"level", 1}, {"name", "CL-1"}, {"description", "Propensity core"}}})}}}};
+    workspace_caller_->answers["list_datasets"] = {
+        {"datasets", nlohmann::json::array({{{"database", "datasets"}, {"name", "customers"}}})}};
     const std::string catalogue = connection->request(
         "GET", "/design/solutions?customer_id=" + customer_id, "", cookie);
     EXPECT_NE(catalogue.find("S-1 Churn &amp; Retention"), std::string::npos);
     EXPECT_NE(catalogue.find("In Design"), std::string::npos);
+    EXPECT_NE(catalogue.find("href=\"/design/solutions\" aria-current=\"page\""), std::string::npos);
+    EXPECT_EQ(catalogue.find("href=\"/design/projects\" aria-current=\"page\""), std::string::npos);
     const std::string module = connection->request(
         "GET", "/design/solution?customer_id=" + customer_id + "&id=S-1", "", cookie);
     EXPECT_NE(module.find("tasks in CRM"), std::string::npos);
+    EXPECT_NE(module.find("level 2+"), std::string::npos) << "attachable heads show their level";
     EXPECT_NE(module.find("action=\"/design/solutions/start\""), std::string::npos);
+    EXPECT_NE(module.find("datasets.customers"), std::string::npos);
+    EXPECT_NE(module.find("Value per outcome"), std::string::npos);
     workspace_caller_->answers["create_project"] = {{"name", "churn"}};
-    workspace_caller_->answers["create_solution"] = {{"project", "churn"}};
+    workspace_caller_->answers["get_project"] = {
+        {"name", "churn"}, {"description", "Solution S-1"}, {"graphs", nlohmann::json::array()}};
     const std::string started = connection->request(
-        "POST", "/design/solutions/start",
-        "customer_id=" + customer_id + "&solution=S-1&name=churn&level=CL-1", cookie);
+        "POST",
+        "/design/solutions/start",
+        "customer_id=" + customer_id +
+            "&solution=S-1&name=churn&level=1&dataset=datasets.customers&delivery_kind=webhook"
+            "&delivery_endpoint=https%3A%2F%2Fcrm.example.test%2Ftasks&owner=retention-team"
+            "&value_per_outcome=125&investment=4000&currency=USD",
+        cookie);
     ASSERT_TRUE(started.starts_with("HTTP/1.1 302")) << started.substr(0, 300);
     EXPECT_NE(response_header(started, "location").find("/design/project?"), std::string::npos);
-    const auto& [name, read, input] = workspace_caller_->calls.back();
-    EXPECT_EQ(name, "create_solution");
-    EXPECT_EQ(input["solution"], "S-1");
-    EXPECT_EQ(input["level"], "CL-1");
-    EXPECT_EQ(input["project"], "churn");
+    const auto task = store_->latest_agent_task(customer_id, "solution:churn");
+    ASSERT_TRUE(task) << "Start launches the Project Agent";
+    EXPECT_EQ(task->body["context"]["delivery"]["owner"], "retention-team");
+    EXPECT_EQ(task->body["context"]["roi_model"]["investment"], 4000.0);
+    EXPECT_TRUE(std::ranges::none_of(workspace_caller_->calls, [](const auto& call) {
+        return std::get<0>(call) == "create_solution";
+    })) << "Start does not create the solution";
+    const std::string proposing = connection->request(
+        "GET", "/design/project?customer_id=" + customer_id + "&name=churn", "", cookie);
+    EXPECT_NE(proposing.find("Project Agent is reading the dataset"), std::string::npos);
+
+    agents_->answer = {
+        {"ok", true},
+        {"result",
+         {{"foundation",
+           {{"sources",
+             {{"source", "datasets"},
+              {"table", "customers"},
+              {"M-2", {{"source", "crm"}, {"record_id", "id"}, {"name", "account"}}}}},
+            {"snapshot",
+             {{"database", "datasets"},
+              {"source_table", "customers"},
+              {"target_table", "churn_snapshot"},
+              {"entity_column", "entity_id"},
+              {"time_column", "observed_at"},
+              {"as_of", "2026-09-28T00:00:00Z"}}},
+            {"dataset",
+             {{"entity_column", "entity_id"},
+              {"label_column", "churned"},
+              {"feature_columns", nlohmann::json::array({"usage"})}}},
+            {"predicates",
+             {{"in_collections", "in_collections"},
+              {"open_complaint", "open_complaint"},
+              {"vulnerable", "vulnerable"}}}}}}}};
+    run_agent_task(*connection, task->id);
+    const std::string proposal = connection->request(
+        "GET", "/design/project?customer_id=" + customer_id + "&name=churn", "", cookie);
+    EXPECT_NE(proposal.find("Foundation Proposal"), std::string::npos);
+    EXPECT_NE(proposal.find("retention-team"), std::string::npos);
+    EXPECT_NE(proposal.find("Confirm and create solution"), std::string::npos);
+
+    workspace_caller_->answers["create_solution"] = {{"project", "churn"},
+                                                     {"solution", "S-1"},
+                                                     {"level", 1},
+                                                     {"graph", "S-1 CL-1"},
+                                                     {"policy_id", "policy-1"},
+                                                     {"experiment_id", "experiment-1"},
+                                                     {"monitor_id", "monitor-1"},
+                                                     {"readout_id", "readout-1"}};
+    nlohmann::json edited = agents_->answer["result"]["foundation"];
+    edited["dataset"]["feature_columns"].push_back("tenure");
+    const std::string confirmed = connection->request(
+        "POST",
+        "/design/solution/confirm",
+        "customer_id=" + customer_id + "&project=churn&task_id=" + task->id +
+            "&confirm=yes&foundation=" + lake::api::oauth_url_encode(edited.dump()),
+        cookie);
+    ASSERT_TRUE(confirmed.starts_with("HTTP/1.1 302")) << confirmed.substr(0, 300);
+    const auto created = std::ranges::find_if(workspace_caller_->calls, [](const auto& call) {
+        return std::get<0>(call) == "create_solution";
+    });
+    ASSERT_NE(created, workspace_caller_->calls.end());
+    EXPECT_EQ(std::get<2>(*created)["foundation"]["dataset"]["feature_columns"],
+              nlohmann::json::array({"usage", "tenure"}));
+    EXPECT_EQ(std::get<2>(*created)["foundation"]["roi_model"]["value_per_outcome"], 125.0);
+
+    workspace_caller_->answers["get_project"]["graphs"] =
+        nlohmann::json::array({{{"id", "graph-1"}, {"name", "S-1 CL-1"}}});
+    workspace_caller_->answers["get_graph"] = {
+        {"graph_id", "graph-1"},
+        {"name", "S-1 CL-1"},
+        {"nodes",
+         nlohmann::json::array(
+             {{{"id", "solution_manifest"},
+               {"name", "Solution Manifest"},
+               {"kind", "transform"},
+               {"attributes",
+                {{"sources", {{"missing_policy_predicates", nlohmann::json::array()}}},
+                 {"foundation",
+                  {{"scope", "project-1/S-1 CL-1"},
+                   {"policy_id", "policy-1"},
+                   {"experiment_id", "experiment-1"},
+                   {"monitor_id", "monitor-1"}}}}}},
+              {{"id", "stage-1"},
+               {"name", "Propensity"},
+               {"kind", "model"},
+               {"attributes", {{"solution_stage", 1}}}}})},
+        {"edges", nlohmann::json::array()}};
+    workspace_caller_->answers["get_policy"] = {
+        {"id", "policy-1"},
+        {"versions", nlohmann::json::array({{{"version", 1}, {"config", {{"threshold", 0.8}}}}})}};
+    workspace_caller_->answers["get_experiment"] = {
+        {"holdout_fraction", 0.1}, {"balanced", true}, {"exemptions", nlohmann::json::array()}};
+    workspace_caller_->answers["list_ledger"] = {
+        {"entries",
+         nlohmann::json::array({{{"id", "action-1"},
+                                 {"kind", "action"},
+                                 {"subject", "account-17"},
+                                 {"decision", "decision-1"},
+                                 {"action", "send_offer"},
+                                 {"currency", "USD"},
+                                 {"recorded_at", "2026-09-28T12:00:00Z"}},
+                                {{"id", "other-action"},
+                                 {"kind", "action"},
+                                 {"subject", "other-project-account"},
+                                 {"decision", "other-decision"},
+                                 {"action", "send_offer"},
+                                 {"currency", "USD"},
+                                 {"recorded_at", "2026-09-28T12:00:00Z"}}})}};
+    workspace_caller_->answers["get_monitor"] = {{"status", "within_bounds"}};
+    workspace_caller_->answers["get_roi_readout"] = {
+        {"currency", "USD"}, {"investment", 4000.0}, {"incrementality", 0.2}};
+    workspace_caller_->answers["list_runs"] = {
+        {"runs",
+         nlohmann::json::array({{{"id", "run-1"},
+                                 {"graph", "S-1 CL-1"},
+                                 {"status", "succeeded"},
+                                 {"created", "2026-09-28T12:00:00Z"}}})}};
+    workspace_caller_->answers["get_run"] = {
+        {"id", "run-1"},
+        {"status", "succeeded"},
+        {"outputs",
+         nlohmann::json::array(
+             {{{"name", "solution decisions"}, {"ref", "solution_results.decisions_run_1"}}})}};
+    workspace_caller_->answers["sql"] = {
+        {"rows",
+         nlohmann::json::array({{{"id", "decision-1"},
+                                 {"entity_id", "account-17"},
+                                 {"tier", "high"},
+                                 {"action", "send_offer"},
+                                 {"autonomy", "A1"},
+                                 {"status", "pending_approval"}}})}};
+    const std::string project = connection->request(
+        "GET", "/design/project?customer_id=" + customer_id + "&name=churn", "", cookie);
+    EXPECT_NE(project.find("Solution Stages"), std::string::npos);
+    EXPECT_NE(project.find("Decision Policy"), std::string::npos);
+    EXPECT_NE(project.find("Experiment and Holdout"), std::string::npos);
+    EXPECT_NE(project.find("Actions and A1 Queue"), std::string::npos);
+    EXPECT_NE(project.find("Approve A1"), std::string::npos);
+    EXPECT_NE(project.find("Delivered and Held Actions"), std::string::npos);
+    EXPECT_EQ(project.find("other-project-account"), std::string::npos);
+    EXPECT_NE(project.find("Monitor"), std::string::npos);
+    EXPECT_NE(project.find("ROI Readout"), std::string::npos);
+    EXPECT_NE(project.find("action=\"/design/solution/run\""), std::string::npos);
+
+    workspace_caller_->answers["run_solution"] = {
+        {"run_id", "run-2"}, {"status", "queued"}, {"engine", "native"}, {"preview", false}};
+    const std::string ran =
+        connection->request("POST",
+                            "/design/solution/run",
+                            "customer_id=" + customer_id + "&project=churn&graph=S-1%20CL-1",
+                            cookie);
+    ASSERT_TRUE(ran.starts_with("HTTP/1.1 302"));
+    EXPECT_EQ(std::get<0>(workspace_caller_->calls.back()), "run_solution");
+    EXPECT_FALSE(std::get<1>(workspace_caller_->calls.back()));
+
+    workspace_caller_->answers["update_policy"] = {{"policy_id", "policy-1"}, {"version", 2}};
+    const std::string policy_config =
+        lake::api::oauth_url_encode(R"({"autonomy":"A1","threshold":0.75})");
+    const std::string updated = connection->request(
+        "POST",
+        "/design/solution/policy",
+        "customer_id=" + customer_id + "&project=churn&policy_id=policy-1&config=" + policy_config +
+            "&reason=reviewed&confirm=yes",
+        cookie);
+    ASSERT_TRUE(updated.starts_with("HTTP/1.1 302"));
+    EXPECT_EQ(std::get<0>(workspace_caller_->calls.back()), "update_policy");
+    EXPECT_FALSE(std::get<1>(workspace_caller_->calls.back()));
+
+    workspace_caller_->answers["approve_decision"] = {{"decision_id", "decision-1"},
+                                                      {"status", "approved"}};
+    const std::string approved = connection->request(
+        "POST",
+        "/design/solution/approve",
+        "customer_id=" + customer_id + "&project=churn&decision_id=decision-1&confirm=yes",
+        cookie);
+    ASSERT_TRUE(approved.starts_with("HTTP/1.1 302"));
+    EXPECT_EQ(std::get<0>(workspace_caller_->calls.back()), "approve_decision");
+    EXPECT_FALSE(std::get<1>(workspace_caller_->calls.back()));
+
+    workspace_caller_->answers["record_outcome"] = {{"outcome_id", "outcome-1"}};
+    const std::string outcome = connection->request(
+        "POST",
+        "/design/solution/outcome",
+        "customer_id=" + customer_id +
+            "&project=churn&action_id=action-1&outcome=retained&value=125&currency=USD"
+            "&occurred_at=2026-09-28T12%3A30%3A00Z",
+        cookie);
+    ASSERT_TRUE(outcome.starts_with("HTTP/1.1 302"));
+    EXPECT_EQ(std::get<0>(workspace_caller_->calls.back()), "record_outcome");
+    EXPECT_FALSE(std::get<1>(workspace_caller_->calls.back()));
+
+    workspace_caller_
+        ->answers["get_graph"]["nodes"][0]["attributes"]["sources"]["missing_policy_predicates"] =
+        nlohmann::json::array({"vulnerable"});
+    const std::string blocked = connection->request(
+        "GET", "/design/project?customer_id=" + customer_id + "&name=churn", "", cookie);
+    EXPECT_NE(blocked.find("Run is blocked"), std::string::npos);
+    EXPECT_EQ(blocked.find("action=\"/design/solution/run\""), std::string::npos);
 }
 
 TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnConfirmation) {
@@ -1546,7 +1762,8 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     EXPECT_NE(page.find("<h1>customer-portal</h1>"), std::string::npos);
     EXPECT_NE(page.find("Revision is ready"), std::string::npos);
     EXPECT_NE(page.find("id=\"app-live-events\""), std::string::npos);
-    EXPECT_NE(page.find("Builds are not available on this lake yet"), std::string::npos);
+    EXPECT_NE(page.find("No builds yet"), std::string::npos);
+    EXPECT_NE(page.find("action=\"/ship/app/build\""), std::string::npos);
     EXPECT_NE(page.find("action=\"/ship/app/restart\""), std::string::npos);
     EXPECT_NE(page.find("action=\"/ship/app/service/create\""), std::string::npos);
     if (memory != nullptr) {

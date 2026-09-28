@@ -39,8 +39,8 @@ constexpr std::array group_rules{
                          n == "schedule_agent" || n == "list_agent_schedules" ||
                          n == "unschedule_agent" || n == "agent_turn" ||
                          n == "create_agent_from_proposal" ||
-                         n == "create_projects_from_opportunities" ||
-                         n == "get_ask_conversation";
+                         n == "create_projects_from_opportunities" || n == "start_solution" ||
+                         n == "confirm_solution" || n == "get_ask_conversation";
               }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your Zetta workspace: projects and pipelines, data, runs, models and search "
