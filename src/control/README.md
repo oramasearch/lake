@@ -23,3 +23,9 @@ Agent tasks (lake#269) are claimed with one insert into `agent_task_status`, so 
 wins. A finished task keeps its phase and loses its credential digest. `agent_bus.cpp` publishes
 tasks on Zetta pub/sub and applies what agents publish; `stale_agent_tasks` is what its loop
 re-publishes or fails. See `docs/api/agent-bus.md`.
+
+`web_apps.cpp` defines the Ship App JSON and deterministic namespace contract. Memory and
+PostgreSQL stores enforce live name/host uniqueness and app/replica quotas; desired writes advance
+generation and PostgreSQL notifies `lake_apps`. The operator writes token hashes only; Lake checks
+purpose, current binding and target, and purges rows after Deleted acknowledgement. See
+`docs/control-plane/web-apps.md`.

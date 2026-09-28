@@ -284,7 +284,7 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`token_attenuation_guard` in the source tree), so a new migration means a new guard and the next Job re-runs the
+(`web_apps_operator_contract_guard` in the source tree), so a new migration means a new guard and the next Job re-runs the
 idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -312,7 +312,9 @@ Today the mechanism is single-shot: once the guard table exists, a changed versi
    `token_attenuation_guard`; session lookup adds `0022_session_lookup` and
    `session_lookup_guard`; Clerk sign-in adds `0023_custodial_identities` and
    `custodial_identity_guard`; managed services add `0024_services` and `services_guard`; the service catalog adds
-   `0025_service_catalog` and `service_catalog_guard`. The operator copy remains deferred to the single
+   `0025_service_catalog` and `service_catalog_guard`; Ship apps add `0034_web_apps`, then
+   `0035_web_apps_operator_contract` and
+   `web_apps_operator_contract_guard`. The operator copy remains deferred to the single
    wave-level migration pull request.
 3. Set the operator's `GuardTable` to the new migration's table.
 4. For an existing Lake, delete its `PostgresSchema` (`kubectl delete postgresschema
@@ -326,8 +328,8 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services', '0025_service_catalog')" \
-  -c "SELECT to_regclass('service_catalog_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services', '0025_service_catalog', '0034_web_apps', '0035_web_apps_operator_contract')" \
+  -c "SELECT to_regclass('web_apps_operator_contract_guard')"
 ```
 
 ## Token attenuation migration
@@ -462,3 +464,14 @@ per Job each schedule's CronJob started). It retires `agent_schedules` without d
 longer reads it, and dropping it is a separate, deliberate change. Idempotent; guard
 `agent_cron_guard`. The operator vendors it and selects that guard before a binary that schedules
 through CronJobs is deployed. Contract: [`../api/agent-launches.md`](../api/agent-launches.md).
+
+## Ship apps migration
+
+`0034_web_apps` adds the `apps` desired-and-observed row shared by lake and the Orama operator.
+Lake writes deployment, runtime, bindings, environment, lifecycle and generation fields; the
+operator writes phase, URL, readiness, message and observed generation. Desired changes notify
+`lake_apps`. Migration `0035_web_apps_operator_contract` aligns runtime/image modes and deleted
+intent, adds `source_entrypoint` and operator-written `token_hashes_json`, normalizes bindings and
+removes the earlier credential table. Only hashes remain; authentication enforces source,
+workspace and event purpose restrictions. Idempotent; guard `web_apps_operator_contract_guard`.
+The complete ownership, quota and reconciliation contract is [`web-apps.md`](web-apps.md).

@@ -170,6 +170,7 @@ add_library(lake-core STATIC
   src/control/agent_library.cpp
   src/control/agent_bus.cpp
   src/control/agent_runs.cpp
+  src/control/web_apps.cpp
   src/control/zetta_workspace.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
@@ -198,6 +199,7 @@ add_library(lake-core STATIC
   src/api/app_capabilities.cpp
   src/api/agent_capabilities.cpp
   src/api/platform_capabilities.cpp
+  src/api/web_app_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp

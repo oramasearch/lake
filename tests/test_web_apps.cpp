@@ -1,0 +1,447 @@
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+#include "lake/api/capabilities.hpp"
+#include "lake/api/registry.hpp"
+#include "lake/audit/audit.hpp"
+#include "lake/control/agent_bus.hpp"
+#include "lake/control/identity_crypto.hpp"
+#include "lake/control/memory_store.hpp"
+#include "lake/control/platform.hpp"
+#include "lake/control/zetta_workspace.hpp"
+#include "temporary_directory.hpp"
+
+namespace {
+
+using json = nlohmann::json;
+
+lake::control::ClerkIdentity minted(std::string subject) {
+    const auto identity = lake::audit::mint_custodial_identity("web-app-test-kek");
+    return lake::control::ClerkIdentity{subject,
+                                        subject + "@example.test",
+                                        "",
+                                        "browser",
+                                        identity->taap_id,
+                                        identity->public_key,
+                                        identity->wrapped_seed};
+}
+
+class UnusedWorkspaceCaller final : public lake::control::WorkspaceCaller {
+public:
+    liquid::runtime::task<lake::control::ZettaControlResult<json>>
+    call(std::string, std::string, std::string, bool, json) override {
+        co_return lake::control::ZettaControlResult<json>(json::object());
+    }
+};
+
+class FakeLoki final : public lake::control::LokiSource {
+public:
+    std::string requested_namespace;
+
+    liquid::runtime::task<lake::control::PlatformResult<json>>
+    query(std::string namespace_name, std::string, int, std::string) override {
+        requested_namespace = std::move(namespace_name);
+        co_return lake::control::PlatformResult<json>(
+            json{{"items", json::array({{{"line", "ready"}}})}, {"next_since", "2"}});
+    }
+};
+
+struct WebApps {
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
+    lake::control::Principal owner;
+    lake::control::Principal other;
+    std::string customer_id;
+    std::string repository_id;
+    lake::api::Registry registry;
+    std::shared_ptr<lake::control::MemoryAgentBus> raw_bus =
+        std::make_shared<lake::control::MemoryAgentBus>();
+    std::shared_ptr<lake::control::AgentTaskBus> bus =
+        std::make_shared<lake::control::AgentTaskBus>(store, raw_bus, std::vector<std::string>{});
+    std::filesystem::path service_dir =
+        lake::test::fixture_path("web-app-services-" + lake::control::new_uuid_v4());
+    std::shared_ptr<UnusedWorkspaceCaller> workspace_caller =
+        std::make_shared<UnusedWorkspaceCaller>();
+    std::shared_ptr<lake::control::WorkspaceService> workspaces;
+    std::shared_ptr<FakeLoki> loki = std::make_shared<FakeLoki>();
+    std::shared_ptr<lake::control::PlatformService> platform;
+
+    WebApps() {
+        std::filesystem::create_directories(service_dir);
+        const auto owner_session = store->sign_in_clerk(minted("app-owner"));
+        const auto other_session = store->sign_in_clerk(minted("app-other"));
+        EXPECT_TRUE(owner_session);
+        EXPECT_TRUE(other_session);
+        owner = *store->context_for(owner_session->secret);
+        other = *store->context_for(other_session->secret);
+        const auto customers = store->list_customers(2, owner.user_id);
+        EXPECT_TRUE(customers);
+        customer_id = customers->front().id;
+        const auto repository =
+            store->create_repository({customer_id, "app-source", "", "private"});
+        EXPECT_TRUE(repository);
+        repository_id = repository->id;
+        workspaces = std::make_shared<lake::control::WorkspaceService>(
+            lake::control::WorkspaceConfig{service_dir.string(), 5}, store, workspace_caller);
+        platform = std::make_shared<lake::control::PlatformService>(
+            store,
+            nullptr,
+            loki,
+            lake::control::PlatformConfig{"test", std::chrono::seconds(15), "", ""});
+        lake::api::register_core_capabilities(registry, "test");
+    }
+
+    lake::api::ApiResult call(const lake::control::Principal& principal,
+                              const std::string& name,
+                              json input,
+                              std::size_t app_limit = 3,
+                              std::size_t replica_limit = 4) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = workspaces.get();
+        context.platform = platform.get();
+        context.agent_bus = bus.get();
+        context.apps_wildcard = "apps.example.test";
+        context.apps_per_customer = app_limit;
+        context.app_replicas_per_customer = replica_limit;
+        context.authorized = true;
+        context.session_credential = true;
+        context.acting_user_id = principal.user_id;
+        context.acting_identity = principal.taap_id;
+        context.credential_session_id = principal.session_id;
+        context.credential_kind = principal.kind;
+        context.credential_workload_id = principal.workload_id;
+        context.credential_customer_id = principal.workload_customer_id;
+        context.credential_repository_id = principal.workload_repository_id;
+        context.credential_revision = principal.workload_revision;
+        context.credential_token_hash = principal.workload_token_hash;
+        context.pool_id = principal.pool_id;
+        context.scopes = principal.scopes;
+        context.request_id = lake::control::new_uuid_v4();
+        if (registry.find(name)->input_schema["properties"].contains("customer_id") &&
+            principal.kind != "app_events" && !input.contains("customer_id")) {
+            input["customer_id"] = customer_id;
+        }
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    }
+
+    lake::api::ApiResult call(const std::string& name, json input = json::object()) {
+        return call(owner, name, std::move(input));
+    }
+
+    lake::api::ApiResult create(std::string name = "reports") {
+        return call("create_app",
+                    {{"name", std::move(name)},
+                     {"mode", "runtime"},
+                     {"source",
+                      {{"repository", repository_id},
+                       {"revision", "main"},
+                       {"path", "web"},
+                       {"entrypoint", "server:app"}}},
+                     {"framework", "node"},
+                     {"port", 3000},
+                     {"bindings", {{"zetta", true}, {"services", json::array()}}},
+                     {"env", {{"LOG_LEVEL", "info"}}}});
+    }
+};
+
+} // namespace
+
+TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
+    WebApps apps;
+    const auto created = apps.create();
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["host"], "reports.apps.example.test");
+    EXPECT_EQ(created.value["auth"], "lake");
+    EXPECT_EQ(created.value["generation"], 1);
+    EXPECT_EQ(created.value["bindings"]["zetta"], json({{"scopes", {"read"}}}));
+    EXPECT_EQ(created.value["source"]["entrypoint"], "server:app");
+    EXPECT_FALSE(created.value.dump().contains("workspace-admin-token"));
+
+    const std::string id = created.value.at("id");
+    const auto audit_events = apps.store->list_audit_events({.limit = 100});
+    ASSERT_TRUE(audit_events) << audit_events.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*audit_events, [&](const lake::audit::Event& event) {
+        return event.draft.action == "create_app" && event.draft.object == "app/" + id &&
+               event.draft.principal == apps.owner.taap_id && event.draft.outcome == "success";
+    }));
+    ASSERT_TRUE(apps.store->set_web_app_status(
+        id, "Running", "https://reports.apps.example.test", true, "available", 1));
+    const auto observed = apps.call("get_app", {{"app_id", id}});
+    ASSERT_TRUE(observed.ok) << observed.error.message;
+    EXPECT_EQ(observed.value["phase"], "Running");
+    EXPECT_EQ(observed.value["observed_generation"], 1);
+    EXPECT_TRUE(observed.value["ready"]);
+
+    const auto scaled = apps.call("scale_app", {{"app_id", id}, {"replicas", 4}});
+    ASSERT_TRUE(scaled.ok) << scaled.error.message;
+    EXPECT_EQ(scaled.value["replicas"], 4);
+    EXPECT_EQ(scaled.value["generation"], 2);
+    const auto over_quota = apps.call("create_app",
+                                      {{"name", "second"},
+                                       {"mode", "image"},
+                                       {"image", "registry.example.test/second:v1"},
+                                       {"framework", "container"},
+                                       {"port", 8080}});
+    EXPECT_EQ(over_quota.error.code, "quota_exceeded");
+
+    const auto stopped = apps.call("stop_app", {{"app_id", id}});
+    ASSERT_TRUE(stopped.ok) << stopped.error.message;
+    EXPECT_EQ(stopped.value["desired"], "stopped");
+    EXPECT_EQ(apps.call("start_app", {{"app_id", id}}).value["desired"], "running");
+    EXPECT_TRUE(apps.call("restart_app", {{"app_id", id}}).ok);
+}
+
+TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
+    WebApps apps;
+    for (const std::string& read : {"list_apps", "get_app", "app_logs", "receive_app_events"}) {
+        ASSERT_EQ(apps.registry.find(read)->action, "read") << read;
+    }
+    for (const std::string& write : {"create_app",
+                                     "deploy_app",
+                                     "rollback_app",
+                                     "delete_app",
+                                     "set_app_env",
+                                     "unset_app_env",
+                                     "restart_app",
+                                     "scale_app",
+                                     "stop_app",
+                                     "start_app",
+                                     "bind_service_to_app",
+                                     "create_service_and_bind_to_app",
+                                     "publish_app_event"}) {
+        ASSERT_EQ(apps.registry.find(write)->action, "write") << write;
+    }
+
+    const auto wrong_host = apps.call("create_app",
+                                      {{"name", "wrong-host"},
+                                       {"mode", "image"},
+                                       {"image", "registry.example.test/app:v1"},
+                                       {"framework", "container"},
+                                       {"port", 8080},
+                                       {"host", "app.example.test"}});
+    EXPECT_EQ(wrong_host.error.code, "invalid_input");
+    const auto invalid_label = apps.call("create_app",
+                                         {{"name", "bad-label"},
+                                          {"mode", "image"},
+                                          {"image", "registry.example.test/app:v1"},
+                                          {"framework", "container"},
+                                          {"port", 8080},
+                                          {"host", "bad-.apps.example.test"}});
+    EXPECT_EQ(invalid_label.error.code, "invalid_input");
+
+    const auto created = apps.create();
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("id");
+    const auto foreign = apps.call(apps.other, "get_app", {{"app_id", id}});
+    EXPECT_EQ(foreign.error.code, "unauthorized");
+    lake::api::ApiContext anonymous;
+    anonymous.store = apps.store.get();
+    EXPECT_EQ(apps.registry
+                  .call("get_app", {{"app_id", id}, {"customer_id", apps.customer_id}}, anonymous)
+                  .error.code,
+              "unauthorized");
+    const auto secret = apps.call("set_app_env",
+                                  {{"app_id", id},
+                                   {"key", "AWS_SECRET_ACCESS_KEY"},
+                                   {"value", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}});
+    EXPECT_EQ(secret.error.code, "secret_required");
+    const auto reference = apps.call(
+        "set_app_env", {{"app_id", id}, {"key", "DATABASE_URL"}, {"secret_ref", "db-url"}});
+    ASSERT_TRUE(reference.ok) << reference.error.message;
+    EXPECT_FALSE(reference.value["env"].contains("DATABASE_URL"));
+    EXPECT_EQ(reference.value["secret_env_refs"]["DATABASE_URL"], "db-url");
+    EXPECT_TRUE(apps.call("unset_app_env", {{"app_id", id}, {"key", "DATABASE_URL"}}).ok);
+
+    const auto deployed =
+        apps.call("deploy_app", {{"app_id", id}, {"image", "registry.example.test/reports:v2"}});
+    ASSERT_TRUE(deployed.ok) << deployed.error.message;
+    EXPECT_EQ(deployed.value["mode"], "image");
+    const auto rolled_back = apps.call(
+        "rollback_app",
+        {{"app_id", id}, {"source", {{"repository", apps.repository_id}, {"revision", "v1"}}}});
+    ASSERT_TRUE(rolled_back.ok) << rolled_back.error.message;
+    EXPECT_EQ(rolled_back.value["source"]["revision"], "v1");
+    EXPECT_EQ(apps.call("delete_app", {{"app_id", id}, {"confirm", "wrong"}}).error.code,
+              "invalid_input");
+    const auto deleted = apps.call("delete_app", {{"app_id", id}, {"confirm", "reports"}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value["desired"], "deleted");
+}
+
+TEST(WebApps, ServiceBindingsLogsAndLifecycleEventsCarryReferencesAndPrincipal) {
+    WebApps apps;
+    const auto created = apps.create();
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("id");
+
+    const auto bound = apps.call("create_service_and_bind_to_app",
+                                 {{"app_id", id}, {"kind", "postgres"}, {"name", "orders"}});
+    ASSERT_TRUE(bound.ok) << bound.error.message;
+    ASSERT_EQ(bound.value["bindings"]["services"].size(), 1U);
+    EXPECT_EQ(bound.value["bindings"]["services"][0], bound.value["service"]["id"]);
+    EXPECT_FALSE(bound.value.dump().contains("password"));
+
+    const auto logs = apps.call("app_logs", {{"app_id", id}});
+    ASSERT_TRUE(logs.ok) << logs.error.message;
+    EXPECT_EQ(logs.value["items"][0]["line"], "ready");
+    EXPECT_EQ(apps.loki->requested_namespace, lake::control::web_app_namespace(id));
+
+    const auto published = apps.call(
+        "publish_app_event", {{"app_id", id}, {"type", "rollout"}, {"message", "complete"}});
+    ASSERT_TRUE(published.ok) << published.error.message;
+    const auto received = apps.call("receive_app_events", {{"app_id", id}});
+    ASSERT_TRUE(received.ok) << received.error.message;
+    ASSERT_GE(received.value["events"].size(), 3U);
+    EXPECT_EQ(received.value["events"][0]["type"], "create");
+    EXPECT_EQ(received.value["events"].back()["type"], "rollout");
+    EXPECT_EQ(received.value["events"].back()["generation"], 2);
+    EXPECT_EQ(received.value["events"].back()["principal"], apps.owner.taap_id);
+}
+
+TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
+    WebApps apps;
+    const auto created = apps.create();
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("id");
+    const auto second = apps.create("second");
+    ASSERT_TRUE(second.ok) << second.error.message;
+    const auto foreign =
+        apps.store->create_repository({apps.customer_id, "other-source", "", "public"});
+    ASSERT_TRUE(foreign);
+    EXPECT_EQ(created.value["mode"], "runtime");
+    EXPECT_FALSE(created.value.contains("token_hashes_json"));
+    ASSERT_TRUE(apps.store->get_web_app(id)->token_hashes.empty());
+
+    const json hashes{{"source", lake::control::identity_crypto::sha256_hex("operator-source")},
+                      {"zetta", lake::control::identity_crypto::sha256_hex("operator-zetta")},
+                      {"events", lake::control::identity_crypto::sha256_hex("operator-events")}};
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes));
+    ASSERT_FALSE(apps.store->context_for("unknown"));
+    for (const std::string purpose : {"source", "zetta", "events"}) {
+        const auto principal = apps.store->context_for("operator-" + purpose);
+        ASSERT_TRUE(principal) << principal.error().message;
+        EXPECT_EQ(principal->kind, "app_" + purpose);
+        EXPECT_EQ(principal->workload_id, id);
+        EXPECT_EQ(principal->workload_customer_id, apps.customer_id);
+        EXPECT_EQ(
+            apps.call(*principal, "get_app", {{"app_id", id}, {"customer_id", apps.customer_id}})
+                .error.code,
+            "unauthorized");
+        EXPECT_EQ(apps.call(*principal, "server_info", json::object()).error.code, "unauthorized");
+        EXPECT_EQ(apps.call(*principal, "server_info", nullptr).error.code, "invalid_input");
+        EXPECT_EQ(
+            apps.call(*principal,
+                      "delete_app",
+                      {{"app_id", id}, {"customer_id", apps.customer_id}, {"confirm", "reports"}})
+                .error.code,
+            "unauthorized");
+        const auto different_app =
+            apps.call(*principal,
+                      "publish_app_event",
+                      {{"app_id", second.value.at("id")}, {"event", {{"phase", "Running"}}}});
+        EXPECT_EQ(different_app.error.code, "unauthorized");
+    }
+
+    const auto source = *apps.store->context_for("operator-source");
+    EXPECT_EQ(apps.call(source,
+                        "repository_tree",
+                        {{"id", apps.repository_id}, {"ref", "other-revision"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(
+        apps.call(source, "repository_tree", {{"id", foreign->id}, {"ref", "main"}}).error.code,
+        "unauthorized");
+    EXPECT_EQ(apps.call(source,
+                        "repository_file",
+                        {{"id", foreign->id}, {"ref", "main"}, {"path", "app.toml"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(apps.call(source, "workspace_query", {{"capability", "list_datasets"}}).error.code,
+              "unauthorized");
+
+    ASSERT_TRUE(apps.call("start_workspace").ok);
+    const auto services = apps.store->list_services(apps.customer_id);
+    ASSERT_TRUE(services);
+    const auto workspace =
+        std::ranges::find_if(*services, [](const auto& service) { return service.is_default; });
+    ASSERT_NE(workspace, services->end());
+    ASSERT_TRUE(
+        apps.store->set_service_status(workspace->id, "Ready", "", "http://workspace.test:4800"));
+    std::ofstream(apps.service_dir / (workspace->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", "workspace-server-token"}}.dump();
+    const auto zetta = *apps.store->context_for("operator-zetta");
+    EXPECT_TRUE(apps.call(zetta, "workspace_query", {{"capability", "list_datasets"}}).ok);
+    EXPECT_TRUE(apps.call(zetta, "workspace_sql", {{"statement", "SELECT * FROM data.rows"}}).ok);
+    EXPECT_FALSE(apps.call(zetta, "workspace_query", {{"capability", "create_project"}}).ok);
+    EXPECT_FALSE(apps.call(zetta, "workspace_sql", {{"statement", "DROP TABLE data.rows"}}).ok);
+    EXPECT_EQ(apps.call(zetta, "workspace_act", {{"capability", "create_project"}}).error.code,
+              "unauthorized");
+    EXPECT_EQ(
+        apps.call(zetta,
+                  "workspace_query",
+                  {{"customer_id", lake::control::new_uuid_v4()}, {"capability", "list_datasets"}})
+            .error.code,
+        "unauthorized");
+    EXPECT_EQ(apps.call(zetta, "repository_tree", {{"id", apps.repository_id}, {"ref", "main"}})
+                  .error.code,
+              "unauthorized");
+
+    const auto events = *apps.store->context_for("operator-events");
+    const auto published =
+        apps.call(events,
+                  "publish_app_event",
+                  {{"app_id", id}, {"event", {{"phase", "Running"}, {"ready", true}}}});
+    ASSERT_TRUE(published.ok) << published.error.message;
+    EXPECT_EQ(
+        apps.call(events, "receive_app_events", {{"app_id", id}, {"customer_id", apps.customer_id}})
+            .error.code,
+        "unauthorized");
+    EXPECT_EQ(
+        apps.call(events,
+                  "publish_app_event",
+                  {{"app_id", id}, {"customer_id", lake::control::new_uuid_v4()}, {"type", "pod"}})
+            .error.code,
+        "unauthorized");
+    const auto received = apps.call("receive_app_events", {{"app_id", id}});
+    ASSERT_TRUE(received.ok);
+    EXPECT_EQ(received.value["events"].back()["principal"], "app:" + id + ":events");
+    EXPECT_EQ(received.value["events"].back()["status"]["phase"], "Running");
+
+    auto rotated = hashes;
+    rotated["source"] = lake::control::identity_crypto::sha256_hex("replacement-source");
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, rotated));
+    EXPECT_FALSE(apps.store->context_for("operator-source"));
+    EXPECT_TRUE(apps.store->context_for("replacement-source"));
+    EXPECT_EQ(apps.call(source, "repository_tree", {{"id", apps.repository_id}, {"ref", "main"}})
+                  .error.code,
+              "unauthorized");
+
+    lake::control::WebAppPatch revoke;
+    revoke.rotate_tokens = true;
+    ASSERT_TRUE(apps.store->update_web_app(id, revoke));
+    EXPECT_FALSE(apps.store->context_for("operator-events"));
+    EXPECT_TRUE(apps.store->get_web_app(id)->token_hashes.empty());
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes));
+    ASSERT_TRUE(apps.call("delete_app", {{"app_id", id}, {"confirm", "reports"}}).ok);
+    EXPECT_FALSE(apps.store->context_for("operator-source"));
+    EXPECT_FALSE(apps.store->context_for("operator-zetta"));
+    EXPECT_TRUE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->purge_deleted_web_apps());
+    EXPECT_TRUE(apps.store->get_web_app(id));
+    ASSERT_TRUE(apps.store->set_web_app_status(id, "Deleted", "", false, "", 4));
+    EXPECT_FALSE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->purge_deleted_web_apps());
+    EXPECT_FALSE(apps.store->get_web_app(id));
+    EXPECT_TRUE(apps.store->get_web_app(second.value.at("id")));
+}
