@@ -197,7 +197,8 @@ public:
     Result<void> create_stream_owner(const StreamOwner&) override;
     Result<std::string> stream_owner(const StreamOwner&) override;
     Result<void> delete_stream_owner(const StreamOwner&) override;
-    Result<std::vector<std::string>> list_agent_task_ids(const std::string& customer_id) override;
+    Result<std::vector<AgentTaskStreamScope>>
+    list_agent_task_stream_scopes(const std::string& customer_id) override;
     Result<Build> get_build(const std::string& id) override;
     Result<Build> create_build(const NewBuild&) override;
     Result<Build> cancel_build(const std::string& id) override;

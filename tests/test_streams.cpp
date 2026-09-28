@@ -1,4 +1,6 @@
+#include <chrono>
 #include <cstdlib>
+#include <format>
 #include <iostream>
 #include <regex>
 
@@ -144,12 +146,14 @@ TEST_F(Streams, SpaceIsolationSystemProtectionAndSharedAgentFiltering) {
     ASSERT_TRUE(foreign);
     const auto own_topic = "app-events." + app->id;
     const auto foreign_topic = "app-events." + foreign->id;
-    for (const auto& topic : {own_topic, foreign_topic, std::string("agent-events")}) {
+    for (const auto& topic : {own_topic, foreign_topic, std::string("agent-events"),
+                              std::string("agent-tasks.agent-project"),
+                              std::string("agent-tasks.agent-private")}) {
         ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic(topic)).value());
     }
     const auto task = store->create_agent_task({.customer_id = customer, .agent = "agent-project",
         .kind = "test", .scopes = {"list_streams"}});
-    const auto foreign_task = store->create_agent_task({.customer_id = other, .agent = "agent-project",
+    const auto foreign_task = store->create_agent_task({.customer_id = other, .agent = "agent-private",
         .kind = "test", .scopes = {"list_streams"}});
     ASSERT_TRUE(task);
     ASSERT_TRUE(foreign_task);
@@ -157,17 +161,59 @@ TEST_F(Streams, SpaceIsolationSystemProtectionAndSharedAgentFiltering) {
         {"message", "private"}}, foreign_task->id)).value());
     ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-events", {{"task_id", task->id},
         {"message", "own progress"}}, task->id)).value());
+    ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-tasks.agent-project",
+        {{"task_id", task->id}, {"customer_id", customer}, {"agent", "agent-project"}},
+        task->id)).value());
+    ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-tasks.agent-project",
+        {{"task_id", foreign_task->id}, {"customer_id", other}, {"agent", "agent-project"}},
+        foreign_task->id)).value());
+    ASSERT_TRUE(
+        liquid::runtime::block_on(raw_bus->create_topic("agent-turn." + task->id)).value());
+    ASSERT_TRUE(store->fail_agent_task(task->id, "finished"));
     const auto listing = call("list_streams", {{"customer_id", customer}});
     ASSERT_TRUE(listing.ok) << listing.error.message;
     EXPECT_NE(listing.value.dump().find(own_topic), std::string::npos);
     EXPECT_EQ(listing.value.dump().find(foreign_topic), std::string::npos);
+    EXPECT_NE(listing.value.dump().find("Agent events"), std::string::npos);
+    EXPECT_NE(listing.value.dump().find("Agent tasks · agent-project"), std::string::npos);
+    EXPECT_EQ(listing.value.dump().find("agent-private"), std::string::npos);
+    EXPECT_EQ(listing.value.dump().find("agent-turn."), std::string::npos);
+    EXPECT_EQ(listing.value.dump().find("topic:"), std::string::npos);
+    const auto legacy = call("list_streams",
+                             {{"customer_id", customer}, {"prefix", "agent-turn."}});
+    ASSERT_TRUE(legacy.ok);
+    EXPECT_NE(legacy.value.dump().find("agent-turn." + task->id), std::string::npos);
     EXPECT_FALSE(call("browse_stream", input(foreign_topic, "bus")).ok);
-    const auto turn = call("browse_stream", input("agent-turn." + task->id, "bus"));
+    auto turn_input = input("agent-events", "bus");
+    turn_input["task"] = task->id;
+    const auto turn = call("browse_stream", turn_input);
     ASSERT_TRUE(turn.ok) << turn.error.message;
     ASSERT_EQ(turn.value["events"].size(), 1);
     EXPECT_EQ(turn.value.dump().find("private"), std::string::npos);
+    const auto scoped = call("browse_stream", input("agent-events", "bus"));
+    ASSERT_TRUE(scoped.ok);
+    ASSERT_EQ(scoped.value["events"].size(), 1);
+    auto agent_input = input("agent-events", "bus");
+    agent_input["agent"] = "agent-project";
+    const auto by_agent = call("browse_stream", agent_input);
+    ASSERT_TRUE(by_agent.ok);
+    EXPECT_EQ(by_agent.value["events"].size(), 1);
+    const auto queue = call("browse_stream", input("agent-tasks.agent-project", "bus"));
+    ASSERT_TRUE(queue.ok);
+    ASSERT_EQ(queue.value["events"].size(), 1);
+    EXPECT_EQ(queue.value["events"][0].at("id"), "event-3");
+    turn_input["task"] = foreign_task->id;
+    EXPECT_FALSE(call("browse_stream", turn_input).ok);
+    const auto events = call("get_stream", input("agent-events", "bus"));
+    ASSERT_TRUE(events.ok);
+    EXPECT_FALSE(events.value.at("counts_available"));
+    EXPECT_TRUE(events.value.at("subscriptions").empty());
+    EXPECT_TRUE(call("get_stream", input("agent-tasks.agent-project", "bus")).ok);
+    EXPECT_FALSE(call("get_stream", input("agent-tasks.agent-private", "bus")).ok);
+    const auto legacy_detail = call("get_stream", input("agent-turn." + task->id, "bus"));
+    ASSERT_TRUE(legacy_detail.ok);
+    EXPECT_EQ(legacy_detail.value.at("topic"), "agent-turn." + task->id);
     EXPECT_FALSE(call("get_stream", input("agent-turn." + foreign_task->id, "bus")).ok);
-    EXPECT_FALSE(call("get_stream", input("agent-events", "bus")).ok);
     for (const std::string name : {"create_stream", "update_stream", "delete_stream",
                                   "publish_stream_message", "update_stream_message", "delete_stream_messages"}) {
         json args = input(own_topic, "bus");
@@ -203,6 +249,61 @@ TEST_F(Streams, SpaceIsolationSystemProtectionAndSharedAgentFiltering) {
     const auto consumer = liquid::runtime::block_on(raw_bus->receive(own_topic, 1, 100, std::chrono::milliseconds(0)));
     ASSERT_TRUE(consumer && *consumer);
     EXPECT_EQ((**consumer).events.size(), 3);
+}
+
+TEST_F(Streams, ThousandTopicListIsPagedAndUsesOneCallPerZetta) {
+    for (int index = 0; index < 1000; ++index) {
+        workspace->caller->topics.emplace(std::format("topic-{:04}", index),
+                                          lake::test::StreamCaller::Topic{});
+    }
+    ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic("agent-events")).value());
+    ASSERT_TRUE(
+        liquid::runtime::block_on(raw_bus->create_topic("agent-tasks.agent-project")).value());
+    ASSERT_TRUE(store->create_agent_task({.customer_id = customer, .agent = "agent-project",
+        .kind = "test", .scopes = {"list_streams"}}));
+    const auto workspace_calls = workspace->caller->calls.size();
+    const auto bus_lists = raw_bus->call_count("list_topics");
+    const auto bus_gets = raw_bus->call_count("get_topic");
+    const auto bus_browses = raw_bus->call_count("browse_topic");
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto first = call("list_streams", {{"customer_id", customer}});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    ASSERT_TRUE(first.ok) << first.error.message;
+    EXPECT_LT(elapsed, std::chrono::milliseconds(500));
+    EXPECT_EQ(first.value.at("total"), 1002);
+    EXPECT_EQ(first.value.at("next_cursor"), "50");
+    EXPECT_TRUE(first.value.at("previous_cursor").is_null());
+    std::size_t shown = 0;
+    for (const auto& group : first.value.at("groups")) {
+        shown += group.at("topics").size();
+    }
+    EXPECT_EQ(shown, 50);
+    EXPECT_EQ(first.value.dump().find("topic:"), std::string::npos);
+    ASSERT_EQ(workspace->caller->calls.size(), workspace_calls + 1);
+    EXPECT_EQ(workspace->caller->calls.back().first, "list_topics");
+    EXPECT_EQ(raw_bus->call_count("list_topics"), bus_lists + 1);
+    EXPECT_EQ(raw_bus->call_count("get_topic"), bus_gets);
+    EXPECT_EQ(raw_bus->call_count("browse_topic"), bus_browses);
+
+    const auto second = call("list_streams", {{"customer_id", customer}, {"cursor", "50"}});
+    ASSERT_TRUE(second.ok);
+    EXPECT_EQ(second.value.at("previous_cursor"), "0");
+    EXPECT_EQ(second.value.at("next_cursor"), "100");
+    EXPECT_EQ(raw_bus->call_count("list_topics"), bus_lists + 2);
+    const auto filtered = call("list_streams",
+                               {{"customer_id", customer}, {"prefix", "topic-0999"}});
+    ASSERT_TRUE(filtered.ok);
+    EXPECT_EQ(filtered.value.at("total"), 1);
+    EXPECT_EQ(filtered.value.at("groups")[0].at("topics")[0].at("topic"), "topic-0999");
+    ASSERT_EQ(workspace->caller->calls.size(), workspace_calls + 3);
+    for (std::size_t index = workspace_calls; index < workspace->caller->calls.size(); ++index) {
+        EXPECT_EQ(workspace->caller->calls[index].first, "list_topics");
+    }
+    EXPECT_EQ(raw_bus->call_count("list_topics"), bus_lists + 3);
+    EXPECT_EQ(raw_bus->call_count("get_topic"), bus_gets);
+    EXPECT_EQ(raw_bus->call_count("browse_topic"), bus_browses);
 }
 
 TEST_F(Streams, ReadsWritesDeletesAndCreatorOwnershipUseSpacePolicy) {
@@ -304,7 +405,7 @@ TEST_F(Streams, ExistingOwnershipCannotBeReassignedAfterAnExternalDrop) {
     EXPECT_FALSE(workspace->caller->topics.contains("orders"));
 }
 
-TEST_F(Streams, AgentTurnPagingCanContinueAcrossEmptyFilteredPages) {
+TEST_F(Streams, AgentEventsPagingCanContinueAcrossEmptyFilteredPages) {
     ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic("agent-events")).value());
     const auto task = store->create_agent_task({.customer_id = customer, .agent = "agent-project",
         .kind = "test", .scopes = {"list_streams"}});
@@ -314,7 +415,8 @@ TEST_F(Streams, AgentTurnPagingCanContinueAcrossEmptyFilteredPages) {
         ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-events",
             {{"task_id", id}, {"index", index}}, id)).value());
     }
-    auto query = input("agent-turn." + task->id, "bus");
+    auto query = input("agent-events", "bus");
+    query["task"] = task->id;
     query["direction"] = "forward";
     query["limit"] = 1;
     auto page = call("browse_stream", query);
@@ -326,9 +428,10 @@ TEST_F(Streams, AgentTurnPagingCanContinueAcrossEmptyFilteredPages) {
     ASSERT_TRUE(page.ok);
     ASSERT_EQ(page.value.at("events").size(), 1);
     EXPECT_EQ(page.value.at("events")[0].at("sequence"), 35);
-    const auto detail = call("get_stream", input("agent-turn." + task->id, "bus"));
+    const auto detail = call("get_stream", input("agent-events", "bus"));
     ASSERT_TRUE(detail.ok);
-    EXPECT_EQ(detail.value.at("held_events"), 1);
+    EXPECT_FALSE(detail.value.at("counts_available"));
+    EXPECT_EQ(detail.value.at("held_events"), 0);
     EXPECT_TRUE(detail.value.at("subscriptions").empty());
 }
 

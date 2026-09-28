@@ -65,12 +65,14 @@ with the rest of the module tree (`git submodule update --init --recursive`) bef
 consumer build. Its `LIQUID_BUILD_CLI` and `LIQUID_BUILD_TESTS` options stay off for lake.
 
 Zetta remains an external source dependency. `LAKE_ZETTA_SOURCE_DIR` must name the one authorized
-`zetta-bridge/modules/zetta` checkout. Lake builds a client-only `zetta-api` from that directory and
-links it to Lake's existing Boost.HTTP, Beast2, Capy, and Corosio targets, so the binary contains
-one networking stack. CI fetches only the pinned `oramasearch/zetta` commit (the one `zetta-bridge` pins), without
-its submodules, because only its client headers and transport are compiled; the image workflow
-supplies the same directory as the `zetta_source` named build context. Bump the ref in both
-workflows when the bridge bumps Zetta, and the liquid ref when liquid-bridge bumps liquid.
+`zetta-bridge/modules/zetta` checkout. Lake builds a client-only `zetta-api` from that directory,
+including the runtime event implementation used by transport completion waits, and links it to
+Lake's existing Boost.HTTP, Beast2, Capy, and Corosio targets, so the binary contains one networking
+stack. CI fetches only the pinned `oramasearch/zetta` commit (the one `zetta-bridge` pins), without
+its submodules, because only its client headers, transport and runtime implementation are compiled;
+the image workflow supplies the same directory as the `zetta_source` named build context. Bump the
+ref in both workflows when the bridge bumps Zetta, and the liquid ref when liquid-bridge bumps
+liquid.
 
 Lake's plain environment-value check compiles libliquid's existing private detector source into
 `lake-core`. The detector has no exported shared-library API, so this keeps static and shared builds

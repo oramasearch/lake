@@ -2,8 +2,8 @@
 
 `Capability::post_alias` gives read capabilities a JSON POST route as well as GET, preserving
 read policy and identical OpenAPI/MCP schemas. `StreamsPage` holds only capability values and
-resolved UI permissions; `web_ui_streams` is a pure renderer. See `docs/api/streams.md` and
-`docs/ui/streams.md` for the contracts.
+resolved UI permissions, including list cursors and Agent event filters; `web_ui_streams` is a
+pure renderer. See `docs/api/streams.md` and `docs/ui/streams.md` for the contracts.
 
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions. The HTTP adapter validates it and supplies it to `RepositoryHomeData`. It takes

@@ -94,6 +94,7 @@ TEST(WebUi, ApprovedIconsAreDecorativeInlineSvg) {
                                         "audit",
                                         "identity",
                                         "api",
+                                        "streams",
                                         "theme"}) {
         const std::string icon = lake::api::web_ui_icon(name);
         EXPECT_NE(icon.find("<svg"), std::string::npos) << name;
@@ -464,6 +465,13 @@ TEST(WebUi, NavigationMatchesVisitorAccountAndOperatorAccess) {
     EXPECT_NE(account.find("href=\"/tokens\""), std::string::npos);
     EXPECT_NE(account.find("href=\"/shared-with-me\""), std::string::npos);
     EXPECT_NE(account.find("href=\"/ship/apps\""), std::string::npos);
+    const auto streams = account.find("href=\"/train/streams\"");
+    ASSERT_NE(streams, std::string::npos);
+    const auto streams_end = account.find("</a>", streams);
+    ASSERT_NE(streams_end, std::string::npos);
+    const std::string streams_link = account.substr(streams, streams_end - streams);
+    EXPECT_NE(streams_link.find("<svg class=\"icon\""), std::string::npos);
+    EXPECT_NE(streams_link.find("<span>Streams</span>"), std::string::npos);
     EXPECT_NE(account.find("action=\"/logout\""), std::string::npos);
     EXPECT_NE(account.find("aria-current=\"page\""), std::string::npos);
     const std::string administrator = lake::api::web_ui_home({true, true});
@@ -1300,6 +1308,20 @@ TEST(WebUi, AccountPagesLiveInTheAccountMenu) {
     EXPECT_EQ(lake::api::web_ui_home().find("account-menu"), std::string::npos);
 }
 
+TEST(WebUi, AgentTurnsLinkToFilteredAgentEvents) {
+    lake::api::AskPage ask;
+    ask.customer_id = "customer-1";
+    ask.task_id = "task-ask";
+    const std::string ask_html = lake::api::web_ui_ask(ask, true);
+    EXPECT_NE(ask_html.find("topic=agent-events&amp;task=task-ask"), std::string::npos);
+
+    lake::api::FactoryPage factory;
+    factory.customer_id = "customer-1";
+    factory.task_id = "task-factory";
+    const std::string factory_html = lake::api::web_ui_factory(factory, true);
+    EXPECT_NE(factory_html.find("topic=agent-events&amp;task=task-factory"), std::string::npos);
+}
+
 TEST(WebUi, ShipAppsShowAFailedAgentTaskInsteadOfDroppingThePage) {
     // A failed task carries "answer": null. Rendering it must not throw (that dropped the
     // connection and surfaced as a 502), and the person sees why it failed.
@@ -1316,6 +1338,7 @@ TEST(WebUi, ShipAppsShowAFailedAgentTaskInsteadOfDroppingThePage) {
     std::string apps;
     ASSERT_NO_THROW(apps = lake::api::web_ui_apps(list, true));
     EXPECT_NE(apps.find("LAKE_APPS_WILDCARD is not configured"), std::string::npos) << apps;
+    EXPECT_NE(apps.find("topic=agent-events&amp;task=task-1"), std::string::npos) << apps;
 }
 
 TEST(WebUi, ShipAppsRenderControlsMaskedSecretsAndLiveEvents) {

@@ -213,6 +213,10 @@ std::string web_ui_icon(std::string_view name) {
         // A speech bubble with a face: an agent you can talk to.
         body =
             R"(<path d="M2 2h12v9H7l-3 3v-3H2V2Zm2 2v5h8V4H4Z"/><path d="M6 5.5h1v1.5H6zm3 0h1v1.5H9z"/>)";
+    } else if (name == "streams") {
+        // Three ordered messages moving through a stream.
+        body =
+            R"(<path d="M1 3h9v2H1V3Zm0 4h12v2H1V7Zm0 4h9v2H1v-2Z"/><path d="m10 1 4 3-4 3V1Zm3 8 3 3-3 3V9Z"/>)";
     } else if (name == "docs") {
         // An open book: the Docs section.
         body =
@@ -453,7 +457,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
         items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
-        items.push_back({"Train", "/train/streams", "Streams", "activity", "streams"});
+        items.push_back({"Train", "/train/streams", "Streams", "streams", "streams"});
         items.push_back({"Ship", "/ship/models", "Models", "api", "models"});
         items.push_back({"Ship", "/ship/indexes", "Search Indexes", "search", "indexes"});
         items.push_back({"Ship", "/ship/packages", "Packages", "repository", "packages"});
@@ -587,6 +591,17 @@ std::string session_control(const WebUiViewer& viewer) {
 
 std::string row_link(std::string_view href, std::string_view text) {
     return std::format("<a href=\"{}\">{}</a>", web_ui_escape(href), web_ui_escape(text));
+}
+
+std::string agent_events_link(std::string_view customer_id, std::string_view task_id) {
+    if (customer_id.empty() || task_id.empty()) {
+        return {};
+    }
+    return "<p class=\"sub\">" +
+           row_link("/train/stream?customer_id=" + url_component(customer_id) +
+                        "&zetta=bus&topic=agent-events&task=" + url_component(task_id),
+                    "View this turn in Streams") +
+           "</p>";
 }
 
 std::string url_component(std::string_view value) {
@@ -5201,6 +5216,8 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
     }
     content += "</section>";
     if (!page.agent_task.empty()) {
+        content += agent_events_link(
+            page.customer_id, page.agent_task.value("task_id", std::string()));
         // A failed task carries "answer": null; its "message" is then the reply shown.
         nlohmann::json answer = page.agent_task.value("answer", nlohmann::json::object());
         if (!answer.is_object()) {
@@ -8753,6 +8770,7 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
                    "content=\"2\"></article>";
     }
     content += "</section>";
+    content += agent_events_link(page.customer_id, page.task_id);
     std::string options;
     for (const nlohmann::json& agent : page.agents) {
         options += std::format("<option value=\"{}\"{}>{}</option>",
@@ -8820,6 +8838,7 @@ std::string web_ui_factory(const FactoryPage& page, WebUiViewer viewer) {
                    "content=\"2\"></article>";
     }
     content += "</section>";
+    content += agent_events_link(page.customer_id, page.task_id);
     const nlohmann::json& latest = page.latest;
     if (json_text(latest, "kind") == "proposal") {
         const nlohmann::json proposal = latest.value("proposal", nlohmann::json::object());

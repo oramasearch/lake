@@ -18,6 +18,11 @@ the Lake's `spec.zetta` cluster, reached as `LAKE_DATA_PLANE_URL` with `LAKE_DAT
 Lake creates both (exposed) when it starts: one `agent-tasks.<agent>` topic per agent in
 `LAKE_AGENT_ENDPOINTS`.
 
+There is no topic per turn. Streams presents one space-filtered Agent events row and one Agent
+tasks row per agent used by that space. Any Lake agent-bus producer which creates a temporary
+turn-specific topic owns its cleanup and must drop it after the task is finished and the topic
+holds no events; finished empty topics must not accumulate on the bus.
+
 ## A turn, end to end
 
 1. `agent_turn` (or a page: Ask Orama, the Agent Factory, Design → Opportunities, the pipeline's
@@ -84,7 +89,8 @@ the workspace: `list_topics` and `receive_events` through `workspace_query` (or
 `GET /workspaces/<customer>/zetta/v1/…`). Only exposed topics are reachable; a `receive_events`
 long poll waits at most 10 seconds. Topic/message writes use the dedicated [Streams](streams.md)
 capabilities, not `workspace_act`. Streams browses without consuming and adds space-scoped
-app/build topics and filtered agent-turn views of the bus; global agent topics remain private.
+app/build topics and space-filtered views of the shared agent topics; the raw global topics remain
+private.
 
 ## Configuration
 

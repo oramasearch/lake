@@ -15,10 +15,12 @@ The regression test grants the second principal space write access explicitly, t
 the ownership conflict is returned without an upstream call or recreated topic.
 
 Memory and Postgres stores implement the same create/read/delete contract. The telemetry store
-wrapper forwards it without changing semantics. A customer's agent task IDs are read from its
-durable task rows to construct scoped `agent-turn.<task-id>` views of the shared `agent-events`
-topic. App/build topic authorization likewise resolves durable rows and their customer IDs.
-The shared topic and subscriptions are never exposed as a space-owned resource.
+wrapper forwards it without changing semantics. `list_agent_task_stream_scopes(customer_id)`
+loads only task ID, agent and completion state in one store query so Streams can build the allowed
+sets without a query per topic or loading task bodies. Those sets authorize and filter one
+`agent-events` view and the `agent-tasks.<agent>` views used by that space. App/build topic
+authorization likewise resolves durable rows and their customer IDs. Shared topics and
+subscriptions are never exposed as space-owned resources.
 
 Space policy supports `write` grants for stream publication and editing. Existing read/admin/owner
 inheritance remains; deletion requires admin and topic drop/configuration additionally require

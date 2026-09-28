@@ -104,6 +104,7 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>>
 MemoryAgentBus::call(std::string capability, nlohmann::json input) {
     using nlohmann::json;
     std::lock_guard lock(mutex_);
+    ++call_counts_[capability];
     if (capability == "list_topics") {
         json topics = json::array();
         for (const auto& [name, events] : topics_) {
@@ -205,6 +206,12 @@ std::vector<BusEvent> MemoryAgentBus::events(const std::string& topic) const {
     std::lock_guard lock(mutex_);
     const auto found = topics_.find(topic);
     return found == topics_.end() ? std::vector<BusEvent>{} : found->second;
+}
+
+std::size_t MemoryAgentBus::call_count(std::string_view capability) const {
+    std::lock_guard lock(mutex_);
+    const auto found = call_counts_.find(std::string(capability));
+    return found == call_counts_.end() ? 0 : found->second;
 }
 
 AgentTaskBus::AgentTaskBus(std::shared_ptr<Store> store,

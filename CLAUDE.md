@@ -43,8 +43,9 @@ floor, migration `0005`, and the `/audit` page; `LAKE_INSTANCE_KEK` is required 
 Postgres store runs. Repository lifecycle adds migration `0006_repository_lifecycle`, repository
 rename, transfer, visibility and tombstone capabilities, and lifecycle state on the repository
 page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
-Platform support links a client-only `zetta-api` from the required `LAKE_ZETTA_SOURCE_DIR`, sharing
-Lake's existing Boost.HTTP/Beast2 stack. It mirrors operator-control deployment, environment, and
+Platform support links a client-only `zetta-api` from the required `LAKE_ZETTA_SOURCE_DIR`, including
+the native transport's runtime event implementation and sharing Lake's existing Boost.HTTP/Beast2
+stack. It mirrors operator-control deployment, environment, and
 domain rows into migration `0019_platform`, creates environment policy objects, exposes the eight
 policy-checked platform capabilities, Loki-compatible logs, and the server-rendered environment
 pages. Operator-control outages degrade platform health, preserve stale mirror reads, and refuse
@@ -213,8 +214,10 @@ prefix. The contracts are `docs/api/builds.md` and `docs/control-plane/builds.md
 Train → Streams adds nine space-scoped REST/MCP capabilities for topic/message CRUD and
 non-consuming live browse across workspace and bus Zettas. System topics are browse-only;
 topic settings/drop require recorded creator ownership. Migration `0037_streams` stores ownership
-per workspace service incarnation. See `docs/api/streams.md`, `docs/ui/streams.md` and
-`docs/control-plane/streams.md`; the operator schema/guard handoff remains a rollout prerequisite.
+per workspace service incarnation. Lists are cursor-paged from one `list_topics` call per Zetta;
+one filtered Agent events row and the space's Agent tasks rows replace per-turn virtual rows. See
+`docs/api/streams.md`, `docs/ui/streams.md` and `docs/control-plane/streams.md`; the operator
+schema/guard handoff remains a rollout prerequisite.
 
 Agent-session custody adds migration `0017_agent_sessions` and a maximum 15-minute Ed25519 key
 delegated to a durable agent by a canonical `delegation/1` attestation. The attestation is appended

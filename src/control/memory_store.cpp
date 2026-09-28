@@ -941,16 +941,16 @@ Result<void> InMemoryStore::delete_stream_owner(const StreamOwner& owner) {
     return {};
 }
 
-Result<std::vector<std::string>>
-InMemoryStore::list_agent_task_ids(const std::string& customer_id) {
+Result<std::vector<AgentTaskStreamScope>>
+InMemoryStore::list_agent_task_stream_scopes(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
-    std::vector<std::string> ids;
+    std::vector<AgentTaskStreamScope> tasks;
     for (const auto& task : agent_tasks_) {
         if (task.customer_id == customer_id) {
-            ids.push_back(task.id);
+            tasks.push_back({task.id, task.agent, task.finished_at});
         }
     }
-    return ids;
+    return tasks;
 }
 
 Result<std::vector<Build>> InMemoryStore::list_builds(const std::string& customer_id) {

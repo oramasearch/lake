@@ -229,7 +229,8 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = tru
 
 struct StreamsPage {
     std::vector<WorkspaceCustomer> customers;
-    std::string customer_id, zetta = "workspace", topic, prefix, error;
+    std::string customer_id, zetta = "workspace", topic, prefix, cursor, task, agent, error;
+    int limit = 50;
     nlohmann::json listing = nlohmann::json::object();
     nlohmann::json detail = nlohmann::json::object();
     nlohmann::json messages = nlohmann::json::object();

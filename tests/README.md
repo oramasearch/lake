@@ -2,10 +2,12 @@
 
 `test_streams.cpp` covers Streams space/system/creator permissions, non-consuming browse,
 retention, revisions, REST/MCP parity with one call per operation, UI control mappings and
-selected navigation. `stream_fixture.hpp` is a stateful fake workspace caller using the exact
-Zetta CRUD wire shape; bus tests use `MemoryAgentBus`. PostgreSQL tests reopen ownership across
-space/workspace boundaries. The schema conformance fixture exercises all nine successful
-outputs. See `docs/api/streams.md` and `docs/ui/streams.md`.
+selected navigation. Its 1,000-topic case checks the 50-row default page, cursor and prefix
+filtering, sub-500 ms response, one list call per Zetta and no per-topic detail calls.
+`stream_fixture.hpp` is a stateful fake workspace caller using the exact Zetta CRUD wire shape;
+bus tests use `MemoryAgentBus`. PostgreSQL tests reopen ownership across space/workspace
+boundaries. The schema conformance fixture exercises all nine successful outputs. See
+`docs/api/streams.md` and `docs/ui/streams.md`.
 
 `test_instance_origin.cpp` checks external-origin precedence, startup validation and repository
 command rendering. `InstanceOrigin.BrowserToTerminal` runs `instance_origin.mjs`: a native Chromium page

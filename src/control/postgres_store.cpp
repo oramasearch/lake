@@ -4315,19 +4315,6 @@ public:
         });
     }
 
-    Result<std::vector<std::string>> list_agent_task_ids(const std::string& customer_id) override {
-        return with_tx<std::vector<std::string>>(
-            [&](pqxx::work& tx) -> Result<std::vector<std::string>> {
-                const auto rows = tx.exec_params(
-                    "SELECT id FROM agent_tasks WHERE customer_id=$1::uuid ORDER BY id", customer_id);
-                std::vector<std::string> ids;
-                for (const auto& row : rows) {
-                    ids.push_back(row[0].as<std::string>());
-                }
-                return ids;
-            });
-    }
-
     Result<std::vector<Build>> list_builds(const std::string& customer_id) override {
         return with_tx<std::vector<Build>>([&](pqxx::work& tx) -> Result<std::vector<Build>> {
             const pqxx::result rows =
@@ -4933,6 +4920,27 @@ public:
         task.result = nlohmann::json::parse(row[17].as<std::string>(), nullptr, false);
         task.events_from = row[18].as<std::uint64_t>();
         return task;
+    }
+
+    Result<std::vector<AgentTaskStreamScope>>
+    list_agent_task_stream_scopes(const std::string& customer_id) override {
+        return with_tx<std::vector<AgentTaskStreamScope>>(
+            [&](pqxx::work& tx) -> Result<std::vector<AgentTaskStreamScope>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT t.id::text, t.agent, "
+                    "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') "
+                    "FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                    "WHERE t.customer_id = $1::uuid ORDER BY t.created_at, t.id",
+                    customer_id);
+                std::vector<AgentTaskStreamScope> tasks;
+                tasks.reserve(rows.size());
+                for (const pqxx::row& row : rows) {
+                    tasks.push_back({row[0].as<std::string>(), row[1].as<std::string>(),
+                                     row[2].as<std::string>()});
+                }
+                return tasks;
+            });
     }
 
     Result<AgentTask> create_agent_task(const AgentTask& in) override {
