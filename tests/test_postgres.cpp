@@ -888,6 +888,91 @@ TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract)
     EXPECT_FALSE(store->get_web_app(created->id));
 }
 
+TEST(PostgresBuilds, DesiredRowStatusTokensAndCancellationFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:build-" + suffix, "build-" + suffix + "@example.com", "Builds"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "build-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_builds",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    lake::control::NewBuild requested;
+    requested.customer_id = customer->id;
+    requested.repository = repository->id;
+    requested.revision = "main";
+    requested.context = "services/api";
+    requested.dockerfile = "services/api/Dockerfile";
+    requested.target = "lake-prod.prod.svc:80/" + customer->name + "/service:v1";
+    requested.build_args = {{"PYTHON_VERSION", "3.13"}};
+    const auto created = store->create_build(requested);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->desired, "queued");
+    EXPECT_EQ(created->phase, "Queued");
+    EXPECT_TRUE(created->token_hashes.empty());
+    EXPECT_EQ(created->build_args, requested.build_args);
+
+    const json hashes{{"source", lake::control::identity_crypto::sha256_hex("pg-build-source")},
+                      {"push", lake::control::identity_crypto::sha256_hex("pg-build-push")},
+                      {"events", lake::control::identity_crypto::sha256_hex("pg-build-events")}};
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE builds SET phase = 'Running', message = 'builder running', "
+                       "token_hashes_json = $2::jsonb, updated_at = now() WHERE id = $1::uuid",
+                       created->id,
+                       hashes.dump());
+        tx.commit();
+    }
+    const auto running = store->get_build(created->id);
+    ASSERT_TRUE(running) << running.error().message;
+    EXPECT_EQ(running->phase, "Running");
+    EXPECT_EQ(running->token_hashes, hashes);
+    const auto source = store->context_for("pg-build-source");
+    const auto push = store->context_for("pg-build-push");
+    const auto events = store->context_for("pg-build-events");
+    ASSERT_TRUE(source) << source.error().message;
+    ASSERT_TRUE(push) << push.error().message;
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_EQ(source->kind, "build_source");
+    EXPECT_EQ(push->kind, "build_push");
+    EXPECT_EQ(events->kind, "build_events");
+    EXPECT_EQ(source->workload_repository_id, repository->id);
+    EXPECT_EQ(source->workload_revision, "main");
+
+    const auto listed = store->list_builds(customer->id);
+    ASSERT_TRUE(listed) << listed.error().message;
+    ASSERT_EQ(listed->size(), 1U);
+    EXPECT_EQ(listed->front().id, created->id);
+    const auto cancelled = store->cancel_build(created->id);
+    ASSERT_TRUE(cancelled) << cancelled.error().message;
+    EXPECT_EQ(cancelled->desired, "cancelled");
+    EXPECT_EQ(store->cancel_build(created->id).error().code, "conflict");
+    EXPECT_FALSE(store->context_for("pg-build-source"));
+    EXPECT_FALSE(store->context_for("pg-build-push"));
+    EXPECT_FALSE(store->context_for("pg-build-events"));
+
+    for (int waited = 0; notified.size() < 2 && waited < 50; ++waited) {
+        listener.await_notification(0, 100000);
+    }
+    ASSERT_GE(notified.size(), 2U);
+    EXPECT_EQ(notified.front(), created->id);
+    EXPECT_EQ(notified.back(), created->id);
+}
+
 TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

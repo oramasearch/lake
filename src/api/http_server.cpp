@@ -9181,12 +9181,20 @@ struct ApiServer::Impl {
             page.logs = logs.value;
         }
         const ApiResult builds = unwrap(co_await workspace_call(
-            "list_builds", {{"customer_id", page.customer_id}, {"app", app_id}}, context));
+            "list_builds", {{"customer_id", page.customer_id}}, context));
         if (builds.ok) {
             page.builds_available = true;
-            page.builds =
-                builds.value.value("builds", builds.value.value("items", nlohmann::json::array()));
-            for (nlohmann::json& build : page.builds) {
+            const nlohmann::json source =
+                page.app.value("source", nlohmann::json::object());
+            const std::string repository = source.value("repository", std::string());
+            const std::string target_marker =
+                "/" + page.app.value("name", std::string()) + ":";
+            for (nlohmann::json build :
+                 builds.value.value("builds", nlohmann::json::array())) {
+                if (build.value("repository", std::string()) != repository ||
+                    !build.value("target", std::string()).contains(target_marker)) {
+                    continue;
+                }
                 const std::string build_id =
                     build.value("id", build.value("build_id", std::string()));
                 if (build_id.empty()) {
@@ -9204,6 +9212,7 @@ struct ApiServer::Impl {
                 if (build_logs.ok) {
                     build["logs"] = build_logs.value;
                 }
+                page.builds.push_back(std::move(build));
             }
         }
         if (options.workspaces) {

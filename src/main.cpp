@@ -78,6 +78,7 @@ int usage() {
     std::println(
         "  $LAKE_TSA_RENEWAL_SECONDS and $LAKE_TSA_RENEW_BEFORE_SECONDS set renewal policy");
     std::println("  LAKE_OPERATOR_ZETTA_URL and LAKE_OPERATOR_ZETTA_TOKEN enable platform sync");
+    std::println("  LAKE_INTERNAL_URL is lake's in-cluster Service URL for agents and builds");
     std::println("  LAKE_LOGS_URL and optional LAKE_LOGS_TOKEN enable environment logs");
     std::println("  LAKE_PLATFORM_SYNC_SECONDS sets the platform poll interval (default 15)");
     std::println(
@@ -114,6 +115,7 @@ int main(int argc, char** argv) {
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
+    opts.internal_url = env_or("LAKE_INTERNAL_URL", "");
     const std::string operator_zetta_url = env_or("LAKE_OPERATOR_ZETTA_URL", "");
     const std::string operator_zetta_token = env_or("LAKE_OPERATOR_ZETTA_TOKEN", "");
     const std::string logs_url = env_or("LAKE_LOGS_URL", "");
@@ -283,7 +285,7 @@ int main(int argc, char** argv) {
     if (const std::string model = env_or("LAKE_AGENT_MODEL", ""); !model.empty()) {
         workspace_config.frontier_model = model;
     }
-    workspace_config.internal_url = env_or("LAKE_INTERNAL_URL", "");
+    workspace_config.internal_url = opts.internal_url;
     workspace_config.agent_service_token = env_or("LAKE_AGENT_SERVICE_TOKEN", "");
     workspace_config.agent_bus_tokens =
         lake::control::read_agent_bus_tokens(env_or("LAKE_AGENT_BUS_DIR", ""));

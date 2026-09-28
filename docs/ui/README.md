@@ -109,3 +109,8 @@ cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (2
 The [sign-up walkthrough](sign-up-walkthrough.md) covers public identity export, personal customer
 ownership, zero initial metering, and creating a first private repository at both requested widths
 and themes. The `POST /repository/create` form adapter calls the existing registry capability.
+
+Repository pages expose `POST /repository/build`, which calls `build_image`. Ship → Packages
+shows authorized tenant images and the selected space's build rows, while `/ship/app` shows one
+App's build history and calls `build_app`. Both build tables long-poll the audited
+`receive_build_events` capability for live phase and retained log updates.

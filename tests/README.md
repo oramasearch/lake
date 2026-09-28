@@ -103,6 +103,11 @@ selection, purpose-scoped operator hashes and lifecycle event delivery with the 
 `PostgresWebApps.*` proves the production desired row, hash registration/rotation, customer
 locking, `lake_apps` notification, operator status and physical deletion. Both stores exercise
 cross-app/customer/revision refusal and reject other capabilities.
+`test_builds.cpp` proves asynchronous build intent, fake operator status, cancellation, generated
+App Dockerfiles, purpose-scoped hashes and retained events in memory. `PostgresBuilds.*` proves the
+same row shape, `lake_builds` notifications and credential revocation in Postgres.
+`RegistryProtocols.BuildPushCredentialIsLimitedToItsCustomerPrefix` pins the private OCI boundary;
+the Web UI renderer check pins repository/App actions and live build followers.
 Authorization assertions use well-formed input; malformed authenticated calls separately assert
 `invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
 `HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` creates a repository

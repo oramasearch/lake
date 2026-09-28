@@ -41,3 +41,7 @@ keeps REST and MCP customer policy, `x-lake-action`, audit, lifecycle bus events
 Secret-reference validation identical. Operator hash credentials are restricted in the registry to
 source repository/revision reads, customer workspace reads, or one app's event publication. See
 `docs/api/web-apps.md`.
+
+`build_capabilities.cpp` owns customer-scoped build creation, app image builds, status,
+cancellation and retained Zetta progress. Build source and event credentials are rechecked against
+the current row on every call. See `docs/api/builds.md`.

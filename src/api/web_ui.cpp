@@ -4949,8 +4949,9 @@ std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
                 build.value("image", build.value("target", std::string()));
             std::string build_log;
             const nlohmann::json logs = build.value("logs", nlohmann::json::object());
-            for (const nlohmann::json& entry :
-                 logs.value("entries", logs.value("events", nlohmann::json::array()))) {
+            for (const nlohmann::json& entry : logs.value(
+                     "lines",
+                     logs.value("entries", logs.value("events", nlohmann::json::array())))) {
                 build_log +=
                     web_ui_escape(entry.is_string() ? entry.get<std::string>() : entry.dump()) +
                     "\n";
@@ -4972,7 +4973,8 @@ std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
                                    "class=\"app-stream\" data-build-events=\"{}\"></div></details>"
                                    "</td></tr>",
                                    web_ui_escape(build_id),
-                                   web_ui_escape(json_text(build, "status")),
+                                   web_ui_escape(build.value(
+                                       "phase", build.value("status", std::string()))),
                                    web_ui_escape(json_text(build, "revision")),
                                    build_actions,
                                    build_log,
