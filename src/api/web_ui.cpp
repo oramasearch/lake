@@ -421,6 +421,9 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Design", "/design/projects", "Projects", "audit", "projects"});
         items.push_back(
             {"Design", "/design/opportunities", "Opportunities", "search", "opportunities"});
+        items.push_back({"Design", "/design/solutions", "Solutions", "audit", "solutions"});
+        items.push_back(
+            {"Design", "/design/methodologies", "Methodologies", "metering", "methodologies"});
         items.push_back({"Design", "/design/agent-library", "Agent Library", "agent", "agent library"});
         items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
@@ -1621,7 +1624,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 16> workspace_sections{{
+constexpr std::array<WorkspaceSection, 20> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1635,6 +1638,21 @@ constexpr std::array<WorkspaceSection, 16> workspace_sections{{
      "What your data could be used for. Auto-Suggest reads the data your workspace can reach and "
      "recommends what to build, from Orama's solutions catalogue; it never changes your data. "
      "Turn an Opportunity into a project, or dismiss it."},
+    {"solutions",
+     "Design",
+     "Solutions",
+     "/design/solutions",
+     "Orama's solutions catalogue: each module answers one business problem end to end, from the "
+     "methodologies it composes to the decision it drives and how its return is measured. Start "
+     "one and it becomes a project in your workspace."},
+    {"solution", "Design", "Solution", "/design/solutions", ""},
+    {"methodologies",
+     "Design",
+     "Methodologies",
+     "/design/methodologies",
+     "The modelling methods your workspace's engine knows: what each needs, what it makes, how it "
+     "is measured, and whether it runs here today. Solutions compose them."},
+    {"methodology", "Design", "Methodology", "/design/methodologies", ""},
     {"library",
      "Design",
      "Agent Library",
@@ -3397,7 +3415,241 @@ std::string discover_content(const WorkspacePage& page) {
     return out;
 }
 
+namespace {
+
+// A registry list as text: ["M-1", "M-2"] → "M-1, M-2".
+std::string joined(const nlohmann::json& list, std::string_view separator = ", ") {
+    std::string out;
+    for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
+        const std::string text = item.is_string() ? item.get<std::string>()
+                                 : item.is_object() ? json_text(item, "role").empty()
+                                                          ? json_text(item, "name")
+                                                          : json_text(item, "role")
+                                                    : item.dump();
+        if (text.empty()) continue;
+        if (!out.empty()) out += separator;
+        out += text;
+    }
+    return out;
+}
+
+// "Churn & Retention" → "churn-retention": a default project name.
+std::string slug_text(std::string_view text) {
+    std::string out;
+    for (const char c : text) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        } else if (!out.empty() && out.back() != '-') {
+            out += '-';
+        }
+    }
+    while (!out.empty() && out.back() == '-') out.pop_back();
+    return out;
+}
+
+std::string runs_badge_of(const nlohmann::json& entry) {
+    if (json_text(entry, "status") == "sketch") {
+        return "<span class=\"badge\">In design</span>";
+    }
+    if (entry.value("runnable", false)) {
+        return std::string("<span class=\"badge status-success\">") +
+               (entry.value("partial", false) ? "Runs, in part" : "Runs today") + "</span>";
+    }
+    return "<span class=\"badge status-warning\">Not yet</span>";
+}
+
+// Design → Methodologies (lake#291): the engine's methodology registry (zetta#1061).
+std::string methodologies_content(const WorkspacePage& page) {
+    const std::string query = customer_query(page.customer_id);
+    const nlohmann::json listed = page.data.value("list_methodologies", nlohmann::json::object())
+                                      .value("methodologies", nlohmann::json::array());
+    const nlohmann::json solutions = page.data.value("list_solutions", nlohmann::json::object())
+                                         .value("solutions", nlohmann::json::array());
+    if (listed.empty()) {
+        return "<div class=\"panel empty\">This workspace's engine does not list its methodologies "
+               "yet. It runs tabular prediction (M-1).</div>";
+    }
+    const auto used_by = [&](const std::string& id) {
+        std::string out;
+        for (const nlohmann::json& solution : solutions) {
+            for (const char* key : {"methodologies", "composition"}) {
+                const nlohmann::json list = solution.value(key, nlohmann::json::array());
+                bool found = false;
+                for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
+                    const std::string text =
+                        item.is_string() ? item.get<std::string>() : json_text(item, "id");
+                    if (text == id) found = true;
+                }
+                if (found) {
+                    if (!out.empty()) out += ", ";
+                    out += row_link("/design/solution?" + query + "&id=" +
+                                        url_component(json_text(solution, "id")),
+                                    json_text(solution, "id") + " " + json_text(solution, "name"));
+                    break;
+                }
+            }
+        }
+        return out;
+    };
+    if (page.section == "methodology") {
+        for (const nlohmann::json& entry : listed) {
+            if (json_text(entry, "id") != page.subject) continue;
+            std::string out = std::format(
+                "<p class=\"sub\">{} · {}</p><section class=\"panel\"><table><tbody>"
+                "<tr><th>What it needs</th><td>{}</td></tr><tr><th>What it makes</th><td>{}</td></tr>"
+                "<tr><th>How it is measured</th><td>{}</td></tr><tr><th>Model kinds</th><td>{}</td></tr>"
+                "<tr><th>Solutions that use it</th><td>{}</td></tr>{}</tbody></table></section>",
+                web_ui_escape(json_text(entry, "family")),
+                runs_badge_of(entry),
+                web_ui_escape(joined(entry.value("inputs", nlohmann::json::array()))),
+                web_ui_escape(joined(entry.value("outputs", nlohmann::json::array()))),
+                web_ui_escape(joined(entry.value("metrics", nlohmann::json::array()))),
+                web_ui_escape(joined(entry.value("model_kinds", nlohmann::json::array()))),
+                used_by(json_text(entry, "id")).empty() ? std::string("—")
+                                                        : used_by(json_text(entry, "id")),
+                entry.value("runnable", false) || json_text(entry, "issue").empty()
+                    ? std::string()
+                    : "<tr><th>Tracked in</th><td>" + web_ui_escape(json_text(entry, "issue")) +
+                          "</td></tr>");
+            if (entry.value("runnable", false)) {
+                out += "<p><a class=\"button button-primary\" href=\"/design/projects?" + query +
+                       "\">Build a pipeline with it</a> <span class=\"sub\">Open a project and "
+                       "choose " + web_ui_escape(json_text(entry, "id")) +
+                       " under Build a Pipeline.</span></p>";
+            }
+            return out;
+        }
+        return "<div class=\"panel empty\">No methodology " + web_ui_escape(page.subject) +
+               ".</div>";
+    }
+    std::string out, family;
+    for (const nlohmann::json& entry : listed) {
+        if (json_text(entry, "family") != family) {
+            if (!family.empty()) out += "</tbody></table></section>";
+            family = json_text(entry, "family");
+            out += "<section class=\"panel\"><h2>" + web_ui_escape(family) +
+                   "</h2><table><thead><tr><th>Methodology</th><th>What it makes</th><th>Status</th>"
+                   "</tr></thead><tbody>";
+        }
+        out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                           row_link("/design/methodology?" + query + "&id=" +
+                                        url_component(json_text(entry, "id")),
+                                    json_text(entry, "id") + " " + json_text(entry, "name")),
+                           web_ui_escape(joined(entry.value("outputs", nlohmann::json::array()))),
+                           runs_badge_of(entry));
+    }
+    if (!family.empty()) out += "</tbody></table></section>";
+    return out;
+}
+
+// Design → Solutions (lake#290): the engine's solution registry (zetta#1102). Product copy only.
+std::string solutions_content(const WorkspacePage& page) {
+    const std::string query = customer_query(page.customer_id);
+    const bool listed_any =
+        page.data.value("list_solutions", nlohmann::json::object()).contains("solutions") ||
+        page.data.value("get_solution", nlohmann::json::object()).contains("id") ||
+        page.data.value("get_solution", nlohmann::json::object()).contains("solution");
+    if (!listed_any) {
+        return "<div class=\"panel empty\">This workspace's engine does not list solutions yet. "
+               "The solutions catalogue arrives with the next engine update; meanwhile see "
+               "<a href=\"/design/methodologies?" + query + "\">Methodologies</a>.</div>";
+    }
+    const auto methodology_links = [&](const nlohmann::json& list) {
+        std::string out;
+        for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
+            const std::string id = item.is_string() ? item.get<std::string>() : json_text(item, "id");
+            if (id.empty()) continue;
+            if (!out.empty()) out += ", ";
+            out += row_link("/design/methodology?" + query + "&id=" + url_component(id), id);
+        }
+        return out.empty() ? std::string("—") : out;
+    };
+    if (page.section == "solution") {
+        const nlohmann::json entry = page.data.value("get_solution", nlohmann::json::object());
+        const nlohmann::json solution =
+            entry.contains("solution") && entry["solution"].is_object() ? entry["solution"] : entry;
+        if (json_text(solution, "id").empty()) {
+            return "<div class=\"panel empty\">No solution " + web_ui_escape(page.subject) + ".</div>";
+        }
+        std::string levels;
+        for (const nlohmann::json& level : solution.value("levels", nlohmann::json::array())) {
+            levels += "<li><strong>" + web_ui_escape(json_text(level, "name").empty()
+                                                         ? json_text(level, "id")
+                                                         : json_text(level, "name")) +
+                      "</strong> " + web_ui_escape(json_text(level, "description")) + "</li>";
+        }
+        std::string out = std::format(
+            "<p class=\"sub\">{} · {}</p><section class=\"panel\"><p>{}</p><table><tbody>"
+            "<tr><th>The problem</th><td>{}</td></tr><tr><th>Methodologies</th><td>{}</td></tr>"
+            "<tr><th>How it acts</th><td>{}</td></tr><tr><th>Decision speed</th><td>{}</td></tr>"
+            "<tr><th>What data it needs</th><td>{}</td></tr>{}</tbody></table>{}</section>",
+            web_ui_escape(json_text(solution, "id")),
+            runs_badge_of(solution),
+            web_ui_escape(json_text(solution, "promise")),
+            web_ui_escape(json_text(solution, "problem").empty() ? json_text(solution, "use_case")
+                                                                 : json_text(solution, "problem")),
+            methodology_links(solution.value("methodologies",
+                                             solution.value("composition", nlohmann::json::array()))),
+            web_ui_escape(joined(solution.value("action_patterns", nlohmann::json::array()))),
+            web_ui_escape(json_text(solution, "latency")),
+            web_ui_escape(joined(solution.value("inputs", solution.value("data_roles", nlohmann::json::array())))),
+            solution.value("runnable", false) || json_text(solution, "issue").empty()
+                ? std::string()
+                : "<tr><th>Tracked in</th><td>" + web_ui_escape(json_text(solution, "issue")) +
+                      "</td></tr>",
+            levels.empty() ? std::string() : "<h2>Levels</h2><ul>" + levels + "</ul>");
+        const bool startable = solution.value("runnable", false) || json_text(solution, "status") == "preview";
+        if (startable) {
+            std::string options;
+            for (const nlohmann::json& level : solution.value("levels", nlohmann::json::array())) {
+                options += "<option value=\"" + web_ui_escape(json_text(level, "id")) + "\">" +
+                           web_ui_escape(json_text(level, "name").empty() ? json_text(level, "id")
+                                                                         : json_text(level, "name")) +
+                           "</option>";
+            }
+            out += std::format(
+                "<section class=\"panel\"><h2>Start This Solution</h2><form class=\"stack\" "
+                "method=\"post\" action=\"/design/solutions/start\">{}{}<label>Project name<input "
+                "name=\"name\" required value=\"{}\"></label>{}<button class=\"button "
+                "button-primary\" type=\"submit\">Start</button></form></section>",
+                hidden("customer_id", page.customer_id),
+                hidden("solution", json_text(solution, "id")),
+                web_ui_escape(slug_text(json_text(solution, "name"))),
+                options.empty() ? std::string()
+                                : "<label>Level<select name=\"level\">" + options + "</select></label>");
+        }
+        return out;
+    }
+    const nlohmann::json listed = page.data.value("list_solutions", nlohmann::json::object())
+                                      .value("solutions", nlohmann::json::array());
+    std::string modules, sketches;
+    for (const nlohmann::json& entry : listed) {
+        const std::string row = std::format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            row_link("/design/solution?" + query + "&id=" + url_component(json_text(entry, "id")),
+                     json_text(entry, "id") + " " + json_text(entry, "name")),
+            web_ui_escape(json_text(entry, "promise")),
+            methodology_links(entry.value("methodologies", entry.value("composition", nlohmann::json::array()))),
+            runs_badge_of(entry));
+        (json_text(entry, "status") == "sketch" ? sketches : modules) += row;
+    }
+    std::string out;
+    const std::string head = "<table><thead><tr><th>Solution</th><th>What it does</th>"
+                             "<th>Methodologies</th><th>Status</th></tr></thead><tbody>";
+    if (!modules.empty()) out += "<section class=\"panel\"><h2>Modules</h2>" + head + modules + "</tbody></table></section>";
+    if (!sketches.empty()) out += "<section class=\"panel\"><h2>In Design</h2>" + head + sketches + "</tbody></table></section>";
+    return out.empty() ? "<div class=\"panel empty\">No solutions listed.</div>" : out;
+}
+
+} // namespace
+
 std::string workspace_content(const WorkspacePage& page) {
+    if (page.section == "methodologies" || page.section == "methodology") {
+        return methodologies_content(page);
+    }
+    if (page.section == "solutions" || page.section == "solution") {
+        return solutions_content(page);
+    }
     if (page.section == "pipeline") {
         return pipeline_content(page);
     }

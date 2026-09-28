@@ -4708,6 +4708,7 @@ struct ApiServer::Impl {
             "/design/opportunities/scan",
             "/design/opportunities/create",
             "/design/opportunities/dismiss",
+            "/design/solutions/start",
             "/design/pipeline/apply",
             "/design/project/new-pipeline",
             "/design/project/n8n",
@@ -7517,6 +7518,8 @@ struct ApiServer::Impl {
         page.customer_id = std::move(selection.customer_id);
         if (section == "project") {
             page.subject = query_value(route, "name");
+        } else if (section == "solution" || section == "methodology") {
+            page.subject = query_value(route, "id");
         } else if (section == "run" || section == "index" || section == "agent") {
             page.subject = query_value(route, "id");
         } else if (section == "dataset") {
@@ -7682,7 +7685,14 @@ struct ApiServer::Impl {
         }
         if (page.unavailable.empty() && page.state.value("ready", false)) {
             std::vector<std::pair<std::string, nlohmann::json>> reads;
-            if (section == "projects") {
+            if (section == "methodologies" || section == "methodology") {
+                reads = {{"list_methodologies", nlohmann::json::object()},
+                         {"list_solutions", nlohmann::json::object()}};
+            } else if (section == "solutions") {
+                reads = {{"list_solutions", nlohmann::json::object()}};
+            } else if (section == "solution") {
+                reads = {{"get_solution", {{"id", page.subject}}}};
+            } else if (section == "projects") {
                 reads = {{"list_projects", nlohmann::json::object()}};
             } else if (section == "project") {
                 reads = {{"get_project", {{"name", page.subject}}},
@@ -7830,7 +7840,10 @@ struct ApiServer::Impl {
                         status != "pending") {
                         reads.push_back({"get_run_report", {{"run_id", page.subject}}});
                     }
-                } else if (page.error.empty() && capability != "list_methodologies") {
+                } else if (page.error.empty() && capability != "list_methodologies" &&
+                           capability != "list_solutions" &&
+                           !(capability == "get_solution" &&
+                             result.error.code == "unknown_capability")) {
                     page.error = result.error.message;
                 }
             }
@@ -8511,6 +8524,31 @@ struct ApiServer::Impl {
                     context));
                 if (result.ok) {
                     back = "/design/projects?" + query;
+                }
+            }
+        } else if (action == "solution_start") {
+            // A catalogue solution becomes a project with its composed pipeline (lake#290,
+            // zetta#1102): the project first, then the solution built into it.
+            const std::string solution = form_field(body, "solution");
+            const std::string name = form_field(body, "name");
+            back = "/design/solution?" + query + "&id=" + oauth_url_encode(solution);
+            result = unwrap(co_await workspace_call(
+                "workspace_act",
+                {{"customer_id", customer_id},
+                 {"capability", "create_project"},
+                 {"input", {{"name", name}, {"description", "Solution " + solution}}}},
+                context));
+            if (result.ok) {
+                nlohmann::json input{{"project", name}, {"solution", solution}};
+                if (const std::string level = form_field(body, "level"); !level.empty()) {
+                    input["level"] = level;
+                }
+                result = unwrap(co_await workspace_call(
+                    "workspace_act",
+                    {{"customer_id", customer_id}, {"capability", "create_solution"}, {"input", std::move(input)}},
+                    context));
+                if (result.ok) {
+                    back = "/design/project?" + query + "&name=" + oauth_url_encode(name);
                 }
             }
         } else if (action == "discover_dismiss") {
@@ -12644,7 +12682,11 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 17>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 21>{{{"/design/projects", "projects"},
+                                                              {"/design/solutions", "solutions"},
+                                                              {"/design/solution", "solution"},
+                                                              {"/design/methodologies", "methodologies"},
+                                                              {"/design/methodology", "methodology"},
                                                               {"/design/discover", "discover"},
                                                               {"/design/opportunities", "discover"},
                                                               {"/design/agent-library", "library"},
@@ -12668,8 +12710,9 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 43>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 44>{
              {{"/workspace/start", "start"},
+              {"/design/solutions/start", "solution_start"},
               {"/train/agents/create", "agent_create"},
               {"/train/agent/run", "agent_run"},
               {"/train/agent/grant", "agent_grant"},

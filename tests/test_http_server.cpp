@@ -1070,6 +1070,90 @@ TEST_P(HttpResponseIsolation, GrantingAPipelineWritesTheWholeListBackToZetta) {
     EXPECT_EQ(std::get<2>(workspace_caller_->calls.back())["pipelines"], nlohmann::json::array());
 }
 
+// lake#290/#291: Design → Methodologies and Design → Solutions list the engine's registries, and a
+// solution starts as a project with its composed pipeline.
+TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolution) {
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory == nullptr) {
+        GTEST_SKIP() << "the operator's status is written directly only on the memory store";
+    }
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customers_response =
+        connection->request("GET", "/v1/list_customers", "", cookie);
+    const std::string customer_id =
+        nlohmann::json::parse(customers_response.substr(customers_response.find("\r\n\r\n") + 4))
+            .at("value").at("items").at(0).at("id");
+    const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
+    const auto service = memory->get_service((*requested)->service_id);
+    ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
+    std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
+
+    // An engine without the solution registry: the page says so, and Methodologies still lists.
+    workspace_caller_->answers["list_methodologies"] = {
+        {"methodologies",
+         nlohmann::json::array(
+             {{{"id", "M-3"}, {"name", "Segmentation / clustering"}, {"family", "Identity & structure"},
+               {"inputs", nlohmann::json::array({{{"role", "entity"}}})},
+               {"outputs", nlohmann::json::array({"segment assignments"})},
+               {"metrics", nlohmann::json::array({"silhouette"})}, {"runnable", true}},
+              {{"id", "M-14"}, {"name", "Speech & audio analytics"}, {"family", "Language"},
+               {"runnable", false}, {"issue", "zetta#1053"}}})}};
+    const std::string methods = connection->request(
+        "GET", "/design/methodologies?customer_id=" + customer_id, "", cookie);
+    ASSERT_TRUE(methods.starts_with("HTTP/1.1 200")) << methods.substr(0, 300);
+    EXPECT_NE(methods.find("M-3 Segmentation / clustering"), std::string::npos);
+    EXPECT_NE(methods.find("Runs today"), std::string::npos);
+    EXPECT_NE(methods.find("Not yet"), std::string::npos);
+    EXPECT_NE(methods.find("href=\"/design/methodologies\""), std::string::npos) << "in the nav";
+    EXPECT_NE(methods.find("href=\"/design/solutions\""), std::string::npos) << "in the nav";
+    const std::string one = connection->request(
+        "GET", "/design/methodology?customer_id=" + customer_id + "&id=M-3", "", cookie);
+    EXPECT_NE(one.find("silhouette"), std::string::npos);
+    EXPECT_NE(one.find("segment assignments"), std::string::npos);
+    const std::string waiting = connection->request(
+        "GET", "/design/solutions?customer_id=" + customer_id, "", cookie);
+    EXPECT_NE(waiting.find("does not list solutions yet"), std::string::npos);
+
+    // With the registry: modules and sketches, a module page, and Start.
+    workspace_caller_->answers["list_solutions"] = {
+        {"solutions",
+         nlohmann::json::array(
+             {{{"id", "S-1"}, {"name", "Churn & Retention"}, {"promise", "Which customers will leave"},
+               {"methodologies", nlohmann::json::array({"M-1", "M-2", "M-3"})}, {"runnable", true}},
+              {{"id", "B-1"}, {"name", "Dynamic Pricing & Discount Governance"},
+               {"status", "sketch"}, {"runnable", false}}})}};
+    workspace_caller_->answers["get_solution"] = {
+        {"id", "S-1"}, {"name", "Churn & Retention"}, {"promise", "Which customers will leave"},
+        {"methodologies", nlohmann::json::array({"M-1", "M-2", "M-3"})},
+        {"action_patterns", nlohmann::json::array({"tasks in CRM", "driver report"})},
+        {"latency", "L1"}, {"runnable", true},
+        {"levels", nlohmann::json::array({{{"id", "CL-1"}, {"name", "Propensity core"}}})}};
+    const std::string catalogue = connection->request(
+        "GET", "/design/solutions?customer_id=" + customer_id, "", cookie);
+    EXPECT_NE(catalogue.find("S-1 Churn &amp; Retention"), std::string::npos);
+    EXPECT_NE(catalogue.find("In Design"), std::string::npos);
+    const std::string module = connection->request(
+        "GET", "/design/solution?customer_id=" + customer_id + "&id=S-1", "", cookie);
+    EXPECT_NE(module.find("tasks in CRM"), std::string::npos);
+    EXPECT_NE(module.find("action=\"/design/solutions/start\""), std::string::npos);
+    workspace_caller_->answers["create_project"] = {{"name", "churn"}};
+    workspace_caller_->answers["create_solution"] = {{"project", "churn"}};
+    const std::string started = connection->request(
+        "POST", "/design/solutions/start",
+        "customer_id=" + customer_id + "&solution=S-1&name=churn&level=CL-1", cookie);
+    ASSERT_TRUE(started.starts_with("HTTP/1.1 302")) << started.substr(0, 300);
+    EXPECT_NE(response_header(started, "location").find("/design/project?"), std::string::npos);
+    const auto& [name, read, input] = workspace_caller_->calls.back();
+    EXPECT_EQ(name, "create_solution");
+    EXPECT_EQ(input["solution"], "S-1");
+    EXPECT_EQ(input["level"], "CL-1");
+    EXPECT_EQ(input["project"], "churn");
+}
+
 TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnConfirmation) {
     auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
     if (memory == nullptr) {

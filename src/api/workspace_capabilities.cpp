@@ -28,7 +28,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 32> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 34> workspace_reads = {"server_info",
                                                               "score",
                                                               "explain",
                                                               "list_projects",
@@ -65,8 +65,14 @@ constexpr std::array<std::string_view, 32> workspace_reads = {"server_info",
                                                               // featurize for it (zetta#1062).
                                                               "list_methodologies",
                                                               "analyze_dataset",
-                                                              "plan_features"};
-constexpr std::array<std::string_view, 34> workspace_actions = {"create_project",
+                                                              "plan_features",
+                                                              // The solutions catalogue
+                                                              // (zetta#1102).
+                                                              "list_solutions",
+                                                              "get_solution"};
+constexpr std::array<std::string_view, 36> workspace_actions = {"create_project",
+                                                                "create_solution",
+                                                                "run_solution",
                                                                 "capture_intent",
                                                                 "compile_intent",
                                                                 "approve_plan",

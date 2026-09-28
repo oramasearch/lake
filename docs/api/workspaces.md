@@ -132,6 +132,7 @@ works unchanged when pointed here:
   `drop_topic` and `publish_event` (actions) are allowed; only topics created `exposed` are
   reachable, and a `receive_events` long poll waits at most 10 seconds through lake
   ([agent-bus.md](agent-bus.md)).
+- **The solutions catalogue (lake#290, zetta#1102).** `list_solutions` and `get_solution` (reads) and `create_solution` and `run_solution` (actions) are allowed. **Design → Solutions** lists the modules and the *in design* sketches, and each module's page offers **Start this solution**. That creates a project, then builds the solution into it (`create_solution {project, solution, level}`). **Design → Methodologies** (lake#291) lists `list_methodologies` by family, with each methodology's inputs, outputs, metrics and the solutions that use it. On an engine without the solution registry, the Solutions page says so.
 - **What the engine runs (lake#289).**
   - `list_methodologies` (zetta#1061) lists the 21 portfolio methodologies. Each carries `runnable`, and those that do not run yet name their tracking issue.
   - `analyze_dataset` and `plan_features` (zetta#1062) describe a table and plan features for a methodology.
