@@ -898,6 +898,44 @@ legend {
 .muted {
   color: var(--lake-text-secondary);
 }
+.app-phase,
+.app-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--lake-space-3);
+}
+.app-stream {
+  max-height: 24rem;
+  overflow: auto;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  padding: var(--lake-space-3);
+  background: var(--lake-layer);
+  font-family: var(--lake-font-mono);
+  font-size: var(--lake-text-12);
+  white-space: pre-wrap;
+}
+.app-stream:empty::before {
+  color: var(--lake-text-secondary);
+  content: 'Waiting for app events…';
+}
+.app-phase-track {
+  height: var(--lake-space-2);
+  overflow: hidden;
+  margin: var(--lake-space-3) 0;
+  border-radius: 9999px;
+  background: var(--lake-layer);
+}
+.app-phase-fill {
+  width: 50%;
+  height: 100%;
+  display: block;
+  background: var(--lake-action);
+}
+.app-phase-fill.ready {
+  width: 100%;
+  background: var(--lake-success-indicator);
+}
 .notice,
 .toast,
 .error {

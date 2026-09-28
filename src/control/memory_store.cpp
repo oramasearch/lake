@@ -853,6 +853,9 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
         found->image = *patch.image;
     }
     found->replicas = replicas;
+    if (patch.auth) {
+        found->auth = *patch.auth;
+    }
     if (patch.bindings) {
         found->bindings = *patch.bindings;
     }

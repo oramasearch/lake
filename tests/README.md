@@ -105,6 +105,10 @@ locking, `lake_apps` notification, operator status and physical deletion. Both s
 cross-app/customer/revision refusal and reject other capabilities.
 Authorization assertions use well-formed input; malformed authenticated calls separately assert
 `invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
+`HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` creates a repository
+app through the form routes, renders the list and operating page, publishes a deploy event, and
+uses restart through its POST adapter. Memory variants add fake operator Ready status; renderer
+coverage verifies secret masking, rollback inputs, and live app/build polling markup.
 
 Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
 time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts

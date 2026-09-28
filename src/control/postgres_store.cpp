@@ -4209,6 +4209,7 @@ public:
                 patch.source_entrypoint.value_or(current->source_entrypoint);
             current->image = patch.image.value_or(current->image);
             current->replicas = replicas;
+            current->auth = patch.auth.value_or(current->auth);
             current->bindings = patch.bindings.value_or(current->bindings);
             current->env = patch.env.value_or(current->env);
             current->secret_env_refs = patch.secret_env_refs.value_or(current->secret_env_refs);
@@ -4217,7 +4218,8 @@ public:
                 "UPDATE apps SET mode = $2, source_repository = $3, source_revision = $4, "
                 "source_path = $5, image = $6, replicas = $7, bindings_json = $8::jsonb, "
                 "env_json = $9::jsonb, secret_env_refs = $10::jsonb, desired = $11, "
-                "source_entrypoint = $12, generation = generation + 1, updated_at = now() "
+                "source_entrypoint = $12, auth = $13, generation = generation + 1, "
+                "updated_at = now() "
                 "WHERE id = $1::uuid",
                 id,
                 current->mode,
@@ -4230,7 +4232,8 @@ public:
                 current->env.dump(),
                 current->secret_env_refs.dump(),
                 current->desired,
-                current->source_entrypoint);
+                current->source_entrypoint,
+                current->auth);
             if (patch.rotate_tokens) {
                 tx.exec_params(
                     "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);

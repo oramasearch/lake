@@ -73,6 +73,7 @@ struct WebAppPatch {
     std::optional<std::string> source_entrypoint;
     std::optional<std::string> image;
     std::optional<int> replicas;
+    std::optional<std::string> auth;
     std::optional<nlohmann::json> bindings;
     std::optional<nlohmann::json> env;
     std::optional<nlohmann::json> secret_env_refs;
