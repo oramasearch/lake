@@ -367,6 +367,9 @@ struct AgentTask {
     // The agent-events sequence at or before the task's first event (0: unknown), lake#275.
     std::uint64_t events_from = 0;
 };
+struct AgentTaskStreamScope {
+    std::string id, agent, finished_at;
+};
 // What lake's bus loop acts on: tasks nobody claimed since they were last published, and tasks
 // past their deadline (pending or running), which it fails.
 struct StaleAgentTasks {
@@ -905,7 +908,8 @@ public:
     virtual Result<void> create_stream_owner(const StreamOwner&) = 0;
     virtual Result<std::string> stream_owner(const StreamOwner&) = 0;
     virtual Result<void> delete_stream_owner(const StreamOwner&) = 0;
-    virtual Result<std::vector<std::string>> list_agent_task_ids(const std::string& customer_id) = 0;
+    virtual Result<std::vector<AgentTaskStreamScope>>
+    list_agent_task_stream_scopes(const std::string& customer_id) = 0;
     virtual Result<Build> get_build(const std::string& id) = 0;
     virtual Result<Build> create_build(const NewBuild&) = 0;
     virtual Result<Build> cancel_build(const std::string& id) = 0;

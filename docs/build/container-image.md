@@ -8,7 +8,8 @@ matching FUSE, OpenSSL, C++ and libpq runtime libraries; it runs as numeric UID/
 `ENTRYPOINT lake`, `CMD --listen 0.0.0.0:4900`, and port 4900 exposed.
 The build also requires a named `zetta_source` context pointing at the authorized
 `zetta-bridge/modules/zetta` checkout. The Dockerfile copies that context to `/opt/zetta` and passes
-the same path as `LAKE_ZETTA_SOURCE_DIR`; Lake compiles only the client transport sources.
+the same path as `LAKE_ZETTA_SOURCE_DIR`; Lake compiles the client transport and its runtime event
+implementation.
 
 ## Publish a deployment image
 

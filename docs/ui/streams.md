@@ -2,9 +2,13 @@
 
 Streams follows Runs in Train. `/train/streams` lists the selected space's exposed topics grouped
 by workspace Zetta and Lake bus Zetta, with subscriber count, held events, next sequence and a
-name-prefix filter. `/train/stream?customer_id=<space>&zetta=<workspace|bus>&topic=<name>` opens
-one topic. Both routes belong to Streams in `navigation_routes` and select its link with
-`aria-current="page"`. No charts or extra stylesheet are used.
+name-prefix filter. The list defaults to 50 rows and provides Previous and Next cursor links; page
+size and name filtering are sent to `list_streams`. Names are shown without Zetta's `topic:`
+resource prefix. Shared Agent events and Agent tasks rows show unavailable counts rather than a
+misleading global total. `/train/stream?customer_id=<space>&zetta=<workspace|bus>&topic=<name>`
+opens one topic. Both routes belong to Streams in `navigation_routes`, select its link with
+`aria-current="page"`, and use the Streams icon from the shared icon set. No charts or extra
+stylesheet are used.
 
 The topic page shows normalized settings, subscription positions and lag, and held messages
 newest first. Each message shows sequence, sender, publication time (Unix milliseconds), byte
@@ -14,14 +18,15 @@ payload. Older/Newest links and Jump use sequence-based browsing, never a consum
 Live uses `browse_stream` through Lake with forward sequence pages, a 100-event bound and a
 10-second long poll. Uncheck Live to abort/pause; enabling it resumes from the last cursor.
 The page retains up to 200 live message cards. Refresh shows later edits to old messages.
-The browser never contacts Zetta or holds its service token. Agent-turn views filter the shared
-bus on the server; other customers' payloads and subscription identities do not reach the page.
+The browser never contacts Zetta or holds its service token. Agent events provide Turn and Agent
+filters and keep them across jump, older/newest and Live reads. Other spaces' payloads and shared
+subscription identities do not reach the page.
 
 ## Controls and capabilities
 
 | Control | Registered capability |
 |---|---|
-| Space selection, prefix filter, grouped list | `list_streams` |
+| Space selection, prefix filter, page size and cursor links | `list_streams` |
 | Topic link, settings and subscriptions | `get_stream` |
 | Messages, paging, jump, Live/pause, copy | `browse_stream` (copy/pause are local presentation) |
 | New Topic with JSON settings | `create_stream` |
@@ -57,6 +62,10 @@ package build-log panel link to `build-events.<build-id>`. Run detail links to t
 workspace Streams list: training does not currently advertise a canonical per-run pub/sub topic,
 so Lake does not invent one. A deploy's app consumer and this page independently see all retained
 events; viewing never advances that consumer.
+
+ApplicationAgent, Ask Orama and Agent Factory turn views link to
+`/train/stream?zetta=bus&topic=agent-events&task=<task-id>`. The event page remains one shared
+space-scoped row; a link selects a turn without adding a permanent list row.
 
 Tests cover HTML escaping, hidden service credentials, both selected-nav routes, all control
 mappings, the live long-poll contract and continued app-consumer delivery. API details and all

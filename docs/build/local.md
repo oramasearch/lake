@@ -12,9 +12,9 @@
 - Node, because the test suite (`LAKE_BUILD_TESTS`, on by default) runs the UI token-gate and
   contrast checks in `tools/ui/`.
 - A checkout of `zetta-bridge`. `LAKE_ZETTA_SOURCE_DIR` is required and must name its
-  `modules/zetta` directory; lake compiles only the client-transport sources from it and links
-  them to its own Boost.HTTP, Beast2, Capy and Corosio targets, so the binary carries one
-  networking stack. `CLAUDE.md` names the one authorized checkout.
+  `modules/zetta` directory; lake compiles the client transport and its runtime event
+  implementation from it and links them to its own Boost.HTTP, Beast2, Capy and Corosio targets,
+  so the binary carries one networking stack. `CLAUDE.md` names the one authorized checkout.
 - Submodules. Clone with `--recurse-submodules` or run `git submodule update --init --recursive`
   before configuring: libliquid (library-only, pinned to liquid `main`), Boost.HTTP, Beast2 and
   libpqxx are vendored under `modules/`. Boost and GoogleTest arrive through FetchContent on the

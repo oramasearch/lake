@@ -33,17 +33,22 @@ in `payload`, not as an unspecified schema object.
 `customer_id` is the space ID. `zetta` is `workspace` or `bus`; it is not a URL or service ID.
 `list_streams` declares candidate authorization and explicitly checks the space's read permission
 inside its handler before either Zetta is called. The other operations use registry authorization.
-`topic` accepts a concrete name with an optional `topic:` prefix. Wildcards are refused. A
+`topic` accepts a concrete name with an optional `topic:` prefix. List and read responses return
+the unqualified name used by `browse_topic`; displayed names therefore never include the resource
+prefix returned by some Zetta mutations. Wildcards are refused. A
 workspace request always resolves that customer's ready workspace. Bus requests resolve app,
 build or agent-task rows and check their customer before calling Zetta; guessing another space's
-identifier returns `not_found`. The global `agent-events` and agent work queues cannot be read.
+identifier returns `not_found`.
 
 The list contains only exposed topics. Bus topics are `app-events.<app-id>`,
-`build-events.<build-id>` and virtual `agent-turn.<task-id>` views. A turn view filters the retained
-global agent bus by `payload.task_id` on the server, hides shared subscriptions and counts only
-its own held messages. Sequence numbers remain those of the source topic, so gaps are normal.
-The allocator high-water mark is not a count of a turn's messages. Up to 32 source pages are
-scanned per browse call; continue with `next_page_sequence`, even when the filtered page is empty.
+`build-events.<build-id>`, one space-filtered `agent-events` view, and one
+`agent-tasks.<agent>` view for each agent used by the space. The list never invents an
+`agent-turn.<task-id>` row. Agent events accept optional `task` and `agent` filters; both are
+validated against durable tasks in the selected space before the shared bus is read. Agent task
+queues filter their payload's `customer_id`. Shared subscriptions and aggregate held counts are
+hidden. Sequence numbers remain those of the source topic, so gaps are normal. The allocator
+high-water mark is not a count of a filtered view's messages. Up to 32 source pages are scanned
+per browse call; continue with `next_page_sequence`, even when the filtered page is empty.
 
 All bus topics and reserved workspace `agent-*`, `app-events.*`, `build-events.*` and inbox names
 are system, browse-only. Every write refuses them, including message writes. Other existing
@@ -55,15 +60,24 @@ Raw topic writes are no longer in `workspace_act`'s allowlist.
 
 ## Topic operations
 
-`list_streams` takes an optional unqualified name `prefix`. Each Zetta has its own group and error
-string, so an unavailable workspace does not hide accessible bus topics.
+`list_streams` takes an optional unqualified name `prefix`, `limit` from 1 through 200, and an
+opaque `cursor`. The default limit is 50. Prefix filtering and paging happen in Lake, not in the
+browser or MCP client. Each request makes one `list_topics` call to the workspace Zetta and one to
+the bus Zetta, with no per-topic `get_topic` or `browse_topic` calls. Lake filters bus rows against
+the space's durable app, build and agent-task rows in one pass. Each Zetta has its own group and
+error string, so an unavailable workspace does not hide accessible bus topics. `next_cursor` and
+`previous_cursor` are nullable; pass either back unchanged with the same prefix and limit.
 
 ```json
-{"customer_id":"space-id","prefix":"orders"}
+{"customer_id":"space-id","prefix":"orders","limit":50}
 ```
 ```json
-{"groups":[{"zetta":"workspace","topics":[{"topic":"topic:orders","subscribers":1,"held_events":2,"next_sequence":3,"system":false}],"error":""},{"zetta":"bus","topics":[],"error":""}]}
+{"groups":[{"zetta":"workspace","topics":[{"topic":"orders","display_name":"orders","subscribers":1,"held_events":2,"next_sequence":3,"system":false,"counts_available":true}],"error":""},{"zetta":"bus","topics":[],"error":""}],"next_cursor":null,"previous_cursor":null,"total":1}
 ```
+
+The Agent events and Agent tasks rows set `counts_available:false`; their subscriber and held
+fields are zero placeholders and the UI renders them as unavailable. This avoids scanning a
+shared topic to manufacture a space-local count.
 
 `create_stream` creates only on the workspace. `settings` is optional; Lake forces `exposed:true`
 and supplies `max_events:1000` unless explicitly configured. All other defaults belong to Zetta.
@@ -85,7 +99,7 @@ settings are shown in reduced form; actual responses include Zetta's normalized 
 {"customer_id":"space-id","zetta":"workspace","topic":"orders"}
 ```
 ```json
-{"topic":"topic:orders","zetta":"workspace","system":false,"can_manage":true,"settings":{"retention_ms":86400000,"max_events":1000},"subscriber_count":1,"subscriptions":[{"id":1,"subscriber":"agent:consumer","positions":[1],"next_sequence":1,"lag":2,"in_flight":0,"redeliveries":0,"connected":true,"group":""}],"held_events":2,"earliest_sequence":1,"next_sequence":3}
+{"topic":"orders","zetta":"workspace","system":false,"can_manage":true,"counts_available":true,"settings":{"retention_ms":86400000,"max_events":1000},"subscriber_count":1,"subscriptions":[{"id":1,"subscriber":"agent:consumer","positions":[1],"next_sequence":1,"lag":2,"in_flight":0,"redeliveries":0,"connected":true,"group":""}],"held_events":2,"earliest_sequence":1,"next_sequence":3}
 ```
 
 `update_stream` accepts a settings merge patch. `dry_run:true` counts the currently held messages
@@ -126,6 +140,13 @@ first (`direction:"backward"`), `limit:100`, `wait_ms:0`. `from_sequence` is inc
 1–1000 and `wait_ms` is 0–30000. Live clients use forward reads from their last allocator mark.
 Both REST and MCP support the bounded long poll. `next_sequence` is the allocator high-water mark,
 not a page cursor: use nullable `next_page_sequence` until it is null, then `next_sequence` to tail.
+
+For a space's shared agent event view, add `task`, `agent`, or both. This is also the stable target
+for links from an agent turn:
+
+```json
+{"customer_id":"space-id","zetta":"bus","topic":"agent-events","task":"task-id","agent":"agent-project","direction":"forward","limit":100}
+```
 
 ```json
 {"customer_id":"space-id","zetta":"workspace","topic":"orders","from_sequence":2,"direction":"forward","limit":100,"wait_ms":10000}
@@ -179,33 +200,45 @@ after that check may still affect the actual removal; the response reports the a
 
 `Streams.*` covers the two Zettas, server-side space isolation, system refusal, ownership and
 permissions, non-consuming browse, stale revisions, paging and retention, REST/MCP schema parity,
-one call per capability on each transport, navigation selection and UI capability mappings.
+one call per capability on each transport, navigation selection and UI capability mappings. Its
+1,000-topic fixture requires a result below 500 ms, a default 50-row page, one `list_topics` call
+per Zetta and zero per-topic `get_topic` or `browse_topic` calls.
 It also checks that generated agent documentation includes the Streams group and confirmation
 guidance, and that a refused list makes no upstream workspace call.
 `StreamsPostgres.*` checks durable ownership across reopen and workspace/space boundaries.
 `SchemaConformance.*` independently validates successful stream outputs through the real server.
-The Zetta CRUD runtime is required in deployed Zettas (Zetta PR #1143); Lake builds only its
-existing transport client and tests use fake workspace/bus callers, not that runtime checkout.
+The Zetta CRUD runtime is required in deployed Zettas (Zetta PR #1143). Lake builds its transport
+client and the runtime event implementation used by transport completion waits; Streams tests use
+fake workspace/bus callers rather than an embedded Zetta server.
 
 ### Native proof (2026-09-28)
 
 Both builds use the authorized Zetta transport checkout through `LAKE_ZETTA_SOURCE_DIR` and the
 Liquid bridge checkout through `LAKE_LIQUID_SOURCE_DIR`. The shared configuration sets
-`BUILD_SHARED_LIBS=ON`; `otool -L` confirms its Liquid/Boost/PQXX dynamic libraries. Configure and
-supply the PostgreSQL environment as described in [local.md](../build/local.md). This proof used
-fresh local bases `lake_issue301_static_main_20260928` and `lake_issue301_shared_main_20260928`, with
-process-owned fixtures under the worktree's `.cache/tmp`. Builds used at most six jobs; suites
-ran one at a time. Both active build trees were configured from scratch after rebasing onto
-`origin/main` at `75219cb` and updating submodules; no compiled objects from before that rebase
-were reused.
+`BUILD_SHARED_LIBS=ON`; `otool -L` confirms its Liquid, Boost, Capy/Corosio and PQXX dynamic
+libraries. Lake compiles Zetta's runtime implementation alongside the native transport because
+current transport completion waits use its asynchronous event. Both files come directly from the
+read-only checkout; no Zetta source is copied into this repository. The PostgreSQL environment is
+configured as described in [local.md](../build/local.md). This proof used fresh local bases
+`lake_issue310_static_20260928_2227` and `lake_issue310_shared_20260928_2227`. Builds used at most
+six jobs and suites ran one at a time. The final fetch/rebase found `origin/main` unchanged at
+`2937726`; recursive submodules were refreshed.
 
 ```text
 cmake --build build -j 6
 cmake --build build-shared -j 6
 ctest --test-dir build --output-on-failure -j 1
-100% tests passed, 0 tests failed out of 409
+100% tests passed, 0 tests failed out of 412
+Total Test time (real) = 226.41 sec
 ctest --test-dir build-shared --output-on-failure -j 1
-100% tests passed, 0 tests failed out of 409
+99% tests passed, 1 tests failed out of 412
+SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract: mutex lock failed: Invalid argument
+sysctl -n vm.loadavg
+{ 4.65 13.57 16.22 }
+ctest --test-dir build-shared --output-on-failure -j 1 \
+  -R '^SchemaConformance\.EveryToolAndRequiredOutputUsesHttpContract$'
+100% tests passed, 0 tests failed out of 1
+Total Test time (real) = 1.05 sec
 tools/ui/test-token-gates.sh
 sync-design-system: ok — 8 files match 38959d9966aa
 build-tokens: ok — src/api/web_ui_tokens.inc matches the vendored tokens
@@ -214,12 +247,10 @@ token-gates: ok — generated output and snapshot changes were rejected
 
 Each suite retains 14 existing skips (browser-to-terminal, optional Hugging Face client and
 Postgres workspace-UI variants) and one disabled search benchmark. No Streams test is skipped.
-The focused `Streams.*` regression run passed all eight cases, including the explicit-grant
-ownership case and every-control capability mapping. Schema, navigation and MCP checks also
-pass in both full suites. The controls' JavaScript parses successfully, and the native binary's
-help command runs.
+The focused `Streams.*` regression run passed all nine cases. The 1,000-topic fixture completed in
+12 ms while proving one list call per Zetta, zero per-topic calls and 50-row pagination. The shared
+schema test's mutex abort did not reproduce in isolation at a low host load, so it is recorded as
+host contention under the work-order rule. Navigation and MCP checks pass, the UI token gates pass,
+and the native binary's help command runs.
 
-Linux proof deferred: the supplied Linux-lane helper is absent. Interactive browser QA is
-deferred because the in-app browser connection rejects missing sandbox metadata. A deployed
-app-progress exercise requires the Zetta CRUD image rollout; fake bus tests verify independent
-consumer delivery while browsing. The operator schema handoff is a separate rollout change.
+Linux proof deferred: the supplied Linux-lane helper is absent. No container proof was run.

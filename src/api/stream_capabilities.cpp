@@ -1,7 +1,10 @@
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <map>
+#include <optional>
 #include <set>
 
 #include "lake/control/agent_bus.hpp"
@@ -37,6 +40,9 @@ json choice(json values, bool nullable = false) {
 }
 json optional_number(std::int64_t minimum = 0) {
     return {{"type", {"integer", "null"}}, {"minimum", minimum}};
+}
+json optional_text() {
+    return {{"type", {"string", "null"}}};
 }
 
 json settings_schema(bool mutable_only = false) {
@@ -86,9 +92,10 @@ json topic_schema() {
                    {"subscriber_count", integer()}, {"subscriptions", array(subscription)},
                    {"held_events", integer()}, {"earliest_sequence", integer()},
                    {"next_sequence", integer()}, {"system", flag()}, {"can_manage", flag()},
-                   {"zetta", choice({"workspace", "bus"})}},
+                   {"counts_available", flag()}, {"zetta", choice({"workspace", "bus"})}},
                   {"topic", "settings", "subscriber_count", "subscriptions", "held_events",
-                   "earliest_sequence", "next_sequence", "system", "can_manage", "zetta"});
+                   "earliest_sequence", "next_sequence", "system", "can_manage",
+                   "counts_available", "zetta"});
 }
 
 json browse_schema() {
@@ -188,6 +195,29 @@ ApiResult completed(std::expected<ApiResult, liquid::error> result) {
     return result ? std::move(*result) : ApiResult::failure("store_error", result.error().message);
 }
 
+struct AgentScope {
+    std::map<std::string, control::AgentTaskStreamScope> tasks;
+    std::set<std::string> agents;
+};
+
+std::expected<AgentScope, ApiResult>
+agent_scope(ApiContext& context, const std::string& customer) {
+    const auto listed = context.store->list_agent_task_stream_scopes(customer);
+    if (!listed) {
+        return std::unexpected(ApiResult::failure(listed.error().code, listed.error().message));
+    }
+    AgentScope scope;
+    for (const control::AgentTaskStreamScope& task : *listed) {
+        scope.agents.insert(task.agent);
+        scope.tasks.emplace(task.id, task);
+    }
+    return scope;
+}
+
+bool shared_agent_topic(const std::string& name) {
+    return name == "agent-events" || name.starts_with("agent-tasks.");
+}
+
 // Only identifiers resolved from this customer's durable rows may address the shared bus.
 std::expected<std::string, ApiResult> bus_topic(const json& input, ApiContext& context) {
     const std::string name = topic_name(input.at("topic"));
@@ -202,35 +232,65 @@ std::expected<std::string, ApiResult> bus_topic(const json& input, ApiContext& c
         if (build && build->customer_id == customer) {
             return name;
         }
+    } else if (name == "agent-events") {
+        const auto scope = agent_scope(context, customer);
+        if (!scope) {
+            return std::unexpected(scope.error());
+        }
+        return name;
+    } else if (name.starts_with("agent-tasks.")) {
+        const auto scope = agent_scope(context, customer);
+        if (!scope) {
+            return std::unexpected(scope.error());
+        }
+        if (scope->agents.contains(name.substr(12))) {
+            return name;
+        }
     } else if (name.starts_with("agent-turn.")) {
         const auto task = context.store->get_agent_task(name.substr(11));
         if (task && task->customer_id == customer) {
-            return std::string("agent-events");
+            return name;
         }
     }
     return std::unexpected(ApiResult::failure("not_found", "no such stream in this space"));
 }
 
 Task browse(ApiContext& context, const json& input) {
-    json args = {{"topic", topic_name(input.at("topic"))},
+    const std::string requested = topic_name(input.at("topic"));
+    json args = {{"topic", requested},
                  {"direction", input.value("direction", "backward")},
                  {"limit", input.value("limit", 100)}, {"wait_ms", input.value("wait_ms", 0)}};
     if (input.contains("from_sequence")) {
         args["from_sequence"] = input.at("from_sequence");
     }
-    bool turn = false;
+    bool shared = false;
+    std::optional<AgentScope> scope;
     if (input.at("zetta") == "bus") {
         const auto resolved = bus_topic(input, context);
         if (!resolved) {
             co_return resolved.error();
         }
-        turn = *resolved == "agent-events";
+        shared = shared_agent_topic(*resolved);
         args["topic"] = *resolved;
+        if (shared) {
+            auto selected = agent_scope(context, input.at("customer_id"));
+            if (!selected) {
+                co_return selected.error();
+            }
+            scope = std::move(*selected);
+            const std::string task = input.value("task", "");
+            const std::string agent = input.value("agent", "");
+            if ((!task.empty() && !scope->tasks.contains(task)) ||
+                (!agent.empty() && !scope->agents.contains(agent)) ||
+                (!task.empty() && !agent.empty() && scope->tasks.at(task).agent != agent)) {
+                co_return ApiResult::failure("not_found", "no such agent turn in this space");
+            }
+        }
     }
     json events = json::array();
     json value;
     // Filter before returning anything. The scan remains bounded even on a busy shared bus.
-    for (int pages = 0; pages < (turn ? 32 : 1); ++pages) {
+    for (int pages = 0; pages < (shared ? 32 : 1); ++pages) {
         auto result = completed(co_await proxy(context, input, "browse_topic", args));
         if (!result.ok) {
             co_return result;
@@ -246,13 +306,26 @@ Task browse(ApiContext& context, const json& input) {
                 value["next_page_sequence"] = last + 1;
             }
         }
-        if (!turn) {
+        if (!shared) {
+            value["topic"] = requested;
             co_return ApiResult::success(std::move(value));
         }
         for (const auto& event : batch) {
             const auto payload = json::parse(event.at("payload").get<std::string>(), nullptr, false);
-            if (payload.is_object() && payload.value("task_id", "") ==
-                                           topic_name(input.at("topic")).substr(11)) {
+            if (!payload.is_object()) {
+                continue;
+            }
+            const std::string task_id = payload.value("task_id", "");
+            const auto task = scope->tasks.find(task_id);
+            const bool selected_task = task != scope->tasks.end() &&
+                                       (input.value("task", "").empty() ||
+                                        input.value("task", "") == task_id) &&
+                                       (input.value("agent", "").empty() ||
+                                        input.value("agent", "") == task->second.agent);
+            const bool selected_queue = requested.starts_with("agent-tasks.") &&
+                                        payload.value("customer_id", "") ==
+                                            input.at("customer_id").get<std::string>();
+            if ((requested == "agent-events" && selected_task) || selected_queue) {
                 events.push_back(event);
             }
         }
@@ -267,7 +340,7 @@ Task browse(ApiContext& context, const json& input) {
         args["wait_ms"] = 0;
     }
     value["events"] = std::move(events);
-    value["topic"] = "topic:" + topic_name(input.at("topic"));
+    value["topic"] = requested;
     // The allocator mark is needed to continue a bounded forward scan, including empty pages.
     co_return ApiResult::success(std::move(value));
 }
@@ -289,7 +362,8 @@ owner_key(ApiContext& context, const json& input) {
 }
 
 Task get(ApiContext& context, const json& input) {
-    std::string name = topic_name(input.at("topic"));
+    const std::string requested = topic_name(input.at("topic"));
+    std::string name = requested;
     const bool bus = input.at("zetta") == "bus";
     if (bus) {
         auto resolved = bus_topic(input, context);
@@ -302,9 +376,11 @@ Task get(ApiContext& context, const json& input) {
     if (!result.ok) {
         co_return result;
     }
+    result.value["topic"] = requested;
     result.value["zetta"] = input.at("zetta");
     result.value["system"] = bus || reserved(name);
     result.value["can_manage"] = false;
+    result.value["counts_available"] = true;
     if (!bus && !reserved(name)) {
         auto key = co_await owner_key(context, input);
         if (key && *key) {
@@ -315,38 +391,28 @@ Task get(ApiContext& context, const json& input) {
             result.value["can_manage"] = *creator == context.acting_identity;
         }
     }
-    if (bus && name == "agent-events") {
-        // No other turn's consumer identity, lag or held count leaves the service.
-        result.value["topic"] = "topic:" + topic_name(input.at("topic"));
+    if (bus && shared_agent_topic(name)) {
+        // Shared subscription identities and aggregate counts never leave the service.
         result.value["subscriptions"] = json::array();
         result.value["subscriber_count"] = 0;
         result.value["held_events"] = 0;
-        json args = input;
-        args["direction"] = "forward";
-        args["limit"] = 1000;
         result.value["earliest_sequence"] = result.value.at("next_sequence");
-        const auto end = result.value.at("next_sequence").get<std::uint64_t>();
-        while (true) {
-            const auto page = completed(co_await browse(context, args));
-            if (!page.ok) {
-                co_return page;
-            }
-            for (const auto& event : page.value.at("events")) {
-                if (event.at("sequence") >= end) {
-                    continue;
-                }
-                result.value["held_events"] = result.value.at("held_events").get<std::uint64_t>() + 1;
-                if (result.value.at("earliest_sequence") > event.at("sequence")) {
-                    result.value["earliest_sequence"] = event.at("sequence");
-                }
-            }
-            if (page.value.at("next_page_sequence").is_null() || page.value.at("next_page_sequence") >= end) {
-                break;
-            }
-            args["from_sequence"] = page.value.at("next_page_sequence");
-        }
+        result.value["counts_available"] = false;
     }
     co_return result;
+}
+
+std::string stream_name(const std::string& topic) {
+    if (topic == "agent-events") {
+        return "Agent events";
+    }
+    if (topic.starts_with("agent-tasks.")) {
+        return "Agent tasks · " + topic.substr(12);
+    }
+    if (topic.starts_with("agent-turn.")) {
+        return "Agent turn · " + topic.substr(11);
+    }
+    return topic;
 }
 
 Task list(ApiContext& context, const json& input) {
@@ -365,7 +431,30 @@ Task list(ApiContext& context, const json& input) {
             co_return ApiResult::failure("unauthorized", "principal cannot read this space's streams");
         }
     }
-    json groups = json::array();
+    const std::string customer = input.at("customer_id");
+    const std::string prefix = input.value("prefix", "");
+    const auto apps = context.store->list_web_apps(customer);
+    if (!apps) {
+        co_return ApiResult::failure(apps.error().code, apps.error().message);
+    }
+    const auto builds = context.store->list_builds(customer);
+    if (!builds) {
+        co_return ApiResult::failure(builds.error().code, builds.error().message);
+    }
+    const auto agents = agent_scope(context, customer);
+    if (!agents) {
+        co_return agents.error();
+    }
+    std::set<std::string> app_topics;
+    std::set<std::string> build_topics;
+    for (const control::WebApp& app : *apps) {
+        app_topics.insert("app-events." + app.id);
+    }
+    for (const control::Build& build : *builds) {
+        build_topics.insert("build-events." + build.id);
+    }
+
+    json unpaged = json::array();
     for (const std::string zetta : {"workspace", "bus"}) {
         json target = input;
         target["zetta"] = zetta;
@@ -377,40 +466,78 @@ Task list(ApiContext& context, const json& input) {
         } else {
             for (auto row : result.value.at("topics")) {
                 const auto name = topic_name(row.at("topic"));
-                target["topic"] = name;
-                if (zetta == "bus" && !bus_topic(target, context)) {
+                if (!name.starts_with(prefix)) {
                     continue;
                 }
-                if (!name.starts_with(input.value("prefix", ""))) {
+                bool allowed = zetta == "workspace";
+                bool counts_available = true;
+                if (zetta == "bus") {
+                    allowed = app_topics.contains(name) || build_topics.contains(name) ||
+                              name == "agent-events";
+                    if (name.starts_with("agent-tasks.")) {
+                        allowed = agents->agents.contains(name.substr(12));
+                    } else if (name.starts_with("agent-turn.")) {
+                        const auto task = agents->tasks.find(name.substr(11));
+                        allowed = task != agents->tasks.end();
+                        if (allowed && prefix.empty() && !task->second.finished_at.empty() &&
+                            row.value("held_events", std::uint64_t{0}) == 0) {
+                            allowed = false;
+                        }
+                    }
+                    counts_available = !shared_agent_topic(name);
+                }
+                if (!allowed) {
                     continue;
                 }
+                row["topic"] = name;
+                row["display_name"] = stream_name(name);
                 row["system"] = zetta == "bus" || reserved(name);
+                row["counts_available"] = counts_available;
+                row["subscribers"] = counts_available ? row.value("subscribers", 0) : 0;
+                row["held_events"] = counts_available ? row.value("held_events", 0) : 0;
                 rows.push_back(std::move(row));
             }
-            if (zetta == "bus") {
-                const auto tasks = context.store->list_agent_task_ids(input.at("customer_id"));
-                if (!tasks) {
-                    co_return ApiResult::failure(tasks.error().code, tasks.error().message);
-                }
-                for (const auto& id : *tasks) {
-                    const auto name = "agent-turn." + id;
-                    if (!name.starts_with(input.value("prefix", ""))) {
-                        continue;
-                    }
-                    target["topic"] = name;
-                    const auto info = completed(co_await get(context, target));
-                    if (info.ok) {
-                        rows.push_back({{"topic", "topic:" + name}, {"subscribers", 0},
-                                        {"held_events", info.value.at("held_events")},
-                                        {"next_sequence", info.value.at("next_sequence")},
-                                        {"system", true}});
-                    }
-                }
-            }
+            auto& topic_rows = rows.get_ref<json::array_t&>();
+            std::ranges::sort(topic_rows, {}, [](const json& row) {
+                return row.at("topic").get<std::string>();
+            });
         }
-        groups.push_back({{"zetta", zetta}, {"topics", std::move(rows)}, {"error", error}});
+        unpaged.push_back({{"zetta", zetta}, {"topics", std::move(rows)}, {"error", error}});
     }
-    co_return ApiResult::success({{"groups", std::move(groups)}});
+
+    std::size_t total = 0;
+    for (const json& group : unpaged) {
+        total += group.at("topics").size();
+    }
+    std::size_t offset = 0;
+    if (input.contains("cursor")) {
+        const std::string cursor = input.at("cursor");
+        const auto parsed = std::from_chars(cursor.data(), cursor.data() + cursor.size(), offset);
+        if (cursor.empty() || parsed.ec != std::errc() || parsed.ptr != cursor.data() + cursor.size() ||
+            offset > total) {
+            co_return ApiResult::failure("invalid_input", "stream cursor is invalid", "/cursor");
+        }
+    }
+    const std::size_t limit = input.value("limit", std::size_t{50});
+    const std::size_t end = std::min(offset + limit, total);
+    std::size_t position = 0;
+    json groups = json::array();
+    for (json& group : unpaged) {
+        json rows = json::array();
+        for (json& row : group.at("topics")) {
+            if (position >= offset && position < end) {
+                rows.push_back(std::move(row));
+            }
+            ++position;
+        }
+        groups.push_back({{"zetta", group.at("zetta")}, {"topics", std::move(rows)},
+                          {"error", group.at("error")}});
+    }
+    json next = end < total ? json(std::to_string(end)) : json(nullptr);
+    json previous = offset > 0 ? json(std::to_string(offset > limit ? offset - limit : 0))
+                               : json(nullptr);
+    co_return ApiResult::success({{"groups", std::move(groups)}, {"next_cursor", std::move(next)},
+                                  {"previous_cursor", std::move(previous)}, {"total", total}});
 }
 
 Task count_changes(ApiContext& context, const json& input, const json& settings, bool retention) {
@@ -603,7 +730,8 @@ void add(Registry& registry, std::string name, json properties, json required, j
             context.audit_details = {{"customer_id", input.at("customer_id")},
                 {"zetta", input.value("zetta", "both")}, {"topic", input.value("topic", "")}};
             for (const auto* field : {"sequence", "expected_revision", "redeliver", "sequences",
-                                      "before_sequence", "confirm_count", "dry_run", "settings"}) {
+                                      "before_sequence", "confirm_count", "dry_run", "settings",
+                                      "prefix", "limit", "cursor", "task", "agent"}) {
                 if (input.contains(field)) {
                     context.audit_details[field] = input.at(field);
                 }
@@ -623,17 +751,24 @@ void add(Registry& registry, std::string name, json properties, json required, j
 } // namespace
 
 void register_stream_capabilities(Registry& registry) {
-    const auto summary = object({{"topic", text()}, {"subscribers", integer()},
-        {"held_events", integer()}, {"next_sequence", integer(1)}, {"system", flag()}},
-        {"topic", "subscribers", "held_events", "next_sequence", "system"});
-    add(registry, "list_streams", {{"prefix", text()}}, json::array(),
+    const auto summary = object({{"topic", text()}, {"display_name", text()},
+        {"subscribers", integer()}, {"held_events", integer()}, {"next_sequence", integer(1)},
+        {"system", flag()}, {"counts_available", flag()}},
+        {"topic", "display_name", "subscribers", "held_events", "next_sequence", "system",
+         "counts_available"});
+    add(registry, "list_streams", {{"prefix", text()},
+        {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 200}}},
+        {"cursor", text()}}, json::array(),
         object({{"groups", array(object({{"zetta", choice({"workspace", "bus"})},
-            {"topics", array(summary)}, {"error", text()}}, {"zetta", "topics", "error"}))}}, {"groups"}), "read");
+            {"topics", array(summary)}, {"error", text()}}, {"zetta", "topics", "error"}))},
+            {"next_cursor", optional_text()}, {"previous_cursor", optional_text()},
+            {"total", integer()}}, {"groups", "next_cursor", "previous_cursor", "total"}), "read");
     add(registry, "get_stream", json::object(), json::array(), topic_schema(), "read");
     add(registry, "browse_stream", {{"from_sequence", integer(1)},
         {"direction", choice({"forward", "backward"})},
         {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1000}}},
-        {"wait_ms", {{"type", "integer"}, {"minimum", 0}, {"maximum", 30000}}}},
+        {"wait_ms", {{"type", "integer"}, {"minimum", 0}, {"maximum", 30000}}},
+        {"task", text()}, {"agent", text()}},
         json::array(), browse_schema(), "read");
     add(registry, "create_stream", {{"settings", settings_schema()}}, json::array(),
         object({{"topic", text()}, {"exposed", flag()}, {"settings", settings_schema()}},

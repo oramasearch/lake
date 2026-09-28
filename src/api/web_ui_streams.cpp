@@ -22,6 +22,19 @@ std::string pretty(std::string payload) {
     return parsed.is_discarded() ? payload : parsed.dump(2);
 }
 
+std::string display_name(std::string_view topic) {
+    if (topic == "agent-events") {
+        return "Agent events";
+    }
+    if (topic.starts_with("agent-tasks.")) {
+        return "Agent tasks · " + std::string(topic.substr(12));
+    }
+    if (topic.starts_with("agent-turn.")) {
+        return "Agent turn · " + std::string(topic.substr(11));
+    }
+    return std::string(topic);
+}
+
 std::string message(const StreamsPage& page, const json& event, bool writable) {
     const auto sequence = event.at("sequence").dump();
     const auto revision = event.at("revision").dump();
@@ -165,9 +178,12 @@ constexpr std::string_view script = R"html(<script id="streams-controls">
     const signal = controller.signal;
     try {
       while (!signal.aborted) {
-        const page = await call('browse_stream', {customer_id: root.dataset.customer,
-          zetta: root.dataset.zetta, topic: root.dataset.topic, from_sequence: cursor,
-          direction: 'forward', limit: 100, wait_ms: 10000}, signal);
+        const input = {customer_id: root.dataset.customer, zetta: root.dataset.zetta,
+          topic: root.dataset.topic, from_sequence: cursor, direction: 'forward', limit: 100,
+          wait_ms: 10000};
+        if (root.dataset.task) input.task = root.dataset.task;
+        if (root.dataset.agent) input.agent = root.dataset.agent;
+        const page = await call('browse_stream', input, signal);
         if (signal.aborted) break;
         for (const event of page.events) insert(event);
         cursor = page.next_page_sequence ?? page.next_sequence;
@@ -187,10 +203,17 @@ constexpr std::string_view script = R"html(<script id="streams-controls">
 std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
     const auto escape = web_ui_escape;
     const std::string query = "customer_id=" + oauth_url_encode(page.customer_id);
-    const std::string base = "/train/stream?" + query + "&zetta=" + oauth_url_encode(page.zetta) +
-                             "&topic=" + oauth_url_encode(page.topic);
+    std::string base = "/train/stream?" + query + "&zetta=" + oauth_url_encode(page.zetta) +
+                       "&topic=" + oauth_url_encode(page.topic);
+    if (!page.task.empty()) {
+        base += "&task=" + oauth_url_encode(page.task);
+    }
+    if (!page.agent.empty()) {
+        base += "&agent=" + oauth_url_encode(page.agent);
+    }
     std::string html = "<section id=\"streams\" data-customer=\"" + escape(page.customer_id) +
         "\" data-zetta=\"" + escape(page.zetta) + "\" data-topic=\"" + escape(page.topic) +
+        "\" data-task=\"" + escape(page.task) + "\" data-agent=\"" + escape(page.agent) +
         "\" data-next-sequence=\"" + page.messages.value("next_sequence", json(1)).dump() + "\">";
     html += "<p class=\"eyebrow\">Train</p><h1>Streams</h1><p>Browse retained messages without "
             "consuming them. Live reads leave subscriber positions unchanged.</p>";
@@ -205,7 +228,8 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
                 (customer.id == page.customer_id ? " selected" : "") + ">" + escape(customer.handle) + "</option>";
         }
         html += "</select></label><label>Name prefix<input name=\"prefix\" value=\"" + escape(page.prefix) +
-            "\"></label><button type=\"submit\">Filter</button></form>";
+            "\"></label><label>Page size<input type=\"number\" name=\"limit\" min=\"1\" max=\"200\" value=\"" +
+            std::to_string(page.limit) + "\"></label><button type=\"submit\">Filter</button></form>";
         for (const auto& group : page.listing.value("groups", json::array())) {
             const std::string zetta = group.at("zetta");
             html += "<section class=\"panel\"><h2>" + std::string(zetta == "bus" ? "Lake Bus" : "Workspace Zetta") +
@@ -213,14 +237,33 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
                 "<th>Subscribers</th><th>Held Events</th><th>Next Sequence</th></tr></thead><tbody>";
             for (const auto& topic : group.at("topics")) {
                 const std::string name = topic.at("topic");
+                const bool counts = topic.value("counts_available", true);
                 html += "<tr><td><a data-capability=\"get_stream\" href=\"/train/stream?" + query +
-                    "&amp;zetta=" + zetta + "&amp;topic=" + oauth_url_encode(name) + "\">" + escape(name) +
+                    "&amp;zetta=" + zetta + "&amp;topic=" + oauth_url_encode(name) + "\">" +
+                    escape(topic.value("display_name", display_name(name))) +
                     "</a>" + (topic.value("system", false) ? " <span class=\"badge\">system</span>" : "") +
-                    "</td><td>" + topic.at("subscribers").dump() + "</td><td>" + topic.at("held_events").dump() +
+                    "</td><td>" + (counts ? topic.at("subscribers").dump() : "—") + "</td><td>" +
+                    (counts ? topic.at("held_events").dump() : "—") +
                     "</td><td>" + topic.at("next_sequence").dump() + "</td></tr>";
             }
             html += "</tbody></table></section>";
         }
+        const std::string page_query = query + "&prefix=" + oauth_url_encode(page.prefix) +
+                                       "&limit=" + std::to_string(page.limit);
+        html += "<nav class=\"pagination\" aria-label=\"Streams pages\">";
+        if (!page.listing.value("previous_cursor", json()).is_null()) {
+            html += "<a data-capability=\"list_streams\" href=\"/train/streams?" + page_query +
+                    "&amp;cursor=" + oauth_url_encode(
+                        page.listing.at("previous_cursor").get<std::string>()) +
+                    "\">Previous</a>";
+        }
+        if (!page.listing.value("next_cursor", json()).is_null()) {
+            html += "<a data-capability=\"list_streams\" href=\"/train/streams?" + page_query +
+                    "&amp;cursor=" + oauth_url_encode(
+                        page.listing.at("next_cursor").get<std::string>()) +
+                    "\">Next</a>";
+        }
+        html += "</nav>";
         if (page.can_write) {
             html += "<section class=\"panel\"><h2>New Topic</h2>" + form("create_stream") +
                 hidden("customer_id", page.customer_id) + hidden("zetta", "workspace") +
@@ -236,7 +279,8 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
     } else if (!page.detail.empty()) {
         const bool system = page.detail.value("system", true);
         const bool manage = page.detail.value("can_manage", false);
-        html += "<p><a data-capability=\"list_streams\" href=\"/train/streams?" + query + "\">All streams</a></p><h2>" + escape(page.topic) +
+        html += "<p><a data-capability=\"list_streams\" href=\"/train/streams?" + query + "\">All streams</a></p><h2>" +
+            escape(display_name(page.topic)) +
             "</h2>" + (system ? "<p class=\"badge\">system · browse-only</p>" : "") +
             "<details><summary>Settings</summary><pre>" + escape(page.detail.at("settings").dump(2)) + "</pre></details>";
         html += "<h2>Subscriptions</h2><table><thead><tr><th>Subscriber</th><th>Position</th>"
@@ -247,6 +291,12 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
                 "</td><td>" + subscription.at("lag").dump() + "</td></tr>";
         }
         html += "</tbody></table>";
+        if (page.zetta == "bus" && page.topic == "agent-events") {
+            html += "<form method=\"get\" action=\"/train/stream\" data-capability=\"browse_stream\">" +
+                scope(page) + "<label>Turn (task ID)<input name=\"task\" value=\"" +
+                escape(page.task) + "\"></label><label>Agent<input name=\"agent\" value=\"" +
+                escape(page.agent) + "\"></label><button type=\"submit\">Filter events</button></form>";
+        }
         if (!system && manage && page.can_write) {
             json mutable_settings = page.detail.at("settings");
             for (const auto* field : {"lifecycle", "store", "ring_capacity", "inline_threshold",
@@ -260,7 +310,8 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
                 "<button type=\"submit\">Preview and save settings</button></form></details>";
         }
         html += "<h2>Messages</h2><form method=\"get\" action=\"/train/stream\" data-capability=\"browse_stream\">" +
-            scope(page) + "<label>Jump to sequence<input type=\"number\" min=\"1\" name=\"from_sequence\" required>"
+            scope(page) + hidden("task", page.task) + hidden("agent", page.agent) +
+            "<label>Jump to sequence<input type=\"number\" min=\"1\" name=\"from_sequence\" required>"
             "</label><button type=\"submit\">Jump</button></form>"
             "<label><input id=\"stream-live\" type=\"checkbox\" data-capability=\"browse_stream\"> Live</label>"
             "<p>Uncheck Live to pause. Copy and edit use the displayed revision. Refresh to see edits "

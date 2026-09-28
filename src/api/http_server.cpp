@@ -9489,6 +9489,16 @@ struct ApiServer::Impl {
         page.customers = std::move(selection.customers);
         page.customer_id = std::move(selection.customer_id);
         page.prefix = query_value(route, "prefix");
+        page.cursor = query_value(route, "cursor");
+        page.task = query_value(route, "task");
+        page.agent = query_value(route, "agent");
+        const std::string limit = query_value(route, "limit");
+        if (!limit.empty()) {
+            const nlohmann::json parsed = nlohmann::json::parse(limit, nullptr, false);
+            if (parsed.is_number_integer() && parsed >= 1 && parsed <= 200) {
+                page.limit = parsed.get<int>();
+            }
+        }
         const auto object = options.store->find_policy_object("customer", page.customer_id);
         if (object) {
             const auto write = control::authorize(*options.store, context.acting_identity,
@@ -9515,6 +9525,12 @@ struct ApiServer::Impl {
                     }
                 }
                 input["direction"] = "backward";
+                if (!page.task.empty()) {
+                    input["task"] = page.task;
+                }
+                if (!page.agent.empty()) {
+                    input["agent"] = page.agent;
+                }
                 const auto messages = unwrap(co_await workspace_call("browse_stream", input, context));
                 if (messages.ok) {
                     page.messages = messages.value;
@@ -9526,6 +9542,10 @@ struct ApiServer::Impl {
             }
         } else {
             input["prefix"] = page.prefix;
+            input["limit"] = page.limit;
+            if (!page.cursor.empty()) {
+                input["cursor"] = page.cursor;
+            }
             const auto listed = unwrap(co_await workspace_call("list_streams", input, context));
             if (listed.ok) {
                 page.listing = listed.value;

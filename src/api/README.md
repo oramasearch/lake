@@ -1,10 +1,11 @@
 # API implementation
 
 `stream_capabilities.cpp` registers the nine Streams REST/MCP operations, enforces space and
-creator policy, filters shared bus topics and proxies non-consuming browse through service
-credentials. `web_ui_streams.cpp` renders the Train pages; its controls call those same
-capabilities. Read `post_alias` routes preserve read classification, and MCP tools carry
-read/destructive annotations. See `docs/api/streams.md` and `docs/ui/streams.md`.
+creator policy, pages one `list_topics` result per Zetta, filters shared bus topics and proxies
+non-consuming browse through service credentials. The shared agent views use durable space tasks
+without per-topic Zetta reads. `web_ui_streams.cpp` renders the Train pages; its controls call
+those same capabilities. Read `post_alias` routes preserve read classification, and MCP tools
+carry read/destructive annotations. See `docs/api/streams.md` and `docs/ui/streams.md`.
 
 Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
 the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select

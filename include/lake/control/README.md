@@ -1,9 +1,10 @@
 # Public control types
 
 `StreamOwner` and its Store methods bind topic management to the creator, customer and actual
-workspace service ID. `list_agent_task_ids` supplies only a customer's turns for scoped bus
-views. `AgentBus::call` carries named CRUD read requests over the existing service transport;
-unsupported custom bus implementations fail explicitly. See `docs/control-plane/streams.md`.
+workspace service ID. `list_agent_task_stream_scopes` supplies one customer's compact durable task
+and agent scope for the shared Agent events and Agent tasks views. `AgentBus::call` carries named
+CRUD read requests over the existing service transport; unsupported custom bus implementations
+fail explicitly. See `docs/control-plane/streams.md`.
 
 `Session.parent_session_id` records derivation. `Principal.expires_at_unix` carries resolved expiry
 in whole Unix seconds to the capability registry. `NewToken.parent_session_id` is supplied by

@@ -615,9 +615,11 @@ public:
     control::Result<void> delete_stream_owner(const control::StreamOwner& owner) override {
         return call("delete_stream_owner", [&] { return store_->delete_stream_owner(owner); });
     }
-    control::Result<std::vector<std::string>>
-    list_agent_task_ids(const std::string& customer_id) override {
-        return call("list_agent_task_ids", [&] { return store_->list_agent_task_ids(customer_id); });
+    control::Result<std::vector<control::AgentTaskStreamScope>>
+    list_agent_task_stream_scopes(const std::string& customer_id) override {
+        return call("list_agent_task_stream_scopes", [&] {
+            return store_->list_agent_task_stream_scopes(customer_id);
+        });
     }
     control::Result<control::Build> get_build(const std::string& id) override {
         return call("get_build", [&] { return store_->get_build(id); });

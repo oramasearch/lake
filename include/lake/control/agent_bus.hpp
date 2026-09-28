@@ -100,10 +100,12 @@ public:
             std::chrono::milliseconds wait) override;
     // Everything published to a topic, for assertions.
     std::vector<BusEvent> events(const std::string& topic) const;
+    std::size_t call_count(std::string_view capability) const;
 
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::vector<BusEvent>> topics_;
+    std::map<std::string, std::size_t> call_counts_;
     std::uint64_t next_id_ = 1;
 };
 
