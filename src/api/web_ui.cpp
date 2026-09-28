@@ -1408,6 +1408,21 @@ std::string web_ui_repository(const control::Repository& repository,
                                web_ui_escape(repository.deleted_at),
                                web_ui_escape(repository.retention_until));
     }
+    if (viewer.signed_in && repository.deleted_at.empty()) {
+        content += std::format(
+            "<section class=\"panel\"><div class=\"section-heading\"><div><h2>Build image</h2>"
+            "<p class=\"muted\">Queue an in-cluster build from this repository.</p></div>"
+            "<form method=\"post\" action=\"/repository/build\">"
+            "<input type=\"hidden\" name=\"customer_id\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"repository\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"revision\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"target\" value=\"{}:latest\">"
+            "<button class=\"primary\" type=\"submit\">Build image</button></form></div></section>",
+            web_ui_escape(repository.customer_id),
+            web_ui_escape(repository.id),
+            web_ui_escape(default_ref),
+            web_ui_escape(repository.name));
+    }
     content +=
         "<section class=\"panel repository-browser\"><div class=\"section-heading\">"
         "<div><h2>Files</h2><p class=\"muted\">The published tree at <code>" +

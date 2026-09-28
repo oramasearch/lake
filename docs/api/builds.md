@@ -63,7 +63,8 @@ Service reaches the same Lake registry without that proxy. The cache is
 
 Build images are private to their space. OCI push credentials may read and write only below their
 own `<space>/` prefix. Customer pull credentials may read only that space. Existing legacy
-published packages remain anonymous reads.
+published packages remain anonymous reads. Registry routes preserve one-, two- and three-part OCI
+repository names so the space prefix and internal cache namespace remain part of authorization.
 
 ## Browser pages
 

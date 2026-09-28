@@ -1670,7 +1670,8 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     EXPECT_NE(page.find("<h1>customer-portal</h1>"), std::string::npos);
     EXPECT_NE(page.find("Revision is ready"), std::string::npos);
     EXPECT_NE(page.find("id=\"app-live-events\""), std::string::npos);
-    EXPECT_NE(page.find("Builds are not available on this lake yet"), std::string::npos);
+    EXPECT_NE(page.find("No builds yet"), std::string::npos);
+    EXPECT_NE(page.find("action=\"/ship/app/build\""), std::string::npos);
     EXPECT_NE(page.find("action=\"/ship/app/restart\""), std::string::npos);
     EXPECT_NE(page.find("action=\"/ship/app/service/create\""), std::string::npos);
     if (memory != nullptr) {
