@@ -132,10 +132,11 @@ works unchanged when pointed here:
   outside the allow-list is `404 unknown_capability` ("not available through lake"); a read called
   with `POST` or an action with `GET` is `405 method_not_allowed` with an `Allow` header. Nothing
   refused reaches the workspace.
-- **The workspace's pub/sub.** `list_topics` and `receive_events` (reads) and `create_topic`,
-  `drop_topic` and `publish_event` (actions) are allowed; only topics created `exposed` are
-  reachable, and a `receive_events` long poll waits at most 10 seconds through lake
-  ([agent-bus.md](agent-bus.md)).
+- **The workspace's pub/sub.** `list_topics` and `receive_events` remain allowed reads; only
+  exposed topics are reachable, and a `receive_events` long poll waits at most 10 seconds.
+  Topic/message writes now use the registered [Streams capabilities](streams.md), not raw
+  `workspace_act`, so creator ownership and system-topic protections cannot be bypassed.
+  Streams uses non-consuming `browse_topic` and permits bounded waits up to 30 seconds.
 - **The solutions catalogue and projects (lake#290, lake#292, zetta#1102).** `list_solutions`, `get_solution`, `get_policy`, `get_experiment`, `list_ledger`, `get_monitor` and `get_roi_readout` are allowed reads. `create_solution`, `run_solution`, `update_policy`, `decide`, `approve_decision` and `record_outcome` are allowed actions. **Design → Solutions** lists modules and *in design* sketches; **Design → Methodologies** (lake#291) lists each methodology's inputs, outputs, metrics and solutions. On an engine without the solution registry, the Solutions page says so.
   - Start never invents customer inputs. Delivery supports `webhook`, `salesforce` or `hubspot`; its endpoint and owner are required. Value per outcome, investment and currency are also required with no defaults.
   - The Project Agent's task credential carries only lake read capabilities. It reads the chosen data with `analyze_dataset`, `get_dataset` and `plan_features`, then answers in `result.foundation`. The proposal includes `sources` and methodology roles, `snapshot`, `dataset`, optional `decision_source`, `predicates`, and `missing_predicates`. Lake supplies the selected source/table and the person's delivery and ROI values before showing it.

@@ -21,6 +21,7 @@
 #include "lake/control/memory_store.hpp"
 #include "objects/records.hpp"
 #include "temporary_directory.hpp"
+#include "stream_fixture.hpp"
 
 extern char** environ;
 
@@ -242,9 +243,11 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     const auto repository =
         checked(store->create_repository({customer.id, "schema-fixture", "", "private"}));
     const auto conflict = prepare_conflict(root, customer.id, repository.id);
+    lake::test::StreamWorkspace streams(store, customer.id);
     lake::api::ApiServer server({.port = 0,
                                  .node_name = "schema-test",
                                  .store = store,
+                                 .workspaces = streams.service,
                                  .admin_token = "schema-test",
                                  .instance_kek = kek,
                                  .store_root = root.string()});
@@ -254,6 +257,26 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         http.call(tool.at("name"), json::object(), false);
     }
     http.call("server_info");
+    json stream{{"customer_id", customer.id}, {"zetta", "workspace"}, {"topic", "schema-orders"}};
+    http.call("create_stream", stream);
+    http.call("list_streams", {{"customer_id", customer.id}});
+    http.call("get_stream", stream);
+    http.call("browse_stream", stream);
+    auto stream_publish = stream;
+    stream_publish["payload"] = "{}";
+    http.call("publish_stream_message", stream_publish);
+    stream_publish["sequence"] = 1;
+    stream_publish["expected_revision"] = 1;
+    http.call("update_stream_message", stream_publish);
+    auto stream_update = stream;
+    stream_update["settings"] = {{"max_events", 100}};
+    http.call("update_stream", stream_update);
+    auto stream_delete = stream;
+    stream_delete["before_sequence"] = 2;
+    stream_delete["confirm_count"] = 1;
+    http.call("delete_stream_messages", stream_delete);
+    stream["confirm_name"] = "schema-orders";
+    http.call("delete_stream", stream);
     http.read("server_info");
     http.call("set_storage_quota", {{"customer_id", customer.id}, {"quota_bytes", 0}});
     http.call("metering_usage", {{"customer_id", customer.id}});

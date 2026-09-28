@@ -14226,6 +14226,13 @@ bool ApiServer::start() {
         const auto method =
             rest_method(*capability) == "GET" ? http::method::get : http::method::post;
         const std::string path = rest_path(*capability);
+        if (capability->kind == CapabilityKind::Read && capability->post_alias) {
+            router.add(http::method::post, path,
+                       [&impl, capability, path](http::route_params& route) -> http::route_task {
+                           return impl.observe_request(
+                               route, path, impl.serve_capability(route, capability));
+                       });
+        }
         router.add(
             method, path, [&impl, capability, path](http::route_params& route) -> http::route_task {
                 return impl.observe_request(route, path, impl.serve_capability(route, capability));

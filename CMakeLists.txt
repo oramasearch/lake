@@ -180,6 +180,7 @@ add_library(lake-core STATIC
   src/api/oauth.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
+  src/api/stream_capabilities.cpp
   src/api/pipeline.cpp
   src/api/registry.cpp
   src/api/rest.cpp

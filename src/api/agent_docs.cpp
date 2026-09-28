@@ -28,6 +28,14 @@ struct GroupRule {
 
 // First match wins, so the narrow groups come before Repositories, which takes the rest.
 constexpr std::array group_rules{
+    GroupRule{"Streams",
+              "Ask Orama and ApplicationAgent may freely read list_streams, get_stream and "
+              "browse_stream. Stream writes require the person's confirmation; deletes require "
+              "space administration. System streams are browse-only. browse_stream never "
+              "consumes messages; use wait_ms for bounded live reads over REST or MCP.",
+              [](std::string_view n) {
+                  return n.find("stream") != std::string_view::npos;
+              }},
     GroupRule{"Agents",
               "The Agent Library of specialized agents Orama ships, and the agents you build in "
               "Train > Agents: create them through workspace_act, talk to any of them with "
@@ -139,7 +147,8 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 10> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 11> group_order{"Workspace: Design, Train and Ship",
+                                                       "Streams",
                                                        "Agents",
                                                        "Services",
                                                        "Storage",
