@@ -6,7 +6,8 @@
 the Ask Orama, Agent Factory, Discover and pipeline tests in `tests/test_http_server.cpp`
 
 **No lake page or capability waits on a library agent inside an HTTP request.** Lake and the
-library agents (Ask Orama, the Project Agent, ApplicationAgent, Auto-Suggest, AgentCreator) talk over
+library agents (Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest,
+AgentCreator) talk over
 [Zetta's pub/sub](https://github.com/oramasearch/zetta/tree/dev/docs/pubsub) on **lake's own Zetta**:
 the Lake's `spec.zetta` cluster, reached as `LAKE_DATA_PLANE_URL` with `LAKE_DATA_PLANE_TOKEN`.
 
@@ -26,8 +27,9 @@ holds no events; finished empty topics must not accumulate on the bus.
 ## A turn, end to end
 
 1. `agent_turn` (or a page: Ask Orama, the Agent Factory, Design → Opportunities, the pipeline's
-   ask box) writes the task to `agent_tasks` (migration `0032_agent_tasks`), publishes it on the
-   agent's topic and answers `{task_id, status: pending}` at once.
+   ask box, Ship → Apps or Train → Experiments) writes the task to `agent_tasks` (migration
+   `0032_agent_tasks`), publishes it on the agent's topic and answers
+   `{task_id, status: pending}` at once.
 2. The agent's service long-polls `receive_agent_tasks`, then calls `claim_agent_task`. **Exactly one
    claim succeeds.** Lake generates the task's credential, `lat.<task id>.<secret>`, stores only its
    SHA-256 in `agent_task_status`, and answers the task's body with every `"{{credential}}"` in it
@@ -67,6 +69,13 @@ ApplicationAgent receives only tasks from `agent-tasks.agent-application` and on
 `agent-application` bus credential can claim or answer them. The task itself has kind `app`; its
 short-lived task credential carries read tools initially and gains repository/App writes only on a
 later task with the person's reviewed proposal.
+
+ExperimentsAgent has the independent topic and credential `agent-tasks.agent-experiments` /
+`agent-experiments`. Its task kinds are `experiment`, `experiment_status` and
+`experiment_explain`. The bus still carries only the task id. Study definitions, trials and
+analysis remain in the selected workspace Zetta, reached with the claimed task credential. An
+initial proposal has no study write; a new task carrying the reviewed proposal receives only
+workspace `create_study` and its backing `start_study` capability in addition to its reads.
 
 The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential: user-created agents on
 agent-runtime hold it too, and customer code must not be able to take another person's task. Long
@@ -111,8 +120,9 @@ suite: each library agent over the bus, as the person whose key it holds, with a
 scenario. T1–T10 are the scenarios tracked at https://github.com/oramasearch/lake/issues/276
 through https://github.com/oramasearch/lake/issues/285. T11 builds a data App with
 ApplicationAgent, confirms the exact proposal, waits for deployment, and requests its URL. It
-prints one line per scenario and exits 1 when one fails. Run it after a roll of lake, Zetta or an
-agent.
+prints one line per scenario and exits 1 when one fails. T12 gives ExperimentsAgent a goal,
+confirms its exact study, waits for trials and requests the explanation. Run the relevant scenario
+after a roll of lake, Zetta or an agent.
 
 ## Not yet
 

@@ -5,6 +5,7 @@
 Press **Ask Orama** at the top of any page. It answers from what you can read, and for anything
 that changes your lake it **proposes** the change for you to confirm. It hands work to the right
 agent: the Project Agent for pipelines, Auto-Suggest for ideas, or an agent you built.
+It can also hand training and tuning goals to ExperimentsAgent.
 
 Agents work in the background: after you send a message the page returns at once and shows that the
 agent is working; you can leave and come back, and the answer is kept.
@@ -15,6 +16,9 @@ agent is working; you can leave and come back, and the answer is kept.
 where to use it:
 
 - **Project Agent**: builds pipelines and proposes changes to them (Design, on a pipeline).
+- **ApplicationAgent**: proposes and builds data apps (Ship → Apps).
+- **ExperimentsAgent**: proposes editable training studies, follows trials and explains results
+  (Train → Experiments). It starts a study only after you confirm the reviewed proposal.
 - **Auto-Suggest**: suggests projects worth building from your data (Design → Opportunities →
   Scan my workspace). The Opportunities are kept until you act on them.
 - **AgentCreator**: designs a new agent with you (Train → Agents → Build it with the Agent Factory).

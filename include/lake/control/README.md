@@ -22,5 +22,6 @@ with a Zetta implementation and an in-memory one for tests. `AgentTaskBus` is la
 `Store::claim_agent_task`, `record_agent_task_event`, `fail_agent_task` and `stale_agent_tasks`
 back it in both stores.
 
-`agent_library.hpp` registers ApplicationAgent as `agent-application`, a chat-capable service used
-from Ship → Apps and Ask Orama. Its bus identity is independent from every other library agent.
+`agent_library.hpp` registers ApplicationAgent as `agent-application` and ExperimentsAgent as
+`agent-experiments`, chat-capable services used from their Ship/Train pages and Ask Orama. Each bus
+identity is independent from every other library agent.
