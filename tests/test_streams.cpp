@@ -351,6 +351,29 @@ TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
         auto update = args;
         update["settings"] = {{"retention_ms", 60000}};
         invoke("update_stream", update);
+        const auto list_html = request("GET", "/train/streams?customer_id=" + customer);
+        const auto detail_html = request("GET", "/train/stream?customer_id=" + customer +
+            "&zetta=workspace&topic=" + args.at("topic").get<std::string>());
+        EXPECT_NE(detail_html.find("href=\"/train/streams\" aria-current=\"page\""), std::string::npos);
+        EXPECT_NE(list_html.find("href=\"/train/streams\" aria-current=\"page\""), std::string::npos);
+        EXPECT_EQ(detail_html.find("test-workspace-service-token"), std::string::npos);
+        EXPECT_NE(detail_html.find("&lt;script&gt;"), std::string::npos);
+        const std::string html = list_html + detail_html;
+        for (const auto& name : names) {
+            EXPECT_NE(html.find("data-capability=\"" + name + "\""), std::string::npos) << name;
+        }
+        const std::regex controls("<(?:form|a|input|button)[^>]*data-capability=\"([^\"]+)\"");
+        for (auto match = std::sregex_iterator(html.begin(), html.end(), controls);
+             match != std::sregex_iterator(); ++match) {
+            EXPECT_NE(registry.find((*match)[1]), nullptr);
+        }
+        if (!mcp && std::getenv("LAKE_STREAM_BROWSER")) {
+            std::cout << "Streams browser fixture: http://127.0.0.1:" << server.port()
+                      << "/train/stream?customer_id=" << customer << "&zetta=workspace&topic=rest-orders\n"
+                      << "Operator token: stream-operator\nPress Enter to finish.\n" << std::flush;
+            std::string line;
+            std::getline(std::cin, line);
+        }
         auto deletion = args;
         deletion["sequences"] = {1};
         deletion["dry_run"] = true;

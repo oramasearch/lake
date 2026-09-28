@@ -262,6 +262,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view agents[] = {"/train/agents", "/train/agent"};
     static constexpr std::string_view data[] = {"/train/data", "/train/dataset", "/train/query"};
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
+    static constexpr std::string_view streams[] = {"/train/streams", "/train/stream"};
     static constexpr std::string_view models[] = {"/ship/models"};
     static constexpr std::string_view indexes[] = {"/ship/indexes", "/ship/index"};
     static constexpr std::string_view packages[] = {"/ship/packages"};
@@ -311,6 +312,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return data;
     if (key == "runs")
         return runs;
+    if (key == "streams")
+        return streams;
     if (key == "models")
         return models;
     if (key == "indexes")
@@ -450,6 +453,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
         items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
+        items.push_back({"Train", "/train/streams", "Streams", "activity", "streams"});
         items.push_back({"Ship", "/ship/models", "Models", "api", "models"});
         items.push_back({"Ship", "/ship/indexes", "Search Indexes", "search", "indexes"});
         items.push_back({"Ship", "/ship/packages", "Packages", "repository", "packages"});
@@ -4520,6 +4524,7 @@ std::string workspace_content(const WorkspacePage& page) {
         }
     } else if (page.section == "run") {
         const nlohmann::json run = data.value("get_run", nlohmann::json::object());
+        out += "<p>" + row_link("/train/streams?" + query, "Workspace streams") + "</p>";
         const std::string status = json_text(run, "status");
         out += std::format("<p>Status: <span class=\"badge\">{}</span></p>",
                            web_ui_escape(status.empty() ? "unknown" : status));
@@ -4942,11 +4947,13 @@ std::string web_ui_packages(const nlohmann::json& catalog,
             content += std::format(
                 "<tr data-build-id=\"{}\"><td><code>{}</code></td><td class=\"build-phase\">{}"
                 "</td><td><code>{}</code></td><td><details><summary>Live log</summary>"
-                "<pre class=\"build-log\"></pre></details></td></tr>",
+                "<pre class=\"build-log\"></pre></details><a href=\"/train/stream?customer_id={}"
+                "&amp;zetta=bus&amp;topic=build-events.{}\">Browse messages</a></td></tr>",
                 web_ui_escape(id),
                 web_ui_escape(build.value("target", std::string())),
                 web_ui_escape(build.value("phase", std::string())),
-                web_ui_escape(build.value("digest", std::string())));
+                web_ui_escape(build.value("digest", std::string())),
+                url_component(customer_id), url_component(id));
         }
         content += "</tbody></table></section>";
         content += std::format(
@@ -5296,6 +5303,8 @@ std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
     }
     content += "<button type=\"submit\">Deploy</button></form></section>";
     content += app_event_history(page);
+    content += "<p>" + row_link("/train/stream?customer_id=" + url_component(page.customer_id) +
+        "&zetta=bus&topic=app-events." + url_component(id), "Browse app event stream") + "</p>";
     content += "<section class=\"panel\"><h2>Live Events</h2><div class=\"app-stream\" "
                "data-app-events role=\"log\">";
     for (const nlohmann::json& event : page.events) {
@@ -5342,6 +5351,8 @@ std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
                                                         page.customer_id,
                                                         id,
                                                         hidden("build_id", build_id));
+            build_actions += row_link("/train/stream?customer_id=" + url_component(page.customer_id) +
+                "&zetta=bus&topic=build-events." + url_component(build_id), "Browse build stream");
             if (!built_image.empty()) {
                 build_actions += app_action_form("/ship/app/deploy",
                                                  "Deploy Build",

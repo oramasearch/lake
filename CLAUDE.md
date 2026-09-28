@@ -210,6 +210,12 @@ queued/cancelled desired rows, operator status, build-specific source/push/event
 Zetta progress. Build targets use the in-cluster Lake Service and a customer-handle registry
 prefix. The contracts are `docs/api/builds.md` and `docs/control-plane/builds.md`.
 
+Train → Streams adds nine space-scoped REST/MCP capabilities for topic/message CRUD and
+non-consuming live browse across workspace and bus Zettas. System topics are browse-only;
+topic settings/drop require recorded creator ownership. Migration `0037_streams` stores ownership
+per workspace service incarnation. See `docs/api/streams.md`, `docs/ui/streams.md` and
+`docs/control-plane/streams.md`; the operator schema/guard handoff remains a rollout prerequisite.
+
 Agent-session custody adds migration `0017_agent_sessions` and a maximum 15-minute Ed25519 key
 delegated to a durable agent by a canonical `delegation/1` attestation. The attestation is appended
 to the tiled transparency log before public session metadata is persisted; the private seed is
