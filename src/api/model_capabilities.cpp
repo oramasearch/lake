@@ -14,6 +14,7 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/zetta_workspace.hpp"
 
 namespace lake::api {
 namespace {
@@ -28,6 +29,46 @@ std::expected<std::string, ApiError> repository_object(const json& input, ApiCon
     const auto object = context.store->find_policy_object("repository", input.at("id"));
     if (!object) {
         return std::unexpected(ApiError{object.error().code, object.error().message, "/id"});
+    }
+    return object->id;
+}
+
+std::expected<std::string, ApiError>
+workspace_dataset_customer(const json& input, ApiContext& context) {
+    if (const std::string customer_id = input.value("customer_id", std::string());
+        !customer_id.empty()) {
+        return customer_id;
+    }
+    constexpr std::string_view task_prefix = "task:";
+    if (!context.store || !context.credential_session_id.starts_with(task_prefix)) {
+        return std::unexpected(
+            ApiError{"invalid_input", "customer_id is required for a workspace dataset", {}});
+    }
+    const auto task =
+        context.store->get_agent_task(context.credential_session_id.substr(task_prefix.size()));
+    if (!task || task->agent != "agent-application") {
+        return std::unexpected(ApiError{"unauthorized", "workspace dataset task is unavailable", {}});
+    }
+    return task->customer_id;
+}
+
+std::expected<std::string, ApiError>
+dataset_object(const json& input, ApiContext& context) {
+    if (input.contains("revision")) {
+        return repository_object(input, context);
+    }
+    const auto customer_id = workspace_dataset_customer(input, context);
+    if (!customer_id) {
+        return std::unexpected(customer_id.error());
+    }
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto object = context.store->find_policy_object("customer", *customer_id);
+    if (!object) {
+        return std::unexpected(
+            ApiError{object.error().code, object.error().message, "/customer_id"});
     }
     return object->id;
 }
@@ -377,6 +418,76 @@ Capability read_capability(
         }};
 }
 
+Capability dataset_capability() {
+    return Capability{
+        .name = "get_dataset",
+        .title = "Get dataset",
+        .description = "Read a repository dataset revision, or a workspace dataset by its "
+                       "<database>/<dataset> id for ApplicationAgent.",
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"id", {{"type", "string"}}},
+               {"revision", {{"type", "string"}}},
+               {"customer_id", {{"type", "string"}}}}},
+             {"required", json::array({"id"})},
+             {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "dataset",
+        .action = "read",
+        .resolve_object = dataset_object,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!input.contains("revision")) {
+                return ApiResult::failure(
+                    "store_error", "workspace datasets require asynchronous dispatch");
+            }
+            return repository_info(input, context, "dataset");
+        },
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (input.contains("revision")) {
+                co_return repository_info(input, context, "dataset");
+            }
+            if (!context.workspaces) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "workspaces are not configured on this lake");
+            }
+            const auto customer_id = workspace_dataset_customer(input, context);
+            if (!customer_id) {
+                co_return ApiResult::failure(customer_id.error().code,
+                                             customer_id.error().message,
+                                             customer_id.error().path);
+            }
+            std::string database = "datasets";
+            std::string dataset = input.at("id");
+            if (const std::size_t slash = dataset.find('/'); slash != std::string::npos) {
+                database = dataset.substr(0, slash);
+                dataset.erase(0, slash + 1);
+            }
+            if (database.empty() || dataset.empty()) {
+                co_return ApiResult::failure(
+                    "invalid_input", "id is <database>/<dataset>", "/id");
+            }
+            auto called = co_await context.workspaces->call(
+                *customer_id, "get_dataset", true, {{"database", database}, {"dataset", dataset}});
+            if (!called) {
+                co_return ApiResult::failure("store_unavailable", called.error().message);
+            }
+            if (!*called) {
+                co_return ApiResult::failure(called->error().code, called->error().message);
+            }
+            json value = std::move(**called);
+            value["id"] = database + "/" + dataset;
+            context.audit_customer_id = *customer_id;
+            context.audit_kind = "workspace.query";
+            context.audit_object = "customer/" + *customer_id + "/workspace";
+            context.audit_details = {{"capability", "get_dataset"}};
+            co_return ApiResult::success(std::move(value));
+        }};
+}
+
 json write_input_schema() {
     return {{"type", "object"},
             {"properties",
@@ -419,8 +530,7 @@ void register_model_capabilities(Registry& registry) {
                                  "Read model files, storage savings, and verified provenance.",
                                  false,
                                  "model"));
-    registry.add(read_capability(
-        "get_dataset", "Get dataset", "Read dataset files and storage savings.", false, "dataset"));
+    registry.add(dataset_capability());
     registry.add(read_capability("resolve_model_file",
                                  "Resolve model file",
                                  "Resolve one model file at a named or immutable revision.",

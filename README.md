@@ -28,6 +28,7 @@ ctest --test-dir build --output-on-failure
 | `GET /design/projects`, `/design/project`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, Train and Ship over the customer's own Zetta workspace ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
 | `GET /ship/apps`, `/ship/app`; `POST /ship/apps/*`, `/ship/app/*` | create and operate customer apps, with masked secrets and live app/build events ([`docs/ui/apps.md`](docs/ui/apps.md)) |
 | `GET /design/projects`, `/design/project`, `/design/solutions`, `/design/solution`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, solution projects, Train and Ship over the customer's own Zetta workspace ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
+| `GET /ship/apps`, `/ship/app`; `POST /ship/apps/*`, `/ship/app/*` | create and operate customer apps, or review and confirm an ApplicationAgent proposal, with masked secrets and live app/build events ([`docs/ui/apps.md`](docs/ui/apps.md)) |
 | `POST /identity/clerk-session` | exchanges a verified Clerk `lake` template token for a `lake_session`; absent without Clerk |
 | `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |

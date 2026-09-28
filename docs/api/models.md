@@ -30,7 +30,8 @@ registered once and therefore appear in `/v1/openapi.json` and `POST /mcp` autom
 
 | Capability | Input | Result |
 |---|---|---|
-| `get_model`, `get_dataset` | `id`, `revision` | Repository identity, immutable `sha`, visibility, card, files, storage totals, and provenance |
+| `get_model`, repository `get_dataset` | `id`, `revision` | Repository identity, immutable `sha`, visibility, card, files, storage totals, and provenance |
+| workspace `get_dataset` | `customer_id`, `id` as `<database>/<dataset>` | Workspace dataset schema for ApplicationAgent; its task credential supplies the customer implicitly |
 | `resolve_model_file`, `resolve_dataset_file` | `id`, `revision`, `path` | Exact bytes plus blob, size, and immutable revision metadata |
 | `prepare_repository_upload` | `id`, `files[{path,size}]` | `regular` for files through 5 MiB, otherwise `lfs` |
 | `stage_repository_file` | `id`, SHA-256 `oid`, `size`, binary body or base64 `content` | Unique stored bytes after digest and size verification |

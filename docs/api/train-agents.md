@@ -48,6 +48,7 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 |---|---|---|---|
 | `agent-ask-orama` | Ask Orama | The Ask Orama panel on every page; delegates to any agent | its own service |
 | `agent-project` | Project Agent | Design: Create a Solution and revised plans; Ask Orama's subagent | its own service |
+| `agent-application` | ApplicationAgent | Ship → Apps: Build an App; Ask Orama's app delegate | its own service |
 | `agent-autosuggest` | Auto-Suggest | Design: Discover Opportunities; Ask Orama's subagent | its own service |
 | `agent-creator` | AgentCreator | Train: Agents, Create with the Agent Factory | `agent-runtime` |
 | `agent-eval-generator` | Eval Generator | A realistic test case on request (a role, their problem, real-looking data), with its own invented tables; publishes nothing (lake#263) | service |

@@ -23,3 +23,6 @@ and HTTP conformance proof.
 operator flag comes from the resolved credential and does not authorize a capability. Boolean
 renderer arguments remain compatible and mean an ordinary account, never an operator. See
 [front-door.md](../../../docs/ui/front-door.md).
+
+`AppsPage` carries the selected ApplicationAgent task, working state, and exact proposal digest to
+the pure Ship Apps renderer. Authorization and digest verification remain in the HTTP adapter.

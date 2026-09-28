@@ -6,7 +6,7 @@
 the Ask Orama, Agent Factory, Discover and pipeline tests in `tests/test_http_server.cpp`
 
 **No lake page or capability waits on a library agent inside an HTTP request.** Lake and the
-library agents (Ask Orama, the Project Agent, Auto-Suggest, AgentCreator) talk over
+library agents (Ask Orama, the Project Agent, ApplicationAgent, Auto-Suggest, AgentCreator) talk over
 [Zetta's pub/sub](https://github.com/oramasearch/zetta/tree/dev/docs/pubsub) on **lake's own Zetta**:
 the Lake's `spec.zetta` cluster, reached as `LAKE_DATA_PLANE_URL` with `LAKE_DATA_PLANE_TOKEN`.
 
@@ -58,6 +58,11 @@ lake (`LAKE_AGENT_BUS_DIR`, one file per agent) and only that agent's token into
 (`AGENT_BUS_TOKEN`, with `LAKE_URL`). A bus credential reaches only the first three capabilities,
 and only with its own agent's name.
 
+ApplicationAgent receives only tasks from `agent-tasks.agent-application` and only its
+`agent-application` bus credential can claim or answer them. The task itself has kind `app`; its
+short-lived task credential carries read tools initially and gains repository/App writes only on a
+later task with the person's reviewed proposal.
+
 The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential: user-created agents on
 agent-runtime hold it too, and customer code must not be able to take another person's task. Long
 polls wait at most 10 seconds (`wait_ms`).
@@ -96,9 +101,11 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 
 `tools/e2e/agents.py <base-url> <token-file> <customer-id> [T1 …]` is the agents' live scenario
 suite: each library agent over the bus, as the person whose key it holds, with a pass condition per
-scenario (T1–T10, each a GitHub issue labelled `test`: https://github.com/oramasearch/lake/issues/276
-to https://github.com/oramasearch/lake/issues/285). It prints one line per scenario and exits 1 when
-one fails. It only proposes; nothing is confirmed. Run it after a roll of lake, Zetta or an agent.
+scenario. T1–T10 are the scenarios tracked at https://github.com/oramasearch/lake/issues/276
+through https://github.com/oramasearch/lake/issues/285. T11 builds a data App with
+ApplicationAgent, confirms the exact proposal, waits for deployment, and requests its URL. It
+prints one line per scenario and exits 1 when one fails. Run it after a roll of lake, Zetta or an
+agent.
 
 ## Not yet
 

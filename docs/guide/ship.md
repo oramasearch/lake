@@ -23,3 +23,15 @@ it, and create a key that can only search (`search_index`).
 
 **Ship → Services** runs databases, streams and engines for your space; **Train → Data → Storage**
 provisions volumes. Each shows its connection details once it is Ready.
+
+## Build and deploy an app
+
+Open **Ship → Apps** and use **Build an App With the ApplicationAgent**. Describe the data app you
+want. ApplicationAgent may inspect datasets, schemas, read-only SQL results, repositories, Services,
+and existing Apps, but its first turn cannot write anything.
+
+The page shows the complete proposal: App settings and every repository file. Choose **Confirm and
+deploy** only after reviewing them. Lake starts a second turn with that exact proposal. Only that
+turn can create the private repository, commit its files, create the App, and deploy it. The result
+links to the running URL. You can also choose ApplicationAgent in **Ask Orama → Talk to**, or ask Ask
+Orama to delegate an app request to it; confirmation still happens before writes.
