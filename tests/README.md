@@ -2,9 +2,10 @@
 
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
 workspace alias checks, audit, REST/MCP parity and actual calls, hashed assets, navigation and
-control mappings. `experiment_fixture.hpp` supplies a stateful fake caller against the authorized
-engine contract and an opt-in browser fixture. `experiment_charts.cjs` tests chart transformations
-and cursors without a browser. Independent response validation also uses these fixtures. See
+control mappings, plus the editable ExperimentsAgent proposal. `experiment_fixture.hpp` supplies
+a stateful fake caller against the authorized engine contract and an opt-in browser fixture.
+`experiment_charts.cjs` tests chart transformations and cursors without a browser. Independent
+response validation also uses these fixtures. See
 [API](../docs/api/experiments.md) and [UI](../docs/ui/experiments.md) contracts.
 
 `test_streams.cpp` covers Streams space/system/creator permissions, non-consuming browse,
@@ -133,6 +134,10 @@ event, and uses restart through its POST adapter. `AgentRuns` proves app tasks u
 and credential, Ask Orama delegates to them, and App writes are absent before confirmation but
 usable after it. Memory variants add fake operator Ready status; renderer coverage verifies secret
 masking, rollback inputs, and live app/build polling markup.
+`HttpServer/HttpResponseIsolation.ExperimentsAgentRestMcpAndPageUseTheSameConfirmedTurn/*`
+compares the `agent_turn` OpenAPI/MCP schemas, calls both transports, then starts, edits and confirms
+the page proposal. `AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations` verifies the
+three kinds, independent topic/credential, workspace URL and confirmation-limited study actions.
 
 Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
 time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts

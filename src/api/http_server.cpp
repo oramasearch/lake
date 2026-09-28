@@ -9499,6 +9499,7 @@ struct ApiServer::Impl {
         page.run = query_value(route, "run");
         page.project = query_value(route, "project");
         page.state = query_value(route, "state");
+        page.error = query_value(route, "error");
         const auto object = options.store->find_policy_object("customer", page.customer_id);
         if (object) {
             const auto write = control::authorize(*options.store, context.acting_identity,
@@ -9507,6 +9508,71 @@ struct ApiServer::Impl {
                 object->id, "admin", context.authorization_cache);
             page.can_write = context.operator_credential || (write && write->allowed);
             page.can_promote = context.operator_credential || (admin && admin->allowed);
+        }
+        if (options.workspaces) {
+            const ApiResult library = unwrap(co_await workspace_call(
+                "list_agent_library", nlohmann::json::object(), context));
+            if (library.ok) {
+                for (const nlohmann::json& agent :
+                     library.value.value("agents", nlohmann::json::array())) {
+                    if (agent.value("key", std::string()) == "agent-experiments" &&
+                        agent.value("deployed", false)) {
+                        page.experiments_agent = true;
+                    }
+                }
+            }
+        }
+        const std::string task_id = query_value(route, "task");
+        if (!task_id.empty()) {
+            std::optional<control::AgentTask> pending;
+            const auto found = options.store->get_agent_task(task_id);
+            if (found) {
+                pending = *found;
+            }
+            if (pending && pending->customer_id == page.customer_id &&
+                pending->requested_by_user_id == context.acting_user_id &&
+                pending->agent == "agent-experiments" && pending->kind == "experiment" &&
+                (pending->phase.empty() || pending->phase == "Pending" ||
+                 pending->phase == "Running")) {
+                page.agent_task = {{"task_id", pending->id},
+                                   {"agent", pending->agent},
+                                   {"kind", pending->kind},
+                                   {"status", pending->phase == "Running" ? "running"
+                                                                           : "pending"}};
+                page.agent_working = true;
+            } else {
+                const ApiResult task = unwrap(co_await workspace_call(
+                    "get_agent_task",
+                    {{"customer_id", page.customer_id}, {"task_id", task_id}},
+                    context));
+                if (!task.ok) {
+                    if (page.error.empty()) {
+                        page.error = task.error.message;
+                    }
+                } else if (task.value.value("agent", std::string()) != "agent-experiments" ||
+                           task.value.value("kind", std::string()) != "experiment") {
+                    if (page.error.empty()) {
+                        page.error = "That is not an ExperimentsAgent experiment task.";
+                    }
+                } else {
+                    page.agent_task = task.value;
+                    nlohmann::json answer =
+                        task.value.value("answer", nlohmann::json::object());
+                    if (!answer.is_object()) {
+                        answer = nlohmann::json::object();
+                    }
+                    nlohmann::json proposal =
+                        answer.value("result", nlohmann::json::object());
+                    if (!proposal.is_object()) {
+                        proposal = nlohmann::json::object();
+                    }
+                    if (proposal.value("kind", std::string()) == "proposal" &&
+                        proposal.value("confirm", false) &&
+                        proposal.value("study", nlohmann::json()).is_object()) {
+                        page.proposal_sha256 = proposal_digest(proposal);
+                    }
+                }
+            }
         }
         nlohmann::json input{{"customer_id", page.customer_id}};
         std::string capability = "list_experiments";
@@ -9535,7 +9601,9 @@ struct ApiServer::Impl {
         }
         const auto result = unwrap(co_await workspace_call(capability, input, context));
         if (!result.ok) {
-            page.error = result.error.message;
+            if (page.error.empty()) {
+                page.error = result.error.message;
+            }
         } else {
             page.data = result.value;
             if (mode == "study") {
@@ -9549,6 +9617,76 @@ struct ApiServer::Impl {
         }
         co_return co_await send_text(route, boost::http::status::ok,
             web_ui_experiments(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_experiments_agent_form(boost::http::route_params& route,
+                                                         bool confirm) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        nlohmann::json input{{"customer_id", customer_id},
+                             {"agent", "agent-experiments"},
+                             {"kind", "experiment"}};
+        std::optional<ApiResult> prepared;
+        if (!confirm) {
+            input["message"] = form_field(body, "goal");
+        } else {
+            const std::string task_id = form_field(body, "task_id");
+            const ApiResult task = unwrap(co_await workspace_call(
+                "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
+            if (!task.ok) {
+                prepared = task;
+            } else {
+                nlohmann::json answer = task.value.value("answer", nlohmann::json::object());
+                if (!answer.is_object()) {
+                    answer = nlohmann::json::object();
+                }
+                nlohmann::json proposal = answer.value("result", nlohmann::json::object());
+                if (!proposal.is_object()) {
+                    proposal = nlohmann::json::object();
+                }
+                const nlohmann::json study = nlohmann::json::parse(
+                    form_field(body, "study"), nullptr, false);
+                if (task.value.value("agent", std::string()) != "agent-experiments" ||
+                    task.value.value("kind", std::string()) != "experiment" ||
+                    task.value.value("status", std::string()) != "succeeded" ||
+                    proposal.value("kind", std::string()) != "proposal" ||
+                    !proposal.value("confirm", false) ||
+                    !proposal.value("study", nlohmann::json()).is_object()) {
+                    prepared = ApiResult::failure(
+                        "invalid_input",
+                        "That task has no ExperimentsAgent proposal to confirm.");
+                } else if (form_field(body, "proposal_sha256") != proposal_digest(proposal)) {
+                    prepared = ApiResult::failure(
+                        "conflict", "The ExperimentsAgent proposal changed before confirmation.");
+                } else if (study.is_discarded() || !study.is_object()) {
+                    prepared = ApiResult::failure(
+                        "invalid_input", "The edited study proposal must be a JSON object.");
+                } else {
+                    proposal["study"] = study;
+                    input["message"] = "Confirm and start the reviewed study proposal.";
+                    input["context"] = {{"confirmed_proposal", std::move(proposal)}};
+                }
+            }
+        }
+        const ApiResult result =
+            prepared ? std::move(*prepared)
+                     : unwrap(co_await workspace_call("agent_turn", input, context));
+        std::string back =
+            "/train/experiments?customer_id=" + oauth_url_encode(customer_id);
+        if (result.ok) {
+            back += "&task=" +
+                    oauth_url_encode(result.value.value("task_id", std::string()));
+        } else {
+            back += "&error=" + oauth_url_encode(result.error.message);
+        }
+        co_return co_await redirect(route, back);
     }
 
     boost::http::route_task serve_streams_page(boost::http::route_params& route, bool detail) {
@@ -14409,6 +14547,16 @@ bool ApiServer::start() {
             [&impl, path, mode](http::route_params& route) -> http::route_task {
                 return impl.observe_request(route, path, impl.serve_experiments_page(route, mode));
             });
+    }
+    for (const auto& [path, confirm] :
+         std::map<std::string, bool>{{"/train/experiments/agent", false},
+                                     {"/train/experiments/agent/confirm", true}}) {
+        router.add(http::method::post,
+                   path,
+                   [&impl, path, confirm](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, path, impl.serve_experiments_agent_form(route, confirm));
+                   });
     }
     for (const std::string path : {"/train/streams", "/train/stream"}) {
         router.add(http::method::get, path,

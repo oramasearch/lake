@@ -51,6 +51,23 @@ A changed pipeline needs **Approve** again before it runs.
 REST/MCP: `run_pipeline` with `{"project", "graph", "dataset_path": "datasets.accounts",
 "holdout_fraction": 0.2, "model_name": "…"}`.
 
+## Run an experiment
+
+Open **Train → Experiments** and describe the training or tuning goal in **Run an Experiment**.
+ExperimentsAgent reads the available planning information and returns a complete study proposal.
+Review its explanation and edit the study JSON, including objective, search space and budgets.
+Nothing starts until you press **Confirm and start study**. The first agent turn has no study write;
+the confirmed turn can start only the exact object you reviewed.
+
+The study page shows trials and their metric curves as they arrive. Ask ExperimentsAgent for study
+status or an explanation of the best trial through **Ask Orama**. Promotion remains a separate
+confirmation.
+
+REST uses `POST /v1/agent_turn`; MCP uses the `agent_turn` tool. Send
+`{"agent":"agent-experiments","kind":"experiment","message":"…"}`, follow its `task_id`, then
+send the reviewed result as `context.confirmed_proposal`. Direct clients may instead use the
+documented `start_study`, study/trial reads and confirmed promotion tools.
+
 ## Read the report
 
 The run page shows what the model learned from, what it leans on (a weight is reliance, not a

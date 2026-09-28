@@ -1,7 +1,8 @@
 # The web UI
 
-Train → Experiments studies, run charts, comparison, local chart assets, accessibility and
-control-to-capability mappings are in [experiments.md](experiments.md).
+Train → Experiments' ExperimentsAgent proposal, studies, run charts, comparison, local chart
+assets, accessibility and control-to-capability mappings are in
+[experiments.md](experiments.md).
 
 Repository clone/push instructions use the configured external origin and a valid first checkout.
 See [forge.md](forge.md) and the [private-instance runbook](../deployment/private-install.md).

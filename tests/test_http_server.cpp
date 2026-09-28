@@ -348,6 +348,7 @@ protected:
         workspace_config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"},
                                             {"agent-project", "http://project:8080"},
                                             {"agent-application", "http://application:8080"},
+                                            {"agent-experiments", "http://experiments:8080"},
                                             {"agent-autosuggest", "http://suggest:8080"},
                                             {"agent-creator", "http://creator:8080"}};
         workspace_config.internal_url = "http://lake.internal";
@@ -1778,6 +1779,133 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     const auto after = store_->get_web_app(app_id);
     ASSERT_TRUE(after);
     EXPECT_GT(after->generation, before->generation);
+}
+
+TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedTurn) {
+    auto connection = connect();
+    const auto body_of = [](const std::string& response) {
+        return nlohmann::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+    };
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const nlohmann::json customers =
+        body_of(connection->request("GET", "/v1/list_customers", "", cookie));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+
+    const nlohmann::json openapi =
+        body_of(connection->request("GET", "/v1/openapi.json", "", cookie));
+    const nlohmann::json listed = body_of(connection->request(
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})",
+        cookie,
+        "HTTP/1.1",
+        "",
+        "application/json"));
+    const auto tool = std::ranges::find_if(
+        listed["result"]["tools"],
+        [](const nlohmann::json& candidate) {
+            return candidate["name"] == "agent_turn";
+        });
+    ASSERT_NE(tool, listed["result"]["tools"].end());
+    const nlohmann::json operation = openapi["paths"]["/v1/agent_turn"]["post"];
+    EXPECT_EQ((*tool)["inputSchema"],
+              operation["requestBody"]["content"]["application/json"]["schema"]);
+    EXPECT_EQ((*tool)["outputSchema"],
+              operation["responses"]["200"]["content"]["application/json"]["schema"]);
+
+    const nlohmann::json turn = {{"customer_id", customer_id},
+                                 {"agent", "agent-experiments"},
+                                 {"kind", "experiment"},
+                                 {"message", "Tune retention"}};
+    const nlohmann::json rest = body_of(connection->request(
+        "POST", "/v1/agent_turn", turn.dump(), cookie, "HTTP/1.1", "", "application/json"));
+    ASSERT_TRUE(rest["ok"].get<bool>()) << rest.dump();
+    EXPECT_EQ(store_->get_agent_task(rest["value"]["task_id"])->agent, "agent-experiments");
+    const nlohmann::json mcp = body_of(connection->request(
+        "POST",
+        "/mcp",
+        nlohmann::json{{"jsonrpc", "2.0"},
+                       {"id", 2},
+                       {"method", "tools/call"},
+                       {"params", {{"name", "agent_turn"}, {"arguments", turn}}}}
+            .dump(),
+        cookie,
+        "HTTP/1.1",
+        "",
+        "application/json"));
+    ASSERT_TRUE(mcp["result"]["structuredContent"]["ok"].get<bool>()) << mcp.dump();
+
+    const std::string empty = connection->request(
+        "GET", "/train/experiments?customer_id=" + customer_id, "", cookie);
+    ASSERT_TRUE(empty.starts_with("HTTP/1.1 200")) << empty.substr(0, 300);
+    EXPECT_NE(empty.find("<h2>Run an Experiment</h2>"), std::string::npos);
+    EXPECT_NE(empty.find("data-capability=\"agent_turn\""), std::string::npos);
+    EXPECT_EQ(empty.find("name=\"goal\" rows=\"4\" placeholder=\"Tune a churn model for "
+                         "validation AUC with a bounded trial budget.\" required disabled"),
+              std::string::npos);
+
+    const std::string started = connection->request(
+        "POST",
+        "/train/experiments/agent",
+        "customer_id=" + customer_id + "&goal=Tune+retention+for+validation+AUC",
+        cookie);
+    ASSERT_TRUE(started.starts_with("HTTP/1.1 302")) << started.substr(0, 300);
+    const std::string task_id = task_of(started);
+    const auto first = store_->get_agent_task(task_id);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->agent, "agent-experiments");
+    EXPECT_EQ(first->kind, "experiment");
+    EXPECT_EQ(std::ranges::find(first->scopes, "create_study"), first->scopes.end());
+    const std::string working = connection->request(
+        "GET", response_header(started, "location"), "", cookie);
+    EXPECT_NE(working.find("ExperimentsAgent Is Working"), std::string::npos);
+
+    nlohmann::json study = {{"name", "Retention Tuning"},
+                            {"project", "retention"},
+                            {"pipeline", "training"},
+                            {"dataset", "accounts"},
+                            {"methodology", "M-1"},
+                            {"objective", {{"metric", "validation.auc"},
+                                           {"direction", "maximize"},
+                                           {"validation_split", "validation"}}},
+                            {"budgets", {{"max_trials", 4},
+                                         {"max_parallel_trials", 1},
+                                         {"max_wall_time_ms", 60000},
+                                         {"cost_cap", 5}}}};
+    agents_->answer = {{"ok", true},
+                       {"reply", "Review the bounded retention study."},
+                       {"result", {{"kind", "proposal"},
+                                   {"confirm", true},
+                                   {"study", study},
+                                   {"explanations", {{"objective", "Use validation AUC."}}}}}};
+    run_agent_task(*connection, task_id);
+    const std::string review = connection->request(
+        "GET", response_header(started, "location"), "", cookie);
+    EXPECT_NE(review.find("Proposed Study"), std::string::npos);
+    EXPECT_NE(review.find("Study proposal (JSON)"), std::string::npos);
+    const std::string sha_marker = "name=\"proposal_sha256\" value=\"";
+    const auto sha_at = review.find(sha_marker);
+    ASSERT_NE(sha_at, std::string::npos);
+    const std::string proposal_sha = review.substr(sha_at + sha_marker.size(), 64);
+
+    study["name"] = "Reviewed Retention Tuning";
+    const std::string confirmed = connection->request(
+        "POST",
+        "/train/experiments/agent/confirm",
+        "customer_id=" + customer_id + "&task_id=" + task_id +
+            "&proposal_sha256=" + proposal_sha +
+            "&study=" + lake::api::oauth_url_encode(study.dump()),
+        cookie);
+    ASSERT_TRUE(confirmed.starts_with("HTTP/1.1 302")) << confirmed.substr(0, 300);
+    const auto confirmed_task = store_->get_agent_task(task_of(confirmed));
+    ASSERT_TRUE(confirmed_task);
+    EXPECT_EQ(confirmed_task->body["context"]["confirmed_proposal"]["study"]["name"],
+              "Reviewed Retention Tuning");
+    EXPECT_NE(std::ranges::find(confirmed_task->scopes, "create_study"),
+              confirmed_task->scopes.end());
 }
 
 TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved) {

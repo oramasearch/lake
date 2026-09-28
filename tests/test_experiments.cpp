@@ -109,6 +109,33 @@ protected:
     }
 };
 
+TEST(ExperimentsRenderer, RunBoxShowsAnEditableConfirmedAgentProposal) {
+    lake::api::ExperimentsPage page;
+    page.customer_id = "customer-one";
+    page.customers = {{"customer-one", "Personal", true}};
+    page.data = {{"studies", json::array()}, {"runs", json::array()}};
+    page.experiments_agent = true;
+    page.agent_task = {
+        {"task_id", "task-one"},
+        {"status", "succeeded"},
+        {"answer",
+         {{"reply", "Review the bounded study."},
+          {"result",
+           {{"kind", "proposal"},
+            {"confirm", true},
+            {"study", lake::test::experiment_study().at("spec")},
+            {"explanations", {{"objective", "Use validation AUC."}}}}}}}};
+    page.proposal_sha256 = std::string(64, 'a');
+    const std::string html = lake::api::web_ui_experiments(page, true);
+    EXPECT_NE(html.find("<h2>Run an Experiment</h2>"), std::string::npos);
+    EXPECT_NE(html.find("Ask ExperimentsAgent"), std::string::npos);
+    EXPECT_NE(html.find("Study proposal (JSON)"), std::string::npos);
+    EXPECT_NE(html.find("validation.auc"), std::string::npos);
+    EXPECT_NE(html.find("Confirm and start study"), std::string::npos);
+    EXPECT_NE(html.find(std::string(64, 'a')), std::string::npos);
+    EXPECT_EQ(html.find("ExperimentsAgent is not registered"), std::string::npos);
+}
+
 TEST_F(Experiments, SpacePolicyConfirmationAndWorkspaceAliasesCannotBypassPromotion) {
     const auto object = store->find_policy_object("customer", customer);
     ASSERT_TRUE(object);

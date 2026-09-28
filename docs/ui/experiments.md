@@ -12,6 +12,25 @@ selected space. Starting a study displays its parameters and budgets in a confir
 Study and trial stop buttons are available to writers; promotion requires space administration.
 No page exposes a credential or contacts Zetta directly.
 
+## Run an Experiment
+
+The list begins with a **Run an Experiment** box. A person describes a training or tuning goal;
+the form starts an `agent_turn` for `agent-experiments` with kind `experiment` and redirects to the
+task on the same page. While it runs, the page refreshes its durable task state. A completed
+proposal shows the agent's explanation and its complete `study` JSON in an editable text area.
+
+**Confirm and start study** submits the edited JSON, the source task id and a digest of the stored
+proposal. The server reloads the task for the same person and space, verifies its agent, kind,
+successful state and digest, parses the edited object, and starts a second `agent_turn` carrying it
+as `context.confirmed_proposal`. The first task has no study action. Only the confirmed turn gets
+`create_study`; the agent then reaches the ordinary `start_study` policy, validation, confirmation
+and audit path through its workspace adapter. A stale digest, malformed JSON, another person's
+task or a non-proposal starts nothing.
+
+ExperimentsAgent must be present in the operator's agent endpoints. Otherwise the box remains
+visible, explains that it is unavailable, and disables submission. Ask Orama and the Project Agent
+can delegate the same goal through `agent_turn`; there is no page-only experiment operation.
+
 ## Studies and Runs
 
 A study displays objective history and its best-so-far line, normalized parallel coordinates,
@@ -42,6 +61,7 @@ from curve drawing and live metric requests.
 
 | Control or data region | Registered capability |
 |---|---|
+| Run an Experiment goal, task state, editable proposal and confirmation | `agent_turn` |
 | Space/project/state filters and list | `list_experiments` |
 | Start form and confirmation | `start_study` |
 | Study status and trial links | `get_experiment_study` |
@@ -78,9 +98,12 @@ tokens and redraw for explicit or system theme changes.
 
 Build static and shared using the authorized bridge Zetta client transport and run their complete
 CTest suites with fresh local PostgreSQL connection databases. Run `tools/ui/test-token-gates.sh`.
-`Experiments.*` covers every route's current navigation item and every rendered control's capability
-mapping. `SchemaConformance.*` independently validates actual REST/MCP output schemas. The native
-chart test verifies numerical behavior and event cursor continuation.
+`Experiments.*` covers every route's current navigation item, the editable agent proposal, and
+every rendered control's capability mapping. The parameterized HTTP case
+`ExperimentsAgentRestMcpAndPageUseTheSameConfirmedTurn` calls `agent_turn` through REST and MCP,
+then starts, edits and confirms the same operation through the page. `SchemaConformance.*`
+independently validates actual REST/MCP output schemas. The native chart test verifies numerical
+behavior and event cursor continuation.
 
 For interactive local review, run `LAKE_EXPERIMENT_BROWSER=1 build/tests/lake-tests
 --gtest_filter=Experiments.EveryPageControlUsesACapabilityAndNavigationOwnsAllExperimentRoutes`.
