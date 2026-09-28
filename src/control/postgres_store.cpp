@@ -4038,6 +4038,281 @@ public:
         });
     }
 
+    static constexpr const char* web_app_columns =
+        "a.id::text, a.customer_id::text, a.name, a.mode, a.source_repository, "
+        "a.source_revision, a.source_path, a.image, a.framework, a.port, a.replicas, a.host, "
+        "a.auth, a.bindings_json::text, a.env_json::text, a.secret_env_refs::text, a.desired, "
+        "a.generation, a.phase, a.url, a.ready, a.message, a.observed_generation, "
+        "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+    static WebApp web_app_from(const pqxx::row& row) {
+        WebApp app;
+        app.id = row[0].as<std::string>();
+        app.customer_id = row[1].as<std::string>();
+        app.name = row[2].as<std::string>();
+        app.mode = row[3].as<std::string>();
+        app.source_repository = row[4].as<std::string>();
+        app.source_revision = row[5].as<std::string>();
+        app.source_path = row[6].as<std::string>();
+        app.image = row[7].as<std::string>();
+        app.framework = row[8].as<std::string>();
+        app.port = row[9].as<int>();
+        app.replicas = row[10].as<int>();
+        app.host = row[11].as<std::string>();
+        app.auth = row[12].as<std::string>();
+        app.bindings = nlohmann::json::parse(row[13].as<std::string>());
+        app.env = nlohmann::json::parse(row[14].as<std::string>());
+        app.secret_env_refs = nlohmann::json::parse(row[15].as<std::string>());
+        app.desired = row[16].as<std::string>();
+        app.generation = row[17].as<std::int64_t>();
+        app.phase = row[18].as<std::string>();
+        app.url = row[19].as<std::string>();
+        app.ready = row[20].as<bool>();
+        app.message = row[21].as<std::string>();
+        app.observed_generation = row[22].as<std::int64_t>();
+        app.updated_at = row[23].as<std::string>();
+        return app;
+    }
+
+    static Result<WebApp> one_web_app(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + web_app_columns + " FROM apps a WHERE a.id = $1::uuid", id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no app " + id});
+        }
+        return web_app_from(rows[0]);
+    }
+
+    Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) override {
+        return with_tx<std::vector<WebApp>>([&](pqxx::work& tx) -> Result<std::vector<WebApp>> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + web_app_columns +
+                                   " FROM apps a WHERE a.customer_id = $1::uuid "
+                                   "AND NOT (a.desired = 'absent' AND a.phase = 'Deleted') "
+                                   "ORDER BY a.updated_at, a.id",
+                               customer_id);
+            std::vector<WebApp> apps;
+            for (const pqxx::row& row : rows) {
+                apps.push_back(web_app_from(row));
+            }
+            return apps;
+        });
+    }
+
+    Result<WebApp> get_web_app(const std::string& id) override {
+        return with_tx<WebApp>(
+            [&](pqxx::work& tx) -> Result<WebApp> { return one_web_app(tx, id); });
+    }
+
+    Result<WebApp> create_web_app(const NewWebApp& input) override {
+        return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
+            const pqxx::result customers = tx.exec_params(
+                "SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", input.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+            }
+            const pqxx::result conflicts = tx.exec_params(
+                "SELECT customer_id::text, name, host FROM apps WHERE desired <> 'absent' "
+                "AND ((customer_id = $1::uuid AND name = $2) OR host = $3)",
+                input.customer_id,
+                input.name,
+                input.host);
+            if (!conflicts.empty()) {
+                const bool same_name = conflicts[0][0].as<std::string>() == input.customer_id &&
+                                       conflicts[0][1].as<std::string>() == input.name;
+                return std::unexpected(
+                    StoreError{"conflict",
+                               same_name ? "an app named " + input.name + " already exists"
+                                         : "an app already uses host " + input.host});
+            }
+            const pqxx::result usage =
+                tx.exec_params("SELECT count(*), COALESCE(sum(replicas), 0) FROM apps "
+                               "WHERE customer_id = $1::uuid AND desired <> 'absent'",
+                               input.customer_id);
+            if (input.max_apps != 0 && usage[0][0].as<std::size_t>() >= input.max_apps) {
+                return std::unexpected(StoreError{"quota_exceeded", "app quota reached"});
+            }
+            if (input.max_replicas != 0 &&
+                usage[0][1].as<std::size_t>() + static_cast<std::size_t>(input.replicas) >
+                    input.max_replicas) {
+                return std::unexpected(StoreError{"quota_exceeded", "app replica quota reached"});
+            }
+            const std::string id = new_uuid_v4();
+            nlohmann::json bindings = input.bindings;
+            std::vector<WebAppCredential> credentials;
+            const auto mint_credential = [&](std::string kind,
+                                             std::string secret_ref,
+                                             std::vector<std::string> scopes,
+                                             std::string_view prefix) -> Result<void> {
+                const std::string value =
+                    std::string(prefix) + id + "." + identity_crypto::random_secret();
+                if (value.ends_with('.') || identity_crypto::sha256_hex(value).empty()) {
+                    return std::unexpected(
+                        StoreError{"store_error", "could not create an app credential"});
+                }
+                credentials.push_back(
+                    {id, std::move(kind), std::move(secret_ref), std::move(scopes), value});
+                return {};
+            };
+            if (bindings.value("zetta", nlohmann::json(false)).is_object()) {
+                const auto scopes =
+                    bindings.at("zetta").at("scopes").get<std::vector<std::string>>();
+                if (auto minted = mint_credential("workspace",
+                                                  bindings.at("zetta").at("secret_ref"),
+                                                  scopes,
+                                                  web_app_workspace_credential_prefix);
+                    !minted) {
+                    return std::unexpected(minted.error());
+                }
+            }
+            if (auto minted = mint_credential("events",
+                                              "app-events-publisher",
+                                              {"publish_app_event"},
+                                              web_app_event_credential_prefix);
+                !minted) {
+                return std::unexpected(minted.error());
+            }
+            tx.exec_params(
+                "INSERT INTO apps (id, customer_id, name, mode, source_repository, "
+                "source_revision, source_path, image, framework, port, replicas, host, auth, "
+                "bindings_json, env_json, secret_env_refs) VALUES ($1::uuid, $2::uuid, $3, $4, "
+                "$5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb)",
+                id,
+                input.customer_id,
+                input.name,
+                input.mode,
+                input.source_repository,
+                input.source_revision,
+                input.source_path,
+                input.image,
+                input.framework,
+                input.port,
+                input.replicas,
+                input.host,
+                input.auth,
+                bindings.dump(),
+                input.env.dump(),
+                input.secret_env_refs.dump());
+            for (const WebAppCredential& credential : credentials) {
+                const std::string purpose = "app.credential." + id + "." + credential.kind;
+                const Result<std::string> encrypted = encrypt_secret(tx, purpose, credential.value);
+                if (!encrypted) {
+                    return std::unexpected(encrypted.error());
+                }
+                tx.exec_params(
+                    "INSERT INTO app_credentials (app_id, kind, secret_ref, credential_sha256, "
+                    "ciphertext, scopes, user_id, taap_id, pool_id) VALUES ($1::uuid, $2, $3, "
+                    "$4, $5, $6::jsonb, $7, $8, $9)",
+                    id,
+                    credential.kind,
+                    credential.secret_ref,
+                    identity_crypto::sha256_hex(credential.value),
+                    *encrypted,
+                    nlohmann::json(credential.scopes).dump(),
+                    input.created_by_user_id,
+                    input.created_by_taap_id,
+                    input.pool_id);
+            }
+            tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
+            return one_web_app(tx, id);
+        });
+    }
+
+    Result<WebApp> update_web_app(const std::string& id, const WebAppPatch& patch) override {
+        return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
+            const pqxx::result locked = tx.exec_params(
+                "SELECT customer_id::text FROM apps WHERE id = $1::uuid FOR UPDATE", id);
+            if (locked.empty()) {
+                return std::unexpected(StoreError{"not_found", "no app " + id});
+            }
+            const std::string customer_id = locked[0][0].as<std::string>();
+            tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", customer_id);
+            Result<WebApp> current = one_web_app(tx, id);
+            if (!current) {
+                return current;
+            }
+            if (current->desired == "absent") {
+                return std::unexpected(StoreError{"conflict", "the app is already deleted"});
+            }
+            const int replicas = patch.replicas.value_or(current->replicas);
+            const std::string desired = patch.desired.value_or(current->desired);
+            if (patch.max_replicas != 0 && desired != "absent") {
+                const pqxx::result usage = tx.exec_params(
+                    "SELECT COALESCE(sum(replicas), 0) FROM apps WHERE customer_id = $1::uuid "
+                    "AND id <> $2::uuid AND desired <> 'absent'",
+                    customer_id,
+                    id);
+                if (usage[0][0].as<std::size_t>() + static_cast<std::size_t>(replicas) >
+                    patch.max_replicas) {
+                    return std::unexpected(
+                        StoreError{"quota_exceeded", "app replica quota reached"});
+                }
+            }
+            current->mode = patch.mode.value_or(current->mode);
+            current->source_repository =
+                patch.source_repository.value_or(current->source_repository);
+            current->source_revision = patch.source_revision.value_or(current->source_revision);
+            current->source_path = patch.source_path.value_or(current->source_path);
+            current->image = patch.image.value_or(current->image);
+            current->replicas = replicas;
+            current->bindings = patch.bindings.value_or(current->bindings);
+            current->env = patch.env.value_or(current->env);
+            current->secret_env_refs = patch.secret_env_refs.value_or(current->secret_env_refs);
+            current->desired = desired;
+            tx.exec_params(
+                "UPDATE apps SET mode = $2, source_repository = $3, source_revision = $4, "
+                "source_path = $5, image = $6, replicas = $7, bindings_json = $8::jsonb, "
+                "env_json = $9::jsonb, secret_env_refs = $10::jsonb, desired = $11, "
+                "generation = generation + 1, updated_at = now() WHERE id = $1::uuid",
+                id,
+                current->mode,
+                current->source_repository,
+                current->source_revision,
+                current->source_path,
+                current->image,
+                current->replicas,
+                current->bindings.dump(),
+                current->env.dump(),
+                current->secret_env_refs.dump(),
+                current->desired);
+            tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
+            return one_web_app(tx, id);
+        });
+    }
+
+    Result<std::vector<WebAppCredential>> web_app_credentials(const std::string& id) override {
+        return with_tx<std::vector<WebAppCredential>>(
+            [&](pqxx::work& tx) -> Result<std::vector<WebAppCredential>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT kind, secret_ref, scopes::text, ciphertext FROM app_credentials "
+                    "WHERE app_id = $1::uuid ORDER BY kind",
+                    id);
+                if (rows.empty()) {
+                    const pqxx::result apps =
+                        tx.exec_params("SELECT 1 FROM apps WHERE id = $1::uuid", id);
+                    if (apps.empty()) {
+                        return std::unexpected(StoreError{"not_found", "no app " + id});
+                    }
+                }
+                std::vector<WebAppCredential> credentials;
+                for (const pqxx::row& row : rows) {
+                    const std::string kind = row[0].as<std::string>();
+                    const Result<std::string> value = decrypt_secret(
+                        tx, "app.credential." + id + "." + kind, row[3].as<std::string>());
+                    if (!value) {
+                        return std::unexpected(value.error());
+                    }
+                    credentials.push_back({id,
+                                           kind,
+                                           row[1].as<std::string>(),
+                                           nlohmann::json::parse(row[2].as<std::string>())
+                                               .get<std::vector<std::string>>(),
+                                           *value});
+                }
+                return credentials;
+            });
+    }
+
     static constexpr const char* store_columns =
         "s.id::text, s.customer_id::text, s.type, s.provider, s.name, s.slug, "
         "COALESCE((s.spec->>'size_gi')::int, 10), COALESCE(s.spec->>'region', ''), "
@@ -4403,8 +4678,7 @@ public:
         });
     }
 
-    Result<AgentCronSchedule>
-    create_agent_cron_schedule(const NewAgentCronSchedule& in) override {
+    Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule& in) override {
         if (in.agent_id.empty() || in.cron.empty() || in.scopes.empty()) {
             return std::unexpected(StoreError{"invalid_input", "agent schedule is invalid"});
         }
@@ -4532,8 +4806,10 @@ public:
         "COALESCE(t.requested_by_user_id::text, ''), t.requested_by_taap_id, "
         "to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(ts.phase, ''), COALESCE(ts.message, ''), "
-        "COALESCE(to_char(ts.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
-        "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), "
+        "COALESCE(to_char(ts.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "''), "
+        "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "''), "
         "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text, "
         "COALESCE(ts.events_from, 0)";
 
@@ -4557,7 +4833,8 @@ public:
         task.kind = row[3].as<std::string>();
         task.conversation_id = row[4].as<std::string>();
         task.body = nlohmann::json::parse(row[5].as<std::string>(), nullptr, false);
-        task.scopes = nlohmann::json::parse(row[6].as<std::string>()).get<std::vector<std::string>>();
+        task.scopes =
+            nlohmann::json::parse(row[6].as<std::string>()).get<std::vector<std::string>>();
         task.deadline_seconds = row[7].as<int>();
         task.desired = row[8].as<std::string>();
         task.requested_by_user_id = row[9].as<std::string>();
@@ -4583,7 +4860,8 @@ public:
                 "INSERT INTO agent_tasks (id, customer_id, agent, kind, conversation_id, body, "
                 "scopes, deadline_seconds, requested_by_user_id, requested_by_taap_id) VALUES "
                 "($1::uuid, $2::uuid, $3, $4, NULLIF($5, '')::uuid, $6::jsonb, "
-                "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, NULLIF($9, '')::uuid, $10)",
+                "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, NULLIF($9, '')::uuid, "
+                "$10)",
                 id,
                 in.customer_id,
                 in.agent,
@@ -4685,8 +4963,7 @@ public:
 
     Result<void> mark_agent_task_published(const std::string& id) override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            tx.exec_params(
-                "UPDATE agent_tasks SET published_at = now() WHERE id = $1::uuid", id);
+            tx.exec_params("UPDATE agent_tasks SET published_at = now() WHERE id = $1::uuid", id);
             return {};
         });
     }
@@ -4747,37 +5024,38 @@ public:
                 return {};
             }
             for (const Opportunity& row : rows) {
-                tx.exec_params("INSERT INTO opportunities (customer_id, task_id, rank, intent, "
-                               "solution, methodology, why, payload, status) VALUES ($1::uuid, "
-                               "$2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9) ON CONFLICT DO NOTHING",
-                               row.customer_id,
-                               row.task_id,
-                               row.rank,
-                               row.intent,
-                               row.solution,
-                               row.methodology,
-                               row.why,
-                               row.payload.dump(),
-                               row.status);
+                tx.exec_params(
+                    "INSERT INTO opportunities (customer_id, task_id, rank, intent, "
+                    "solution, methodology, why, payload, status) VALUES ($1::uuid, "
+                    "$2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9) ON CONFLICT DO NOTHING",
+                    row.customer_id,
+                    row.task_id,
+                    row.rank,
+                    row.intent,
+                    row.solution,
+                    row.methodology,
+                    row.why,
+                    row.payload.dump(),
+                    row.status);
             }
             return {};
         });
     }
 
     Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override {
-        return with_tx<std::vector<Opportunity>>(
-            [&](pqxx::work& tx) -> Result<std::vector<Opportunity>> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("SELECT ") + opportunity_columns +
-                        " FROM opportunities WHERE customer_id = $1::uuid ORDER BY created_at DESC, "
-                        "rank",
-                    customer_id);
-                std::vector<Opportunity> out;
-                for (const pqxx::row& row : rows) {
-                    out.push_back(opportunity_from(row));
-                }
-                return out;
-            });
+        return with_tx<std::vector<Opportunity>>([&](pqxx::work& tx)
+                                                     -> Result<std::vector<Opportunity>> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + opportunity_columns +
+                    " FROM opportunities WHERE customer_id = $1::uuid ORDER BY created_at DESC, "
+                    "rank",
+                customer_id);
+            std::vector<Opportunity> out;
+            for (const pqxx::row& row : rows) {
+                out.push_back(opportunity_from(row));
+            }
+            return out;
+        });
     }
 
     Result<Opportunity> set_opportunity_status(const std::string& id,
@@ -5639,7 +5917,61 @@ public:
             return {};
         });
     }
+    Result<Principal>
+    app_principal(const std::string& secret, std::string_view prefix, std::string_view kind) {
+        const auto parsed = parse_agent_credential(secret, prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "app credential is not active"});
+        }
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        if (digest.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not hash app credential"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT c.credential_sha256, c.scopes::text, c.user_id, c.taap_id, c.pool_id, "
+                "a.desired, a.customer_id::text "
+                "FROM app_credentials c JOIN apps a ON a.id = c.app_id "
+                "WHERE c.app_id = $1::uuid AND c.kind = $2 AND a.phase <> 'Deleted'",
+                parsed->first,
+                kind);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "app credential is not active"});
+            }
+            const std::string expected = rows[0][0].as<std::string>();
+            if (expected.size() != digest.size() ||
+                CRYPTO_memcmp(expected.data(), digest.data(), digest.size()) != 0) {
+                return std::unexpected(StoreError{"not_found", "app credential is not active"});
+            }
+            const bool events = kind == "events";
+            if (!events && rows[0][5].as<std::string>() == "absent") {
+                return std::unexpected(StoreError{"not_found", "app credential is not active"});
+            }
+            const std::string taap_id = events ? "admin" : rows[0][3].as<std::string>();
+            if (!events && taap_id.empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "app workspace identity is unavailable"});
+            }
+            return Principal{
+                rows[0][2].as<std::string>(),
+                taap_id,
+                "app:" + parsed->first,
+                "",
+                rows[0][4].as<std::string>(),
+                events ? "app_event" : "app_workspace",
+                nlohmann::json::parse(rows[0][1].as<std::string>()).get<std::vector<std::string>>(),
+                std::nullopt,
+                parsed->first,
+                rows[0][6].as<std::string>()};
+        });
+    }
     Result<Principal> context_for(const std::string& secret) override {
+        if (secret.starts_with(web_app_workspace_credential_prefix)) {
+            return app_principal(secret, web_app_workspace_credential_prefix, "workspace");
+        }
+        if (secret.starts_with(web_app_event_credential_prefix)) {
+            return app_principal(secret, web_app_event_credential_prefix, "events");
+        }
         if (secret.starts_with(agent_launch_credential_prefix)) {
             return launch_principal(secret);
         }

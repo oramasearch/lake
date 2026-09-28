@@ -84,6 +84,10 @@ int usage() {
         "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
     std::println(
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
+    std::println("  LAKE_APPS_WILDCARD is the required parent domain for Ship app hosts");
+    std::println("  LAKE_APPS_PER_CUSTOMER caps live apps per space (default 0: no limit)");
+    std::println(
+        "  LAKE_APP_REPLICAS_PER_CUSTOMER caps desired app replicas (default 0: no limit)");
     std::println(
         "  LAKE_AGENT_ENDPOINTS lists the Agent Library agents this lake runs (key=url,...)");
     std::println("  LAKE_BASE_AGENT_MODEL is the base-agent checkpoint inside a workspace");
@@ -107,6 +111,9 @@ int main(int argc, char** argv) {
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
+    opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
+    opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
+    opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
     const std::string operator_zetta_url = env_or("LAKE_OPERATOR_ZETTA_URL", "");
     const std::string operator_zetta_token = env_or("LAKE_OPERATOR_ZETTA_TOKEN", "");
     const std::string logs_url = env_or("LAKE_LOGS_URL", "");
@@ -244,9 +251,12 @@ int main(int argc, char** argv) {
     if (platform_transport_required) {
         lake::control::install_zetta_control_transport();
     }
-    if (!operator_zetta_url.empty()) {
-        auto control = std::make_shared<lake::control::ZettaControlClient>(operator_zetta_url,
-                                                                           operator_zetta_token);
+    if (!operator_zetta_url.empty() || !logs_url.empty()) {
+        std::shared_ptr<lake::control::ZettaControl> control;
+        if (!operator_zetta_url.empty()) {
+            control = std::make_shared<lake::control::ZettaControlClient>(operator_zetta_url,
+                                                                          operator_zetta_token);
+        }
         std::shared_ptr<lake::control::LokiSource> logs;
         if (!logs_url.empty()) {
             logs = std::make_shared<lake::control::LokiHttpSource>(logs_url, logs_token);
@@ -297,7 +307,8 @@ int main(int argc, char** argv) {
     }
     const std::string bus_url = env_or("LAKE_DATA_PLANE_URL", "");
     const std::string bus_token = env_or("LAKE_DATA_PLANE_TOKEN", "");
-    if (workspaces_configured && !bus_agents.empty()) {
+    const bool app_bus_configured = opts.store != nullptr && !opts.apps_wildcard.empty();
+    if ((workspaces_configured && !bus_agents.empty()) || app_bus_configured) {
         std::shared_ptr<lake::control::AgentBus> bus;
         if (!bus_url.empty() && !bus_token.empty()) {
             bus = std::make_shared<lake::control::ZettaAgentBus>(bus_url, bus_token);
@@ -364,9 +375,9 @@ int main(int argc, char** argv) {
                         std::println(
                             stderr,
                             "{}",
-                            nlohmann::json{{"event", "agent_bus_unavailable"},
-                                           {"error",
-                                            created ? created->error().message : "transport"}}
+                            nlohmann::json{
+                                {"event", "agent_bus_unavailable"},
+                                {"error", created ? created->error().message : "transport"}}
                                 .dump());
                         std::this_thread::sleep_for(std::chrono::seconds(5));
                         continue;

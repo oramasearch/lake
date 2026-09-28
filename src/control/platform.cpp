@@ -621,6 +621,28 @@ PlatformService::environment_logs(std::string repository_id,
     co_return PlatformResult<json>(std::move(*result));
 }
 
+liquid::runtime::task<PlatformResult<json>>
+PlatformService::app_logs(std::string app_id, std::string since, int limit, std::string direction) {
+    if (!logs_) {
+        co_return platform_failure<json>(
+            {"store_unavailable", "the Loki-compatible log source is not configured"});
+    }
+    const std::string namespace_name = web_app_namespace(app_id);
+    if (namespace_name.empty()) {
+        co_return platform_failure<json>({"invalid_input", "app id is not a UUID"});
+    }
+    auto completed = co_await logs_->query(namespace_name, since, limit, direction);
+    if (!completed) {
+        co_return platform_failure<json>(platform_error(completed.error()));
+    }
+    auto result = std::move(*completed);
+    if (!result) {
+        co_return platform_failure<json>(result.error());
+    }
+    (*result)["app_id"] = app_id;
+    co_return PlatformResult<json>(std::move(*result));
+}
+
 PlatformResult<void> PlatformService::require_writable() const {
     if (!control_ || !platform_store_) {
         return std::unexpected(

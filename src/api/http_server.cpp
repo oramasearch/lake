@@ -4859,6 +4859,9 @@ struct ApiServer::Impl {
         ctx.non_expiring_credentials_allowed = options.allow_non_expiring_credentials;
         ctx.agent_caller = options.agent_caller.get();
         ctx.agent_bus = options.agent_bus.get();
+        ctx.apps_wildcard = options.apps_wildcard;
+        ctx.apps_per_customer = options.apps_per_customer;
+        ctx.app_replicas_per_customer = options.app_replicas_per_customer;
         ctx.callers = callers.get();
         ctx.transparency = transparency.get();
         ctx.checkpoints = checkpoints.get();
@@ -4933,6 +4936,8 @@ struct ApiServer::Impl {
                 ctx.credential_device_id = principal->device_id;
                 ctx.credential_session_id = principal->session_id;
                 ctx.credential_kind = principal->kind;
+                ctx.credential_workload_id = principal->workload_id;
+                ctx.credential_customer_id = principal->workload_customer_id;
                 ctx.credential_expires_at_unix = principal->expires_at_unix;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;

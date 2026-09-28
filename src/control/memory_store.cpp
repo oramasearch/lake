@@ -728,6 +728,213 @@ Result<void> InMemoryStore::set_service_status(const std::string& id,
     return std::unexpected(StoreError{"not_found", "no service " + id});
 }
 
+Result<std::vector<WebApp>> InMemoryStore::list_web_apps(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<WebApp> apps;
+    for (const WebApp& app : web_apps_) {
+        if (app.customer_id == customer_id &&
+            !(app.desired == "absent" && app.phase == "Deleted")) {
+            apps.push_back(app);
+        }
+    }
+    return apps;
+}
+
+Result<WebApp> InMemoryStore::get_web_app(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (app == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    return *app;
+}
+
+Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& customer) {
+            return customer.id == input.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+    }
+    std::size_t app_count = 0;
+    std::size_t replica_count = 0;
+    for (const WebApp& app : web_apps_) {
+        if (app.desired == "absent") {
+            continue;
+        }
+        if (app.host == input.host) {
+            return std::unexpected(
+                StoreError{"conflict", "an app already uses host " + input.host});
+        }
+        if (app.customer_id != input.customer_id) {
+            continue;
+        }
+        if (app.name == input.name) {
+            return std::unexpected(
+                StoreError{"conflict", "an app named " + input.name + " already exists"});
+        }
+        ++app_count;
+        replica_count += static_cast<std::size_t>(app.replicas);
+    }
+    if (input.max_apps != 0 && app_count >= input.max_apps) {
+        return std::unexpected(StoreError{"quota_exceeded", "app quota reached"});
+    }
+    if (input.max_replicas != 0 &&
+        replica_count + static_cast<std::size_t>(input.replicas) > input.max_replicas) {
+        return std::unexpected(StoreError{"quota_exceeded", "app replica quota reached"});
+    }
+    WebApp app;
+    app.id = new_uuid_v4();
+    app.customer_id = input.customer_id;
+    app.name = input.name;
+    app.mode = input.mode;
+    app.source_repository = input.source_repository;
+    app.source_revision = input.source_revision;
+    app.source_path = input.source_path;
+    app.image = input.image;
+    app.framework = input.framework;
+    app.port = input.port;
+    app.replicas = input.replicas;
+    app.host = input.host;
+    app.auth = input.auth;
+    app.bindings = input.bindings;
+    app.env = input.env;
+    app.secret_env_refs = input.secret_env_refs;
+    app.updated_at = now_iso8601();
+
+    std::vector<WebAppCredentialRecord> credentials;
+    const auto retain_credential = [&](std::string kind,
+                                       std::string secret_ref,
+                                       std::vector<std::string> scopes,
+                                       std::string_view prefix) -> Result<void> {
+        const std::string value =
+            std::string(prefix) + app.id + "." + identity_crypto::random_secret();
+        const std::string digest = identity_crypto::sha256_hex(value);
+        if (value.ends_with('.') || digest.empty()) {
+            return std::unexpected(StoreError{"store_error", "could not create an app credential"});
+        }
+        credentials.push_back(
+            {WebAppCredential{
+                 app.id, std::move(kind), std::move(secret_ref), std::move(scopes), value},
+             digest,
+             input.created_by_user_id,
+             input.created_by_taap_id,
+             input.pool_id});
+        return {};
+    };
+    if (app.bindings.value("zetta", nlohmann::json(false)).is_object()) {
+        const auto scopes = app.bindings.at("zetta").at("scopes").get<std::vector<std::string>>();
+        if (auto retained = retain_credential("workspace",
+                                              app.bindings.at("zetta").at("secret_ref"),
+                                              scopes,
+                                              web_app_workspace_credential_prefix);
+            !retained) {
+            return std::unexpected(retained.error());
+        }
+    }
+    if (auto retained = retain_credential("events",
+                                          "app-events-publisher",
+                                          {"publish_app_event"},
+                                          web_app_event_credential_prefix);
+        !retained) {
+        return std::unexpected(retained.error());
+    }
+    web_apps_.push_back(app);
+    web_app_credentials_.insert(
+        web_app_credentials_.end(), credentials.begin(), credentials.end());
+    return app;
+}
+
+Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebAppPatch& patch) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (found == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    if (found->desired == "absent") {
+        return std::unexpected(StoreError{"conflict", "the app is already deleted"});
+    }
+    const int replicas = patch.replicas.value_or(found->replicas);
+    const std::string desired = patch.desired.value_or(found->desired);
+    std::size_t replica_count = 0;
+    for (const WebApp& app : web_apps_) {
+        if (app.customer_id != found->customer_id || app.id == id || app.desired == "absent") {
+            continue;
+        }
+        replica_count += static_cast<std::size_t>(app.replicas);
+    }
+    if (desired != "absent") {
+        replica_count += static_cast<std::size_t>(replicas);
+    }
+    if (patch.max_replicas != 0 && replica_count > patch.max_replicas) {
+        return std::unexpected(StoreError{"quota_exceeded", "app replica quota reached"});
+    }
+    if (patch.mode) {
+        found->mode = *patch.mode;
+    }
+    if (patch.source_repository) {
+        found->source_repository = *patch.source_repository;
+    }
+    if (patch.source_revision) {
+        found->source_revision = *patch.source_revision;
+    }
+    if (patch.source_path) {
+        found->source_path = *patch.source_path;
+    }
+    if (patch.image) {
+        found->image = *patch.image;
+    }
+    found->replicas = replicas;
+    if (patch.bindings) {
+        found->bindings = *patch.bindings;
+    }
+    if (patch.env) {
+        found->env = *patch.env;
+    }
+    if (patch.secret_env_refs) {
+        found->secret_env_refs = *patch.secret_env_refs;
+    }
+    found->desired = desired;
+    ++found->generation;
+    found->updated_at = now_iso8601();
+    return *found;
+}
+
+Result<std::vector<WebAppCredential>> InMemoryStore::web_app_credentials(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (app == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    std::vector<WebAppCredential> credentials;
+    for (const WebAppCredentialRecord& record : web_app_credentials_) {
+        if (record.credential.app_id == id) {
+            credentials.push_back(record.credential);
+        }
+    }
+    return credentials;
+}
+
+Result<void> InMemoryStore::set_web_app_status(const std::string& id,
+                                               std::string phase,
+                                               std::string url,
+                                               bool ready,
+                                               std::string message,
+                                               std::int64_t observed_generation) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (app == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    app->phase = std::move(phase);
+    app->url = std::move(url);
+    app->ready = ready;
+    app->message = std::move(message);
+    app->observed_generation = observed_generation;
+    app->updated_at = now_iso8601();
+    return {};
+}
+
 Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedStore> stores;
@@ -998,8 +1205,8 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
     if (schedule == agent_cron_schedules_.end()) {
         return std::unexpected(StoreError{"not_found", "no agent schedule " + schedule_id});
     }
-    auto run = std::ranges::find_if(
-        agent_cron_runs_, [&](const auto& entry) { return entry.second.id == run_id; });
+    auto run = std::ranges::find_if(agent_cron_runs_,
+                                    [&](const auto& entry) { return entry.second.id == run_id; });
     if (run == agent_cron_runs_.end()) {
         AgentLaunch launch;
         launch.id = run_id;
@@ -1045,8 +1252,8 @@ Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
 
 namespace {
 std::string utc_now() {
-    return std::format(
-        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    return std::format("{:%FT%TZ}",
+                       std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
 }
 } // namespace
 
@@ -1089,8 +1296,7 @@ Result<AgentTask> InMemoryStore::record_agent_task_event(const std::string& id,
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
     if (found == agent_tasks_.end() || found->agent != agent || found->phase != "Running") {
-        return std::unexpected(
-            StoreError{"conflict", "the task is not running on " + agent});
+        return std::unexpected(StoreError{"conflict", "the task is not running on " + agent});
     }
     found->phase = phase;
     found->message = message;
@@ -1172,8 +1378,9 @@ Result<void> InMemoryStore::record_opportunities(const std::vector<Opportunity>&
     }
     for (Opportunity row : rows) {
         row.id = new_uuid_v4();
-        row.created_at = std::format(
-            "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+        row.created_at =
+            std::format("{:%FT%TZ}",
+                        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
         opportunities_.push_back(std::move(row));
     }
     return {};
@@ -2333,6 +2540,49 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
+    const auto app_principal = [&](std::string_view prefix,
+                                   std::string_view kind) -> std::optional<Result<Principal>> {
+        if (!secret.starts_with(prefix)) {
+            return std::nullopt;
+        }
+        const auto parsed = parse_agent_credential(secret, prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "app credential is not active"});
+        }
+        const auto app = std::ranges::find(web_apps_, parsed->first, &WebApp::id);
+        const auto record =
+            std::ranges::find_if(web_app_credentials_, [&](const WebAppCredentialRecord& value) {
+                return value.credential.app_id == parsed->first && value.credential.kind == kind;
+            });
+        if (app == web_apps_.end() || app->phase == "Deleted" ||
+            (kind == "workspace" && app->desired == "absent") ||
+            record == web_app_credentials_.end() ||
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret), record->digest)) {
+            return std::unexpected(StoreError{"not_found", "app credential is not active"});
+        }
+        const bool events = kind == "events";
+        const std::string principal = events ? "admin" : record->taap_id;
+        if (!events && principal.empty()) {
+            return std::unexpected(
+                StoreError{"unauthorized", "app workspace identity is unavailable"});
+        }
+        return Principal{record->user_id,
+                         principal,
+                         "app:" + app->id,
+                         "",
+                         record->pool_id,
+                         events ? "app_event" : "app_workspace",
+                         record->credential.scopes,
+                         std::nullopt,
+                         app->id,
+                         app->customer_id};
+    };
+    if (auto principal = app_principal(web_app_workspace_credential_prefix, "workspace")) {
+        return std::move(*principal);
+    }
+    if (auto principal = app_principal(web_app_event_credential_prefix, "events")) {
+        return std::move(*principal);
+    }
     if (secret.starts_with(agent_task_credential_prefix)) {
         const auto parsed = parse_agent_credential(secret, agent_task_credential_prefix);
         if (!parsed) {
@@ -2341,7 +2591,8 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
         const auto task = std::ranges::find(agent_tasks_, parsed->first, &AgentTask::id);
         if (task == agent_tasks_.end() || task->desired != "present" ||
             task->credential_sha256.empty() ||
-            !constant_time_hex_equal(identity_crypto::sha256_hex(secret), task->credential_sha256)) {
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                     task->credential_sha256)) {
             return std::unexpected(StoreError{"not_found", "session is not active"});
         }
         const auto user = std::ranges::find_if(

@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <string>
 
@@ -62,6 +63,10 @@ struct ServerOptions {
     std::shared_ptr<control::AgentCaller> agent_caller;
     // The agent bus (docs/api/agent-bus.md): agent turns are published and followed on it.
     std::shared_ptr<control::AgentTaskBus> agent_bus;
+    // Ship Apps wildcard and per-space quotas. Zero quotas mean no limit.
+    std::string apps_wildcard;
+    std::size_t apps_per_customer = 0;
+    std::size_t app_replicas_per_customer = 0;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;

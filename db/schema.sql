@@ -1687,3 +1687,79 @@ CREATE TABLE IF NOT EXISTS agent_task_events_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0033_agent_task_events') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0034_web_apps: Ship apps desired state and the status the Orama operator observes (lake#293).
+-- lake writes the desired fields, increments generation, and NOTIFYs lake_apps. The operator
+-- reconciles one LakeApp per row and writes phase through observed_generation back on this row.
+-- Credentials are represented only by opaque references in bindings_json and secret_env_refs;
+-- env_json never contains clear credentials. See docs/control-plane/web-apps.md.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS apps (
+    id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id         uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    name                text        NOT NULL,
+    mode                text        NOT NULL,
+    source_repository   text        NOT NULL DEFAULT '',
+    source_revision     text        NOT NULL DEFAULT '',
+    source_path         text        NOT NULL DEFAULT '',
+    image               text        NOT NULL DEFAULT '',
+    framework           text        NOT NULL DEFAULT '',
+    port                integer     NOT NULL,
+    replicas            integer     NOT NULL DEFAULT 1,
+    host                text        NOT NULL,
+    auth                text        NOT NULL DEFAULT 'lake',
+    bindings_json       jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    env_json            jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    secret_env_refs     jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    desired             text        NOT NULL DEFAULT 'running',
+    generation          bigint      NOT NULL DEFAULT 1,
+    phase               text        NOT NULL DEFAULT '',
+    url                 text        NOT NULL DEFAULT '',
+    ready               boolean     NOT NULL DEFAULT false,
+    message             text        NOT NULL DEFAULT '',
+    observed_generation bigint      NOT NULL DEFAULT 0,
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT app_name_format CHECK (name ~ '^[a-z]([a-z0-9-]{0,29}[a-z0-9])?$'),
+    CONSTRAINT app_mode_check CHECK (mode IN ('source', 'image')),
+    CONSTRAINT app_source_or_image_check CHECK (
+        (mode = 'source' AND source_repository <> '' AND source_revision <> '' AND image = '') OR
+        (mode = 'image' AND image <> '' AND source_repository = '' AND source_revision = '')
+    ),
+    CONSTRAINT app_port_check CHECK (port BETWEEN 1 AND 65535),
+    CONSTRAINT app_replicas_check CHECK (replicas BETWEEN 1 AND 100),
+    CONSTRAINT app_auth_check CHECK (auth IN ('lake', 'none')),
+    CONSTRAINT app_desired_check CHECK (desired IN ('running', 'stopped', 'absent')),
+    CONSTRAINT app_bindings_object CHECK (jsonb_typeof(bindings_json) = 'object'),
+    CONSTRAINT app_env_object CHECK (jsonb_typeof(env_json) = 'object'),
+    CONSTRAINT app_secret_refs_object CHECK (jsonb_typeof(secret_env_refs) = 'object')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS apps_customer_name_idx
+    ON apps (customer_id, name) WHERE desired <> 'absent';
+CREATE UNIQUE INDEX IF NOT EXISTS apps_host_idx ON apps (host) WHERE desired <> 'absent';
+CREATE INDEX IF NOT EXISTS apps_customer_idx ON apps (customer_id, updated_at);
+
+-- Clear credentials never enter apps. Lake retains encrypted material here so the operator can
+-- resolve the fixed references into separate namespace-local Secrets.
+CREATE TABLE IF NOT EXISTS app_credentials (
+    app_id              uuid        NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    kind                text        NOT NULL,
+    secret_ref          text        NOT NULL,
+    credential_sha256   text        NOT NULL,
+    ciphertext          text        NOT NULL,
+    scopes              jsonb       NOT NULL,
+    user_id             text        NOT NULL DEFAULT '',
+    taap_id             text        NOT NULL DEFAULT '',
+    pool_id             text        NOT NULL DEFAULT 'lake',
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (app_id, kind),
+    CONSTRAINT app_credentials_kind_check CHECK (kind IN ('workspace', 'events')),
+    CONSTRAINT app_credentials_scopes_array CHECK (jsonb_typeof(scopes) = 'array')
+);
+
+CREATE TABLE IF NOT EXISTS web_apps_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0034_web_apps') ON CONFLICT DO NOTHING;

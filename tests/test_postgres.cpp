@@ -651,6 +651,117 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     EXPECT_EQ(store->get_service(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
+TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:app-" + suffix, "app-" + suffix + "@example.com", "Apps"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "app-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_apps",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    lake::control::NewWebApp app;
+    app.customer_id = customer->id;
+    app.name = "reports";
+    app.mode = "source";
+    app.source_repository = "https://example.test/team/reports.git";
+    app.source_revision = "main";
+    app.source_path = "web";
+    app.framework = "node";
+    app.port = 3000;
+    app.replicas = 2;
+    app.host = "reports-" + suffix + ".apps.example.test";
+    app.bindings = {
+        {"zetta",
+         {{"scopes", json::array({"workspace_query"})}, {"secret_ref", "workspace-token"}}},
+        {"services", json::array()}};
+    app.env = {{"LOG_LEVEL", "info"}};
+    app.created_by_user_id = user->id;
+    app.created_by_taap_id = user->taap_id;
+    app.max_apps = 1;
+    app.max_replicas = 3;
+    const auto created = store->create_web_app(app);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->generation, 1);
+    EXPECT_EQ(created->observed_generation, 0);
+    EXPECT_FALSE(created->ready);
+    const auto credentials = store->web_app_credentials(created->id);
+    ASSERT_TRUE(credentials) << credentials.error().message;
+    ASSERT_EQ(credentials->size(), 2U);
+    const auto workspace =
+        std::ranges::find(*credentials, "workspace", [](const auto& value) { return value.kind; });
+    const auto events =
+        std::ranges::find(*credentials, "events", [](const auto& value) { return value.kind; });
+    ASSERT_NE(workspace, credentials->end());
+    ASSERT_NE(events, credentials->end());
+    const auto workspace_principal = store->context_for(workspace->value);
+    const auto event_principal = store->context_for(events->value);
+    ASSERT_TRUE(workspace_principal) << workspace_principal.error().message;
+    ASSERT_TRUE(event_principal) << event_principal.error().message;
+    EXPECT_EQ(workspace_principal->kind, "app_workspace");
+    EXPECT_EQ(event_principal->workload_id, created->id);
+    EXPECT_EQ(event_principal->workload_customer_id, customer->id);
+    {
+        pqxx::connection connection(uri);
+        pqxx::read_transaction tx(connection);
+        const auto row = tx.exec_params1(
+            "SELECT credential_sha256, ciphertext FROM app_credentials WHERE app_id = $1::uuid "
+            "AND kind = 'workspace'",
+            created->id);
+        EXPECT_NE(row[0].as<std::string>(), workspace->value);
+        EXPECT_NE(row[1].as<std::string>(), workspace->value);
+    }
+    EXPECT_EQ(store->create_web_app(app).error().code, "conflict");
+    app.name = "second";
+    app.host = "second-" + suffix + ".apps.example.test";
+    EXPECT_EQ(store->create_web_app(app).error().code, "quota_exceeded");
+
+    lake::control::WebAppPatch scale;
+    scale.replicas = 3;
+    scale.max_replicas = 3;
+    const auto scaled = store->update_web_app(created->id, scale);
+    ASSERT_TRUE(scaled) << scaled.error().message;
+    EXPECT_EQ(scaled->replicas, 3);
+    EXPECT_EQ(scaled->generation, 2);
+    scale.replicas = 4;
+    EXPECT_EQ(store->update_web_app(created->id, scale).error().code, "quota_exceeded");
+
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE apps SET phase = 'Ready', url = $2, ready = true, "
+                       "message = 'available', observed_generation = generation, "
+                       "updated_at = now() WHERE id = $1::uuid",
+                       created->id,
+                       "https://" + created->host);
+        tx.commit();
+    }
+    const auto observed = store->get_web_app(created->id);
+    ASSERT_TRUE(observed) << observed.error().message;
+    EXPECT_EQ(observed->phase, "Ready");
+    EXPECT_TRUE(observed->ready);
+    EXPECT_EQ(observed->url, "https://" + created->host);
+    EXPECT_EQ(observed->observed_generation, 2);
+
+    for (int waited = 0; notified.size() < 2 && waited < 50; ++waited) {
+        listener.await_notification(0, 100000);
+    }
+    ASSERT_GE(notified.size(), 2U);
+    EXPECT_EQ(notified.front(), created->id);
+    EXPECT_EQ(notified.back(), created->id);
+}
+
 TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -739,8 +850,8 @@ TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     EXPECT_EQ(store->get_store(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
-// Agent launches, their credential, cron schedules and Ask Orama messages against the production store
-// (docs/api/agent-launches.md, lake#231).
+// Agent launches, their credential, cron schedules and Ask Orama messages against the production
+// store (docs/api/agent-launches.md, lake#231).
 TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -802,26 +913,26 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     EXPECT_FALSE(store->context_for(credential)) << "a stopped launch's credential stops too";
 
     // Cron schedules: several per agent, each with its own slug and credential (migration 0031).
-    const auto weekly = store->create_agent_cron_schedule({.customer_id = customer->id,
-                                                           .agent_id = "a-1",
-                                                           .agent_name = "Watcher",
-                                                           .cron = "0 9 * * 1",
-                                                           .description = "every monday at 09:00",
-                                                           .input = json{{"week", 39}},
-                                                           .scopes =
-                                                               lake::control::agent_launch_scopes,
-                                                           .created_by_user_id = user->id,
-                                                           .created_by_taap_id = user->taap_id});
+    const auto weekly =
+        store->create_agent_cron_schedule({.customer_id = customer->id,
+                                           .agent_id = "a-1",
+                                           .agent_name = "Watcher",
+                                           .cron = "0 9 * * 1",
+                                           .description = "every monday at 09:00",
+                                           .input = json{{"week", 39}},
+                                           .scopes = lake::control::agent_launch_scopes,
+                                           .created_by_user_id = user->id,
+                                           .created_by_taap_id = user->taap_id});
     ASSERT_TRUE(weekly) << weekly.error().message;
-    const auto nightly = store->create_agent_cron_schedule({.customer_id = customer->id,
-                                                            .agent_id = "a-1",
-                                                            .agent_name = "Watcher",
-                                                            .cron = "30 2 * * *",
-                                                            .time_zone = "America/Toronto",
-                                                            .scopes =
-                                                                lake::control::agent_launch_scopes,
-                                                            .created_by_user_id = user->id,
-                                                            .created_by_taap_id = user->taap_id});
+    const auto nightly =
+        store->create_agent_cron_schedule({.customer_id = customer->id,
+                                           .agent_id = "a-1",
+                                           .agent_name = "Watcher",
+                                           .cron = "30 2 * * *",
+                                           .time_zone = "America/Toronto",
+                                           .scopes = lake::control::agent_launch_scopes,
+                                           .created_by_user_id = user->id,
+                                           .created_by_taap_id = user->taap_id});
     ASSERT_TRUE(nightly) << nightly.error().message;
     EXPECT_EQ(weekly->slug, lake::control::managed_service_slug("as", weekly->id));
     EXPECT_EQ(weekly->time_zone, "Etc/UTC");
@@ -867,7 +978,8 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     EXPECT_EQ(runs->front().result["reply"], "3 at risk");
     EXPECT_EQ(runs->front().input["week"], 39);
     ASSERT_TRUE(store->withdraw_agent_cron_schedule(weekly->id));
-    EXPECT_FALSE(store->context_for(schedule_credential)) << "a removed schedule's credential stops";
+    EXPECT_FALSE(store->context_for(schedule_credential))
+        << "a removed schedule's credential stops";
     EXPECT_FALSE(store->withdraw_agent_cron_schedule(weekly->id)) << "already removed";
     schedules = store->list_agent_cron_schedules(customer->id, "a-1");
     ASSERT_TRUE(schedules && schedules->size() == 1U);

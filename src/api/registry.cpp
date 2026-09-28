@@ -183,6 +183,11 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
         state.result = validation;
         state.proceed = false;
+    } else if (!context.credential_customer_id.empty() &&
+               input.value("customer_id", std::string()) != context.credential_customer_id) {
+        state.result =
+            ApiResult::failure("unauthorized", "credential belongs to a different customer");
+        state.proceed = false;
     } else if (entry.requires_auth && context.session_credential &&
                std::ranges::find(context.scopes, "*") == context.scopes.end() &&
                std::ranges::find(context.scopes, entry.name) == context.scopes.end()) {

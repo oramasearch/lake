@@ -15,6 +15,7 @@
 #include "lake/control/apps.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
+#include "lake/control/web_apps.hpp"
 
 // The control-plane store: users and organizations (identity), customers (the
 // tenant that owns everything). One interface, two implementations — Postgres
@@ -149,6 +150,8 @@ struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
     std::vector<std::string> scopes;
     std::optional<std::int64_t> expires_at_unix;
+    std::string workload_id;
+    std::string workload_customer_id;
 };
 struct NewPasswordUser {
     std::string pool_id, email, password, display_name, device_name, identity_document;
@@ -229,7 +232,7 @@ struct ServiceKind {
     int ready_seconds = 60;
 };
 inline constexpr ServiceKind service_kinds[] = {
-    {"zetta", "Zetta", 30}, // Steve, 2026-09-26 (measured once at 41 s)
+    {"zetta", "Zetta", 30},          // Steve, 2026-09-26 (measured once at 41 s)
     {"cassandra", "Cassandra", 420}, // not yet measured without a node scale-up (lake#197)
     {"clickhouse", "ClickHouse", 75},
     {"duckdb", "DuckDB", 30},
@@ -881,6 +884,13 @@ public:
     virtual Result<ManagedService> create_service(const NewManagedService&) = 0;
     // Marks a service absent so the operator deletes it. Refuses one already absent.
     virtual Result<ManagedService> withdraw_service(const std::string& id) = 0;
+    // Ship apps (docs/control-plane/web-apps.md). The apps row carries desired state from lake and
+    // status written by the operator. Finished deletions remain history and are omitted from lists.
+    virtual Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) = 0;
+    virtual Result<WebApp> get_web_app(const std::string& id) = 0;
+    virtual Result<WebApp> create_web_app(const NewWebApp&) = 0;
+    virtual Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) = 0;
+    virtual Result<std::vector<WebAppCredential>> web_app_credentials(const std::string& id) = 0;
     // Stores (docs/control-plane/storage.md). Lists the customer's stores, oldest first, leaving
     // out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) = 0;
@@ -905,8 +915,9 @@ public:
     // Marks a schedule absent so the operator deletes its CronJob. Refuses one already absent.
     virtual Result<AgentCronSchedule> withdraw_agent_cron_schedule(const std::string& id) = 0;
     // The runs the schedules' CronJobs started, as launches (trigger "schedule"), newest first.
-    virtual Result<std::vector<AgentLaunch>>
-    list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
+    virtual Result<std::vector<AgentLaunch>> list_agent_cron_runs(const std::string& customer_id,
+                                                                  const std::string& agent_id,
+                                                                  int limit) = 0;
     // Background agent turns (lake#269, docs/api/agent-bus.md).
     virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
     virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;

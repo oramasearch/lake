@@ -4588,6 +4588,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_application_capabilities(registry);
     register_agent_capabilities(registry);
     register_platform_capabilities(registry);
+    register_web_app_capabilities(registry);
     register_workspace_capabilities(registry);
 }
 

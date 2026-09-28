@@ -35,3 +35,8 @@ Their contract and regression coverage are in [audit.md](../../docs/api/audit.md
 
 The common request context compares operator bearers in constant time before any session lookup.
 User bearers and cookies use the same indexed PostgreSQL resolver; see `docs/api/auth.md`.
+
+`web_app_capabilities.cpp` owns Ship App reads and desired-state mutations. The common registry
+keeps REST and MCP customer policy, `x-lake-action`, audit, lifecycle bus events, Loki reads and
+Secret-reference validation identical. It also limits credential resolution to the operator and
+an app event credential to its app ID. See `docs/api/web-apps.md`.
