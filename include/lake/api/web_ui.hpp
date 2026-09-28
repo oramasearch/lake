@@ -262,6 +262,31 @@ std::string web_ui_packages(const nlohmann::json& catalog,
                             std::string_view origin,
                             WebUiViewer viewer = true);
 
+// Ship > Apps. Capability answers stay as JSON so this page can consume the app model and the
+// independently delivered build model without duplicating either control-plane type.
+struct AppsPage {
+    std::vector<WorkspaceCustomer> customers;
+    std::string customer_id;
+    nlohmann::json apps = nlohmann::json::array();
+    nlohmann::json repositories = nlohmann::json::array();
+    bool application_agent = false;
+    std::string error;
+};
+std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer = true);
+
+struct AppPage {
+    std::vector<WorkspaceCustomer> customers;
+    std::string customer_id;
+    nlohmann::json app = nlohmann::json::object();
+    nlohmann::json events = nlohmann::json::array();
+    nlohmann::json logs = nlohmann::json::object();
+    nlohmann::json builds = nlohmann::json::array();
+    nlohmann::json services = nlohmann::json::array();
+    bool builds_available = false;
+    std::string error;
+};
+std::string web_ui_app(const AppPage& page, WebUiViewer viewer = true);
+
 // One environment of one repository, for the cross-repository deployments page.
 struct DeploymentSummary {
     control::Repository repository;

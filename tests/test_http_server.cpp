@@ -338,6 +338,9 @@ protected:
         options.metering.transfer_in_gib_micros = 1000;
         options.metering.transfer_out_gib_micros = 1000;
         options.metering.compute_second_micros = 1000;
+        options.apps_wildcard = "apps.example.test";
+        options.apps_per_customer = 10;
+        options.app_replicas_per_customer = 20;
         workspace_dir_ = lake::test::fixture_path("http-services-" + lake::control::new_uuid_v4());
         std::filesystem::create_directories(workspace_dir_);
         lake::control::WorkspaceConfig workspace_config{workspace_dir_.string(), 0};
@@ -569,6 +572,7 @@ TEST_P(HttpResponseIsolation, NavigationUsesTheResolvedViewerOnEveryPage) {
             std::string nav = response.substr(begin, response.find("</nav>", begin) - begin);
             EXPECT_EQ(nav.contains("Administration"), administrator) << path;
             EXPECT_EQ(nav.contains("href=\"/deployments\""), signed_in) << path;
+            EXPECT_EQ(nav.contains("href=\"/ship/apps\""), signed_in) << path;
             // Account pages moved from the sidebar to the top-bar account menu.
             EXPECT_FALSE(nav.contains("href=\"/tokens\"")) << path;
             const auto menu = response.find("<details class=\"account-menu\">");
@@ -1381,6 +1385,90 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
         workspace_caller_->calls.rbegin(), workspace_caller_->calls.rend(),
         [](const auto& call) { return std::get<0>(call) == "save_graph"; });
     EXPECT_NE(std::get<2>(*retrieved).dump().find("\"table\":\"at_risk_1\""), std::string::npos);
+}
+
+TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customers_response =
+        connection->request("GET", "/v1/list_customers", "", cookie);
+    const nlohmann::json customers =
+        nlohmann::json::parse(customers_response.substr(customers_response.find("\r\n\r\n") + 4));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+
+    const std::string empty =
+        connection->request("GET", "/ship/apps?customer_id=" + customer_id, "", cookie);
+    ASSERT_TRUE(empty.starts_with("HTTP/1.1 200")) << empty.substr(0, 300);
+    EXPECT_NE(empty.find("No apps yet"), std::string::npos);
+    EXPECT_NE(empty.find("ApplicationAgent is not registered"), std::string::npos);
+    EXPECT_NE(empty.find("name=\"description\""), std::string::npos);
+    EXPECT_NE(empty.find("name=\"description\" placeholder=\"What should the app do?\" disabled"),
+              std::string::npos);
+
+    const std::string repository = connection->request(
+        "POST",
+        "/repository/create",
+        "customer_id=" + customer_id + "&name=apps-ui-source&description=App+source",
+        cookie);
+    const std::string repository_location = response_header(repository, "location");
+    const std::string repository_id =
+        repository_location.substr(repository_location.find("id=") + 3);
+    const std::string created =
+        connection->request("POST",
+                            "/ship/apps/create",
+                            "customer_id=" + customer_id +
+                                "&mode=runtime&name=customer-portal&repository=" + repository_id +
+                                "&revision=main&path=.&framework=node&port=3000",
+                            cookie);
+    ASSERT_TRUE(created.starts_with("HTTP/1.1 302")) << created.substr(0, 300);
+    const std::string location = response_header(created, "location");
+    const std::size_t app_at = location.find("app_id=");
+    ASSERT_NE(app_at, std::string::npos) << location;
+    const std::string app_id = location.substr(app_at + 7);
+
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory != nullptr) {
+        ASSERT_TRUE(memory->set_web_app_status(
+            app_id, "Running", "https://customer-portal.apps.example.test", true, "Ready", 1));
+    }
+    const std::string published =
+        connection->request("POST",
+                            "/v1/publish_app_event",
+                            nlohmann::json{{"customer_id", customer_id},
+                                           {"app_id", app_id},
+                                           {"type", "deploy"},
+                                           {"message", "Revision is ready"},
+                                           {"event", {{"phase", "Running"}}}}
+                                .dump(),
+                            cookie,
+                            "HTTP/1.1",
+                            "",
+                            "application/json");
+    EXPECT_NE(published.find("\"ok\":true"), std::string::npos) << published;
+
+    const std::string page = connection->request("GET", location, "", cookie);
+    ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
+    EXPECT_NE(page.find("<h1>customer-portal</h1>"), std::string::npos);
+    EXPECT_NE(page.find("Revision is ready"), std::string::npos);
+    EXPECT_NE(page.find("id=\"app-live-events\""), std::string::npos);
+    EXPECT_NE(page.find("Builds are not available on this lake yet"), std::string::npos);
+    EXPECT_NE(page.find("action=\"/ship/app/restart\""), std::string::npos);
+    EXPECT_NE(page.find("action=\"/ship/app/service/create\""), std::string::npos);
+    if (memory != nullptr) {
+        EXPECT_NE(page.find("https://customer-portal.apps.example.test"), std::string::npos);
+    }
+
+    const auto before = store_->get_web_app(app_id);
+    ASSERT_TRUE(before);
+    const std::string restarted = connection->request(
+        "POST", "/ship/app/restart", "customer_id=" + customer_id + "&app_id=" + app_id, cookie);
+    EXPECT_EQ(response_header(restarted, "location"), location);
+    const auto after = store_->get_web_app(app_id);
+    ASSERT_TRUE(after);
+    EXPECT_GT(after->generation, before->generation);
 }
 
 TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved) {

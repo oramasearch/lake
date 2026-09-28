@@ -200,6 +200,9 @@ app tokens and writes only their hashes into Lake. Lake validates purpose and ta
 rows after the operator acknowledges deletion. This App entity is distinct from application
 identity pools. Its contracts are `docs/api/web-apps.md` and
 `docs/control-plane/web-apps.md`.
+The server-rendered Ship → Apps list and detail pages use those capabilities for creation and all
+controls, mask Secret references, follow retained app/build events, and disable ApplicationAgent
+creation until `agent-application` is registered. Their contract is `docs/ui/apps.md`.
 
 Agent-session custody adds migration `0017_agent_sessions` and a maximum 15-minute Ed25519 key
 delegated to a durable agent by a canonical `delegation/1` attestation. The attestation is appended

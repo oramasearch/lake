@@ -9091,6 +9091,240 @@ struct ApiServer::Impl {
             "no-store");
     }
 
+    boost::http::route_task serve_apps_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        AppsPage page;
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        page.error = query_value(route, "error");
+        if (!page.customer_id.empty()) {
+            const ApiResult apps = unwrap(
+                co_await workspace_call("list_apps", {{"customer_id", page.customer_id}}, context));
+            if (apps.ok) {
+                page.apps = apps.value.value("apps", nlohmann::json::array());
+            } else if (page.error.empty()) {
+                page.error = apps.error.message;
+            }
+            const ApiResult repositories = registry.call(
+                "list_repositories", {{"customer_id", page.customer_id}, {"limit", 500}}, context);
+            if (repositories.ok) {
+                page.repositories = repositories.value.value("items", nlohmann::json::array());
+            }
+            if (options.workspaces) {
+                const ApiResult library = unwrap(co_await workspace_call(
+                    "list_agent_library", nlohmann::json::object(), context));
+                if (library.ok) {
+                    for (const nlohmann::json& agent :
+                         library.value.value("agents", nlohmann::json::array())) {
+                        if (agent.value("key", std::string()) == "agent-application" &&
+                            agent.value("deployed", false)) {
+                            page.application_agent = true;
+                        }
+                    }
+                }
+            }
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_apps(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_app_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        AppPage page;
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        page.error = query_value(route, "error");
+        const std::string app_id = query_value(route, "app_id");
+        if (page.customer_id.empty() || app_id.empty()) {
+            co_return co_await redirect(
+                route, "/ship/apps?customer_id=" + oauth_url_encode(page.customer_id));
+        }
+        const nlohmann::json input{{"customer_id", page.customer_id}, {"app_id", app_id}};
+        const ApiResult app = unwrap(co_await workspace_call("get_app", input, context));
+        if (!app.ok) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::not_found,
+                web_ui_error(app.error.code, app.error.message, viewer_for(context)),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        page.app = app.value;
+        nlohmann::json events_input = input;
+        events_input["wait_ms"] = 0;
+        const ApiResult events =
+            unwrap(co_await workspace_call("receive_app_events", events_input, context));
+        if (events.ok) {
+            page.events = events.value.value("events", nlohmann::json::array());
+        }
+        nlohmann::json logs_input = input;
+        logs_input["limit"] = 200;
+        const ApiResult logs = unwrap(co_await workspace_call("app_logs", logs_input, context));
+        if (logs.ok) {
+            page.logs = logs.value;
+        }
+        const ApiResult builds = unwrap(co_await workspace_call(
+            "list_builds", {{"customer_id", page.customer_id}, {"app", app_id}}, context));
+        if (builds.ok) {
+            page.builds_available = true;
+            page.builds =
+                builds.value.value("builds", builds.value.value("items", nlohmann::json::array()));
+            for (nlohmann::json& build : page.builds) {
+                const std::string build_id =
+                    build.value("id", build.value("build_id", std::string()));
+                if (build_id.empty()) {
+                    continue;
+                }
+                const nlohmann::json build_input{{"customer_id", page.customer_id},
+                                                 {"build_id", build_id}};
+                const ApiResult detail =
+                    unwrap(co_await workspace_call("get_build", build_input, context));
+                if (detail.ok) {
+                    build = detail.value;
+                }
+                const ApiResult build_logs =
+                    unwrap(co_await workspace_call("build_logs", build_input, context));
+                if (build_logs.ok) {
+                    build["logs"] = build_logs.value;
+                }
+            }
+        }
+        if (options.workspaces) {
+            const ApiResult services = unwrap(co_await workspace_call(
+                "list_services", {{"customer_id", page.customer_id}}, context));
+            if (services.ok) {
+                page.services = services.value.value("services", nlohmann::json::array());
+            }
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_app(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_app_form(boost::http::route_params& route, std::string action) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        const std::string app_id = form_field(body, "app_id");
+        nlohmann::json input{{"customer_id", customer_id}};
+        if (!app_id.empty()) {
+            input["app_id"] = app_id;
+        }
+        std::string capability;
+        if (action == "create") {
+            capability = "create_app";
+            input["name"] = form_field(body, "name");
+            input["mode"] = form_field(body, "mode");
+            input["framework"] = form_field(body, "framework");
+            const auto port = decimal_value(form_field(body, "port"));
+            input["port"] = port.value_or(0);
+            if (input.at("mode") == "runtime") {
+                input["source"] = {{"repository", form_field(body, "repository")},
+                                   {"revision", form_field(body, "revision")},
+                                   {"path", form_field(body, "path")},
+                                   {"entrypoint", form_field(body, "entrypoint")}};
+            } else {
+                input["image"] = form_field(body, "image");
+            }
+        } else if (action == "restart" || action == "stop" || action == "start") {
+            capability = action + "_app";
+        } else if (action == "scale") {
+            capability = "scale_app";
+            input["replicas"] = decimal_value(form_field(body, "replicas")).value_or(0);
+        } else if (action == "deploy" || action == "rollback") {
+            capability = action + "_app";
+            const std::string image = form_field(body, "image");
+            if (!image.empty()) {
+                input["image"] = image;
+            } else {
+                input["source"] = {{"repository", form_field(body, "repository")},
+                                   {"revision", form_field(body, "revision")},
+                                   {"path", form_field(body, "path")},
+                                   {"entrypoint", form_field(body, "entrypoint")}};
+            }
+        } else if (action == "env_set") {
+            capability = "set_app_env";
+            input["key"] = form_field(body, "key");
+            const std::string secret_ref = form_field(body, "secret_ref");
+            if (secret_ref.empty()) {
+                input["value"] = form_field(body, "value");
+            } else {
+                input["secret_ref"] = secret_ref;
+            }
+        } else if (action == "env_unset") {
+            capability = "unset_app_env";
+            input["key"] = form_field(body, "key");
+        } else if (action == "zetta") {
+            capability = "set_app_zetta_binding";
+            input["attached"] = form_field(body, "attached") == "1";
+        } else if (action == "service_bind" || action == "service_unbind") {
+            capability =
+                action == "service_bind" ? "bind_service_to_app" : "unbind_service_from_app";
+            input["service_id"] = form_field(body, "service_id");
+        } else if (action == "service_create") {
+            capability = "create_service_and_bind_to_app";
+            input["kind"] = form_field(body, "kind");
+            input["name"] = form_field(body, "name");
+            if (const auto size = decimal_value(form_field(body, "size")); size) {
+                input["storage_gi"] = *size;
+            }
+        } else if (action == "auth") {
+            capability = "set_app_auth";
+            input["auth"] = form_field(body, "auth");
+            input["confirm_public"] = form_field(body, "confirm_public") == "1";
+        } else if (action == "delete") {
+            capability = "delete_app";
+            input["confirm"] = form_field(body, "confirm");
+        } else if (action == "build") {
+            capability = "build_app";
+            input.erase("app_id");
+            input["app"] = app_id;
+        } else if (action == "build_cancel") {
+            capability = "cancel_build";
+            input.erase("app_id");
+            input["build_id"] = form_field(body, "build_id");
+        } else if (action == "agent") {
+            capability = "agent_turn";
+            input["agent"] = "agent-application";
+            input["kind"] = "app";
+            input["message"] = form_field(body, "description");
+        }
+        ApiResult result = capability.empty()
+                               ? ApiResult::failure("invalid_input", "unknown app action")
+                               : unwrap(co_await workspace_call(capability, input, context));
+        std::string back = action == "create" || action == "agent"
+                               ? "/ship/apps?customer_id=" + oauth_url_encode(customer_id)
+                               : "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
+                                     "&app_id=" + oauth_url_encode(app_id);
+        if (result.ok && action == "create") {
+            back = "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
+                   "&app_id=" + oauth_url_encode(result.value.value("id", std::string()));
+        }
+        if (!result.ok) {
+            back += "&error=" + oauth_url_encode(result.error.message);
+        }
+        co_return co_await redirect(route, back);
+    }
+
     // Every environment across the repositories the caller may list, from the same two
     // capabilities the per-repository pages call. A repository whose environments the caller
     // may not read is skipped rather than failing the page.
@@ -12823,6 +13057,39 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/ship/packages", impl.serve_packages_page(route));
                });
+    router.add(
+        http::method::get, "/ship/apps", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/ship/apps", impl.serve_apps_page(route));
+        });
+    router.add(
+        http::method::get, "/ship/app", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/ship/app", impl.serve_app_page(route));
+        });
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 18>{
+             {{"/ship/apps/create", "create"},
+              {"/ship/apps/agent", "agent"},
+              {"/ship/app/restart", "restart"},
+              {"/ship/app/stop", "stop"},
+              {"/ship/app/start", "start"},
+              {"/ship/app/scale", "scale"},
+              {"/ship/app/deploy", "deploy"},
+              {"/ship/app/rollback", "rollback"},
+              {"/ship/app/env/set", "env_set"},
+              {"/ship/app/env/unset", "env_unset"},
+              {"/ship/app/zetta", "zetta"},
+              {"/ship/app/service/bind", "service_bind"},
+              {"/ship/app/service/unbind", "service_unbind"},
+              {"/ship/app/service/create", "service_create"},
+              {"/ship/app/auth", "auth"},
+              {"/ship/app/delete", "delete"},
+              {"/ship/app/build", "build"},
+              {"/ship/app/build/cancel", "build_cancel"}}}) {
+        router.add(http::method::post,
+                   path,
+                   [&impl, path, action](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route, path, impl.serve_app_form(route, action));
+                   });
+    }
     router.add(
         http::method::get, "/deployments", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/deployments", impl.serve_deployments_page(route));
