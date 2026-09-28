@@ -1692,7 +1692,7 @@ INSERT INTO schema_migrations (version) VALUES ('0033_agent_task_events') ON CON
 -- 0034_web_apps: Ship apps desired state and the status the Orama operator observes (lake#293).
 -- lake writes the desired fields, increments generation, and NOTIFYs lake_apps. The operator
 -- reconciles one LakeApp per row and writes phase through observed_generation back on this row.
--- Credentials are represented only by opaque references in bindings_json and secret_env_refs;
+-- The operator writes token hashes; bindings contain read scopes and service IDs only.
 -- env_json never contains clear credentials. See docs/control-plane/web-apps.md.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS apps (
@@ -1703,63 +1703,91 @@ CREATE TABLE IF NOT EXISTS apps (
     source_repository   text        NOT NULL DEFAULT '',
     source_revision     text        NOT NULL DEFAULT '',
     source_path         text        NOT NULL DEFAULT '',
+    source_entrypoint   text        NOT NULL DEFAULT '',
     image               text        NOT NULL DEFAULT '',
     framework           text        NOT NULL DEFAULT '',
     port                integer     NOT NULL,
     replicas            integer     NOT NULL DEFAULT 1,
     host                text        NOT NULL,
     auth                text        NOT NULL DEFAULT 'lake',
-    bindings_json       jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    bindings_json       jsonb       NOT NULL DEFAULT '{"zetta":null,"services":[]}'::jsonb,
     env_json            jsonb       NOT NULL DEFAULT '{}'::jsonb,
     secret_env_refs     jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    token_hashes_json   jsonb       NOT NULL DEFAULT '{}'::jsonb,
     desired             text        NOT NULL DEFAULT 'running',
     generation          bigint      NOT NULL DEFAULT 1,
-    phase               text        NOT NULL DEFAULT '',
+    phase               text        NOT NULL DEFAULT 'Pending',
     url                 text        NOT NULL DEFAULT '',
     ready               boolean     NOT NULL DEFAULT false,
     message             text        NOT NULL DEFAULT '',
     observed_generation bigint      NOT NULL DEFAULT 0,
     updated_at          timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT app_name_format CHECK (name ~ '^[a-z]([a-z0-9-]{0,29}[a-z0-9])?$'),
-    CONSTRAINT app_mode_check CHECK (mode IN ('source', 'image')),
+    CONSTRAINT app_mode_check CHECK (mode IN ('runtime', 'image')),
     CONSTRAINT app_source_or_image_check CHECK (
-        (mode = 'source' AND source_repository <> '' AND source_revision <> '' AND image = '') OR
+        (mode = 'runtime' AND source_repository <> '' AND source_revision <> '' AND image = '') OR
         (mode = 'image' AND image <> '' AND source_repository = '' AND source_revision = '')
     ),
     CONSTRAINT app_port_check CHECK (port BETWEEN 1 AND 65535),
     CONSTRAINT app_replicas_check CHECK (replicas BETWEEN 1 AND 100),
     CONSTRAINT app_auth_check CHECK (auth IN ('lake', 'none')),
-    CONSTRAINT app_desired_check CHECK (desired IN ('running', 'stopped', 'absent')),
+    CONSTRAINT app_desired_check CHECK (desired IN ('running', 'stopped', 'deleted')),
     CONSTRAINT app_bindings_object CHECK (jsonb_typeof(bindings_json) = 'object'),
     CONSTRAINT app_env_object CHECK (jsonb_typeof(env_json) = 'object'),
     CONSTRAINT app_secret_refs_object CHECK (jsonb_typeof(secret_env_refs) = 'object')
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS apps_customer_name_idx
-    ON apps (customer_id, name) WHERE desired <> 'absent';
-CREATE UNIQUE INDEX IF NOT EXISTS apps_host_idx ON apps (host) WHERE desired <> 'absent';
+    ON apps (customer_id, name) WHERE desired <> 'deleted';
+CREATE UNIQUE INDEX IF NOT EXISTS apps_host_idx ON apps (host) WHERE desired <> 'deleted';
 CREATE INDEX IF NOT EXISTS apps_customer_idx ON apps (customer_id, updated_at);
-
--- Clear credentials never enter apps. Lake retains encrypted material here so the operator can
--- resolve the fixed references into separate namespace-local Secrets.
-CREATE TABLE IF NOT EXISTS app_credentials (
-    app_id              uuid        NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-    kind                text        NOT NULL,
-    secret_ref          text        NOT NULL,
-    credential_sha256   text        NOT NULL,
-    ciphertext          text        NOT NULL,
-    scopes              jsonb       NOT NULL,
-    user_id             text        NOT NULL DEFAULT '',
-    taap_id             text        NOT NULL DEFAULT '',
-    pool_id             text        NOT NULL DEFAULT 'lake',
-    created_at          timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (app_id, kind),
-    CONSTRAINT app_credentials_kind_check CHECK (kind IN ('workspace', 'events')),
-    CONSTRAINT app_credentials_scopes_array CHECK (jsonb_typeof(scopes) = 'array')
-);
 
 CREATE TABLE IF NOT EXISTS web_apps_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0034_web_apps') ON CONFLICT DO NOTHING;
+
+-- 0035_web_apps_operator_contract: upgrade earlier Apps rows to the operator-owned token contract.
+-- This also works after 0034 has already been applied. No app bearer material is retained by lake.
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS source_entrypoint text NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS token_hashes_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS app_mode_check;
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS app_source_or_image_check;
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS app_desired_check;
+-- Earlier partial indexes exclude absent rows. Remove them before converting historical rows,
+-- which may legitimately reuse a name or host after deletion.
+DROP INDEX IF EXISTS apps_customer_name_idx;
+DROP INDEX IF EXISTS apps_host_idx;
+UPDATE apps SET mode = 'runtime' WHERE mode = 'source';
+UPDATE apps SET desired = 'deleted' WHERE desired = 'absent';
+UPDATE apps SET phase = 'Running' WHERE phase = 'Ready';
+ALTER TABLE apps ALTER COLUMN phase SET DEFAULT 'Pending';
+ALTER TABLE apps ALTER COLUMN bindings_json SET DEFAULT '{"zetta":null,"services":[]}'::jsonb;
+ALTER TABLE apps ADD CONSTRAINT app_mode_check CHECK (mode IN ('runtime', 'image'));
+ALTER TABLE apps ADD CONSTRAINT app_source_or_image_check CHECK (
+    (mode = 'runtime' AND source_repository <> '' AND source_revision <> '' AND image = '') OR
+    (mode = 'image' AND image <> '' AND source_repository = '' AND source_revision = '')
+);
+ALTER TABLE apps ADD CONSTRAINT app_desired_check CHECK (desired IN ('running', 'stopped', 'deleted'));
+UPDATE apps SET bindings_json = jsonb_build_object(
+    'zetta', CASE WHEN jsonb_typeof(bindings_json->'zetta') = 'object'
+        OR bindings_json->'zetta' = 'true'::jsonb
+        THEN '{"scopes":["read"]}'::jsonb ELSE 'null'::jsonb END,
+    'services', COALESCE((SELECT jsonb_agg(CASE WHEN jsonb_typeof(value) = 'object'
+        THEN value->'id' ELSE value END)
+        FROM jsonb_array_elements(COALESCE(bindings_json->'services', '[]'::jsonb))), '[]'::jsonb)
+) WHERE NOT EXISTS (
+    SELECT 1 FROM schema_migrations WHERE version = '0035_web_apps_operator_contract'
+);
+CREATE UNIQUE INDEX apps_customer_name_idx ON apps (customer_id, name) WHERE desired <> 'deleted';
+CREATE UNIQUE INDEX apps_host_idx ON apps (host) WHERE desired <> 'deleted';
+CREATE INDEX IF NOT EXISTS apps_source_token_idx ON apps ((token_hashes_json->>'source'));
+CREATE INDEX IF NOT EXISTS apps_zetta_token_idx ON apps ((token_hashes_json->>'zetta'));
+CREATE INDEX IF NOT EXISTS apps_events_token_idx ON apps ((token_hashes_json->>'events'));
+DROP TABLE IF EXISTS app_credentials;
+CREATE TABLE IF NOT EXISTS web_apps_operator_contract_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0035_web_apps_operator_contract')
+    ON CONFLICT DO NOTHING;

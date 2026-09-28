@@ -117,6 +117,12 @@ std::expected<control::Repository, ApiError> readable_repository(const json& inp
     if (!context.authorized && repository->visibility != "public") {
         return std::unexpected(ApiError{"unauthorized", "the repository is not public", "/id"});
     }
+    if (context.authorized && context.credential_kind == "app_source" &&
+        repository->id == context.credential_repository_id &&
+        repository->customer_id == context.credential_customer_id &&
+        input.value("ref", "") == context.credential_revision) {
+        return *repository;
+    }
     if (context.authorized) {
         const auto object = context.store->find_policy_object("repository", repository->id);
         if (!object) {

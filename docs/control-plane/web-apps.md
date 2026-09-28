@@ -1,58 +1,113 @@
-# Ship app desired state
+# Apps: Lake and operator contract
 
-Lake owns the desired row for each Ship app. The Orama operator watches `lake_apps`, reconciles one
-`LakeApp`, and writes rollout status back to the same row. The API contract is
-[web-apps.md](../api/web-apps.md); application identity pools remain a different entity documented
-in [apps.md](../api/apps.md).
+The shared contract is [lake#293](https://github.com/oramasearch/lake/issues/293), implemented by
+[orama-operator#199](https://github.com/oramasearch/orama-operator/pull/199). Apps are distinct from
+the application identity pools in [apps.md](../api/apps.md). The customer API is
+[web-apps.md](../api/web-apps.md).
 
-## `0034_web_apps`
+## Desired and observed state
 
-Migration `0034_web_apps` creates `apps` with exactly this shared Lake/operator contract:
+The contract states:
 
-| Column | Writer | Meaning |
+> `mode` is `runtime | image`.
+>
+> `source_entrypoint` (text, optional). When empty, app-runtime reads the entrypoint from the
+> app's own `app.toml`, so the operator passes `APP_ENTRYPOINT` only when set.
+>
+> `token_hashes_json` (jsonb, written by the **operator**):
+> `{"source": "<sha256 hex>", "zetta": "<sha256 hex>|null", "events": "<sha256 hex>"}`.
+
+Migration `0034_web_apps` creates `apps`. Migration `0035_web_apps_operator_contract` upgrades
+earlier rows and adds the two agreed columns with defaults `''` and `'{}'::jsonb`. It converts the
+earlier mode and deletion values, normalizes binding JSON, and removes the superseded
+`app_credentials` table and its retained credentials. Apply it before deploying this binary.
+The old partial unique indexes are removed before conversion, preserving deleted rows that reuse
+a name or host, then recreated with the new deletion value.
+The deployment guard is `web_apps_operator_contract_guard`; the operator must vendor the schema.
+
+| Columns | Writer |
+|---|---|
+| `id, customer_id, name, mode` | Lake |
+| `source_repository, source_revision, source_path, source_entrypoint, image` | Lake |
+| `framework, port, replicas, host, auth` | Lake |
+| `bindings_json, env_json, secret_env_refs, desired, generation` | Lake |
+| `token_hashes_json` | operator; Lake may only clear it for rotation |
+| `phase, url, ready, message, observed_generation` | operator |
+| `updated_at` | both |
+
+`source_repository` is the Lake repository ID; the API refuses a repository outside the app's
+customer. Source tokens additionally require the exact `source_revision`. Generation increases
+on each desired-state edit. Create and update enforce per-customer app and replica quotas under a
+customer lock. Hosts are unique and must be one label beneath `LAKE_APPS_WILDCARD`.
+
+The binding contract is:
+
+> `{"zetta": {"scopes": ["read"]} | null, "services": ["<service_id>", ...]}`.
+>
+> The operator resolves each Service's connection from the lake services Secret
+> (`lake-<lake>-services`, key per service id) and mounts it at
+> `/var/run/orama/bindings/services/<service name>`.
+
+Lake writes only those scopes and service IDs, with no token or token Secret reference. The
+operator resolves the service connection. Plain environment values are scanned for secrets;
+secret environment configuration remains represented by references.
+
+## Operator tokens
+
+> Tokens follow the agent-bus pattern: the operator generates them, and lake validates hashes.
+> No plaintext token is ever stored in lake's database.
+>
+> It stores them in Secret `app-tokens` in the app's namespace, mounts them into the pod
+> (`APP_TOKEN`, `/var/run/orama/bindings/zetta`) and into its own publisher, and writes their
+> **SHA-256 hashes** to `token_hashes_json`.
+
+Lake hashes every presented bearer and matches an indexed purpose hash. It exposes no token
+minting or credential-resolution capability. The registry rechecks the current row, hash, purpose
+and target for every call, including MCP calls sharing a context. Matching hashes grant only:
+
+| Purpose | Capabilities | Required target |
 |---|---|---|
-| `id`, `customer_id`, `name` | lake | stable identity and space-local name |
-| `mode`, `source_repository`, `source_revision`, `source_path`, `image` | lake | exactly one source or image deployment |
-| `framework`, `port`, `replicas`, `host`, `auth` | lake | runtime and ingress desired state |
-| `bindings_json`, `env_json`, `secret_env_refs` | lake | non-secret configuration and opaque Secret references |
-| `desired`, `generation` | lake | `running`, `stopped`, or `absent`, and monotonic desired revision |
-| `phase`, `url`, `ready`, `message`, `observed_generation` | operator | latest rollout observation |
-| `updated_at` | both | latest desired or observed update |
+| `source` | `repository_tree`, `repository_file` | app repository and exact revision, owned by the app customer |
+| `zetta` | `workspace_query`, `workspace_sql` | app customer with the `read` binding; existing read allow-list and SQL validation apply |
+| `events` | `publish_app_event` | app ID, topic `app-events.<app>` |
 
-Constraints require a lowercase app name, valid mode, one deployment input, port 1–65535,
-replicas 1–100, `lake` or `none` auth, and object-shaped JSON. Partial indexes keep live names
-unique per customer and live hosts unique for the Lake. A completed deletion stays as history and
-is omitted from list results after phase `Deleted`.
+All other capabilities, including public registry capabilities, are refused for app credentials.
+Ambiguous hashes are refused. Hash changes invalidate the old token on the next authentication or
+registry call. Clearing hashes revokes access until the operator registers replacement hashes;
+the operator owns generation and delivery of replacements. Unbinding revokes Zetta access even
+before the operator clears its hash. Source and Zetta access stop at deletion intent; events remain
+available during teardown and stop at `phase = Deleted`.
 
-Create and desired-state update lock the customer row before counting apps or replicas. This makes
-per-space quotas stable under concurrent requests. Every insert or desired-state update executes
-`pg_notify('lake_apps', app_id)` in the same transaction. The operator sets
-`observed_generation` to the generation it reconciled, so a reader can distinguish current from
-stale status.
+## Lifecycle and events
 
-The Kubernetes namespace is `app-` plus the first 12 hexadecimal characters of the app UUID.
-Loki reads use that namespace. The operator creates a `LakeApp` there, resolves binding and
-environment Secret references, and never copies credential material into the desired row. Zetta
-bindings carry only requested read scopes and a Secret reference; service bindings carry only the
-managed-service ID and connection Secret reference.
+> `desired = running | stopped | deleted`. Stopped means replicas 0, with the `LakeApp` kept.
+>
+> The operator deletes the `LakeApp` (a finalizer tears down the namespace and DNS record), then
+> writes `phase = Deleted`. Lake removes the row after it sees `Deleted`.
 
-`app_credentials` is Lake-owned and outside the shared `apps` column contract. App creation
-atomically mints an optional read-only workspace bearer and one event-publisher bearer, stores only
-their SHA-256 authentication digests plus envelope-encrypted values, and gives each a fixed opaque
-reference. The operator calls `get_app_credentials` with its operator credential, writes
-`workspace-token` into the app's Kubernetes Secret when requested, and keeps
-`app-events-publisher` in its own reconciliation credential. The latter can call only
-`publish_app_event` and only with its own app ID. For a service binding, the operator copies the
-connection from its existing managed-service Secret into the app namespace under the binding's
-opaque reference.
+Lake keeps the requested replica count at 1–100. `stop_app` writes `stopped`; the operator sets
+the workload to zero. `start_app` restores the requested count through `running`. The owner loop
+removes rows with both `desired = deleted` and `phase = Deleted` on its cleanup pass; stopped and
+unacknowledged deleting rows remain. Status phases are `Pending`, `Deploying`, `Running`,
+`Degraded`, `Stopped`, `Failed`, and `Deleted`.
 
-The deployment guard is `web_apps_guard`. The operator must vendor `db/schema.sql` byte-for-byte,
-select that guard, and apply it before a binary that reads `apps` is deployed.
+Every desired-state insert/edit sends `NOTIFY lake_apps, '<app id>'` in its transaction. The
+operator also re-lists rows every 60 seconds. Lifecycle events carry the acting principal and
+generation. The operator's event request is accepted directly:
 
-## Verification
+```json
+{"app_id":"<app id>","event":{"phase":"Running","ready":true,"message":"available"}}
+```
 
-The memory fake-operator test changes phase, URL, readiness, message, and observed generation after
-creation, and proves credential scope and operator-only resolution.
-`PostgresWebApps.DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract` proves the same row loop
-through PostgreSQL, including encrypted credential retention, notification delivery and quota
-refusal.
+The customer is resolved from the app. Authentication restricts the events bearer to that app.
+Build Jobs belong to `spec.builds` (orama-operator#195); Lake has no `spec.apps.buildkit` setting.
+
+## Verification and changes
+
+Run both native CTest suites with `LAKE_TEST_DB_URI` set to a local PostgreSQL database.
+`WebApps.*` covers capabilities, private source reads, read-only workspace calls, event delivery,
+cross-app/customer/revision refusal, rotation and deletion cleanup. `PostgresWebApps.*` covers
+operator hash writes, scoped authentication, preserved hashes during desired edits, quotas,
+`lake_apps` notifications, status feedback and physical row removal. Apply the full schema twice
+to check upgrade repeatability. Any future contract change must update these docs and the operator
+contract together.

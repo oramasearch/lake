@@ -38,5 +38,6 @@ User bearers and cookies use the same indexed PostgreSQL resolver; see `docs/api
 
 `web_app_capabilities.cpp` owns Ship App reads and desired-state mutations. The common registry
 keeps REST and MCP customer policy, `x-lake-action`, audit, lifecycle bus events, Loki reads and
-Secret-reference validation identical. It also limits credential resolution to the operator and
-an app event credential to its app ID. See `docs/api/web-apps.md`.
+Secret-reference validation identical. Operator hash credentials are restricted in the registry to
+source repository/revision reads, customer workspace reads, or one app's event publication. See
+`docs/api/web-apps.md`.

@@ -152,6 +152,9 @@ struct Principal {
     std::optional<std::int64_t> expires_at_unix;
     std::string workload_id;
     std::string workload_customer_id;
+    std::string workload_repository_id;
+    std::string workload_revision;
+    std::string workload_token_hash;
 };
 struct NewPasswordUser {
     std::string pool_id, email, password, display_name, device_name, identity_document;
@@ -885,12 +888,12 @@ public:
     // Marks a service absent so the operator deletes it. Refuses one already absent.
     virtual Result<ManagedService> withdraw_service(const std::string& id) = 0;
     // Ship apps (docs/control-plane/web-apps.md). The apps row carries desired state from lake and
-    // status written by the operator. Finished deletions remain history and are omitted from lists.
+    // status written by the operator. Acknowledged deletions are removed by the owner loop.
     virtual Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) = 0;
     virtual Result<WebApp> get_web_app(const std::string& id) = 0;
     virtual Result<WebApp> create_web_app(const NewWebApp&) = 0;
     virtual Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) = 0;
-    virtual Result<std::vector<WebAppCredential>> web_app_credentials(const std::string& id) = 0;
+    virtual Result<void> purge_deleted_web_apps() = 0;
     // Stores (docs/control-plane/storage.md). Lists the customer's stores, oldest first, leaving
     // out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) = 0;

@@ -1,78 +1,94 @@
-# Ship web apps
+# Ship Apps
 
-Ship web apps are named `App` in the API and `LakeApp` in the operator. They are distinct from
-the application identity pools documented in [apps.md](apps.md). The customer owns desired state;
-the Orama operator reconciles it and reports observed state.
+Apps are customer-owned desired state reconciled as operator `LakeApp` resources. Application
+identity pools remain a separate entity in [apps.md](apps.md). The authoritative
+[Lake/operator contract](../control-plane/web-apps.md) records the schema and token ownership.
 
-## Capabilities
+## Customer capabilities
 
-Every capability is available through REST and MCP, requires a customer ID, authorizes on that
-customer's policy object, and records a signed registry audit event. Reads advertise
+REST and MCP expose the same registry, customer policy and signed audit records. Reads advertise
 `x-lake-action: read`; mutations advertise `x-lake-action: write`.
 
-| Capability | Input beyond `customer_id` | Result or effect |
+| Capability | Input beyond `customer_id` | Effect |
 |---|---|---|
-| `list_apps` | — | live and deleting apps in the space |
-| `get_app` | `app_id` | desired and observed state |
-| `create_app` | name, mode, exactly one of source or image, framework, port, optional host/auth/replicas/bindings/env | generation 1 desired row and `create` event |
-| `deploy_app`, `rollback_app` | `app_id`, exactly one source revision or image | replacement deployment input and incremented generation |
-| `delete_app` | `app_id`, `confirm` equal to the app name | desired `absent` |
-| `set_app_env`, `unset_app_env` | `app_id`, key, and one plain value or Secret reference | changed environment references and incremented generation |
-| `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle desired state and incremented generation |
-| `scale_app` | `app_id`, replicas | desired replicas within the space quota |
-| `bind_service_to_app` | `app_id`, service ID | an opaque service Secret reference |
-| `create_service_and_bind_to_app` | `app_id`, service kind/name and optional size | new managed service plus binding in one call |
-| `app_logs` | `app_id`, optional cursor, limit and direction | Loki page for the app namespace |
-| `get_app_credentials` | `app_id`; operator credential only | Lake-held workspace and event-publisher values for Secret delivery |
-| `publish_app_event` | `app_id`, type, optional message/status | operator rollout or pod event ID |
-| `receive_app_events` | `app_id`, optional sequence and long-poll wait | ordered lifecycle, rollout and pod events |
+| `list_apps`, `get_app` | `app_id` for get | desired and observed state |
+| `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env | generation 1 and create event |
+| `deploy_app`, `rollback_app` | `app_id`, source or image | new desired deployment and generation |
+| `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
+| `set_app_env`, `unset_app_env` | `app_id`, key; set takes value or secret_ref | scanned environment update |
+| `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent |
+| `scale_app` | `app_id`, replicas | desired count within customer quota |
+| `bind_service_to_app` | `app_id`, service_id | bind a service from the same customer |
+| `create_service_and_bind_to_app` | `app_id`, service kind/name and optional size | create and bind in one call |
+| `app_logs` | `app_id`, optional since/limit/direction | Loki log page |
+| `receive_app_events` | `app_id`, optional from_sequence/wait_ms | ordered events with a cursor |
+| `publish_app_event` | `app_id`, event; customer_id optional | scoped operator status publication |
 
-Names are lowercase DNS-label prefixes. `auth` defaults to `lake`; `none` is explicit. A host must
-be a child of `LAKE_APPS_WILDCARD`, and a live host is unique across the Lake. Source mode requires
-repository and revision, with path defaulting to `.`. Image mode requires a nonempty image.
+The agreed runtime and binding values are:
 
-Creation and scale enforce both `LAKE_APPS_PER_CUSTOMER` and
-`LAKE_APP_REPLICAS_PER_CUSTOMER`. Zero means no configured limit. Deleting an app releases both
-quotas, but its row remains until the operator reports `phase: Deleted`.
+> `mode` is `runtime | image`.
+>
+> `bindings_json` is exactly
+> `{"zetta": {"scopes": ["read"]} | null, "services": ["<service_id>", ...]}`.
 
-## Bindings and environment
+Runtime input uses `source: {repository, revision, path?, entrypoint?}`. Repository is a Lake
+repository ID in the customer. Path defaults to `.`; entrypoint defaults to empty so app-runtime
+reads the app's `app.toml`. Image mode uses `image`. Deploy and rollback accept the same source or
+image input. The old `source` mode value is rejected.
 
-`bindings.zetta` accepts `true` for the default read-only set or an explicit nonempty list of
-read-only workspace capabilities. Lake mints a distinct `law.` bearer carrying exactly those
-capabilities, the app's customer ID, and the creator's live customer authority. The desired row
-contains scopes and the opaque `workspace-token` Secret reference, never that bearer or the
-workspace administrator bearer. Service bindings contain the service ID and an opaque
-`service-<id>` Secret reference.
-The operator resolves the workspace and event-publisher references through operator-only
-`get_app_credentials`, copies an existing service connection from its managed-service Secret, and
-delivers each value as a namespace-local Kubernetes Secret. Neither connection is copied into
-source code or `env_json`. PostgreSQL retains minted values under envelope encryption and compares
-only SHA-256 digests while authenticating them. Marking an app absent immediately rejects its
-workspace bearer.
+`bindings.zetta` accepts `true`, `["read"]`, or `{"scopes":["read"]}` to bind; false/null/omitted
+means no binding. Writes normalize to the quoted contract. Service IDs stay strings. Lake never
+adds a workspace token or an opaque token Secret reference to bindings, code, or environment.
+`auth` defaults to `lake`; names are DNS labels and hosts must be one label beneath
+`LAKE_APPS_WILDCARD`. `LAKE_APPS_PER_CUSTOMER` and `LAKE_APP_REPLICAS_PER_CUSTOMER` enforce quotas;
+zero means no configured limit.
 
-Plain environment values live in `env_json`. Values detected as credentials are rejected with
-`secret_required`; callers put the credential in the Lake-held secret system and pass only its
-reference. Those references live in `secret_env_refs`, and setting either representation removes
-the other representation of the same key. Audit records contain the key and whether it is secret,
-not the value or reference contents.
+## Tokens and events
 
-## Events and logs
+> The operator generates them, and lake validates hashes. No plaintext token is ever stored in
+> lake's database.
+>
+> source → `repository_tree`/`repository_file` on that repository only;
+> zetta → `workspace_query`/`workspace_sql` reads on that customer only;
+> events → `publish_app_event` for that app only.
 
-Lifecycle mutations publish to `app-events.<app-id>` on the Lake bus Zetta. Events contain the app,
-customer, generation, type, acting principal, and non-secret change details. Creation also mints a
-`lae.` bearer whose only capability is `publish_app_event` and whose handler accepts only that app
-ID. The operator resolves its `app-events-publisher` reference, uses it for rollout and pod
-observations, and never delivers it to the app. `receive_app_events` long-polls from a one-based
-sequence. The publisher remains valid through deletion reconciliation, then is rejected when the
-operator reports `phase: Deleted`. App logs query Loki with the deterministic namespace
-`app-<first 12 UUID hex digits>` and otherwise use the cursor contract from
-[platform.md](platform.md).
+The operator holds tokens in Secret `app-tokens` and writes SHA-256 hex hashes to
+`token_hashes_json`. Lake issues and returns no app tokens. Source calls must also name the app's
+exact revision. Zetta calls retain the workspace read allow-list and read-only SQL checks. Every
+other capability or target is refused. New hashes invalidate prior tokens; unbinding or deletion
+revokes workload access. Events remain available during teardown until the operator reports
+`Deleted`.
+
+Protected calls without authentication and well-formed calls with a wrong-purpose token return
+`unauthorized`. Malformed input on an authenticated call returns `invalid_input`; input validation
+precedes purpose authorization. Tests exercise those cases separately, and Postgres registry
+fixtures set the instance encryption key so signed-audit recording can complete.
+
+The operator calls `publish_app_event` with `{"app_id":"...","event":{"phase":"Running"}}`.
+Lake derives the customer and publishes to `app-events.<app>`. Customer callers may also supply the
+existing `type`, `message`, and `status` fields. Events record the acting app identity or customer
+principal and the current generation. `receive_app_events` uses a one-based sequence and supports
+long polling.
+
+## Stop, delete and environment
+
+> `desired = running | stopped | deleted`. Stopped means replicas 0, with the `LakeApp` kept.
+>
+> Lake removes the row after it sees `Deleted`.
+
+The row retains its requested replica count (1–100) while stopped. The operator scales the
+workload to zero; starting restores that count. Delete requires the app name, then waits for the
+operator's `Deleted` acknowledgement before Lake physically removes the row. Status exposes
+`phase`, `url`, `ready`, `message`, and `observed_generation`.
+
+Plain environment values are scanned; detected credentials return `secret_required`. Secret
+environment updates use a reference instead of a clear value. Audit records contain the key and
+whether it is secret, never its value. Bindings and operator tokens are delivered as mounted
+Secrets.
 
 ## Verification
 
-`WebApps.*` exercises policy isolation, validation, quotas, desired-to-observed status, lifecycle
-changes, minted and app-scoped credentials, operator-only resolution, Secret references, logs, and
-published/received events against the memory store. `PostgresWebApps.*` exercises the production
-store, encrypted credential retention, `lake_apps` notifications, quota locking and a fake operator
-status update. The full PostgreSQL-backed static and shared CTest suites cover REST, OpenAPI, MCP
-discovery, auditing, and migration conformance.
+`WebApps.*` and `PostgresWebApps.*` cover the memory and Postgres stores, purpose restrictions,
+cross-app/customer/revision refusal, private repository reads, read-only workspace calls,
+published/received operator events, rotation, stop/start and deletion cleanup. Full static and
+shared native CTest suites exercise registration, REST/OpenAPI/MCP discovery and auditing.

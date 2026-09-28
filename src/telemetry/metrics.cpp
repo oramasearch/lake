@@ -599,9 +599,8 @@ public:
                                                     const control::WebAppPatch& patch) override {
         return call("update_web_app", [&] { return store_->update_web_app(id, patch); });
     }
-    control::Result<std::vector<control::WebAppCredential>>
-    web_app_credentials(const std::string& id) override {
-        return call("web_app_credentials", [&] { return store_->web_app_credentials(id); });
+    control::Result<void> purge_deleted_web_apps() override {
+        return call("purge_deleted_web_apps", [&] { return store_->purge_deleted_web_apps(); });
     }
     control::Result<std::vector<control::ManagedStore>>
     list_stores(const std::string& customer_id) override {

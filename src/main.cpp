@@ -393,7 +393,15 @@ int main(int argc, char** argv) {
             }
         });
     }
+    auto next_app_cleanup = std::chrono::steady_clock::now();
     while (!stop_requested.load()) {
+        if (app_bus_configured && std::chrono::steady_clock::now() >= next_app_cleanup) {
+            const auto purged = opts.store->purge_deleted_web_apps();
+            if (!purged) {
+                std::println(stderr, "lake: could not remove acknowledged app deletions");
+            }
+            next_app_cleanup = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        }
         server.wait_for_work(std::chrono::milliseconds(100));
         server.drain();
     }

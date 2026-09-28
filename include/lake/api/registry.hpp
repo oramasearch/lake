@@ -113,6 +113,9 @@ struct ApiContext {
     std::string credential_kind;
     std::string credential_workload_id;
     std::string credential_customer_id;
+    std::string credential_repository_id;
+    std::string credential_revision;
+    std::string credential_token_hash;
     std::optional<std::int64_t> credential_expires_at_unix;
     std::string identity_seed;
     std::string instance_kek;

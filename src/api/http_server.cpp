@@ -4938,6 +4938,9 @@ struct ApiServer::Impl {
                 ctx.credential_kind = principal->kind;
                 ctx.credential_workload_id = principal->workload_id;
                 ctx.credential_customer_id = principal->workload_customer_id;
+                ctx.credential_repository_id = principal->workload_repository_id;
+                ctx.credential_revision = principal->workload_revision;
+                ctx.credential_token_hash = principal->workload_token_hash;
                 ctx.credential_expires_at_unix = principal->expires_at_unix;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;

@@ -733,7 +733,7 @@ Result<std::vector<WebApp>> InMemoryStore::list_web_apps(const std::string& cust
     std::vector<WebApp> apps;
     for (const WebApp& app : web_apps_) {
         if (app.customer_id == customer_id &&
-            !(app.desired == "absent" && app.phase == "Deleted")) {
+            !(app.desired == "deleted" && app.phase == "Deleted")) {
             apps.push_back(app);
         }
     }
@@ -759,7 +759,7 @@ Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
     std::size_t app_count = 0;
     std::size_t replica_count = 0;
     for (const WebApp& app : web_apps_) {
-        if (app.desired == "absent") {
+        if (app.desired == "deleted") {
             continue;
         }
         if (app.host == input.host) {
@@ -791,6 +791,7 @@ Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
     app.source_repository = input.source_repository;
     app.source_revision = input.source_revision;
     app.source_path = input.source_path;
+    app.source_entrypoint = input.source_entrypoint;
     app.image = input.image;
     app.framework = input.framework;
     app.port = input.port;
@@ -802,46 +803,7 @@ Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
     app.secret_env_refs = input.secret_env_refs;
     app.updated_at = now_iso8601();
 
-    std::vector<WebAppCredentialRecord> credentials;
-    const auto retain_credential = [&](std::string kind,
-                                       std::string secret_ref,
-                                       std::vector<std::string> scopes,
-                                       std::string_view prefix) -> Result<void> {
-        const std::string value =
-            std::string(prefix) + app.id + "." + identity_crypto::random_secret();
-        const std::string digest = identity_crypto::sha256_hex(value);
-        if (value.ends_with('.') || digest.empty()) {
-            return std::unexpected(StoreError{"store_error", "could not create an app credential"});
-        }
-        credentials.push_back(
-            {WebAppCredential{
-                 app.id, std::move(kind), std::move(secret_ref), std::move(scopes), value},
-             digest,
-             input.created_by_user_id,
-             input.created_by_taap_id,
-             input.pool_id});
-        return {};
-    };
-    if (app.bindings.value("zetta", nlohmann::json(false)).is_object()) {
-        const auto scopes = app.bindings.at("zetta").at("scopes").get<std::vector<std::string>>();
-        if (auto retained = retain_credential("workspace",
-                                              app.bindings.at("zetta").at("secret_ref"),
-                                              scopes,
-                                              web_app_workspace_credential_prefix);
-            !retained) {
-            return std::unexpected(retained.error());
-        }
-    }
-    if (auto retained = retain_credential("events",
-                                          "app-events-publisher",
-                                          {"publish_app_event"},
-                                          web_app_event_credential_prefix);
-        !retained) {
-        return std::unexpected(retained.error());
-    }
     web_apps_.push_back(app);
-    web_app_credentials_.insert(
-        web_app_credentials_.end(), credentials.begin(), credentials.end());
     return app;
 }
 
@@ -851,19 +813,19 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
     if (found == web_apps_.end()) {
         return std::unexpected(StoreError{"not_found", "no app " + id});
     }
-    if (found->desired == "absent") {
+    if (found->desired == "deleted") {
         return std::unexpected(StoreError{"conflict", "the app is already deleted"});
     }
     const int replicas = patch.replicas.value_or(found->replicas);
     const std::string desired = patch.desired.value_or(found->desired);
     std::size_t replica_count = 0;
     for (const WebApp& app : web_apps_) {
-        if (app.customer_id != found->customer_id || app.id == id || app.desired == "absent") {
+        if (app.customer_id != found->customer_id || app.id == id || app.desired == "deleted") {
             continue;
         }
         replica_count += static_cast<std::size_t>(app.replicas);
     }
-    if (desired != "absent") {
+    if (desired != "deleted") {
         replica_count += static_cast<std::size_t>(replicas);
     }
     if (patch.max_replicas != 0 && replica_count > patch.max_replicas) {
@@ -880,6 +842,12 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
     }
     if (patch.source_path) {
         found->source_path = *patch.source_path;
+    }
+    if (patch.source_entrypoint) {
+        found->source_entrypoint = *patch.source_entrypoint;
+    }
+    if (patch.rotate_tokens) {
+        found->token_hashes = nlohmann::json::object();
     }
     if (patch.image) {
         found->image = *patch.image;
@@ -900,19 +868,22 @@ Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebApp
     return *found;
 }
 
-Result<std::vector<WebAppCredential>> InMemoryStore::web_app_credentials(const std::string& id) {
+Result<void> InMemoryStore::purge_deleted_web_apps() {
+    std::lock_guard lock(mutex_);
+    std::erase_if(web_apps_, [](const WebApp& app) {
+        return app.desired == "deleted" && app.phase == "Deleted";
+    });
+    return {};
+}
+
+Result<void> InMemoryStore::set_web_app_token_hashes(const std::string& id, nlohmann::json hashes) {
     std::lock_guard lock(mutex_);
     const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
     if (app == web_apps_.end()) {
         return std::unexpected(StoreError{"not_found", "no app " + id});
     }
-    std::vector<WebAppCredential> credentials;
-    for (const WebAppCredentialRecord& record : web_app_credentials_) {
-        if (record.credential.app_id == id) {
-            credentials.push_back(record.credential);
-        }
-    }
-    return credentials;
+    app->token_hashes = std::move(hashes);
+    return {};
 }
 
 Result<void> InMemoryStore::set_web_app_status(const std::string& id,
@@ -2540,48 +2511,32 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
-    const auto app_principal = [&](std::string_view prefix,
-                                   std::string_view kind) -> std::optional<Result<Principal>> {
-        if (!secret.starts_with(prefix)) {
-            return std::nullopt;
+    const std::string app_digest = identity_crypto::sha256_hex(secret);
+    std::optional<Principal> app_principal;
+    for (const WebApp& app : web_apps_) {
+        const auto purpose = web_app_token_purpose(app, app_digest);
+        if (!purpose) {
+            continue;
         }
-        const auto parsed = parse_agent_credential(secret, prefix);
-        if (!parsed) {
-            return std::unexpected(StoreError{"not_found", "app credential is not active"});
+        if (app_principal) {
+            return std::unexpected(StoreError{"unauthorized", "app token is ambiguous"});
         }
-        const auto app = std::ranges::find(web_apps_, parsed->first, &WebApp::id);
-        const auto record =
-            std::ranges::find_if(web_app_credentials_, [&](const WebAppCredentialRecord& value) {
-                return value.credential.app_id == parsed->first && value.credential.kind == kind;
-            });
-        if (app == web_apps_.end() || app->phase == "Deleted" ||
-            (kind == "workspace" && app->desired == "absent") ||
-            record == web_app_credentials_.end() ||
-            !constant_time_hex_equal(identity_crypto::sha256_hex(secret), record->digest)) {
-            return std::unexpected(StoreError{"not_found", "app credential is not active"});
-        }
-        const bool events = kind == "events";
-        const std::string principal = events ? "admin" : record->taap_id;
-        if (!events && principal.empty()) {
-            return std::unexpected(
-                StoreError{"unauthorized", "app workspace identity is unavailable"});
-        }
-        return Principal{record->user_id,
-                         principal,
-                         "app:" + app->id,
-                         "",
-                         record->pool_id,
-                         events ? "app_event" : "app_workspace",
-                         record->credential.scopes,
-                         std::nullopt,
-                         app->id,
-                         app->customer_id};
-    };
-    if (auto principal = app_principal(web_app_workspace_credential_prefix, "workspace")) {
-        return std::move(*principal);
+        app_principal = Principal{"",
+                                  "app:" + app.id + ":" + *purpose,
+                                  "app:" + app.id,
+                                  "",
+                                  "lake",
+                                  "app_" + *purpose,
+                                  web_app_token_scopes(*purpose),
+                                  std::nullopt,
+                                  app.id,
+                                  app.customer_id,
+                                  app.source_repository,
+                                  app.source_revision,
+                                  app_digest};
     }
-    if (auto principal = app_principal(web_app_event_credential_prefix, "events")) {
-        return std::move(*principal);
+    if (app_principal) {
+        return *app_principal;
     }
     if (secret.starts_with(agent_task_credential_prefix)) {
         const auto parsed = parse_agent_credential(secret, agent_task_credential_prefix);

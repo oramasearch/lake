@@ -164,6 +164,51 @@ struct CallState {
     bool proceed = true;
 };
 
+ApiResult
+authorize_app_token(const Capability& entry, const nlohmann::json& input, ApiContext& context) {
+    const auto refused = [] {
+        return ApiResult::failure("unauthorized", "app token does not grant this operation");
+    };
+    if (!context.authorized || context.credential_workload_id.empty() || !context.store) {
+        return refused();
+    }
+    const auto app = context.store->get_web_app(context.credential_workload_id);
+    if (!app || web_app_token_purpose(*app, context.credential_token_hash) !=
+                    context.credential_kind.substr(4)) {
+        return refused();
+    }
+    context.audit_customer_id = app->customer_id;
+    context.audit_object = "app/" + app->id;
+    if (context.credential_kind == "app_source") {
+        if (app->desired == "deleted" || app->mode != "runtime" ||
+            (entry.name != "repository_tree" && entry.name != "repository_file") ||
+            input.value("id", "") != app->source_repository ||
+            input.value("ref", "") != app->source_revision) {
+            return refused();
+        }
+        const auto repository = context.store->get_repository(app->source_repository);
+        if (!repository || repository->customer_id != app->customer_id) {
+            return refused();
+        }
+    } else if (context.credential_kind == "app_zetta") {
+        if (app->desired == "deleted" ||
+            (entry.name != "workspace_query" && entry.name != "workspace_sql") ||
+            input.value("customer_id", "") != app->customer_id ||
+            app->bindings.value("zetta", nlohmann::json()) !=
+                nlohmann::json{{"scopes", nlohmann::json::array({"read"})}}) {
+            return refused();
+        }
+    } else if (context.credential_kind == "app_events") {
+        if (entry.name != "publish_app_event" || input.value("app_id", "") != app->id ||
+            (input.contains("customer_id") && input.value("customer_id", "") != app->customer_id)) {
+            return refused();
+        }
+    } else {
+        return refused();
+    }
+    return ApiResult::success(nullptr);
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
@@ -183,11 +228,9 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
         state.result = validation;
         state.proceed = false;
-    } else if (!context.credential_customer_id.empty() &&
-               input.value("customer_id", std::string()) != context.credential_customer_id) {
-        state.result =
-            ApiResult::failure("unauthorized", "credential belongs to a different customer");
-        state.proceed = false;
+    } else if (context.credential_kind.starts_with("app_")) {
+        state.result = authorize_app_token(entry, input, context);
+        state.proceed = state.result.ok;
     } else if (entry.requires_auth && context.session_credential &&
                std::ranges::find(context.scopes, "*") == context.scopes.end() &&
                std::ranges::find(context.scopes, entry.name) == context.scopes.end()) {

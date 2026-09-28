@@ -4043,7 +4043,8 @@ public:
         "a.source_revision, a.source_path, a.image, a.framework, a.port, a.replicas, a.host, "
         "a.auth, a.bindings_json::text, a.env_json::text, a.secret_env_refs::text, a.desired, "
         "a.generation, a.phase, a.url, a.ready, a.message, a.observed_generation, "
-        "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+        "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "a.source_entrypoint, a.token_hashes_json::text";
 
     static WebApp web_app_from(const pqxx::row& row) {
         WebApp app;
@@ -4071,6 +4072,8 @@ public:
         app.message = row[21].as<std::string>();
         app.observed_generation = row[22].as<std::int64_t>();
         app.updated_at = row[23].as<std::string>();
+        app.source_entrypoint = row[24].as<std::string>();
+        app.token_hashes = nlohmann::json::parse(row[25].as<std::string>());
         return app;
     }
 
@@ -4088,7 +4091,7 @@ public:
             const pqxx::result rows =
                 tx.exec_params(std::string("SELECT ") + web_app_columns +
                                    " FROM apps a WHERE a.customer_id = $1::uuid "
-                                   "AND NOT (a.desired = 'absent' AND a.phase = 'Deleted') "
+                                   "AND NOT (a.desired = 'deleted' AND a.phase = 'Deleted') "
                                    "ORDER BY a.updated_at, a.id",
                                customer_id);
             std::vector<WebApp> apps;
@@ -4112,7 +4115,7 @@ public:
                 return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
             }
             const pqxx::result conflicts = tx.exec_params(
-                "SELECT customer_id::text, name, host FROM apps WHERE desired <> 'absent' "
+                "SELECT customer_id::text, name, host FROM apps WHERE desired <> 'deleted' "
                 "AND ((customer_id = $1::uuid AND name = $2) OR host = $3)",
                 input.customer_id,
                 input.name,
@@ -4127,7 +4130,7 @@ public:
             }
             const pqxx::result usage =
                 tx.exec_params("SELECT count(*), COALESCE(sum(replicas), 0) FROM apps "
-                               "WHERE customer_id = $1::uuid AND desired <> 'absent'",
+                               "WHERE customer_id = $1::uuid AND desired <> 'deleted'",
                                input.customer_id);
             if (input.max_apps != 0 && usage[0][0].as<std::size_t>() >= input.max_apps) {
                 return std::unexpected(StoreError{"quota_exceeded", "app quota reached"});
@@ -4139,44 +4142,12 @@ public:
             }
             const std::string id = new_uuid_v4();
             nlohmann::json bindings = input.bindings;
-            std::vector<WebAppCredential> credentials;
-            const auto mint_credential = [&](std::string kind,
-                                             std::string secret_ref,
-                                             std::vector<std::string> scopes,
-                                             std::string_view prefix) -> Result<void> {
-                const std::string value =
-                    std::string(prefix) + id + "." + identity_crypto::random_secret();
-                if (value.ends_with('.') || identity_crypto::sha256_hex(value).empty()) {
-                    return std::unexpected(
-                        StoreError{"store_error", "could not create an app credential"});
-                }
-                credentials.push_back(
-                    {id, std::move(kind), std::move(secret_ref), std::move(scopes), value});
-                return {};
-            };
-            if (bindings.value("zetta", nlohmann::json(false)).is_object()) {
-                const auto scopes =
-                    bindings.at("zetta").at("scopes").get<std::vector<std::string>>();
-                if (auto minted = mint_credential("workspace",
-                                                  bindings.at("zetta").at("secret_ref"),
-                                                  scopes,
-                                                  web_app_workspace_credential_prefix);
-                    !minted) {
-                    return std::unexpected(minted.error());
-                }
-            }
-            if (auto minted = mint_credential("events",
-                                              "app-events-publisher",
-                                              {"publish_app_event"},
-                                              web_app_event_credential_prefix);
-                !minted) {
-                return std::unexpected(minted.error());
-            }
             tx.exec_params(
                 "INSERT INTO apps (id, customer_id, name, mode, source_repository, "
                 "source_revision, source_path, image, framework, port, replicas, host, auth, "
-                "bindings_json, env_json, secret_env_refs) VALUES ($1::uuid, $2::uuid, $3, $4, "
-                "$5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb)",
+                "bindings_json, env_json, secret_env_refs, source_entrypoint) VALUES ($1::uuid, "
+                "$2::uuid, $3, $4, "
+                "$5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, $17)",
                 id,
                 input.customer_id,
                 input.name,
@@ -4192,27 +4163,8 @@ public:
                 input.auth,
                 bindings.dump(),
                 input.env.dump(),
-                input.secret_env_refs.dump());
-            for (const WebAppCredential& credential : credentials) {
-                const std::string purpose = "app.credential." + id + "." + credential.kind;
-                const Result<std::string> encrypted = encrypt_secret(tx, purpose, credential.value);
-                if (!encrypted) {
-                    return std::unexpected(encrypted.error());
-                }
-                tx.exec_params(
-                    "INSERT INTO app_credentials (app_id, kind, secret_ref, credential_sha256, "
-                    "ciphertext, scopes, user_id, taap_id, pool_id) VALUES ($1::uuid, $2, $3, "
-                    "$4, $5, $6::jsonb, $7, $8, $9)",
-                    id,
-                    credential.kind,
-                    credential.secret_ref,
-                    identity_crypto::sha256_hex(credential.value),
-                    *encrypted,
-                    nlohmann::json(credential.scopes).dump(),
-                    input.created_by_user_id,
-                    input.created_by_taap_id,
-                    input.pool_id);
-            }
+                input.secret_env_refs.dump(),
+                input.source_entrypoint);
             tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
             return one_web_app(tx, id);
         });
@@ -4231,15 +4183,15 @@ public:
             if (!current) {
                 return current;
             }
-            if (current->desired == "absent") {
+            if (current->desired == "deleted") {
                 return std::unexpected(StoreError{"conflict", "the app is already deleted"});
             }
             const int replicas = patch.replicas.value_or(current->replicas);
             const std::string desired = patch.desired.value_or(current->desired);
-            if (patch.max_replicas != 0 && desired != "absent") {
+            if (patch.max_replicas != 0 && desired != "deleted") {
                 const pqxx::result usage = tx.exec_params(
                     "SELECT COALESCE(sum(replicas), 0) FROM apps WHERE customer_id = $1::uuid "
-                    "AND id <> $2::uuid AND desired <> 'absent'",
+                    "AND id <> $2::uuid AND desired <> 'deleted'",
                     customer_id,
                     id);
                 if (usage[0][0].as<std::size_t>() + static_cast<std::size_t>(replicas) >
@@ -4253,6 +4205,8 @@ public:
                 patch.source_repository.value_or(current->source_repository);
             current->source_revision = patch.source_revision.value_or(current->source_revision);
             current->source_path = patch.source_path.value_or(current->source_path);
+            current->source_entrypoint =
+                patch.source_entrypoint.value_or(current->source_entrypoint);
             current->image = patch.image.value_or(current->image);
             current->replicas = replicas;
             current->bindings = patch.bindings.value_or(current->bindings);
@@ -4263,7 +4217,8 @@ public:
                 "UPDATE apps SET mode = $2, source_repository = $3, source_revision = $4, "
                 "source_path = $5, image = $6, replicas = $7, bindings_json = $8::jsonb, "
                 "env_json = $9::jsonb, secret_env_refs = $10::jsonb, desired = $11, "
-                "generation = generation + 1, updated_at = now() WHERE id = $1::uuid",
+                "source_entrypoint = $12, generation = generation + 1, updated_at = now() "
+                "WHERE id = $1::uuid",
                 id,
                 current->mode,
                 current->source_repository,
@@ -4274,43 +4229,22 @@ public:
                 current->bindings.dump(),
                 current->env.dump(),
                 current->secret_env_refs.dump(),
-                current->desired);
+                current->desired,
+                current->source_entrypoint);
+            if (patch.rotate_tokens) {
+                tx.exec_params(
+                    "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);
+            }
             tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
             return one_web_app(tx, id);
         });
     }
 
-    Result<std::vector<WebAppCredential>> web_app_credentials(const std::string& id) override {
-        return with_tx<std::vector<WebAppCredential>>(
-            [&](pqxx::work& tx) -> Result<std::vector<WebAppCredential>> {
-                const pqxx::result rows = tx.exec_params(
-                    "SELECT kind, secret_ref, scopes::text, ciphertext FROM app_credentials "
-                    "WHERE app_id = $1::uuid ORDER BY kind",
-                    id);
-                if (rows.empty()) {
-                    const pqxx::result apps =
-                        tx.exec_params("SELECT 1 FROM apps WHERE id = $1::uuid", id);
-                    if (apps.empty()) {
-                        return std::unexpected(StoreError{"not_found", "no app " + id});
-                    }
-                }
-                std::vector<WebAppCredential> credentials;
-                for (const pqxx::row& row : rows) {
-                    const std::string kind = row[0].as<std::string>();
-                    const Result<std::string> value = decrypt_secret(
-                        tx, "app.credential." + id + "." + kind, row[3].as<std::string>());
-                    if (!value) {
-                        return std::unexpected(value.error());
-                    }
-                    credentials.push_back({id,
-                                           kind,
-                                           row[1].as<std::string>(),
-                                           nlohmann::json::parse(row[2].as<std::string>())
-                                               .get<std::vector<std::string>>(),
-                                           *value});
-                }
-                return credentials;
-            });
+    Result<void> purge_deleted_web_apps() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec("DELETE FROM apps WHERE desired = 'deleted' AND phase = 'Deleted'");
+            return {};
+        });
     }
 
     static constexpr const char* store_columns =
@@ -5917,60 +5851,45 @@ public:
             return {};
         });
     }
-    Result<Principal>
-    app_principal(const std::string& secret, std::string_view prefix, std::string_view kind) {
-        const auto parsed = parse_agent_credential(secret, prefix);
-        if (!parsed) {
-            return std::unexpected(StoreError{"not_found", "app credential is not active"});
-        }
+    Result<Principal> app_principal(const std::string& secret) {
         const std::string digest = identity_crypto::sha256_hex(secret);
         if (digest.empty()) {
-            return std::unexpected(StoreError{"store_error", "could not hash app credential"});
+            return std::unexpected(StoreError{"not_found", "app token is not active"});
         }
         return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
-            const pqxx::result rows = tx.exec_params(
-                "SELECT c.credential_sha256, c.scopes::text, c.user_id, c.taap_id, c.pool_id, "
-                "a.desired, a.customer_id::text "
-                "FROM app_credentials c JOIN apps a ON a.id = c.app_id "
-                "WHERE c.app_id = $1::uuid AND c.kind = $2 AND a.phase <> 'Deleted'",
-                parsed->first,
-                kind);
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "app credential is not active"});
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + web_app_columns +
+                                   " FROM apps a WHERE a.phase <> 'Deleted' AND "
+                                   "(a.token_hashes_json->>'source' = $1 OR "
+                                   "a.token_hashes_json->>'zetta' = $1 OR "
+                                   "a.token_hashes_json->>'events' = $1)",
+                               digest);
+            if (rows.size() != 1) {
+                return std::unexpected(StoreError{"not_found", "app token is not active"});
             }
-            const std::string expected = rows[0][0].as<std::string>();
-            if (expected.size() != digest.size() ||
-                CRYPTO_memcmp(expected.data(), digest.data(), digest.size()) != 0) {
-                return std::unexpected(StoreError{"not_found", "app credential is not active"});
+            const WebApp app = web_app_from(rows[0]);
+            const auto purpose = web_app_token_purpose(app, digest);
+            if (!purpose) {
+                return std::unexpected(StoreError{"not_found", "app token is not active"});
             }
-            const bool events = kind == "events";
-            if (!events && rows[0][5].as<std::string>() == "absent") {
-                return std::unexpected(StoreError{"not_found", "app credential is not active"});
-            }
-            const std::string taap_id = events ? "admin" : rows[0][3].as<std::string>();
-            if (!events && taap_id.empty()) {
-                return std::unexpected(
-                    StoreError{"unauthorized", "app workspace identity is unavailable"});
-            }
-            return Principal{
-                rows[0][2].as<std::string>(),
-                taap_id,
-                "app:" + parsed->first,
-                "",
-                rows[0][4].as<std::string>(),
-                events ? "app_event" : "app_workspace",
-                nlohmann::json::parse(rows[0][1].as<std::string>()).get<std::vector<std::string>>(),
-                std::nullopt,
-                parsed->first,
-                rows[0][6].as<std::string>()};
+            return Principal{"",
+                             "app:" + app.id + ":" + *purpose,
+                             "app:" + app.id,
+                             "",
+                             "lake",
+                             "app_" + *purpose,
+                             web_app_token_scopes(*purpose),
+                             std::nullopt,
+                             app.id,
+                             app.customer_id,
+                             app.source_repository,
+                             app.source_revision,
+                             digest};
         });
     }
     Result<Principal> context_for(const std::string& secret) override {
-        if (secret.starts_with(web_app_workspace_credential_prefix)) {
-            return app_principal(secret, web_app_workspace_credential_prefix, "workspace");
-        }
-        if (secret.starts_with(web_app_event_credential_prefix)) {
-            return app_principal(secret, web_app_event_credential_prefix, "events");
+        if (auto principal = app_principal(secret)) {
+            return principal;
         }
         if (secret.starts_with(agent_launch_credential_prefix)) {
             return launch_principal(secret);

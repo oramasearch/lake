@@ -131,7 +131,8 @@ app_host(const json& input, const std::string& name, const ApiContext& context) 
             "store_unavailable", "LAKE_APPS_WILDCARD is not configured with a valid domain"));
     }
     const std::string host = input.value("host", name + "." + wildcard);
-    if (!valid_domain(host) || host == wildcard || !host.ends_with("." + wildcard)) {
+    if (!valid_domain(host) || host == wildcard || !host.ends_with("." + wildcard) ||
+        host.substr(0, host.size() - wildcard.size() - 1).contains('.')) {
         return std::unexpected(ApiResult::failure(
             "invalid_input", "host must be below the lake apps wildcard " + wildcard, "/host"));
     }
@@ -182,43 +183,18 @@ normalized_bindings(const json& value, const std::string& customer_id, ApiContex
         return std::unexpected(
             ApiResult::failure("invalid_input", "bindings must be an object", "/bindings"));
     }
-    json output{{"zetta", false}, {"services", json::array()}};
-    if (value.contains("zetta")) {
-        const json& zetta = value.at("zetta");
-        if (zetta.is_boolean()) {
-            if (zetta.get<bool>()) {
-                output["zetta"] = {
-                    {"scopes", json::array({"workspace_query", "workspace_openapi"})},
-                    {"secret_ref", "workspace-token"}};
-            }
-        } else if (zetta.is_array()) {
-            json scopes = json::array();
-            for (const json& scope : zetta) {
-                if (!scope.is_string()) {
-                    return std::unexpected(ApiResult::failure(
-                        "invalid_input", "zetta scopes must be strings", "/bindings/zetta"));
-                }
-                const std::string name = scope.get<std::string>();
-                if (name != "workspace_query" && name != "workspace_openapi" &&
-                    !workspace_read_allowed(name)) {
-                    return std::unexpected(ApiResult::failure(
-                        "invalid_input",
-                        "zetta binding scopes are read-only workspace capabilities",
-                        "/bindings/zetta"));
-                }
-                scopes.push_back(name);
-            }
-            if (scopes.empty()) {
-                return std::unexpected(ApiResult::failure(
-                    "invalid_input", "zetta scopes cannot be empty", "/bindings/zetta"));
-            }
-            output["zetta"] = {{"scopes", std::move(scopes)}, {"secret_ref", "workspace-token"}};
-        } else {
-            return std::unexpected(
-                ApiResult::failure("invalid_input",
-                                   "zetta must be a boolean or an array of scopes",
-                                   "/bindings/zetta"));
+    json output{{"zetta", nullptr}, {"services", json::array()}};
+    if (value.contains("zetta") && !value.at("zetta").is_null() && value.at("zetta") != false) {
+        const json& binding = value.at("zetta");
+        const json scopes = binding == true       ? json::array({"read"})
+                            : binding.is_array()  ? binding
+                            : binding.is_object() ? binding.value("scopes", json())
+                                                  : json();
+        if (scopes != json::array({"read"})) {
+            return std::unexpected(ApiResult::failure(
+                "invalid_input", "zetta binding scopes must be [read]", "/bindings/zetta"));
         }
+        output["zetta"] = {{"scopes", scopes}};
     }
     const json services = value.value("services", json::array());
     if (!services.is_array()) {
@@ -235,8 +211,9 @@ normalized_bindings(const json& value, const std::string& customer_id, ApiContex
             return std::unexpected(ApiResult::failure(
                 "not_found", "no such service in this space", "/bindings/services"));
         }
-        output["services"].push_back(
-            {{"id", service->id}, {"secret_ref", "service-" + service->id}});
+        if (std::ranges::find(output["services"], json(service->id)) == output["services"].end()) {
+            output["services"].push_back(service->id);
+        }
     }
     return output;
 }
@@ -298,19 +275,51 @@ control::WebAppPatch deployment_patch(const json& input) {
     patch.desired = "running";
     if (input.contains("source")) {
         const json& source = input.at("source");
-        patch.mode = "source";
+        patch.mode = "runtime";
         patch.source_repository = source.value("repository", "");
         patch.source_revision = source.value("revision", "");
         patch.source_path = source.value("path", ".");
+        patch.source_entrypoint = source.value("entrypoint", "");
         patch.image = "";
     } else {
         patch.mode = "image";
         patch.source_repository = "";
         patch.source_revision = "";
         patch.source_path = "";
+        patch.source_entrypoint = "";
         patch.image = input.value("image", "");
     }
     return patch;
+}
+
+std::optional<ApiResult> validate_source_repository(const json& input, ApiContext& context) {
+    if (!input.contains("source")) {
+        return std::nullopt;
+    }
+    const auto repository =
+        context.store->get_repository(input.at("source").at("repository").get<std::string>());
+    if (!repository || repository->customer_id != input.at("customer_id").get<std::string>()) {
+        return ApiResult::failure(
+            "not_found", "no such repository in this space", "/source/repository");
+    }
+    return std::nullopt;
+}
+
+json event_input_schema() {
+    json schema = app_input_schema({{"type", {{"type", "string"}}},
+                                    {"message", {{"type", "string"}}},
+                                    {"status", {{"type", "object"}}},
+                                    {"event", {{"type", "object"}}}});
+    schema["required"] = json::array({"app_id"});
+    return schema;
+}
+
+std::expected<std::string, ApiError> event_customer_object(const json& input, ApiContext& context) {
+    const auto app = context.store->get_web_app(input.at("app_id"));
+    if (!app || (input.contains("customer_id") && input.at("customer_id") != app->customer_id)) {
+        return std::unexpected(ApiError{"not_found", "no such app in this space", "/app_id"});
+    }
+    return customer_object({{"customer_id", app->customer_id}}, context);
 }
 
 std::optional<ApiResult> validate_deployment(const json& input) {
@@ -340,7 +349,8 @@ json deployment_properties() {
               {"properties",
                {{"repository", {{"type", "string"}}},
                 {"revision", {{"type", "string"}}},
-                {"path", {{"type", "string"}}}}},
+                {"path", {{"type", "string"}}},
+                {"entrypoint", {{"type", "string"}}}}},
               {"additionalProperties", false}}},
             {"image", {{"type", "string"}}}};
 }
@@ -412,10 +422,10 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_app",
         .title = "Create app",
-        .description = "Create source- or image-backed desired state for the app operator.",
+        .description = "Create runtime or image desired state for the app operator.",
         .input_schema = input_schema(
             {{"name", {{"type", "string"}}},
-             {"mode", {{"type", "string"}, {"enum", json::array({"source", "image"})}}},
+             {"mode", {{"type", "string"}, {"enum", json::array({"runtime", "image"})}}},
              {"source", deployment_properties().at("source")},
              {"image", {{"type", "string"}}},
              {"framework", {{"type", "string"}}},
@@ -447,12 +457,15 @@ void register_web_app_capabilities(Registry& registry) {
             }
             json deployment = input;
             const std::string mode = input.at("mode");
-            if ((mode == "source") != input.contains("source") ||
+            if ((mode == "runtime") != input.contains("source") ||
                 (mode == "image") != input.contains("image")) {
                 co_return ApiResult::failure(
                     "invalid_input", "mode must match exactly one source or image", "/mode");
             }
             if (const auto invalid = validate_deployment(deployment)) {
+                co_return *invalid;
+            }
+            if (const auto invalid = validate_source_repository(input, context)) {
                 co_return *invalid;
             }
             const json env = input.value("env", json::object());
@@ -484,15 +497,13 @@ void register_web_app_capabilities(Registry& registry) {
             app.auth = input.value("auth", "lake");
             app.bindings = std::move(*bindings);
             app.env = env;
-            app.created_by_user_id = context.acting_user_id;
-            app.created_by_taap_id = context.acting_identity;
-            app.pool_id = context.pool_id;
             app.max_apps = context.apps_per_customer;
             app.max_replicas = context.app_replicas_per_customer;
             const control::WebAppPatch sources = deployment_patch(deployment);
             app.source_repository = sources.source_repository.value_or("");
             app.source_revision = sources.source_revision.value_or("");
             app.source_path = sources.source_path.value_or("");
+            app.source_entrypoint = sources.source_entrypoint.value_or("");
             app.image = sources.image.value_or("");
             auto created = context.store->create_web_app(app);
             if (!created) {
@@ -519,6 +530,9 @@ void register_web_app_capabilities(Registry& registry) {
                 if (const auto invalid = validate_deployment(input)) {
                     co_return *invalid;
                 }
+                if (const auto invalid = validate_source_repository(input, context)) {
+                    co_return *invalid;
+                }
                 co_return co_await patch_and_publish(input,
                                                      context,
                                                      deployment_patch(input),
@@ -532,7 +546,7 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "delete_app",
         .title = "Delete app",
-        .description = "Mark an app absent. confirm must equal its name.",
+        .description = "Request app deletion. confirm must equal its name.",
         .input_schema =
             app_input_schema({{"confirm", {{"type", "string"}}}}, json::array({"confirm"})),
         .output_schema = {{"type", "object"}},
@@ -551,7 +565,7 @@ void register_web_app_capabilities(Registry& registry) {
                     "invalid_input", "confirm must be the app name " + app->name, "/confirm");
             }
             control::WebAppPatch patch;
-            patch.desired = "absent";
+            patch.desired = "deleted";
             co_return co_await patch_and_publish(
                 input, context, std::move(patch), "app.delete", "delete");
         }});
@@ -707,10 +721,8 @@ void register_web_app_capabilities(Registry& registry) {
                 co_return ApiResult::failure("not_found", "no such service in this space");
             }
             json services = app->bindings.value("services", json::array());
-            if (std::ranges::none_of(services, [&](const json& binding) {
-                    return binding.value("id", "") == service->id;
-                })) {
-                services.push_back({{"id", service->id}, {"secret_ref", "service-" + service->id}});
+            if (std::ranges::find(services, json(service->id)) == services.end()) {
+                services.push_back(service->id);
             }
             app->bindings["services"] = std::move(services);
             control::WebAppPatch patch;
@@ -807,65 +819,24 @@ void register_web_app_capabilities(Registry& registry) {
             co_return ApiResult::success(std::move(*logs));
         }});
     registry.add(Capability{
-        .name = "get_app_credentials",
-        .title = "Resolve app credentials",
-        .description =
-            "Operator-only resolution of Lake-held credentials for Kubernetes Secret delivery.",
-        .input_schema = app_input_schema(),
-        .output_schema = {{"type", "object"}},
-        .kind = CapabilityKind::Read,
-        .object = "customer",
-        .action = "read",
-        .resolve_object = customer_object,
-        .handler = [](const json& input, ApiContext& context) {
-            if (!context.operator_credential) {
-                return ApiResult::failure("unauthorized",
-                                          "only the lake operator may resolve app credentials");
-            }
-            auto app = owned_app(input, context);
-            if (!app) {
-                return app.error();
-            }
-            auto credentials = context.store->web_app_credentials(app->id);
-            if (!credentials) {
-                return store_failure(credentials.error());
-            }
-            json items = json::array();
-            for (const control::WebAppCredential& credential : *credentials) {
-                items.push_back({{"kind", credential.kind},
-                                 {"secret_ref", credential.secret_ref},
-                                 {"scopes", credential.scopes},
-                                 {"value", credential.value}});
-            }
-            app_audit(
-                context, "app.credentials.resolve", *app, {{"credential_count", items.size()}});
-            return ApiResult::success({{"credentials", std::move(items)}});
-        }});
-    registry.add(Capability{
         .name = "publish_app_event",
         .title = "Publish app event",
         .description = "Publish operator rollout or pod status on this app's dedicated topic.",
-        .input_schema = app_input_schema({{"type", {{"type", "string"}}},
-                                          {"message", {{"type", "string"}}},
-                                          {"status", {{"type", "object"}}}},
-                                         json::array({"type"})),
+        .input_schema = event_input_schema(),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
         .action = "write",
-        .resolve_object = customer_object,
+        .resolve_object = event_customer_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            if (context.credential_kind == "app_event") {
-                if (context.credential_workload_id != input.at("app_id").get<std::string>()) {
-                    co_return ApiResult::failure(
-                        "unauthorized", "the publish credential belongs to a different app");
-                }
-                context.acting_identity = "app-operator:" + context.credential_workload_id;
+            auto app = context.store->get_web_app(input.at("app_id"));
+            if (!app ||
+                (input.contains("customer_id") && input.at("customer_id") != app->customer_id)) {
+                co_return ApiResult::failure("not_found", "no such app in this space");
             }
-            auto app = owned_app(input, context);
-            if (!app) {
-                co_return app.error();
+            if (!input.contains("event") && !input.contains("type")) {
+                co_return ApiResult::failure("invalid_input", "event or type is required");
             }
             if (context.agent_bus == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
@@ -878,17 +849,18 @@ void register_web_app_capabilities(Registry& registry) {
             }
             json event{{"app_id", app->id},
                        {"customer_id", app->customer_id},
-                       {"type", input.at("type")},
+                       {"type", input.value("type", "rollout")},
                        {"generation", app->generation},
                        {"message", input.value("message", "")},
-                       {"status", input.value("status", json::object())},
+                       {"status", input.value("event", input.value("status", json::object()))},
                        {"principal", context.acting_identity}};
             auto published = control::settled(
                 co_await context.agent_bus->bus().publish(topic, std::move(event), app->id));
             if (!published) {
                 co_return ApiResult::failure("store_unavailable", published.error().message);
             }
-            app_audit(context, "app.event.publish", *app, {{"type", input.at("type")}});
+            app_audit(
+                context, "app.event.publish", *app, {{"type", input.value("type", "rollout")}});
             co_return ApiResult::success({{"event_id", *published}});
         }});
     registry.add(

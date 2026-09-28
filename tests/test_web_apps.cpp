@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -58,6 +60,7 @@ struct WebApps {
     lake::control::Principal owner;
     lake::control::Principal other;
     std::string customer_id;
+    std::string repository_id;
     lake::api::Registry registry;
     std::shared_ptr<lake::control::MemoryAgentBus> raw_bus =
         std::make_shared<lake::control::MemoryAgentBus>();
@@ -82,6 +85,10 @@ struct WebApps {
         const auto customers = store->list_customers(2, owner.user_id);
         EXPECT_TRUE(customers);
         customer_id = customers->front().id;
+        const auto repository =
+            store->create_repository({customer_id, "app-source", "", "private"});
+        EXPECT_TRUE(repository);
+        repository_id = repository->id;
         workspaces = std::make_shared<lake::control::WorkspaceService>(
             lake::control::WorkspaceConfig{service_dir.string(), 5}, store, workspace_caller);
         platform = std::make_shared<lake::control::PlatformService>(
@@ -113,10 +120,16 @@ struct WebApps {
         context.credential_kind = principal.kind;
         context.credential_workload_id = principal.workload_id;
         context.credential_customer_id = principal.workload_customer_id;
+        context.credential_repository_id = principal.workload_repository_id;
+        context.credential_revision = principal.workload_revision;
+        context.credential_token_hash = principal.workload_token_hash;
         context.pool_id = principal.pool_id;
         context.scopes = principal.scopes;
         context.request_id = lake::control::new_uuid_v4();
-        input["customer_id"] = customer_id;
+        if (registry.find(name)->input_schema["properties"].contains("customer_id") &&
+            principal.kind != "app_events" && !input.contains("customer_id")) {
+            input["customer_id"] = customer_id;
+        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -129,11 +142,12 @@ struct WebApps {
     lake::api::ApiResult create(std::string name = "reports") {
         return call("create_app",
                     {{"name", std::move(name)},
-                     {"mode", "source"},
+                     {"mode", "runtime"},
                      {"source",
-                      {{"repository", "https://example.test/team/app.git"},
+                      {{"repository", repository_id},
                        {"revision", "main"},
-                       {"path", "web"}}},
+                       {"path", "web"},
+                       {"entrypoint", "server:app"}}},
                      {"framework", "node"},
                      {"port", 3000},
                      {"bindings", {{"zetta", true}, {"services", json::array()}}},
@@ -150,7 +164,8 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
     EXPECT_EQ(created.value["host"], "reports.apps.example.test");
     EXPECT_EQ(created.value["auth"], "lake");
     EXPECT_EQ(created.value["generation"], 1);
-    EXPECT_EQ(created.value["bindings"]["zetta"]["secret_ref"], "workspace-token");
+    EXPECT_EQ(created.value["bindings"]["zetta"], json({{"scopes", {"read"}}}));
+    EXPECT_EQ(created.value["source"]["entrypoint"], "server:app");
     EXPECT_FALSE(created.value.dump().contains("workspace-admin-token"));
 
     const std::string id = created.value.at("id");
@@ -161,10 +176,10 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
                event.draft.principal == apps.owner.taap_id && event.draft.outcome == "success";
     }));
     ASSERT_TRUE(apps.store->set_web_app_status(
-        id, "Ready", "https://reports.apps.example.test", true, "available", 1));
+        id, "Running", "https://reports.apps.example.test", true, "available", 1));
     const auto observed = apps.call("get_app", {{"app_id", id}});
     ASSERT_TRUE(observed.ok) << observed.error.message;
-    EXPECT_EQ(observed.value["phase"], "Ready");
+    EXPECT_EQ(observed.value["phase"], "Running");
     EXPECT_EQ(observed.value["observed_generation"], 1);
     EXPECT_TRUE(observed.value["ready"]);
 
@@ -189,8 +204,7 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
 
 TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     WebApps apps;
-    for (const std::string& read :
-         {"list_apps", "get_app", "get_app_credentials", "app_logs", "receive_app_events"}) {
+    for (const std::string& read : {"list_apps", "get_app", "app_logs", "receive_app_events"}) {
         ASSERT_EQ(apps.registry.find(read)->action, "read") << read;
     }
     for (const std::string& write : {"create_app",
@@ -231,6 +245,12 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     const std::string id = created.value.at("id");
     const auto foreign = apps.call(apps.other, "get_app", {{"app_id", id}});
     EXPECT_EQ(foreign.error.code, "unauthorized");
+    lake::api::ApiContext anonymous;
+    anonymous.store = apps.store.get();
+    EXPECT_EQ(apps.registry
+                  .call("get_app", {{"app_id", id}, {"customer_id", apps.customer_id}}, anonymous)
+                  .error.code,
+              "unauthorized");
     const auto secret = apps.call("set_app_env",
                                   {{"app_id", id},
                                    {"key", "AWS_SECRET_ACCESS_KEY"},
@@ -249,15 +269,14 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     EXPECT_EQ(deployed.value["mode"], "image");
     const auto rolled_back = apps.call(
         "rollback_app",
-        {{"app_id", id},
-         {"source", {{"repository", "https://example.test/team/app.git"}, {"revision", "v1"}}}});
+        {{"app_id", id}, {"source", {{"repository", apps.repository_id}, {"revision", "v1"}}}});
     ASSERT_TRUE(rolled_back.ok) << rolled_back.error.message;
     EXPECT_EQ(rolled_back.value["source"]["revision"], "v1");
     EXPECT_EQ(apps.call("delete_app", {{"app_id", id}, {"confirm", "wrong"}}).error.code,
               "invalid_input");
     const auto deleted = apps.call("delete_app", {{"app_id", id}, {"confirm", "reports"}});
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
-    EXPECT_EQ(deleted.value["desired"], "absent");
+    EXPECT_EQ(deleted.value["desired"], "deleted");
 }
 
 TEST(WebApps, ServiceBindingsLogsAndLifecycleEventsCarryReferencesAndPrincipal) {
@@ -270,7 +289,7 @@ TEST(WebApps, ServiceBindingsLogsAndLifecycleEventsCarryReferencesAndPrincipal) 
                                  {{"app_id", id}, {"kind", "postgres"}, {"name", "orders"}});
     ASSERT_TRUE(bound.ok) << bound.error.message;
     ASSERT_EQ(bound.value["bindings"]["services"].size(), 1U);
-    EXPECT_TRUE(bound.value["bindings"]["services"][0].contains("secret_ref"));
+    EXPECT_EQ(bound.value["bindings"]["services"][0], bound.value["service"]["id"]);
     EXPECT_FALSE(bound.value.dump().contains("password"));
 
     const auto logs = apps.call("app_logs", {{"app_id", id}});
@@ -290,66 +309,139 @@ TEST(WebApps, ServiceBindingsLogsAndLifecycleEventsCarryReferencesAndPrincipal) 
     EXPECT_EQ(received.value["events"].back()["principal"], apps.owner.taap_id);
 }
 
-TEST(WebApps, LakeMintsScopedCredentialsAndOnlyTheOperatorCanResolveThem) {
+TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
     WebApps apps;
     const auto created = apps.create();
     ASSERT_TRUE(created.ok) << created.error.message;
     const std::string id = created.value.at("id");
-
-    const auto credentials = apps.store->web_app_credentials(id);
-    ASSERT_TRUE(credentials) << credentials.error().message;
-    ASSERT_EQ(credentials->size(), 2U);
-    const auto workspace =
-        std::ranges::find(*credentials, "workspace", [](const auto& value) { return value.kind; });
-    const auto events =
-        std::ranges::find(*credentials, "events", [](const auto& value) { return value.kind; });
-    ASSERT_NE(workspace, credentials->end());
-    ASSERT_NE(events, credentials->end());
-    EXPECT_TRUE(workspace->value.starts_with(lake::control::web_app_workspace_credential_prefix));
-    EXPECT_EQ(workspace->scopes,
-              std::vector<std::string>({"workspace_query", "workspace_openapi"}));
-    EXPECT_TRUE(events->value.starts_with(lake::control::web_app_event_credential_prefix));
-    EXPECT_EQ(events->scopes, std::vector<std::string>({"publish_app_event"}));
-    EXPECT_FALSE(created.value.dump().contains(workspace->value));
-    EXPECT_FALSE(created.value.dump().contains(events->value));
-
-    const auto workspace_principal = apps.store->context_for(workspace->value);
-    ASSERT_TRUE(workspace_principal) << workspace_principal.error().message;
-    EXPECT_EQ(workspace_principal->kind, "app_workspace");
-    EXPECT_EQ(workspace_principal->workload_id, id);
-    EXPECT_EQ(workspace_principal->workload_customer_id, apps.customer_id);
-    EXPECT_EQ(apps.call(*workspace_principal, "get_app", {{"app_id", id}}).error.code,
-              "unauthorized");
-
-    const auto event_principal = apps.store->context_for(events->value);
-    ASSERT_TRUE(event_principal) << event_principal.error().message;
-    const auto published =
-        apps.call(*event_principal, "publish_app_event", {{"app_id", id}, {"type", "rollout"}});
-    ASSERT_TRUE(published.ok) << published.error.message;
     const auto second = apps.create("second");
     ASSERT_TRUE(second.ok) << second.error.message;
-    EXPECT_EQ(apps.call(*event_principal,
-                        "publish_app_event",
-                        {{"app_id", second.value.at("id")}, {"type", "pod"}})
+    const auto foreign =
+        apps.store->create_repository({apps.customer_id, "other-source", "", "public"});
+    ASSERT_TRUE(foreign);
+    EXPECT_EQ(created.value["mode"], "runtime");
+    EXPECT_FALSE(created.value.contains("token_hashes_json"));
+    ASSERT_TRUE(apps.store->get_web_app(id)->token_hashes.empty());
+
+    const json hashes{{"source", lake::control::identity_crypto::sha256_hex("operator-source")},
+                      {"zetta", lake::control::identity_crypto::sha256_hex("operator-zetta")},
+                      {"events", lake::control::identity_crypto::sha256_hex("operator-events")}};
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes));
+    ASSERT_FALSE(apps.store->context_for("unknown"));
+    for (const std::string purpose : {"source", "zetta", "events"}) {
+        const auto principal = apps.store->context_for("operator-" + purpose);
+        ASSERT_TRUE(principal) << principal.error().message;
+        EXPECT_EQ(principal->kind, "app_" + purpose);
+        EXPECT_EQ(principal->workload_id, id);
+        EXPECT_EQ(principal->workload_customer_id, apps.customer_id);
+        EXPECT_EQ(
+            apps.call(*principal, "get_app", {{"app_id", id}, {"customer_id", apps.customer_id}})
+                .error.code,
+            "unauthorized");
+        EXPECT_EQ(apps.call(*principal, "server_info", json::object()).error.code, "unauthorized");
+        EXPECT_EQ(apps.call(*principal, "server_info", nullptr).error.code, "invalid_input");
+        EXPECT_EQ(
+            apps.call(*principal,
+                      "delete_app",
+                      {{"app_id", id}, {"customer_id", apps.customer_id}, {"confirm", "reports"}})
+                .error.code,
+            "unauthorized");
+        const auto different_app =
+            apps.call(*principal,
+                      "publish_app_event",
+                      {{"app_id", second.value.at("id")}, {"event", {{"phase", "Running"}}}});
+        EXPECT_EQ(different_app.error.code, "unauthorized");
+    }
+
+    const auto source = *apps.store->context_for("operator-source");
+    EXPECT_EQ(apps.call(source,
+                        "repository_tree",
+                        {{"id", apps.repository_id}, {"ref", "other-revision"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(
+        apps.call(source, "repository_tree", {{"id", foreign->id}, {"ref", "main"}}).error.code,
+        "unauthorized");
+    EXPECT_EQ(apps.call(source,
+                        "repository_file",
+                        {{"id", foreign->id}, {"ref", "main"}, {"path", "app.toml"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(apps.call(source, "workspace_query", {{"capability", "list_datasets"}}).error.code,
+              "unauthorized");
+
+    ASSERT_TRUE(apps.call("start_workspace").ok);
+    const auto services = apps.store->list_services(apps.customer_id);
+    ASSERT_TRUE(services);
+    const auto workspace =
+        std::ranges::find_if(*services, [](const auto& service) { return service.is_default; });
+    ASSERT_NE(workspace, services->end());
+    ASSERT_TRUE(
+        apps.store->set_service_status(workspace->id, "Ready", "", "http://workspace.test:4800"));
+    std::ofstream(apps.service_dir / (workspace->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", "workspace-server-token"}}.dump();
+    const auto zetta = *apps.store->context_for("operator-zetta");
+    EXPECT_TRUE(apps.call(zetta, "workspace_query", {{"capability", "list_datasets"}}).ok);
+    EXPECT_TRUE(apps.call(zetta, "workspace_sql", {{"statement", "SELECT * FROM data.rows"}}).ok);
+    EXPECT_FALSE(apps.call(zetta, "workspace_query", {{"capability", "create_project"}}).ok);
+    EXPECT_FALSE(apps.call(zetta, "workspace_sql", {{"statement", "DROP TABLE data.rows"}}).ok);
+    EXPECT_EQ(apps.call(zetta, "workspace_act", {{"capability", "create_project"}}).error.code,
+              "unauthorized");
+    EXPECT_EQ(
+        apps.call(zetta,
+                  "workspace_query",
+                  {{"customer_id", lake::control::new_uuid_v4()}, {"capability", "list_datasets"}})
+            .error.code,
+        "unauthorized");
+    EXPECT_EQ(apps.call(zetta, "repository_tree", {{"id", apps.repository_id}, {"ref", "main"}})
                   .error.code,
               "unauthorized");
 
-    EXPECT_EQ(apps.call("get_app_credentials", {{"app_id", id}}).error.code, "unauthorized");
-    lake::api::ApiContext operator_context;
-    operator_context.store = apps.store.get();
-    operator_context.authorized = true;
-    operator_context.operator_credential = true;
-    operator_context.acting_identity = "admin";
-    operator_context.request_id = lake::control::new_uuid_v4();
-    const auto resolved = apps.registry.call("get_app_credentials",
-                                             {{"customer_id", apps.customer_id}, {"app_id", id}},
-                                             operator_context);
-    ASSERT_TRUE(resolved.ok) << resolved.error.message;
-    EXPECT_EQ(resolved.value["credentials"].size(), 2U);
+    const auto events = *apps.store->context_for("operator-events");
+    const auto published =
+        apps.call(events,
+                  "publish_app_event",
+                  {{"app_id", id}, {"event", {{"phase", "Running"}, {"ready", true}}}});
+    ASSERT_TRUE(published.ok) << published.error.message;
+    EXPECT_EQ(
+        apps.call(events, "receive_app_events", {{"app_id", id}, {"customer_id", apps.customer_id}})
+            .error.code,
+        "unauthorized");
+    EXPECT_EQ(
+        apps.call(events,
+                  "publish_app_event",
+                  {{"app_id", id}, {"customer_id", lake::control::new_uuid_v4()}, {"type", "pod"}})
+            .error.code,
+        "unauthorized");
+    const auto received = apps.call("receive_app_events", {{"app_id", id}});
+    ASSERT_TRUE(received.ok);
+    EXPECT_EQ(received.value["events"].back()["principal"], "app:" + id + ":events");
+    EXPECT_EQ(received.value["events"].back()["status"]["phase"], "Running");
 
+    auto rotated = hashes;
+    rotated["source"] = lake::control::identity_crypto::sha256_hex("replacement-source");
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, rotated));
+    EXPECT_FALSE(apps.store->context_for("operator-source"));
+    EXPECT_TRUE(apps.store->context_for("replacement-source"));
+    EXPECT_EQ(apps.call(source, "repository_tree", {{"id", apps.repository_id}, {"ref", "main"}})
+                  .error.code,
+              "unauthorized");
+
+    lake::control::WebAppPatch revoke;
+    revoke.rotate_tokens = true;
+    ASSERT_TRUE(apps.store->update_web_app(id, revoke));
+    EXPECT_FALSE(apps.store->context_for("operator-events"));
+    EXPECT_TRUE(apps.store->get_web_app(id)->token_hashes.empty());
+    ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes));
     ASSERT_TRUE(apps.call("delete_app", {{"app_id", id}, {"confirm", "reports"}}).ok);
-    EXPECT_FALSE(apps.store->context_for(workspace->value));
-    EXPECT_TRUE(apps.store->context_for(events->value));
-    ASSERT_TRUE(apps.store->set_web_app_status(id, "Deleted", "", false, "", 2));
-    EXPECT_FALSE(apps.store->context_for(events->value));
+    EXPECT_FALSE(apps.store->context_for("operator-source"));
+    EXPECT_FALSE(apps.store->context_for("operator-zetta"));
+    EXPECT_TRUE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->purge_deleted_web_apps());
+    EXPECT_TRUE(apps.store->get_web_app(id));
+    ASSERT_TRUE(apps.store->set_web_app_status(id, "Deleted", "", false, "", 4));
+    EXPECT_FALSE(apps.store->context_for("operator-events"));
+    ASSERT_TRUE(apps.store->purge_deleted_web_apps());
+    EXPECT_FALSE(apps.store->get_web_app(id));
+    EXPECT_TRUE(apps.store->get_web_app(second.value.at("id")));
 }

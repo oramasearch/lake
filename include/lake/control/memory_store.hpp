@@ -183,7 +183,8 @@ public:
     Result<WebApp> get_web_app(const std::string& id) override;
     Result<WebApp> create_web_app(const NewWebApp&) override;
     Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) override;
-    Result<std::vector<WebAppCredential>> web_app_credentials(const std::string& id) override;
+    Result<void> purge_deleted_web_apps() override;
+    Result<void> set_web_app_token_hashes(const std::string& id, nlohmann::json hashes);
     // What the operator writes back after reconciling a desired row. Tests and local demos call
     // this directly; the production operator updates the same columns in Postgres.
     Result<void> set_web_app_status(const std::string& id,
@@ -498,14 +499,6 @@ private:
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
     std::vector<WebApp> web_apps_;
-    struct WebAppCredentialRecord {
-        WebAppCredential credential;
-        std::string digest;
-        std::string user_id;
-        std::string taap_id;
-        std::string pool_id;
-    };
-    std::vector<WebAppCredentialRecord> web_app_credentials_;
     std::vector<ManagedStore> stores_;
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;

@@ -26,6 +26,6 @@ re-publishes or fails. See `docs/api/agent-bus.md`.
 
 `web_apps.cpp` defines the Ship App JSON and deterministic namespace contract. Memory and
 PostgreSQL stores enforce live name/host uniqueness and app/replica quotas; desired writes advance
-generation and PostgreSQL notifies `lake_apps`. App workspace and event credentials are scoped,
-digest-authenticated and retained encrypted for operator Secret delivery. See
+generation and PostgreSQL notifies `lake_apps`. The operator writes token hashes only; Lake checks
+purpose, current binding and target, and purges rows after Deleted acknowledgement. See
 `docs/control-plane/web-apps.md`.

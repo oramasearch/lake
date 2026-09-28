@@ -192,11 +192,13 @@ hosted and custom-domain entry pages, per-application Ed25519 JWTs and JWKS, sig
 webhooks with retained attempts, and authorized operator management for users and organizations.
 Its contract is `docs/api/apps.md`.
 
-Ship Apps add migration `0034_web_apps`, customer-scoped REST and MCP capabilities for create,
-deploy, rollback, lifecycle, scaling, environment, service binding, Loki logs, and app-specific bus
-events. The `apps` row is desired state shared with the Orama operator; credentials remain opaque
-Secret references, with scoped values retained encrypted for operator delivery. This App entity is
-distinct from application identity pools. Its contracts are `docs/api/web-apps.md` and
+Ship Apps add migrations `0034_web_apps` and `0035_web_apps_operator_contract`, customer-scoped
+REST and MCP capabilities for create, deploy, rollback, lifecycle, scaling, environment, service
+binding, Loki logs, and app-specific bus
+events. The `apps` row uses runtime/image modes and is shared with the Orama operator, which owns
+app tokens and writes only their hashes into Lake. Lake validates purpose and target, and removes
+rows after the operator acknowledges deletion. This App entity is distinct from application
+identity pools. Its contracts are `docs/api/web-apps.md` and
 `docs/control-plane/web-apps.md`.
 
 Agent-session custody adds migration `0017_agent_sessions` and a maximum 15-minute Ed25519 key
@@ -298,7 +300,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `web_apps_guard` in the source tree, versioned by content hash).
+  `web_apps_operator_contract_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
