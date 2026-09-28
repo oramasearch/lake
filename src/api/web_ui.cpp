@@ -251,7 +251,14 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view shared[] = {"/shared-with-me", "/share"};
     static constexpr std::string_view search[] = {"/search"};
     static constexpr std::string_view deployments[] = {"/deployments"};
-    static constexpr std::string_view projects[] = {"/design"};
+    // Each Design page owns its own routes; Projects keeps the bare /design and its detail pages.
+    static constexpr std::string_view projects[] = {
+        "/design/projects", "/design/project", "/design/pipeline"};
+    static constexpr std::string_view opportunities[] = {"/design/opportunities", "/design/discover"};
+    static constexpr std::string_view solutions[] = {"/design/solutions", "/design/solution"};
+    static constexpr std::string_view methodologies[] = {"/design/methodologies",
+                                                         "/design/methodology"};
+    static constexpr std::string_view agent_library[] = {"/design/agent-library"};
     static constexpr std::string_view agents[] = {"/train/agents", "/train/agent"};
     static constexpr std::string_view data[] = {"/train/data", "/train/dataset", "/train/query"};
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
@@ -289,6 +296,14 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return deployments;
     if (key == "projects")
         return projects;
+    if (key == "opportunities")
+        return opportunities;
+    if (key == "solutions")
+        return solutions;
+    if (key == "methodologies")
+        return methodologies;
+    if (key == "agent library")
+        return agent_library;
     if (key == "agents")
         return agents;
     if (key == "data")
@@ -325,6 +340,10 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
 bool route_owns(std::string_view path, std::string_view route) {
     if (route == "/") {
         return path == "/";
+    }
+    // The bare Design stage link lands on Projects.
+    if (route == "/design/projects" && path == "/design") {
+        return true;
     }
     return path == route ||
            (path.starts_with(route) && path.size() > route.size() && path[route.size()] == '/');

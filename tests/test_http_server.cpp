@@ -1110,6 +1110,9 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
     EXPECT_NE(methods.find("Not yet"), std::string::npos);
     EXPECT_NE(methods.find("href=\"/design/methodologies\""), std::string::npos) << "in the nav";
     EXPECT_NE(methods.find("href=\"/design/solutions\""), std::string::npos) << "in the nav";
+    // The page's own nav item is the current one, not Projects (Steve, 2026-09-28).
+    EXPECT_NE(methods.find("href=\"/design/methodologies\" aria-current=\"page\""), std::string::npos);
+    EXPECT_EQ(methods.find("href=\"/design/projects\" aria-current=\"page\""), std::string::npos);
     const std::string one = connection->request(
         "GET", "/design/methodology?customer_id=" + customer_id + "&id=M-3", "", cookie);
     EXPECT_NE(one.find("silhouette"), std::string::npos);
@@ -1141,6 +1144,8 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
         "GET", "/design/solutions?customer_id=" + customer_id, "", cookie);
     EXPECT_NE(catalogue.find("S-1 Churn &amp; Retention"), std::string::npos);
     EXPECT_NE(catalogue.find("In Design"), std::string::npos);
+    EXPECT_NE(catalogue.find("href=\"/design/solutions\" aria-current=\"page\""), std::string::npos);
+    EXPECT_EQ(catalogue.find("href=\"/design/projects\" aria-current=\"page\""), std::string::npos);
     const std::string module = connection->request(
         "GET", "/design/solution?customer_id=" + customer_id + "&id=S-1", "", cookie);
     EXPECT_NE(module.find("tasks in CRM"), std::string::npos);
