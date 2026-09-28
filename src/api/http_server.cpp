@@ -82,6 +82,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/pki.hpp"
 #include "lake/control/platform.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
@@ -489,6 +490,29 @@ std::string bearer_of(const boost::http::route_params& route) {
     return std::string(header_value.substr(7));
 }
 
+std::string registry_token_of(const boost::http::route_params& route) {
+    const std::string bearer = bearer_of(route);
+    if (!bearer.empty()) {
+        return bearer;
+    }
+    if (route.req.count(boost::http::field::authorization) == 0) {
+        return {};
+    }
+    const std::string_view header = route.req.at(boost::http::field::authorization);
+    if (!header.starts_with("Basic ")) {
+        return {};
+    }
+    const auto decoded = base64_decode(header.substr(6));
+    if (!decoded) {
+        return {};
+    }
+    const std::string credential(reinterpret_cast<const char*>(decoded->data()), decoded->size());
+    if (!credential.starts_with("lake:")) {
+        return {};
+    }
+    return credential.substr(5);
+}
+
 bool constant_time_equal(std::string_view a, std::string_view b) {
     if (a.size() != b.size())
         return false;
@@ -667,18 +691,21 @@ public:
             std::ranges::sort(entries, {}, [](const auto& entry) { return entry.path(); });
             return entries;
         };
-        for (const auto& repository : sorted_entries(root_ / "manifests")) {
-            if (!repository.is_directory()) {
+        std::map<std::string, std::vector<std::string>> oci_repositories;
+        const std::filesystem::path manifests_root = root_ / "manifests";
+        for (const auto& manifest :
+             std::filesystem::recursive_directory_iterator(manifests_root, error)) {
+            if (!manifest.is_regular_file() || manifest.path().extension() != ".json") {
                 continue;
             }
-            nlohmann::json tags = nlohmann::json::array();
-            for (const auto& manifest : sorted_entries(repository.path())) {
-                if (manifest.path().extension() == ".json") {
-                    tags.push_back(manifest.path().stem().string());
-                }
-            }
-            out["oci"].push_back(
-                {{"name", repository.path().filename().string()}, {"versions", tags}});
+            const std::string repository =
+                manifest.path().parent_path().lexically_relative(manifests_root).generic_string();
+            auto [entry, inserted] = oci_repositories.try_emplace(repository);
+            entry->second.push_back(manifest.path().stem().string());
+        }
+        for (auto& [repository, tags] : oci_repositories) {
+            std::ranges::sort(tags);
+            out["oci"].push_back({{"name", repository}, {"versions", tags}});
         }
         for (const auto& package : sorted_entries(root_ / "npm")) {
             const auto metadata = read_text(package.path() / "metadata.json");
@@ -721,7 +748,7 @@ public:
     }
 
     ArtifactResult<std::string> begin_upload(std::string_view repository) {
-        if (!safe_component(repository)) {
+        if (!safe_oci_repository(repository)) {
             return std::unexpected("OCI repository name is invalid");
         }
         const std::string id = control::new_uuid_v4();
@@ -792,11 +819,53 @@ public:
         return StoredArtifact{*contents, "application/octet-stream", std::string(digest)};
     }
 
+    bool repository_has_blob(std::string_view repository, std::string_view digest) const {
+        if (!safe_oci_repository(repository) || !valid_digest(digest)) {
+            return false;
+        }
+        std::error_code error;
+        const std::filesystem::path directory = root_ / "manifests" / std::string(repository);
+        for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".json") {
+                continue;
+            }
+            const auto pointer_text = read_text(entry.path());
+            const nlohmann::json pointer =
+                pointer_text ? nlohmann::json::parse(*pointer_text, nullptr, false)
+                             : nlohmann::json();
+            if (!pointer.is_object()) {
+                continue;
+            }
+            const std::string manifest_digest = pointer.value("digest", "");
+            if (manifest_digest == digest) {
+                return true;
+            }
+            if (!valid_digest(manifest_digest)) {
+                continue;
+            }
+            const auto manifest_bytes = read(blob_path(manifest_digest));
+            if (!manifest_bytes) {
+                continue;
+            }
+            const std::string document(reinterpret_cast<const char*>(manifest_bytes->data()),
+                                       manifest_bytes->size());
+            const nlohmann::json manifest = nlohmann::json::parse(document, nullptr, false);
+            if (!manifest.is_object()) {
+                continue;
+            }
+            const auto references = manifest_references(manifest);
+            if (references && std::ranges::find(*references, digest) != references->end()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     ArtifactResult<std::string> put_manifest(std::string_view repository,
                                              std::string_view reference,
                                              std::string content_type,
                                              std::span<const std::byte> bytes) {
-        if (!safe_component(repository) || !safe_component(reference)) {
+        if (!safe_oci_repository(repository) || !safe_component(reference)) {
             return std::unexpected("OCI manifest name is invalid");
         }
         const std::string document(reinterpret_cast<const char*>(bytes.data()), bytes.size());
@@ -829,10 +898,13 @@ public:
 
     ArtifactResult<StoredArtifact> manifest(std::string_view repository,
                                             std::string_view reference) const {
-        if (!safe_component(repository) || !safe_component(reference)) {
+        if (!safe_oci_repository(repository) || !safe_component(reference)) {
             return std::unexpected("OCI manifest name is invalid");
         }
         if (valid_digest(reference)) {
+            if (!repository_has_blob(repository, reference)) {
+                return std::unexpected("OCI manifest is unknown in this repository");
+            }
             auto object = blob(reference);
             if (object) {
                 object->content_type = "application/vnd.oci.image.manifest.v1+json";
@@ -995,6 +1067,24 @@ private:
             return std::isalnum(character) || character == '-' || character == '_' ||
                    character == '.' || character == ':';
         });
+    }
+
+    static bool safe_oci_repository(std::string_view value) {
+        if (value.empty() || value.front() == '/' || value.back() == '/') {
+            return false;
+        }
+        while (!value.empty()) {
+            const std::size_t slash = value.find('/');
+            const std::string_view component = value.substr(0, slash);
+            if (!safe_component(component) || component.find(':') != std::string_view::npos) {
+                return false;
+            }
+            if (slash == std::string_view::npos) {
+                return true;
+            }
+            value.remove_prefix(slash + 1);
+        }
+        return false;
     }
 
     static bool safe_package(std::string_view value) {
@@ -7298,6 +7388,26 @@ struct ApiServer::Impl {
                                     "/repository?id=" + result.value.at("id").get<std::string>());
     }
 
+    boost::http::route_task serve_repository_build(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const ApiResult result = registry.call("build_image",
+                                               {{"customer_id", form_field(body, "customer_id")},
+                                                {"repository", form_field(body, "repository")},
+                                                {"revision", form_field(body, "revision")},
+                                                {"target", form_field(body, "target")}},
+                                               context);
+        if (!result.ok) {
+            co_return co_await serve_page_error(route, result);
+        }
+        co_return co_await redirect(route,
+                                    "/ship/packages?customer_id=" +
+                                        oauth_url_encode(form_field(body, "customer_id")));
+    }
+
     boost::http::route_task serve_repositories_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         std::vector<control::Repository> repositories;
@@ -9316,18 +9426,295 @@ struct ApiServer::Impl {
         if (!context.authorized) {
             return redirect(route, "/sign-in");
         }
+        nlohmann::json catalog = artifacts.catalog();
+        nlohmann::json builds = nlohmann::json::array();
+        std::set<std::string> visible_spaces;
+        std::string customer_id = query_value(route, "customer_id");
+        const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, context);
+        if (customers.ok) {
+            for (const nlohmann::json& customer : customers.value.at("items")) {
+                visible_spaces.insert(customer.value("name", std::string()));
+                if (customer_id.empty()) {
+                    customer_id = customer.value("id", std::string());
+                }
+            }
+        }
+        nlohmann::json visible_images = nlohmann::json::array();
+        for (const nlohmann::json& image : catalog.value("oci", nlohmann::json::array())) {
+            const std::string name = image.value("name", std::string());
+            const std::size_t slash = name.find('/');
+            const bool cache =
+                slash != std::string::npos && name.substr(slash + 1).starts_with("cache/");
+            if (!cache &&
+                (slash == std::string::npos || visible_spaces.contains(name.substr(0, slash)))) {
+                visible_images.push_back(image);
+            }
+        }
+        catalog["oci"] = std::move(visible_images);
+        if (!customer_id.empty()) {
+            const ApiResult listed =
+                registry.call("list_builds", {{"customer_id", customer_id}}, context);
+            if (listed.ok) {
+                builds = listed.value.value("builds", nlohmann::json::array());
+            }
+        }
         return send_text(
             route,
             boost::http::status::ok,
-            web_ui_packages(artifacts.catalog(),
+            web_ui_packages(catalog,
                             artifacts.available(),
                             options.external_origin.empty()
                                 ? (options.public_host.empty() ? std::string()
                                                                : "https://" + options.public_host)
                                 : options.external_origin,
-                            viewer_for(context)),
+                            viewer_for(context),
+                            builds,
+                            customer_id),
             "text/html; charset=utf-8",
             "no-store");
+    }
+
+    boost::http::route_task serve_apps_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        AppsPage page;
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        page.error = query_value(route, "error");
+        if (!page.customer_id.empty()) {
+            const ApiResult apps = unwrap(
+                co_await workspace_call("list_apps", {{"customer_id", page.customer_id}}, context));
+            if (apps.ok) {
+                page.apps = apps.value.value("apps", nlohmann::json::array());
+            } else if (page.error.empty()) {
+                page.error = apps.error.message;
+            }
+            const ApiResult repositories = registry.call(
+                "list_repositories", {{"customer_id", page.customer_id}, {"limit", 500}}, context);
+            if (repositories.ok) {
+                page.repositories = repositories.value.value("items", nlohmann::json::array());
+            }
+            if (options.workspaces) {
+                const ApiResult library = unwrap(co_await workspace_call(
+                    "list_agent_library", nlohmann::json::object(), context));
+                if (library.ok) {
+                    for (const nlohmann::json& agent :
+                         library.value.value("agents", nlohmann::json::array())) {
+                        if (agent.value("key", std::string()) == "agent-application" &&
+                            agent.value("deployed", false)) {
+                            page.application_agent = true;
+                        }
+                    }
+                }
+            }
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_apps(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_app_page(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        AppPage page;
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        page.error = query_value(route, "error");
+        const std::string app_id = query_value(route, "app_id");
+        if (page.customer_id.empty() || app_id.empty()) {
+            co_return co_await redirect(
+                route, "/ship/apps?customer_id=" + oauth_url_encode(page.customer_id));
+        }
+        const nlohmann::json input{{"customer_id", page.customer_id}, {"app_id", app_id}};
+        const ApiResult app = unwrap(co_await workspace_call("get_app", input, context));
+        if (!app.ok) {
+            co_return co_await send_text(
+                route,
+                boost::http::status::not_found,
+                web_ui_error(app.error.code, app.error.message, viewer_for(context)),
+                "text/html; charset=utf-8",
+                "no-store");
+        }
+        page.app = app.value;
+        nlohmann::json events_input = input;
+        events_input["wait_ms"] = 0;
+        const ApiResult events =
+            unwrap(co_await workspace_call("receive_app_events", events_input, context));
+        if (events.ok) {
+            page.events = events.value.value("events", nlohmann::json::array());
+        }
+        nlohmann::json logs_input = input;
+        logs_input["limit"] = 200;
+        const ApiResult logs = unwrap(co_await workspace_call("app_logs", logs_input, context));
+        if (logs.ok) {
+            page.logs = logs.value;
+        }
+        const ApiResult builds = unwrap(co_await workspace_call(
+            "list_builds", {{"customer_id", page.customer_id}}, context));
+        if (builds.ok) {
+            page.builds_available = true;
+            const nlohmann::json source =
+                page.app.value("source", nlohmann::json::object());
+            const std::string repository = source.value("repository", std::string());
+            const std::string target_marker =
+                "/" + page.app.value("name", std::string()) + ":";
+            for (nlohmann::json build :
+                 builds.value.value("builds", nlohmann::json::array())) {
+                if (build.value("repository", std::string()) != repository ||
+                    !build.value("target", std::string()).contains(target_marker)) {
+                    continue;
+                }
+                const std::string build_id =
+                    build.value("id", build.value("build_id", std::string()));
+                if (build_id.empty()) {
+                    continue;
+                }
+                const nlohmann::json build_input{{"customer_id", page.customer_id},
+                                                 {"build_id", build_id}};
+                const ApiResult detail =
+                    unwrap(co_await workspace_call("get_build", build_input, context));
+                if (detail.ok) {
+                    build = detail.value;
+                }
+                const ApiResult build_logs =
+                    unwrap(co_await workspace_call("build_logs", build_input, context));
+                if (build_logs.ok) {
+                    build["logs"] = build_logs.value;
+                }
+                page.builds.push_back(std::move(build));
+            }
+        }
+        if (options.workspaces) {
+            const ApiResult services = unwrap(co_await workspace_call(
+                "list_services", {{"customer_id", page.customer_id}}, context));
+            if (services.ok) {
+                page.services = services.value.value("services", nlohmann::json::array());
+            }
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_app(page, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    boost::http::route_task serve_app_form(boost::http::route_params& route, std::string action) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        const std::string app_id = form_field(body, "app_id");
+        nlohmann::json input{{"customer_id", customer_id}};
+        if (!app_id.empty()) {
+            input["app_id"] = app_id;
+        }
+        std::string capability;
+        if (action == "create") {
+            capability = "create_app";
+            input["name"] = form_field(body, "name");
+            input["mode"] = form_field(body, "mode");
+            input["framework"] = form_field(body, "framework");
+            const auto port = decimal_value(form_field(body, "port"));
+            input["port"] = port.value_or(0);
+            if (input.at("mode") == "runtime") {
+                input["source"] = {{"repository", form_field(body, "repository")},
+                                   {"revision", form_field(body, "revision")},
+                                   {"path", form_field(body, "path")},
+                                   {"entrypoint", form_field(body, "entrypoint")}};
+            } else {
+                input["image"] = form_field(body, "image");
+            }
+        } else if (action == "restart" || action == "stop" || action == "start") {
+            capability = action + "_app";
+        } else if (action == "scale") {
+            capability = "scale_app";
+            input["replicas"] = decimal_value(form_field(body, "replicas")).value_or(0);
+        } else if (action == "deploy" || action == "rollback") {
+            capability = action + "_app";
+            const std::string image = form_field(body, "image");
+            if (!image.empty()) {
+                input["image"] = image;
+            } else {
+                input["source"] = {{"repository", form_field(body, "repository")},
+                                   {"revision", form_field(body, "revision")},
+                                   {"path", form_field(body, "path")},
+                                   {"entrypoint", form_field(body, "entrypoint")}};
+            }
+        } else if (action == "env_set") {
+            capability = "set_app_env";
+            input["key"] = form_field(body, "key");
+            const std::string secret_ref = form_field(body, "secret_ref");
+            if (secret_ref.empty()) {
+                input["value"] = form_field(body, "value");
+            } else {
+                input["secret_ref"] = secret_ref;
+            }
+        } else if (action == "env_unset") {
+            capability = "unset_app_env";
+            input["key"] = form_field(body, "key");
+        } else if (action == "zetta") {
+            capability = "set_app_zetta_binding";
+            input["attached"] = form_field(body, "attached") == "1";
+        } else if (action == "service_bind" || action == "service_unbind") {
+            capability =
+                action == "service_bind" ? "bind_service_to_app" : "unbind_service_from_app";
+            input["service_id"] = form_field(body, "service_id");
+        } else if (action == "service_create") {
+            capability = "create_service_and_bind_to_app";
+            input["kind"] = form_field(body, "kind");
+            input["name"] = form_field(body, "name");
+            if (const auto size = decimal_value(form_field(body, "size")); size) {
+                input["storage_gi"] = *size;
+            }
+        } else if (action == "auth") {
+            capability = "set_app_auth";
+            input["auth"] = form_field(body, "auth");
+            input["confirm_public"] = form_field(body, "confirm_public") == "1";
+        } else if (action == "delete") {
+            capability = "delete_app";
+            input["confirm"] = form_field(body, "confirm");
+        } else if (action == "build") {
+            capability = "build_app";
+            input.erase("app_id");
+            input["app"] = app_id;
+        } else if (action == "build_cancel") {
+            capability = "cancel_build";
+            input.erase("app_id");
+            input["build_id"] = form_field(body, "build_id");
+        } else if (action == "agent") {
+            capability = "agent_turn";
+            input["agent"] = "agent-application";
+            input["kind"] = "app";
+            input["message"] = form_field(body, "description");
+        }
+        ApiResult result = capability.empty()
+                               ? ApiResult::failure("invalid_input", "unknown app action")
+                               : unwrap(co_await workspace_call(capability, input, context));
+        std::string back = action == "create" || action == "agent"
+                               ? "/ship/apps?customer_id=" + oauth_url_encode(customer_id)
+                               : "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
+                                     "&app_id=" + oauth_url_encode(app_id);
+        if (result.ok && action == "create") {
+            back = "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
+                   "&app_id=" + oauth_url_encode(result.value.value("id", std::string()));
+        }
+        if (!result.ok) {
+            back += "&error=" + oauth_url_encode(result.error.message);
+        }
+        co_return co_await redirect(route, back);
     }
 
     // Every environment across the repositories the caller may list, from the same two
@@ -10955,10 +11342,90 @@ struct ApiServer::Impl {
         return (request_is_https(route) ? "https://" : "http://") + host;
     }
 
+    enum class RegistryAccess { Allowed, Missing, Denied };
+
     bool registry_write_authorized(const boost::http::route_params& route) const {
-        const std::string bearer = bearer_of(route);
-        return !options.admin_token.empty() && !bearer.empty() &&
-               constant_time_equal(bearer, options.admin_token);
+        const std::string token = registry_token_of(route);
+        return !options.admin_token.empty() && !token.empty() &&
+               constant_time_equal(token, options.admin_token);
+    }
+
+    std::string oci_repository(const boost::http::route_params& route) const {
+        const std::string repository = route_value(route, "repository");
+        const std::string space = route_value(route, "space");
+        const std::string category = route_value(route, "category");
+        if (space.empty()) {
+            return repository;
+        }
+        return space + "/" + (category.empty() ? "" : category + "/") + repository;
+    }
+
+    RegistryAccess registry_access(const boost::http::route_params& route,
+                                   std::string_view repository,
+                                   bool write) const {
+        if (!write && repository.find('/') == std::string_view::npos) {
+            return RegistryAccess::Allowed;
+        }
+        const std::string token = registry_token_of(route);
+        if (token.empty()) {
+            return RegistryAccess::Missing;
+        }
+        if (!options.admin_token.empty() && constant_time_equal(token, options.admin_token)) {
+            return RegistryAccess::Allowed;
+        }
+        if (!options.store) {
+            return RegistryAccess::Denied;
+        }
+        const auto principal = options.store->context_for(token);
+        if (!principal) {
+            return RegistryAccess::Denied;
+        }
+        if (principal->kind == "build_push") {
+            const auto customer = options.store->get_customer(principal->workload_customer_id);
+            if (!customer) {
+                return RegistryAccess::Denied;
+            }
+            const std::string prefix = customer->name + "/";
+            return repository.starts_with(prefix) ? RegistryAccess::Allowed
+                                                  : RegistryAccess::Denied;
+        }
+        if (write || principal->taap_id.empty() ||
+            (std::ranges::find(principal->scopes, "*") == principal->scopes.end() &&
+             std::ranges::find(principal->scopes, "registry_pull") == principal->scopes.end())) {
+            return RegistryAccess::Denied;
+        }
+        const std::string space = std::string(repository.substr(0, repository.find('/')));
+        const auto customers = options.store->list_customers(10000);
+        if (!customers) {
+            return RegistryAccess::Denied;
+        }
+        const auto customer = std::ranges::find(*customers, space, &control::Customer::name);
+        if (customer == customers->end()) {
+            return RegistryAccess::Denied;
+        }
+        if (!principal->user_id.empty() && customer->user_id == principal->user_id) {
+            return RegistryAccess::Allowed;
+        }
+        const auto object = options.store->find_policy_object("customer", customer->id);
+        if (!object) {
+            return RegistryAccess::Denied;
+        }
+        control::AuthorizationCache cache;
+        const auto decision =
+            control::authorize(*options.store, principal->taap_id, object->id, "read", cache);
+        return decision && decision->allowed ? RegistryAccess::Allowed : RegistryAccess::Denied;
+    }
+
+    boost::http::route_task registry_auth_error(boost::http::route_params& route,
+                                                RegistryAccess access) {
+        const boost::http::status status = access == RegistryAccess::Missing
+                                               ? boost::http::status::unauthorized
+                                               : boost::http::status::forbidden;
+        if (status == boost::http::status::unauthorized) {
+            route.res.set(boost::http::field::www_authenticate, "Basic realm=\"lake registry\"");
+        }
+        return registry_error(
+            route, status, "registry credential does not grant this repository", true);
     }
 
     boost::http::route_task registry_error(boost::http::route_params& route,
@@ -10985,11 +11452,11 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_oci_upload_start(boost::http::route_params& route) {
-        if (!registry_write_authorized(route)) {
-            return registry_error(
-                route, boost::http::status::unauthorized, "registry bearer is required", true);
+        const std::string repository = oci_repository(route);
+        const RegistryAccess access = registry_access(route, repository, true);
+        if (access != RegistryAccess::Allowed) {
+            return registry_auth_error(route, access);
         }
-        const std::string repository = route_value(route, "repository");
         const auto started = artifacts.begin_upload(repository);
         if (!started) {
             return registry_error(route, boost::http::status::bad_request, started.error(), true);
@@ -11004,9 +11471,10 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_oci_upload(boost::http::route_params& route, bool finish) {
-        if (!registry_write_authorized(route)) {
-            co_return co_await registry_error(
-                route, boost::http::status::unauthorized, "registry bearer is required", true);
+        const std::string repository = oci_repository(route);
+        const RegistryAccess access = registry_access(route, repository, true);
+        if (access != RegistryAccess::Allowed) {
+            co_return co_await registry_auth_error(route, access);
         }
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
@@ -11020,7 +11488,6 @@ struct ApiServer::Impl {
             co_return co_await registry_error(
                 route, boost::http::status::bad_request, appended.error(), true);
         }
-        const std::string repository = route_value(route, "repository");
         const std::string upload = route_value(route, "upload");
         if (!finish) {
             route.res.set(boost::http::field::location,
@@ -11044,6 +11511,15 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_oci_blob(boost::http::route_params& route, bool head) {
+        const std::string repository = oci_repository(route);
+        const RegistryAccess access = registry_access(route, repository, false);
+        if (access != RegistryAccess::Allowed) {
+            co_return co_await registry_auth_error(route, access);
+        }
+        if (!artifacts.repository_has_blob(repository, route_value(route, "digest"))) {
+            co_return co_await registry_error(
+                route, boost::http::status::not_found, "blob is unknown in this repository", true);
+        }
         const auto object = artifacts.blob(route_value(route, "digest"));
         if (!object) {
             co_return co_await registry_error(
@@ -11060,9 +11536,13 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_oci_manifest(boost::http::route_params& route, bool head) {
-        const std::string repository = route_value(route, "repository");
+        const std::string repository = oci_repository(route);
         const std::string reference = route_value(route, "reference");
         if (route.req.method() != boost::http::method::put) {
+            const RegistryAccess access = registry_access(route, repository, false);
+            if (access != RegistryAccess::Allowed) {
+                co_return co_await registry_auth_error(route, access);
+            }
             const auto object = artifacts.manifest(repository, reference);
             if (!object) {
                 co_return co_await registry_error(
@@ -11077,9 +11557,9 @@ struct ApiServer::Impl {
                                           {},
                                           head);
         }
-        if (!registry_write_authorized(route)) {
-            co_return co_await registry_error(
-                route, boost::http::status::unauthorized, "registry bearer is required", true);
+        const RegistryAccess access = registry_access(route, repository, true);
+        if (access != RegistryAccess::Allowed) {
+            co_return co_await registry_auth_error(route, access);
         }
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error || body.empty()) {
@@ -12923,6 +13403,12 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/repository/create", impl.serve_repository_create(route));
                });
+    router.add(http::method::post,
+               "/repository/build",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/repository/build", impl.serve_repository_build(route));
+               });
     router.add(
         http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
@@ -13067,6 +13553,39 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/ship/packages", impl.serve_packages_page(route));
                });
+    router.add(
+        http::method::get, "/ship/apps", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/ship/apps", impl.serve_apps_page(route));
+        });
+    router.add(
+        http::method::get, "/ship/app", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/ship/app", impl.serve_app_page(route));
+        });
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 18>{
+             {{"/ship/apps/create", "create"},
+              {"/ship/apps/agent", "agent"},
+              {"/ship/app/restart", "restart"},
+              {"/ship/app/stop", "stop"},
+              {"/ship/app/start", "start"},
+              {"/ship/app/scale", "scale"},
+              {"/ship/app/deploy", "deploy"},
+              {"/ship/app/rollback", "rollback"},
+              {"/ship/app/env/set", "env_set"},
+              {"/ship/app/env/unset", "env_unset"},
+              {"/ship/app/zetta", "zetta"},
+              {"/ship/app/service/bind", "service_bind"},
+              {"/ship/app/service/unbind", "service_unbind"},
+              {"/ship/app/service/create", "service_create"},
+              {"/ship/app/auth", "auth"},
+              {"/ship/app/delete", "delete"},
+              {"/ship/app/build", "build"},
+              {"/ship/app/build/cancel", "build_cancel"}}}) {
+        router.add(http::method::post,
+                   path,
+                   [&impl, path, action](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route, path, impl.serve_app_form(route, action));
+                   });
+    }
     router.add(
         http::method::get, "/deployments", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/deployments", impl.serve_deployments_page(route));
@@ -13636,47 +14155,52 @@ bool ApiServer::start() {
     router.add(http::method::get, "/v2/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/v2/", impl.serve_oci_ping(route));
     });
-    router.add(http::method::post,
-               "/v2/:repository/blobs/uploads/",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/v2/:repository/blobs/uploads/", impl.serve_oci_upload_start(route));
-               });
-    router.add(http::method::patch,
-               "/v2/:repository/blobs/uploads/:upload",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/v2/:repository/blobs/uploads/:upload",
-                                               impl.serve_oci_upload(route, false));
-               });
-    router.add(http::method::put,
-               "/v2/:repository/blobs/uploads/:upload",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/v2/:repository/blobs/uploads/:upload",
-                                               impl.serve_oci_upload(route, true));
-               });
-    router.add(http::method::get,
-               "/v2/:repository/blobs/:digest",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/v2/:repository/blobs/:digest", impl.serve_oci_blob(route, false));
-               });
-    router.add(http::method::head,
-               "/v2/:repository/blobs/:digest",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/v2/:repository/blobs/:digest", impl.serve_oci_blob(route, true));
-               });
-    for (const auto method : {http::method::get, http::method::head, http::method::put}) {
-        router.add(method,
-                   "/v2/:repository/manifests/:reference",
-                   [&impl, method](http::route_params& route) -> http::route_task {
+    for (const std::string prefix :
+         {"/v2/:repository", "/v2/:space/:repository", "/v2/:space/:category/:repository"}) {
+        const std::string start_path = prefix + "/blobs/uploads/";
+        router.add(http::method::post,
+                   start_path,
+                   [&impl, start_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
-                           route,
-                           "/v2/:repository/manifests/:reference",
-                           impl.serve_oci_manifest(route, method == http::method::head));
+                           route, start_path, impl.serve_oci_upload_start(route));
                    });
+        const std::string upload_path = prefix + "/blobs/uploads/:upload";
+        router.add(http::method::patch,
+                   upload_path,
+                   [&impl, upload_path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, upload_path, impl.serve_oci_upload(route, false));
+                   });
+        router.add(http::method::put,
+                   upload_path,
+                   [&impl, upload_path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, upload_path, impl.serve_oci_upload(route, true));
+                   });
+        const std::string blob_path = prefix + "/blobs/:digest";
+        router.add(http::method::get,
+                   blob_path,
+                   [&impl, blob_path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(
+                           route, blob_path, impl.serve_oci_blob(route, false));
+                   });
+        router.add(http::method::head,
+                   blob_path,
+                   [&impl, blob_path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route, blob_path, impl.serve_oci_blob(route, true));
+                   });
+        const std::string manifest_path = prefix + "/manifests/:reference";
+        for (const auto method : {http::method::get, http::method::head, http::method::put}) {
+            router.add(
+                method,
+                manifest_path,
+                [&impl, method, manifest_path](http::route_params& route) -> http::route_task {
+                    return impl.observe_request(route,
+                                                manifest_path,
+                                                impl.serve_oci_manifest(
+                                                    route, method == http::method::head));
+                });
+        }
     }
     router.add(
         http::method::post, "/legacy/", [&impl](http::route_params& route) -> http::route_task {

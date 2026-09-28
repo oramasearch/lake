@@ -13,6 +13,7 @@
 
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/builds.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
 #include "lake/control/web_apps.hpp"
@@ -894,6 +895,12 @@ public:
     virtual Result<WebApp> create_web_app(const NewWebApp&) = 0;
     virtual Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) = 0;
     virtual Result<void> purge_deleted_web_apps() = 0;
+    // In-cluster image builds (docs/control-plane/builds.md). Lake inserts desired rows; the
+    // operator writes status and the hashes of the three credentials it owns.
+    virtual Result<std::vector<Build>> list_builds(const std::string& customer_id) = 0;
+    virtual Result<Build> get_build(const std::string& id) = 0;
+    virtual Result<Build> create_build(const NewBuild&) = 0;
+    virtual Result<Build> cancel_build(const std::string& id) = 0;
     // Stores (docs/control-plane/storage.md). Lists the customer's stores, oldest first, leaving
     // out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) = 0;

@@ -62,7 +62,11 @@ routes and their exact-byte integration coverage.
 a customer's stores (buckets, filesystems, network filesystems and volumes; a cluster volume in
 phase 1, lake#196), with their capabilities and the Train → Data → Storage panel.
 [`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, deployment, lifecycle,
+authentication, environment, attach/detach bindings, logs and events. It is separate from identity
+[applications](apps.md).
 bindings, environment, logs and events. It is separate from identity [applications](apps.md).
+[`builds.md`](builds.md) defines asynchronous in-cluster image builds, cancellation, status,
+retained progress and build-scoped credentials.
 
 ## Operational routes
 

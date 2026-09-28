@@ -67,6 +67,8 @@ struct ServerOptions {
     std::string apps_wildcard;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;
+    // In-cluster Service URL used in build registry targets (LAKE_INTERNAL_URL).
+    std::string internal_url;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;

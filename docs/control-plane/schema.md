@@ -475,3 +475,11 @@ intent, adds `source_entrypoint` and operator-written `token_hashes_json`, norma
 removes the earlier credential table. Only hashes remain; authentication enforces source,
 workspace and event purpose restrictions. Idempotent; guard `web_apps_operator_contract_guard`.
 The complete ownership, quota and reconciliation contract is [`web-apps.md`](web-apps.md).
+
+## In-cluster builds migration
+
+`0036_builds` adds the build desired-and-observed row shared by Lake and the Orama operator. Lake
+writes repository, revision, context, Dockerfile, target, allowed build arguments and queued or
+cancelled intent. The operator writes phase, digest, size, message and only SHA-256 hashes for its
+source, push and event credentials. Desired changes notify `lake_builds`. Idempotent; guard
+`builds_guard`. The ownership and Job handoff contract is [`builds.md`](builds.md).

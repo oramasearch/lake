@@ -10,6 +10,7 @@ The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
 Organization and personal settings are in [`settings.md`](settings.md).
 The top-bar breadcrumb (every page's trail, mirroring its URL) is in [`breadcrumb.md`](breadcrumb.md).
 Developer → MCP (keys, copy-ready agent setup, the lake skill and `llms.txt`) is in [`../api/mcp.md`](../api/mcp.md).
+Ship → Apps list, detail, controls, and live event behavior are in [`apps.md`](apps.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed
@@ -67,6 +68,7 @@ Contextual links lead to exports, SSO, repository content, and drive views. The 
 | Drive history | `GET /drive/history`, `/drive/history/diff`, `/drive/conflict`; `POST /drive/conflict/resolve` | retained path versions, restore-as-new-change controls, explained two-version conflicts, and write-authorized resolution |
 | Drive sharing | GET /drive/share, /drive/share/link, /share/<token>, /share/<token>/preview, /share/<token>/download | effective access before sharing, People/Organization/Link choices, link state and revocation consequence, individual link detail, and signed-out scoped traversal, preview, and exact-byte download; see [sharing.md](sharing.md) |
 | Shared with me | GET /shared-with-me | live folders granted directly to the signed-in identity, their grantor, allowed actions, and current availability; see [sharing.md](sharing.md) |
+| Ship Apps | `GET /ship/apps`, `/ship/app`; `POST /ship/apps/*`, `/ship/app/*` | customer app creation, status, deploy and rollback history, logs, builds, environment, bindings, authentication, lifecycle controls, and deletion; see [apps.md](apps.md) |
 
 **Session.** `POST /session` compares the form token with the operator token in constant time; on
 a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the
@@ -107,3 +109,8 @@ cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (2
 The [sign-up walkthrough](sign-up-walkthrough.md) covers public identity export, personal customer
 ownership, zero initial metering, and creating a first private repository at both requested widths
 and themes. The `POST /repository/create` form adapter calls the existing registry capability.
+
+Repository pages expose `POST /repository/build`, which calls `build_image`. Ship → Packages
+shows authorized tenant images and the selected space's build rows, while `/ship/app` shows one
+App's build history and calls `build_app`. Both build tables long-poll the audited
+`receive_build_events` capability for live phase and retained log updates.

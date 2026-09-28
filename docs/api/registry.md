@@ -4,9 +4,10 @@
 
 Lake exposes native HTTP endpoints for OCI Distribution, npm, the Python Simple Repository API,
 and debuginfod. These are protocol routes rather than JSON capabilities: existing package clients
-send and receive their native metadata and binary payloads without a translation step. Writes
-require the configured Lake administrator bearer. Package metadata, blobs, wheels, and debug
-artifacts are public reads after publication.
+send and receive their native metadata and binary payloads without a translation step. Legacy
+one-component OCI repositories, package metadata, wheels, and debug artifacts remain public reads
+after publication. npm, Python, debug, and legacy OCI writes require the configured administrator
+bearer. Tenant OCI repositories use the scoped credentials described below.
 
 For server `node_name = <instance>`, registry objects live below:
 
@@ -21,7 +22,8 @@ LAKE_STORE_ROOT/<instance>/registry/debug/
 Writes use a sibling temporary file followed by rename. OCI upload sessions are staged separately;
 completion recalculates SHA-256 and refuses bytes that do not match the requested digest. A
 manifest is accepted only when it is schema version 2 JSON and every referenced config or layer
-digest is already present.
+digest is already present. Blob and digest-manifest reads also require that a tag in the requested
+repository references the object, so a known tenant digest cannot be read through a public alias.
 
 ## The Packages page
 
@@ -29,14 +31,27 @@ digest is already present.
 storage layout above: OCI repositories with their tags, npm packages with the versions in their
 metadata, and Python projects with the versions of their files. Each row carries the install
 command for this lake's public origin (`LAKE_EXTERNAL_ORIGIN`, else `https://LAKE_PUBLIC_HOST`).
-Everything listed is already a public read. The registries are instance-wide, and publishing still
-needs the operator credential, which the page says.
+The page shows public packages and only those `<space>/...` images the signed-in viewer may read.
+It also shows the selected space's asynchronous builds and follows their retained progress topic
+for live phase and log updates.
+
+## Tenant OCI credentials
+
+A build push token is accepted as either `Bearer <token>` or HTTP Basic user `lake` with the token
+as its password. Lake re-hashes it, resolves the active build row, and permits blob, manifest, and
+cache reads or writes only below that build customer's `<space>/` prefix. A valid credential used
+against another prefix receives OCI `403 DENIED`. Cancellation, terminal status, or hash rotation
+revokes it.
+
+A customer account token attenuated to `registry_pull` may read private images only in spaces its
+identity may read; the operator can deliver that credential as an `imagePullSecret`. Anonymous
+requests to tenant paths are refused. The administrator bearer remains valid across repositories.
 
 ## Protocol routes
 
 | Protocol | Routes |
 |---|---|
-| OCI Distribution | `GET /v2/`; `POST /v2/:repository/blobs/uploads/`; `PATCH` or `PUT /v2/:repository/blobs/uploads/:upload`; `GET` or `HEAD /v2/:repository/blobs/:digest`; `GET`, `HEAD`, or `PUT /v2/:repository/manifests/:reference` |
+| OCI Distribution | `GET /v2/`; blob upload/read and manifest routes below `/v2/<repository>/...`, including nested `<space>/<name>` and `<space>/cache/<name>` repositories |
 | npm | `GET` or `PUT /:package`; `GET /:package/-/:filename` |
 | Python | `POST /legacy/`; `GET /simple/:package/`; `GET` or `HEAD /packages/:filename` |
 | debuginfod | `GET /buildid/:build_id/executable`; `GET /buildid/:build_id/debuginfo`; `GET /buildid/:build_id/source/:path` |
@@ -61,6 +76,8 @@ identifier.
 `RegistryProtocols.OciClientPushesAndPullsTwoLayersByteIdentical` uses a small Distribution API
 client, not a container CLI. It uploads a config and two distinct binary layers, publishes an OCI
 image manifest, pulls the manifest and both layers, and compares every returned byte.
+`RegistryProtocols.BuildPushCredentialIsLimitedToItsCustomerPrefix` proves Basic authentication,
+private reads, and the cross-space `403 DENIED` boundary.
 
 `RegistryProtocols.NpmPublishesAndInstallsWithTheRealClient` runs the host `npm` binary to publish
 and then install a fixture package through Lake. If npm is unavailable, the same test exercises

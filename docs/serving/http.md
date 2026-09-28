@@ -31,6 +31,8 @@ out) and are the unit-tested surface.
 | `POST /identity/*` | form adapters that call the corresponding registry capability; see [`../ui/identity.md`](../ui/identity.md) |
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |
+| `GET /ship/apps`, `/ship/app?customer_id=<id>&app_id=<id>` | Ship app list and operating page, including retained and live app/build events |
+| `POST /ship/apps/create`, `/ship/apps/agent`, `/ship/app/*` | capability-backed app creation, agent start, deploy, lifecycle, environment, binding, auth, build, and delete form adapters |
 | `POST /apps/<id>/identity/*` | application-pool identity form adapters |
 | `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
 | `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/organization?id=`, `/team?id=`, `/member?id=`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | server-rendered pages with ordinary `/sign-in` for protected reads and public repository browsing; operator entry remains `/login` and `POST /session`; see [`../ui/README.md`](../ui/README.md) |

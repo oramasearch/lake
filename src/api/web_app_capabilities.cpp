@@ -533,11 +533,18 @@ void register_web_app_capabilities(Registry& registry) {
                 if (const auto invalid = validate_source_repository(input, context)) {
                     co_return *invalid;
                 }
+                json details;
+                if (input.contains("source")) {
+                    details["source"] = input.at("source");
+                } else {
+                    details["image"] = input.at("image");
+                }
                 co_return co_await patch_and_publish(input,
                                                      context,
                                                      deployment_patch(input),
                                                      rollback ? "app.rollback" : "app.deploy",
-                                                     rollback ? "rollback" : "deploy");
+                                                     rollback ? "rollback" : "deploy",
+                                                     std::move(details));
             }});
     };
     register_deployment("deploy_app", false);
@@ -677,6 +684,33 @@ void register_web_app_capabilities(Registry& registry) {
     register_state("start_app", "running", "start");
 
     registry.add(Capability{
+        .name = "set_app_auth",
+        .title = "Set app authentication",
+        .description = "Require lake sign-in or make an app public after explicit confirmation.",
+        .input_schema = app_input_schema(
+            {{"auth", {{"type", "string"}, {"enum", json::array({"lake", "none"})}}},
+             {"confirm_public", {{"type", "boolean"}}}},
+            json::array({"auth"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            const std::string auth = input.at("auth");
+            if (auth == "none" && !input.value("confirm_public", false)) {
+                co_return ApiResult::failure("invalid_input",
+                                             "making an app public requires confirmation",
+                                             "/confirm_public");
+            }
+            control::WebAppPatch patch;
+            patch.auth = auth;
+            co_return co_await patch_and_publish(
+                input, context, std::move(patch), "app.auth.set", "auth", {{"auth", auth}});
+        }});
+
+    registry.add(Capability{
         .name = "scale_app",
         .title = "Scale app",
         .description = "Set desired replicas within the space's aggregate quota.",
@@ -697,6 +731,36 @@ void register_web_app_capabilities(Registry& registry) {
                 input, context, std::move(patch), "app.scale", "scale", {{"replicas", replicas}});
         }});
 
+    registry.add(Capability{
+        .name = "set_app_zetta_binding",
+        .title = "Set app Zetta binding",
+        .description = "Attach or detach read-only access to the space's workspace Zetta.",
+        .input_schema =
+            app_input_schema({{"attached", {{"type", "boolean"}}}}, json::array({"attached"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            auto app = owned_app(input, context);
+            if (!app) {
+                co_return app.error();
+            }
+            const bool attached = input.at("attached");
+            app->bindings["zetta"] =
+                attached ? json({{"scopes", json::array({"read"})}}) : json(nullptr);
+            control::WebAppPatch patch;
+            patch.bindings = app->bindings;
+            patch.rotate_tokens = !attached;
+            co_return co_await patch_and_publish(input,
+                                                 context,
+                                                 std::move(patch),
+                                                 "app.binding.zetta",
+                                                 "binding",
+                                                 {{"zetta", attached}});
+        }});
     registry.add(Capability{
         .name = "bind_service_to_app",
         .title = "Bind service to app",
@@ -733,6 +797,41 @@ void register_web_app_capabilities(Registry& registry) {
                                                  "app.binding.service",
                                                  "binding",
                                                  {{"service_id", service->id}});
+        }});
+    registry.add(Capability{
+        .name = "unbind_service_from_app",
+        .title = "Detach service from app",
+        .description = "Remove one managed service connection from an app.",
+        .input_schema =
+            app_input_schema({{"service_id", {{"type", "string"}}}}, json::array({"service_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            auto app = owned_app(input, context);
+            if (!app) {
+                co_return app.error();
+            }
+            const std::string service_id = input.at("service_id");
+            json services = app->bindings.value("services", json::array());
+            const auto found = std::ranges::find(services, json(service_id));
+            if (found == services.end()) {
+                co_return ApiResult::failure(
+                    "not_found", "that service is not bound to this app", "/service_id");
+            }
+            services.erase(found);
+            app->bindings["services"] = std::move(services);
+            control::WebAppPatch patch;
+            patch.bindings = app->bindings;
+            co_return co_await patch_and_publish(input,
+                                                 context,
+                                                 std::move(patch),
+                                                 "app.binding.service.remove",
+                                                 "binding",
+                                                 {{"service_id", service_id}, {"attached", false}});
         }});
     registry.add(Capability{
         .name = "create_service_and_bind_to_app",
