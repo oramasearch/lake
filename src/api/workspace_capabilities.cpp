@@ -1306,6 +1306,49 @@ void register_sql_capability(Registry& registry) {
         }});
 }
 
+// ApplicationAgent reads the workspace catalogue as a first-class Lake tool. The ordinary
+// workspace_query surface remains available to every other caller.
+void register_dataset_catalog_capability(Registry& registry) {
+    registry.add(Capability{
+        .name = "list_datasets",
+        .title = "List workspace datasets",
+        .description = "List the datasets in a customer's workspace for ApplicationAgent.",
+        .input_schema = customer_input_schema(json::object(), json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .authorizes_candidates = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            auto called = co_await context.workspaces->call(
+                input.at("customer_id"), "list_datasets", true, json::object());
+            if (!called) {
+                co_return ApiResult::failure("store_unavailable", called.error().message);
+            }
+            if (!*called) {
+                co_return ApiResult::failure(called->error().code, called->error().message);
+            }
+            json value = std::move(**called);
+            for (json& dataset : value["datasets"]) {
+                if (!dataset.is_object() || dataset.contains("id")) {
+                    continue;
+                }
+                const std::string database = dataset.value("database", std::string("datasets"));
+                const std::string name = dataset.value("name", std::string());
+                if (!name.empty()) {
+                    dataset["id"] = database + "/" + name;
+                }
+            }
+            set_audit(context, "workspace.query", input, "list_datasets");
+            co_return ApiResult::success(std::move(value));
+        }});
+}
+
 namespace {
 
 // The workspace's answer to one Zetta call, or the failure as an ApiResult. Not std::expected:
@@ -1401,6 +1444,15 @@ json task_json(const control::AgentTask& task) {
                             oauth_url_encode(proposal.value("project", std::string())) +
                             "&graph=" + oauth_url_encode(proposal.value("graph", std::string())) +
                             "&task=" + task.id;
+    }
+    const json app_proposal = task.result.is_object()
+                                  ? task.result.value("result", json::object())
+                                  : json::object();
+    if (task.agent == "agent-application" &&
+        app_proposal.value("kind", std::string()) == "proposal" &&
+        app_proposal.value("confirm", false)) {
+        out["review_url"] =
+            "/ship/apps?customer_id=" + task.customer_id + "&task=" + task.id + "#proposal";
     }
     return out;
 }
@@ -2962,7 +3014,8 @@ void register_agent_run_capabilities(Registry& registry) {
         .title = "Talk to an agent",
         .description =
             "Send one message to any agent: a specialized agent of the Agent Library by its key "
-            "(agent-ask-orama, agent-project, agent-autosuggest, agent-creator) or an agent of "
+            "(agent-ask-orama, agent-project, agent-application, agent-autosuggest, "
+            "agent-creator) or an agent of "
             "this space by its id. A library agent's turn runs in the background: the answer is "
             "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
             "agent answers from the workspace; a Python agent from its running service (started "
@@ -3018,6 +3071,31 @@ void register_agent_run_capabilities(Registry& registry) {
                         }
                     }
                     scopes.push_back("workspace_query");
+                } else if (agent == "agent-application") {
+                    scopes = {"workspace_query",
+                              "workspace_openapi",
+                              "workspace_sql",
+                              "list_datasets",
+                              "get_dataset",
+                              "list_services",
+                              "repository_tree",
+                              "repository_file",
+                              "list_apps",
+                              "get_app",
+                              "app_logs",
+                              "receive_app_events"};
+                    body["context"] = input.value("context", json::object());
+                    const json confirmed = body["context"].value("confirmed_proposal", json());
+                    if (confirmed.is_object() &&
+                        confirmed.value("kind", std::string()) == "proposal" &&
+                        confirmed.value("confirm", false) && confirmed.contains("files") &&
+                        confirmed.at("files").is_array() && confirmed.contains("app") &&
+                        confirmed.at("app").is_object()) {
+                        scopes.push_back("create_repository");
+                        scopes.push_back("commit_repository_files");
+                        scopes.push_back("create_app");
+                        scopes.push_back("deploy_app");
+                    }
                 }
                 // The turn runs in the background (lake#269): lake records it, publishes it on
                 // the agent bus and answers at once. The agent claims it through lake, which
@@ -3079,7 +3157,9 @@ void register_agent_run_capabilities(Registry& registry) {
                 auto task = context.store->create_agent_task(
                     control::AgentTask{.customer_id = customer_id,
                                        .agent = agent,
-                                       .kind = input.value("kind", std::string("api")),
+                                       .kind = agent == "agent-application"
+                                                   ? std::string("app")
+                                                   : input.value("kind", std::string("api")),
                                        .conversation_id =
                                            input.value("conversation_id", std::string()),
                                        .body = std::move(body),
@@ -3541,6 +3621,7 @@ void register_workspace_capabilities(Registry& registry) {
     register_agent_flow_capabilities(registry);
     register_agent_bus_capabilities(registry);
     register_sql_capability(registry);
+    register_dataset_catalog_capability(registry);
     register_pipeline_capabilities(registry);
     register_parity_capabilities(registry);
     register_connect_capabilities(registry);
@@ -3672,9 +3753,9 @@ void register_workspace_capabilities(Registry& registry) {
         .name = "list_agent_library",
         .title = "The Agent Library",
         .description =
-            "Every specialized agent Orama ships (Ask Orama, the Project Agent, Auto-Suggest, "
-            "AgentCreator and the offline evaluation and corpus agents): what each does, where "
-            "you meet it, and whether this lake runs it.",
+            "Every specialized agent Orama ships (Ask Orama, the Project Agent, "
+            "ApplicationAgent, Auto-Suggest, AgentCreator and the evaluation and corpus agents): "
+            "what each does, where you meet it, and whether this lake runs it.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},

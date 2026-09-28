@@ -10,7 +10,8 @@ The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
 Organization and personal settings are in [`settings.md`](settings.md).
 The top-bar breadcrumb (every page's trail, mirroring its URL) is in [`breadcrumb.md`](breadcrumb.md).
 Developer → MCP (keys, copy-ready agent setup, the lake skill and `llms.txt`) is in [`../api/mcp.md`](../api/mcp.md).
-Ship → Apps list, detail, controls, and live event behavior are in [`apps.md`](apps.md).
+Ship → Apps list, detail, ApplicationAgent proposal confirmation, controls, and live event behavior
+are in [`apps.md`](apps.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed

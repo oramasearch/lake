@@ -111,9 +111,12 @@ the Web UI renderer check pins repository/App actions and live build followers.
 Authorization assertions use well-formed input; malformed authenticated calls separately assert
 `invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
 `HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` creates a repository
-app through the form routes, renders the list and operating page, publishes a deploy event, and
-uses restart through its POST adapter. Memory variants add fake operator Ready status; renderer
-coverage verifies secret masking, rollback inputs, and live app/build polling markup.
+app through the form routes, starts an ApplicationAgent task, rejects a changed proposal digest,
+confirms the stored proposal, renders its deployed URL and the operating page, publishes a deploy
+event, and uses restart through its POST adapter. `AgentRuns` proves app tasks use their own topic
+and credential, Ask Orama delegates to them, and App writes are absent before confirmation but
+usable after it. Memory variants add fake operator Ready status; renderer coverage verifies secret
+masking, rollback inputs, and live app/build polling markup.
 
 Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
 time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts

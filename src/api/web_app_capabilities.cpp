@@ -177,6 +177,40 @@ std::optional<ApiResult> validate_plain_env(const json& env) {
     return std::nullopt;
 }
 
+std::expected<std::pair<json, json>, ApiResult> normalized_app_env(const json& env) {
+    if (!env.is_object()) {
+        return std::unexpected(
+            ApiResult::failure("invalid_input", "env must be an object", "/env"));
+    }
+    json plain = json::object();
+    json secret_refs = json::object();
+    for (const auto& [key, value] : env.items()) {
+        if (!valid_env_key(key)) {
+            return std::unexpected(
+                ApiResult::failure("invalid_input", "env keys must be names", "/env"));
+        }
+        if (value.is_object() && value.size() == 1 && value.contains("secret") &&
+            value.at("secret").is_string() && !value.at("secret").get<std::string>().empty()) {
+            secret_refs[key] = value.at("secret");
+            continue;
+        }
+        if (!value.is_string()) {
+            return std::unexpected(ApiResult::failure(
+                "invalid_input",
+                "env values must be strings or {secret: <operator reference>}",
+                "/env/" + key));
+        }
+        if (flagged_secret(key, value.get<std::string>())) {
+            return std::unexpected(ApiResult::failure(
+                "secret_required",
+                "the value looks like a secret; use {secret: <operator reference>}",
+                "/env/" + key));
+        }
+        plain[key] = value;
+    }
+    return std::pair{std::move(plain), std::move(secret_refs)};
+}
+
 std::expected<json, ApiResult>
 normalized_bindings(const json& value, const std::string& customer_id, ApiContext& context) {
     if (!value.is_object()) {
@@ -431,8 +465,9 @@ void register_web_app_capabilities(Registry& registry) {
              {"framework", {{"type", "string"}}},
              {"port", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65535}}},
              {"replicas", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}},
-             {"host", {{"type", "string"}}},
-             {"auth", {{"type", "string"}, {"enum", json::array({"lake", "none"})}}},
+             {"host", {{"type", json::array({"string", "null"})}}},
+             {"auth",
+              {{"type", "string"}, {"enum", json::array({"lake", "none", "public"})}}},
              {"bindings", {{"type", "object"}}},
              {"env", {{"type", "object"}}}},
             json::array({"name", "mode", "framework", "port"})),
@@ -468,11 +503,15 @@ void register_web_app_capabilities(Registry& registry) {
             if (const auto invalid = validate_source_repository(input, context)) {
                 co_return *invalid;
             }
-            const json env = input.value("env", json::object());
-            if (const auto invalid = validate_plain_env(env)) {
-                co_return *invalid;
+            auto env = normalized_app_env(input.value("env", json::object()));
+            if (!env) {
+                co_return env.error();
             }
-            auto host = app_host(input, name, context);
+            json host_input = input;
+            if (host_input.value("host", json()).is_null()) {
+                host_input.erase("host");
+            }
+            auto host = app_host(host_input, name, context);
             if (!host) {
                 co_return host.error();
             }
@@ -494,9 +533,11 @@ void register_web_app_capabilities(Registry& registry) {
             app.port = input.at("port");
             app.replicas = replicas;
             app.host = *host;
-            app.auth = input.value("auth", "lake");
+            app.auth = input.value("auth", "lake") == "public" ? "none"
+                                                                  : input.value("auth", "lake");
             app.bindings = std::move(*bindings);
-            app.env = env;
+            app.env = std::move(env->first);
+            app.secret_env_refs = std::move(env->second);
             app.max_apps = context.apps_per_customer;
             app.max_replicas = context.app_replicas_per_customer;
             const control::WebAppPatch sources = deployment_patch(deployment);
@@ -514,12 +555,21 @@ void register_web_app_capabilities(Registry& registry) {
         }});
 
     const auto register_deployment = [&](std::string name, bool rollback) {
+        json properties = deployment_properties();
+        json schema;
+        if (rollback) {
+            schema = app_input_schema(std::move(properties));
+        } else {
+            properties["app_id"] = {{"type", "string"}};
+            properties["app"] = {{"type", "string"}};
+            schema = input_schema(std::move(properties));
+        }
         registry.add(Capability{
             .name = std::move(name),
             .title = rollback ? "Rollback app" : "Deploy app",
             .description = rollback ? "Set a prior source revision or image as desired."
                                     : "Set a new source revision or image as desired.",
-            .input_schema = app_input_schema(deployment_properties()),
+            .input_schema = std::move(schema),
             .output_schema = {{"type", "object"}},
             .kind = CapabilityKind::Action,
             .object = "customer",
@@ -527,21 +577,34 @@ void register_web_app_capabilities(Registry& registry) {
             .resolve_object = customer_object,
             .async_handler = [rollback](const json& input,
                                         ApiContext& context) -> liquid::runtime::task<ApiResult> {
-                if (const auto invalid = validate_deployment(input)) {
+                json normalized = input;
+                if (!rollback) {
+                    const bool has_app_id = input.contains("app_id");
+                    const bool has_app = input.contains("app");
+                    if (has_app_id == has_app) {
+                        co_return ApiResult::failure(
+                            "invalid_input", "give exactly one of app_id or app", "/app_id");
+                    }
+                    if (has_app) {
+                        normalized["app_id"] = input.at("app");
+                        normalized.erase("app");
+                    }
+                }
+                if (const auto invalid = validate_deployment(normalized)) {
                     co_return *invalid;
                 }
-                if (const auto invalid = validate_source_repository(input, context)) {
+                if (const auto invalid = validate_source_repository(normalized, context)) {
                     co_return *invalid;
                 }
                 json details;
-                if (input.contains("source")) {
-                    details["source"] = input.at("source");
+                if (normalized.contains("source")) {
+                    details["source"] = normalized.at("source");
                 } else {
-                    details["image"] = input.at("image");
+                    details["image"] = normalized.at("image");
                 }
-                co_return co_await patch_and_publish(input,
+                co_return co_await patch_and_publish(normalized,
                                                      context,
-                                                     deployment_patch(input),
+                                                     deployment_patch(normalized),
                                                      rollback ? "app.rollback" : "app.deploy",
                                                      rollback ? "rollback" : "deploy",
                                                      std::move(details));
