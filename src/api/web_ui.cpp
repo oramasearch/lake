@@ -5194,9 +5194,15 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
     }
     content += "</section>";
     if (!page.agent_task.empty()) {
-        const nlohmann::json answer =
-            page.agent_task.value("answer", nlohmann::json::object());
-        const nlohmann::json result = answer.value("result", nlohmann::json::object());
+        // A failed task carries "answer": null; its "message" is then the reply shown.
+        nlohmann::json answer = page.agent_task.value("answer", nlohmann::json::object());
+        if (!answer.is_object()) {
+            answer = nlohmann::json::object();
+        }
+        nlohmann::json result = answer.value("result", nlohmann::json::object());
+        if (!result.is_object()) {
+            result = nlohmann::json::object();
+        }
         const std::string reply = answer.value("reply", page.agent_task.value("message", ""));
         if (page.agent_working) {
             content +=

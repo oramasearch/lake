@@ -1300,6 +1300,24 @@ TEST(WebUi, AccountPagesLiveInTheAccountMenu) {
     EXPECT_EQ(lake::api::web_ui_home().find("account-menu"), std::string::npos);
 }
 
+TEST(WebUi, ShipAppsShowAFailedAgentTaskInsteadOfDroppingThePage) {
+    // A failed task carries "answer": null. Rendering it must not throw (that dropped the
+    // connection and surfaced as a 502), and the person sees why it failed.
+    lake::api::AppsPage list;
+    list.customer_id = "customer-1";
+    list.customers = {{"customer-1", "Personal", true}};
+    list.application_agent = true;
+    list.agent_task = {{"task_id", "task-1"},
+                       {"agent", "agent-application"},
+                       {"kind", "app"},
+                       {"status", "failed"},
+                       {"answer", nullptr},
+                       {"message", "create_app: LAKE_APPS_WILDCARD is not configured"}};
+    std::string apps;
+    ASSERT_NO_THROW(apps = lake::api::web_ui_apps(list, true));
+    EXPECT_NE(apps.find("LAKE_APPS_WILDCARD is not configured"), std::string::npos) << apps;
+}
+
 TEST(WebUi, ShipAppsRenderControlsMaskedSecretsAndLiveEvents) {
     lake::api::AppsPage list;
     list.customer_id = "customer-1";
