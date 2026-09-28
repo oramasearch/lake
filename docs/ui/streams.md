@@ -31,8 +31,9 @@ bus on the server; other customers' payloads and subscription identities do not 
 | Edit Payload with displayed revision | `update_stream_message` |
 | Delete Message, Purge Before Sequence, count preview | `delete_stream_messages` |
 
-Each control or enclosing form declares `data-capability`; the parity test checks the registry
-mapping. Forms submit JSON to the same public POST capabilities used by MCP. The HTTP page
+Each control or enclosing form declares `data-capability`; the parity test checks every form,
+link, input, button, select and textarea in the Streams content, rejecting missing or unknown
+registry mappings. Forms submit JSON to the same public POST capabilities used by MCP. The HTTP page
 adapter only selects the space, calls read capabilities and renders their values. It does not
 provide a private mutation endpoint. Writes require JavaScript; read navigation remains ordinary
 GET links/forms.

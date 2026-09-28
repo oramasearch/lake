@@ -8,6 +8,11 @@ creation never grants management of an existing topic. Successful topic drop rem
 If Zetta succeeds but the following ownership store write fails, the operation reports failure;
 the topic remains readable but cannot be reconfigured/dropped until ownership is reconciled.
 Lake does not infer creator ownership from a service credential or a topic's name.
+An existing ownership record refuses creation before contacting Zetta, including after an
+out-of-band topic drop or failed ownership cleanup. A second person cannot recreate that name
+under the first person's permissions; reconcile the leftover record before reusing the name.
+The regression test grants the second principal space write access explicitly, then verifies
+the ownership conflict is returned without an upstream call or recreated topic.
 
 Memory and Postgres stores implement the same create/read/delete contract. The telemetry store
 wrapper forwards it without changing semantics. A customer's agent task IDs are read from its

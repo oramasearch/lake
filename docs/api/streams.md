@@ -50,6 +50,7 @@ are system, browse-only. Every write refuses them, including message writes. Oth
 workspace topics can be read and their messages changed with space permission, but only a
 creator recorded by Lake can reconfigure or drop them. Ownership is durable and tied to the
 workspace service incarnation; see [control-plane storage](../control-plane/streams.md).
+Creation refuses an existing ownership record, even if the topic was dropped outside Lake.
 Raw topic writes are no longer in `workspace_act`'s allowlist.
 
 ## Topic operations
@@ -192,17 +193,19 @@ Both builds use the authorized Zetta transport checkout through `LAKE_ZETTA_SOUR
 Liquid bridge checkout through `LAKE_LIQUID_SOURCE_DIR`. The shared configuration sets
 `BUILD_SHARED_LIBS=ON`; `otool -L` confirms its Liquid/Boost/PQXX dynamic libraries. Configure and
 supply the PostgreSQL environment as described in [local.md](../build/local.md). This proof used
-fresh local bases `lake_issue301_static_20260928b` and `lake_issue301_shared_20260928b`, with
+fresh local bases `lake_issue301_static_main_20260928` and `lake_issue301_shared_main_20260928`, with
 process-owned fixtures under the worktree's `.cache/tmp`. Builds used at most six jobs; suites
-ran one at a time.
+ran one at a time. Both active build trees were configured from scratch after rebasing onto
+`origin/main` at `75219cb` and updating submodules; no compiled objects from before that rebase
+were reused.
 
 ```text
 cmake --build build -j 6
 cmake --build build-shared -j 6
 ctest --test-dir build --output-on-failure -j 1
-100% tests passed, 0 tests failed out of 406
+100% tests passed, 0 tests failed out of 409
 ctest --test-dir build-shared --output-on-failure -j 1
-100% tests passed, 0 tests failed out of 406
+100% tests passed, 0 tests failed out of 409
 tools/ui/test-token-gates.sh
 sync-design-system: ok — 8 files match 38959d9966aa
 build-tokens: ok — src/api/web_ui_tokens.inc matches the vendored tokens
@@ -211,8 +214,10 @@ token-gates: ok — generated output and snapshot changes were rejected
 
 Each suite retains 14 existing skips (browser-to-terminal, optional Hugging Face client and
 Postgres workspace-UI variants) and one disabled search benchmark. No Streams test is skipped.
-The focused Streams/schema/navigation/MCP regression run passed all 18 cases. The controls'
-JavaScript parses successfully, and the native binary's help command runs.
+The focused `Streams.*` regression run passed all eight cases, including the explicit-grant
+ownership case and every-control capability mapping. Schema, navigation and MCP checks also
+pass in both full suites. The controls' JavaScript parses successfully, and the native binary's
+help command runs.
 
 Linux proof deferred: the supplied Linux-lane helper is absent. Interactive browser QA is
 deferred because the in-app browser connection rejects missing sandbox metadata. A deployed

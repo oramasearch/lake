@@ -18,6 +18,35 @@
 namespace {
 using nlohmann::json;
 
+void expect_control_capabilities(const std::string& html, const lake::api::Registry& registry) {
+    const auto root = html.find("<section id=\"streams\"");
+    ASSERT_NE(root, std::string::npos);
+    const auto script = html.find("<script id=\"streams-controls\"", root);
+    ASSERT_NE(script, std::string::npos);
+    const auto content = html.substr(root, script - root);
+    const std::regex controls("</?(?:form|a|input|button|select|textarea)\\b[^>]*>");
+    const std::regex mapping("data-capability=\"([^\"]+)\"");
+    std::string form_capability;
+    for (auto match = std::sregex_iterator(content.begin(), content.end(), controls);
+         match != std::sregex_iterator(); ++match) {
+        const auto tag = match->str();
+        if (tag == "</form>") {
+            form_capability.clear();
+        }
+        if (tag.starts_with("</")) {
+            continue;
+        }
+        std::smatch declared;
+        const auto capability = std::regex_search(tag, declared, mapping)
+            ? declared[1].str() : form_capability;
+        ASSERT_FALSE(capability.empty()) << "Unmapped Streams control: " << tag;
+        EXPECT_NE(registry.find(capability), nullptr) << tag;
+        if (tag.starts_with("<form ")) {
+            form_capability = capability;
+        }
+    }
+}
+
 struct Streams : testing::Test {
     std::shared_ptr<lake::control::InMemoryStore> store = std::make_shared<lake::control::InMemoryStore>();
     lake::api::Registry registry;
@@ -260,6 +289,21 @@ TEST_F(Streams, ValidationPurgeConfirmationAndExistingTopicsFailClosed) {
     EXPECT_FALSE(call("get_stream", input("external")).value.at("can_manage"));
 }
 
+TEST_F(Streams, ExistingOwnershipCannotBeReassignedAfterAnExternalDrop) {
+    ASSERT_TRUE(call("create_stream", input()).ok);
+    workspace->caller->topics.erase("orders");
+    const auto object = store->find_policy_object("customer", customer);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({"another-creator", object->id, "write",
+        "test-attestation", "admin", ""}));
+    context.acting_identity = "another-creator";
+    context.operator_credential = false;
+    const auto calls_before = workspace->caller->calls.size();
+    EXPECT_EQ(call("create_stream", input()).error.code, "conflict");
+    EXPECT_EQ(workspace->caller->calls.size(), calls_before);
+    EXPECT_FALSE(workspace->caller->topics.contains("orders"));
+}
+
 TEST_F(Streams, AgentTurnPagingCanContinueAcrossEmptyFilteredPages) {
     ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic("agent-events")).value());
     const auto task = store->create_agent_task({.customer_id = customer, .agent = "agent-project",
@@ -362,11 +406,8 @@ TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
         for (const auto& name : names) {
             EXPECT_NE(html.find("data-capability=\"" + name + "\""), std::string::npos) << name;
         }
-        const std::regex controls("<(?:form|a|input|button)[^>]*data-capability=\"([^\"]+)\"");
-        for (auto match = std::sregex_iterator(html.begin(), html.end(), controls);
-             match != std::sregex_iterator(); ++match) {
-            EXPECT_NE(registry.find((*match)[1]), nullptr);
-        }
+        expect_control_capabilities(list_html, registry);
+        expect_control_capabilities(detail_html, registry);
         if (!mcp && std::getenv("LAKE_STREAM_BROWSER")) {
             std::cout << "Streams browser fixture: http://127.0.0.1:" << server.port()
                       << "/train/stream?customer_id=" << customer << "&zetta=workspace&topic=rest-orders\n"

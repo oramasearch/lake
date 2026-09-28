@@ -472,6 +472,9 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
         co_return ApiResult::failure(creator.error().code, creator.error().message);
     }
     const bool create = name == "create_stream";
+    if (create && !creator->empty()) {
+        co_return ApiResult::failure("conflict", "a recorded topic creation already exists");
+    }
     if ((name == "update_stream" || name == "delete_stream") &&
         *creator != context.acting_identity) {
         co_return ApiResult::failure("unauthorized", "only the topic creator may change this stream");

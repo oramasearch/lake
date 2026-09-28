@@ -236,7 +236,7 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
     } else if (!page.detail.empty()) {
         const bool system = page.detail.value("system", true);
         const bool manage = page.detail.value("can_manage", false);
-        html += "<p><a href=\"/train/streams?" + query + "\">All streams</a></p><h2>" + escape(page.topic) +
+        html += "<p><a data-capability=\"list_streams\" href=\"/train/streams?" + query + "\">All streams</a></p><h2>" + escape(page.topic) +
             "</h2>" + (system ? "<p class=\"badge\">system · browse-only</p>" : "") +
             "<details><summary>Settings</summary><pre>" + escape(page.detail.at("settings").dump(2)) + "</pre></details>";
         html += "<h2>Subscriptions</h2><table><thead><tr><th>Subscriber</th><th>Position</th>"
