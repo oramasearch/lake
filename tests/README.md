@@ -96,6 +96,25 @@ coroutine HTTP client, selector request, secret bearer, line conversion, and cur
 Postgres suite round-trips the same environment binding and JSON mirror through the production
 store.
 
+`test_web_apps.cpp` proves Ship App policy isolation, validation, desired-state generations,
+app/replica quotas, fake-operator status, Secret references, service binding, Loki namespace
+selection, purpose-scoped operator hashes and lifecycle event delivery with the memory store.
+`test_api.cpp` proves successful private repository tree/file reads with a source token.
+`PostgresWebApps.*` proves the production desired row, hash registration/rotation, customer
+locking, `lake_apps` notification, operator status and physical deletion. Both stores exercise
+cross-app/customer/revision refusal and reject other capabilities.
+`test_builds.cpp` proves asynchronous build intent, fake operator status, cancellation, generated
+App Dockerfiles, purpose-scoped hashes and retained events in memory. `PostgresBuilds.*` proves the
+same row shape, `lake_builds` notifications and credential revocation in Postgres.
+`RegistryProtocols.BuildPushCredentialIsLimitedToItsCustomerPrefix` pins the private OCI boundary;
+the Web UI renderer check pins repository/App actions and live build followers.
+Authorization assertions use well-formed input; malformed authenticated calls separately assert
+`invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
+`HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` creates a repository
+app through the form routes, renders the list and operating page, publishes a deploy event, and
+uses restart through its POST adapter. Memory variants add fake operator Ready status; renderer
+coverage verifies secret masking, rollback inputs, and live app/build polling markup.
+
 Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
 time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts
 loopback HTTP servers, publishes through the HTTP capability, and prints two checkpoints accepted by

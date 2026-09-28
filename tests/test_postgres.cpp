@@ -651,6 +651,328 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     EXPECT_EQ(store->get_service(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
+TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:app-" + suffix, "app-" + suffix + "@example.com", "Apps"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "app-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_apps",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    lake::control::NewWebApp app;
+    app.customer_id = customer->id;
+    app.name = "reports";
+    app.mode = "runtime";
+    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    ASSERT_TRUE(repository);
+    app.source_repository = repository->id;
+    app.source_revision = "main";
+    app.source_path = "web";
+    app.source_entrypoint = "main:app";
+    app.framework = "node";
+    app.port = 3000;
+    app.replicas = 2;
+    app.host = "reports-" + suffix + ".apps.example.test";
+    app.bindings = {{"zetta", {{"scopes", json::array({"read"})}}}, {"services", json::array()}};
+    app.env = {{"LOG_LEVEL", "info"}};
+    app.max_apps = 1;
+    app.max_replicas = 3;
+    const auto created = store->create_web_app(app);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->generation, 1);
+    EXPECT_EQ(created->observed_generation, 0);
+    EXPECT_FALSE(created->ready);
+    EXPECT_EQ(created->source_entrypoint, "main:app");
+    EXPECT_TRUE(created->token_hashes.empty());
+    EXPECT_FALSE(store->context_for("operator-source"));
+    const json hashes{{"source", lake::control::identity_crypto::sha256_hex("operator-source")},
+                      {"zetta", lake::control::identity_crypto::sha256_hex("operator-zetta")},
+                      {"events", lake::control::identity_crypto::sha256_hex("operator-events")}};
+    const auto write_hashes = [&](const json& values) {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE apps SET token_hashes_json = $2::jsonb WHERE id = $1::uuid",
+                       created->id,
+                       values.dump());
+        tx.commit();
+    };
+    write_hashes(hashes);
+    Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const lake::control::Principal& principal,
+                          const std::string& name,
+                          const json& input) {
+        ApiContext context;
+        context.store = store.get();
+        context.authorized = true;
+        context.session_credential = true;
+        context.acting_identity = principal.taap_id;
+        context.credential_kind = principal.kind;
+        context.credential_workload_id = principal.workload_id;
+        context.credential_customer_id = principal.workload_customer_id;
+        context.credential_repository_id = principal.workload_repository_id;
+        context.credential_revision = principal.workload_revision;
+        context.credential_token_hash = principal.workload_token_hash;
+        context.scopes = principal.scopes;
+        context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        auto result = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(result);
+        return *result;
+    };
+    for (const std::string purpose : {"source", "zetta", "events"}) {
+        const auto principal = store->context_for("operator-" + purpose);
+        ASSERT_TRUE(principal) << principal.error().message;
+        EXPECT_EQ(principal->kind, "app_" + purpose);
+        EXPECT_EQ(principal->workload_id, created->id);
+        EXPECT_EQ(principal->workload_customer_id, customer->id);
+        EXPECT_EQ(call(*principal, "server_info", json::object()).error.code, "unauthorized");
+        EXPECT_EQ(call(*principal, "server_info", nullptr).error.code, "invalid_input");
+        EXPECT_EQ(
+            call(*principal,
+                 "publish_app_event",
+                 {{"app_id", lake::control::new_uuid_v4()}, {"event", {{"phase", "Running"}}}})
+                .error.code,
+            "unauthorized");
+        EXPECT_EQ(
+            call(*principal,
+                 "workspace_query",
+                 {{"customer_id", lake::control::new_uuid_v4()}, {"capability", "list_datasets"}})
+                .error.code,
+            "unauthorized");
+        EXPECT_EQ(call(*principal,
+                       "repository_tree",
+                       {{"id", lake::control::new_uuid_v4()}, {"ref", "main"}})
+                      .error.code,
+                  "unauthorized");
+    }
+    const auto source = *store->context_for("operator-source");
+    EXPECT_EQ(
+        call(source, "repository_tree", {{"id", repository->id}, {"ref", "other"}}).error.code,
+        "unauthorized");
+    EXPECT_EQ(call(source,
+                   "repository_file",
+                   {{"id", repository->id}, {"ref", "other"}, {"path", "app.toml"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(call(source, "get_app", {{"customer_id", customer->id}, {"app_id", created->id}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(call(source, "repository_tree", {{"id", repository->id}, {"ref", "main"}}).error.code,
+              "store_unavailable")
+        << "authorized source reads reach the repository content store";
+    EXPECT_EQ(call(source,
+                   "repository_file",
+                   {{"id", repository->id}, {"ref", "main"}, {"path", "app.toml"}})
+                  .error.code,
+              "store_unavailable");
+    const auto zetta = *store->context_for("operator-zetta");
+    EXPECT_EQ(call(zetta,
+                   "workspace_query",
+                   {{"customer_id", customer->id}, {"capability", "list_datasets"}})
+                  .error.code,
+              "store_unavailable");
+    EXPECT_EQ(call(zetta,
+                   "workspace_sql",
+                   {{"customer_id", customer->id}, {"statement", "SELECT * FROM data.rows"}})
+                  .error.code,
+              "store_unavailable");
+    EXPECT_EQ(call(zetta,
+                   "workspace_act",
+                   {{"customer_id", customer->id}, {"capability", "create_project"}})
+                  .error.code,
+              "unauthorized");
+    const auto events = *store->context_for("operator-events");
+    EXPECT_EQ(call(events,
+                   "publish_app_event",
+                   {{"app_id", created->id}, {"event", {{"phase", "Running"}}}})
+                  .error.code,
+              "store_unavailable");
+    {
+        pqxx::connection connection(uri);
+        pqxx::read_transaction tx(connection);
+        EXPECT_TRUE(tx.exec1("SELECT to_regclass('app_credentials')")[0].is_null());
+        const auto row = tx.exec_params1(
+            "SELECT token_hashes_json::text FROM apps WHERE id = $1::uuid", created->id);
+        EXPECT_EQ(json::parse(row[0].as<std::string>()), hashes);
+        EXPECT_FALSE(row[0].as<std::string>().contains("operator-"));
+    }
+    EXPECT_EQ(store->create_web_app(app).error().code, "conflict");
+    app.name = "second";
+    app.host = "second-" + suffix + ".apps.example.test";
+    EXPECT_EQ(store->create_web_app(app).error().code, "quota_exceeded");
+
+    lake::control::WebAppPatch scale;
+    scale.replicas = 3;
+    scale.max_replicas = 3;
+    const auto scaled = store->update_web_app(created->id, scale);
+    ASSERT_TRUE(scaled) << scaled.error().message;
+    EXPECT_EQ(scaled->replicas, 3);
+    EXPECT_EQ(scaled->generation, 2);
+    scale.replicas = 4;
+    EXPECT_EQ(store->update_web_app(created->id, scale).error().code, "quota_exceeded");
+
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE apps SET phase = 'Running', url = $2, ready = true, "
+                       "message = 'available', observed_generation = generation, "
+                       "updated_at = now() WHERE id = $1::uuid",
+                       created->id,
+                       "https://" + created->host);
+        tx.commit();
+    }
+    const auto observed = store->get_web_app(created->id);
+    ASSERT_TRUE(observed) << observed.error().message;
+    EXPECT_EQ(observed->phase, "Running");
+    EXPECT_TRUE(observed->ready);
+    EXPECT_EQ(observed->url, "https://" + created->host);
+    EXPECT_EQ(observed->observed_generation, 2);
+    EXPECT_EQ(observed->token_hashes, hashes)
+        << "desired and status edits preserve operator hashes";
+
+    for (int waited = 0; notified.size() < 2 && waited < 50; ++waited) {
+        listener.await_notification(0, 100000);
+    }
+    ASSERT_GE(notified.size(), 2U);
+    EXPECT_EQ(notified.front(), created->id);
+    EXPECT_EQ(notified.back(), created->id);
+
+    auto rotated = hashes;
+    rotated["source"] = lake::control::identity_crypto::sha256_hex("replacement-source");
+    write_hashes(rotated);
+    EXPECT_FALSE(store->context_for("operator-source"));
+    EXPECT_TRUE(store->context_for("replacement-source"));
+    EXPECT_EQ(call(source, "repository_tree", {{"id", repository->id}, {"ref", "main"}}).error.code,
+              "unauthorized");
+    lake::control::WebAppPatch rotation;
+    rotation.rotate_tokens = true;
+    ASSERT_TRUE(store->update_web_app(created->id, rotation));
+    EXPECT_TRUE(store->get_web_app(created->id)->token_hashes.empty());
+    EXPECT_FALSE(store->context_for("operator-events"));
+    write_hashes(hashes);
+    lake::control::WebAppPatch stopped;
+    stopped.desired = "stopped";
+    const auto stop = store->update_web_app(created->id, stopped);
+    ASSERT_TRUE(stop);
+    EXPECT_EQ(stop->replicas, 3);
+    ASSERT_TRUE(store->purge_deleted_web_apps());
+    EXPECT_TRUE(store->get_web_app(created->id));
+    lake::control::WebAppPatch deleted;
+    deleted.desired = "deleted";
+    ASSERT_TRUE(store->update_web_app(created->id, deleted));
+    EXPECT_FALSE(store->context_for("operator-source"));
+    EXPECT_FALSE(store->context_for("operator-zetta"));
+    EXPECT_TRUE(store->context_for("operator-events"));
+    ASSERT_TRUE(store->purge_deleted_web_apps());
+    EXPECT_TRUE(store->get_web_app(created->id));
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE apps SET phase = 'Deleted' WHERE id = $1::uuid", created->id);
+        tx.commit();
+    }
+    EXPECT_FALSE(store->context_for("operator-events"));
+    ASSERT_TRUE(store->purge_deleted_web_apps());
+    EXPECT_FALSE(store->get_web_app(created->id));
+}
+
+TEST(PostgresBuilds, DesiredRowStatusTokensAndCancellationFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:build-" + suffix, "build-" + suffix + "@example.com", "Builds"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "build-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+
+    pqxx::connection listener(uri);
+    std::vector<std::string> notified;
+    listener.listen("lake_builds",
+                    [&](pqxx::notification note) { notified.emplace_back(note.payload); });
+
+    lake::control::NewBuild requested;
+    requested.customer_id = customer->id;
+    requested.repository = repository->id;
+    requested.revision = "main";
+    requested.context = "services/api";
+    requested.dockerfile = "services/api/Dockerfile";
+    requested.target = "lake-prod.prod.svc:80/" + customer->name + "/service:v1";
+    requested.build_args = {{"PYTHON_VERSION", "3.13"}};
+    const auto created = store->create_build(requested);
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->desired, "queued");
+    EXPECT_EQ(created->phase, "Queued");
+    EXPECT_TRUE(created->token_hashes.empty());
+    EXPECT_EQ(created->build_args, requested.build_args);
+
+    const json hashes{{"source", lake::control::identity_crypto::sha256_hex("pg-build-source")},
+                      {"push", lake::control::identity_crypto::sha256_hex("pg-build-push")},
+                      {"events", lake::control::identity_crypto::sha256_hex("pg-build-events")}};
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE builds SET phase = 'Running', message = 'builder running', "
+                       "token_hashes_json = $2::jsonb, updated_at = now() WHERE id = $1::uuid",
+                       created->id,
+                       hashes.dump());
+        tx.commit();
+    }
+    const auto running = store->get_build(created->id);
+    ASSERT_TRUE(running) << running.error().message;
+    EXPECT_EQ(running->phase, "Running");
+    EXPECT_EQ(running->token_hashes, hashes);
+    const auto source = store->context_for("pg-build-source");
+    const auto push = store->context_for("pg-build-push");
+    const auto events = store->context_for("pg-build-events");
+    ASSERT_TRUE(source) << source.error().message;
+    ASSERT_TRUE(push) << push.error().message;
+    ASSERT_TRUE(events) << events.error().message;
+    EXPECT_EQ(source->kind, "build_source");
+    EXPECT_EQ(push->kind, "build_push");
+    EXPECT_EQ(events->kind, "build_events");
+    EXPECT_EQ(source->workload_repository_id, repository->id);
+    EXPECT_EQ(source->workload_revision, "main");
+
+    const auto listed = store->list_builds(customer->id);
+    ASSERT_TRUE(listed) << listed.error().message;
+    ASSERT_EQ(listed->size(), 1U);
+    EXPECT_EQ(listed->front().id, created->id);
+    const auto cancelled = store->cancel_build(created->id);
+    ASSERT_TRUE(cancelled) << cancelled.error().message;
+    EXPECT_EQ(cancelled->desired, "cancelled");
+    EXPECT_EQ(store->cancel_build(created->id).error().code, "conflict");
+    EXPECT_FALSE(store->context_for("pg-build-source"));
+    EXPECT_FALSE(store->context_for("pg-build-push"));
+    EXPECT_FALSE(store->context_for("pg-build-events"));
+
+    for (int waited = 0; notified.size() < 2 && waited < 50; ++waited) {
+        listener.await_notification(0, 100000);
+    }
+    ASSERT_GE(notified.size(), 2U);
+    EXPECT_EQ(notified.front(), created->id);
+    EXPECT_EQ(notified.back(), created->id);
+}
+
 TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -739,8 +1061,8 @@ TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     EXPECT_EQ(store->get_store(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
-// Agent launches, their credential, cron schedules and Ask Orama messages against the production store
-// (docs/api/agent-launches.md, lake#231).
+// Agent launches, their credential, cron schedules and Ask Orama messages against the production
+// store (docs/api/agent-launches.md, lake#231).
 TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -802,26 +1124,26 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     EXPECT_FALSE(store->context_for(credential)) << "a stopped launch's credential stops too";
 
     // Cron schedules: several per agent, each with its own slug and credential (migration 0031).
-    const auto weekly = store->create_agent_cron_schedule({.customer_id = customer->id,
-                                                           .agent_id = "a-1",
-                                                           .agent_name = "Watcher",
-                                                           .cron = "0 9 * * 1",
-                                                           .description = "every monday at 09:00",
-                                                           .input = json{{"week", 39}},
-                                                           .scopes =
-                                                               lake::control::agent_launch_scopes,
-                                                           .created_by_user_id = user->id,
-                                                           .created_by_taap_id = user->taap_id});
+    const auto weekly =
+        store->create_agent_cron_schedule({.customer_id = customer->id,
+                                           .agent_id = "a-1",
+                                           .agent_name = "Watcher",
+                                           .cron = "0 9 * * 1",
+                                           .description = "every monday at 09:00",
+                                           .input = json{{"week", 39}},
+                                           .scopes = lake::control::agent_launch_scopes,
+                                           .created_by_user_id = user->id,
+                                           .created_by_taap_id = user->taap_id});
     ASSERT_TRUE(weekly) << weekly.error().message;
-    const auto nightly = store->create_agent_cron_schedule({.customer_id = customer->id,
-                                                            .agent_id = "a-1",
-                                                            .agent_name = "Watcher",
-                                                            .cron = "30 2 * * *",
-                                                            .time_zone = "America/Toronto",
-                                                            .scopes =
-                                                                lake::control::agent_launch_scopes,
-                                                            .created_by_user_id = user->id,
-                                                            .created_by_taap_id = user->taap_id});
+    const auto nightly =
+        store->create_agent_cron_schedule({.customer_id = customer->id,
+                                           .agent_id = "a-1",
+                                           .agent_name = "Watcher",
+                                           .cron = "30 2 * * *",
+                                           .time_zone = "America/Toronto",
+                                           .scopes = lake::control::agent_launch_scopes,
+                                           .created_by_user_id = user->id,
+                                           .created_by_taap_id = user->taap_id});
     ASSERT_TRUE(nightly) << nightly.error().message;
     EXPECT_EQ(weekly->slug, lake::control::managed_service_slug("as", weekly->id));
     EXPECT_EQ(weekly->time_zone, "Etc/UTC");
@@ -867,7 +1189,8 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     EXPECT_EQ(runs->front().result["reply"], "3 at risk");
     EXPECT_EQ(runs->front().input["week"], 39);
     ASSERT_TRUE(store->withdraw_agent_cron_schedule(weekly->id));
-    EXPECT_FALSE(store->context_for(schedule_credential)) << "a removed schedule's credential stops";
+    EXPECT_FALSE(store->context_for(schedule_credential))
+        << "a removed schedule's credential stops";
     EXPECT_FALSE(store->withdraw_agent_cron_schedule(weekly->id)) << "already removed";
     schedules = store->list_agent_cron_schedules(customer->id, "a-1");
     ASSERT_TRUE(schedules && schedules->size() == 1U);

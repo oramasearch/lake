@@ -54,6 +54,27 @@ Agent Factory) adds its first schedule; deleting the agent removes all of them.
 The per-agent `agent_schedules` table of 0030 and lake's in-process scheduler are retired: the
 table is no longer read, and is left for a deliberate drop.
 
+## Background turns (lake#269)
+
+**No lake page or capability waits on a library agent inside an HTTP request.** `agent_turn` to
+Ask Orama, the Project Agent, Auto-Suggest or AgentCreator writes a task to `agent_tasks`
+(migration `0032_agent_tasks`: agent, kind, conversation, the body, scopes, deadline, who asked),
+publishes it on the agent bus, and answers `{task_id, status: pending}` at once. The agent claims
+it, is handed the body with a `lat.` credential lake never stores, and publishes its progress and
+answer, all over Zetta pub/sub: [agent-bus.md](agent-bus.md).
+
+`get_agent_task {task_id}` follows a task, and `receive_agent_events` follows it live. A finished
+Project Agent proposal carries `review_url` (the pipeline page with `&task=`). Pages redirect at
+once and follow the task:
+
+- Ask Orama and the Agent Factory show *Thinking…* / *Working on it…* and record the answer in the
+  conversation once;
+- the pipeline page shows *The Project Agent is working on it…*;
+- Design → Opportunities shows *Scanning your workspace…*.
+
+Auto-Suggest builds the workspace profile itself with its read-only credential. Your own Python and
+native agents still answer within the call (a follow-up).
+
 ## Turns
 
 `agent_turn` delivers one message to any agent and returns its answer:

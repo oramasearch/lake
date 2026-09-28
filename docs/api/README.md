@@ -61,6 +61,12 @@ routes and their exact-byte integration coverage.
 [`services.md`](services.md) defines a customer's managed services, and [`storage.md`](storage.md)
 a customer's stores (buckets, filesystems, network filesystems and volumes; a cluster volume in
 phase 1, lake#196), with their capabilities and the Train → Data → Storage panel.
+[`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, deployment, lifecycle,
+authentication, environment, attach/detach bindings, logs and events. It is separate from identity
+[applications](apps.md).
+bindings, environment, logs and events. It is separate from identity [applications](apps.md).
+[`builds.md`](builds.md) defines asynchronous in-cluster image builds, cancellation, status,
+retained progress and build-scoped credentials.
 
 ## Operational routes
 
@@ -142,6 +148,7 @@ phase 1, lake#196), with their capabilities and the Train → Data → Storage p
 | `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships and whether this lake runs it | [train-agents.md](train-agents.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |
 | `agent_turn` | action | customer, agent, message | one conversation turn with any agent: library, native or Python | [agent-launches.md](agent-launches.md) |
+| `receive_agent_tasks`, `claim_agent_task`, `publish_agent_event`, `receive_agent_events` | read / action | agent, task, sequence | the agent bus: library agents take tasks and report over Zetta pub/sub; anyone who asked follows a task live | [agent-bus.md](agent-bus.md) |
 | `mint_agent_session_key` | action | customer, durable and dispatcher identities, scopes, lifetime | response-only private seed plus logged durable-identity delegation | [agents.md](agents.md) |
 | `verify_agent_session_drip` | action | customer, session, canonical body and TAAP signature | verified durable attribution, scopes and log commitment | [agents.md](agents.md) |
 | `revoke_agent_session` | action | customer, agent session | the key with `revoked_at`; it never verifies again | [agents.md](agents.md) |
@@ -197,6 +204,12 @@ phase 1, lake#196), with their capabilities and the Train → Data → Storage p
 
 MCP: [`mcp.md`](mcp.md). The full request/response schemas are in `/v1/openapi.json`, generated
 from the registry.
+
+Each operation carries **`x-lake-action`**: `read` or `write`, the action lake authorizes the call
+as. It is what the call does, apart from how it is sent: an action (POST) can be a read, like
+`workspace_query` (its input is a JSON object) or `predict`. An agent that may only read decides
+from it, not from the method. Ask Orama's turn credential carries every capability whose action is
+`read`.
 
 The binary sync operations use `/v1/repositories/<repository-id>/sync/*` rather than the generic
 `/v1/<capability>` mapping. Their OpenAPI operations are generated from registry entries, and the

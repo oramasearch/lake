@@ -179,6 +179,26 @@ public:
                                     std::string phase,
                                     std::string message,
                                     std::string endpoint);
+    Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) override;
+    Result<WebApp> get_web_app(const std::string& id) override;
+    Result<WebApp> create_web_app(const NewWebApp&) override;
+    Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) override;
+    Result<void> purge_deleted_web_apps() override;
+    Result<void> set_web_app_token_hashes(const std::string& id, nlohmann::json hashes);
+    // What the operator writes back after reconciling a desired row. Tests and local demos call
+    // this directly; the production operator updates the same columns in Postgres.
+    Result<void> set_web_app_status(const std::string& id,
+                                    std::string phase,
+                                    std::string url,
+                                    bool ready,
+                                    std::string message,
+                                    std::int64_t observed_generation);
+    Result<std::vector<Build>> list_builds(const std::string& customer_id) override;
+    Result<Build> get_build(const std::string& id) override;
+    Result<Build> create_build(const NewBuild&) override;
+    Result<Build> cancel_build(const std::string& id) override;
+    // The production operator updates these columns directly after reconciling the Job.
+    Result<void> set_build_status(const std::string& id, BuildStatus status);
     Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) override;
     Result<ManagedStore> get_store(const std::string& id) override;
     Result<ManagedStore> create_store(const NewManagedStore&) override;
@@ -223,6 +243,35 @@ public:
                                     std::string message,
                                     std::optional<int> exit_code = std::nullopt,
                                     nlohmann::json result = nullptr);
+    Result<AgentTask> create_agent_task(const AgentTask&) override;
+    Result<AgentTask> get_agent_task(const std::string& id) override;
+    Result<AgentTask> latest_agent_task(const std::string& customer_id,
+                                        const std::string& kind) override;
+    Result<AgentTask> claim_agent_task(const std::string& id,
+                                       const std::string& agent,
+                                       const std::string& credential_sha256,
+                                       std::uint64_t events_from = 0) override;
+    Result<AgentTask> record_agent_task_event(const std::string& id,
+                                              const std::string& agent,
+                                              const std::string& phase,
+                                              const std::string& message,
+                                              const nlohmann::json& result) override;
+    Result<void> fail_agent_task(const std::string& id, const std::string& message) override;
+    Result<void> mark_agent_task_published(const std::string& id) override;
+    Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) override;
+    // Moves a task's clocks back, so tests reach a deadline without waiting for it.
+    void age_agent_task(const std::string& id, std::chrono::seconds by);
+    Result<void> record_opportunities(const std::vector<Opportunity>&) override;
+    Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override;
+    Result<Opportunity> set_opportunity_status(const std::string& id,
+                                               const std::string& status,
+                                               const std::string& project) override;
+    // Sets a task's status directly; tests and local demos call it.
+    Result<void> set_agent_task_status(const std::string& id,
+                                       std::string phase,
+                                       std::string message,
+                                       std::string credential_sha256,
+                                       nlohmann::json result = nullptr);
     Result<AskMessage> append_ask_message(const AskMessage&) override;
     Result<std::vector<AskMessage>> ask_conversation(const std::string& conversation_id,
                                                      const std::string& user_id,
@@ -455,6 +504,8 @@ private:
     std::vector<MeteringUsage> metering_usage_;
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
+    std::vector<WebApp> web_apps_;
+    std::vector<Build> builds_;
     std::vector<ManagedStore> stores_;
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
@@ -466,6 +517,12 @@ private:
     std::vector<AgentCronSchedule> agent_cron_schedules_;
     std::vector<std::pair<std::string, AgentLaunch>> agent_cron_runs_; // schedule id, run
     std::vector<AskMessage> ask_messages_;
+    std::vector<AgentTask> agent_tasks_;
+    struct TaskClock {
+        std::chrono::steady_clock::time_point created, published, started;
+    };
+    std::map<std::string, TaskClock> agent_task_clocks_;
+    std::vector<Opportunity> opportunities_;
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {

@@ -728,6 +728,267 @@ Result<void> InMemoryStore::set_service_status(const std::string& id,
     return std::unexpected(StoreError{"not_found", "no service " + id});
 }
 
+Result<std::vector<WebApp>> InMemoryStore::list_web_apps(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<WebApp> apps;
+    for (const WebApp& app : web_apps_) {
+        if (app.customer_id == customer_id &&
+            !(app.desired == "deleted" && app.phase == "Deleted")) {
+            apps.push_back(app);
+        }
+    }
+    return apps;
+}
+
+Result<WebApp> InMemoryStore::get_web_app(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (app == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    return *app;
+}
+
+Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& customer) {
+            return customer.id == input.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+    }
+    std::size_t app_count = 0;
+    std::size_t replica_count = 0;
+    for (const WebApp& app : web_apps_) {
+        if (app.desired == "deleted") {
+            continue;
+        }
+        if (app.host == input.host) {
+            return std::unexpected(
+                StoreError{"conflict", "an app already uses host " + input.host});
+        }
+        if (app.customer_id != input.customer_id) {
+            continue;
+        }
+        if (app.name == input.name) {
+            return std::unexpected(
+                StoreError{"conflict", "an app named " + input.name + " already exists"});
+        }
+        ++app_count;
+        replica_count += static_cast<std::size_t>(app.replicas);
+    }
+    if (input.max_apps != 0 && app_count >= input.max_apps) {
+        return std::unexpected(StoreError{"quota_exceeded", "app quota reached"});
+    }
+    if (input.max_replicas != 0 &&
+        replica_count + static_cast<std::size_t>(input.replicas) > input.max_replicas) {
+        return std::unexpected(StoreError{"quota_exceeded", "app replica quota reached"});
+    }
+    WebApp app;
+    app.id = new_uuid_v4();
+    app.customer_id = input.customer_id;
+    app.name = input.name;
+    app.mode = input.mode;
+    app.source_repository = input.source_repository;
+    app.source_revision = input.source_revision;
+    app.source_path = input.source_path;
+    app.source_entrypoint = input.source_entrypoint;
+    app.image = input.image;
+    app.framework = input.framework;
+    app.port = input.port;
+    app.replicas = input.replicas;
+    app.host = input.host;
+    app.auth = input.auth;
+    app.bindings = input.bindings;
+    app.env = input.env;
+    app.secret_env_refs = input.secret_env_refs;
+    app.updated_at = now_iso8601();
+
+    web_apps_.push_back(app);
+    return app;
+}
+
+Result<WebApp> InMemoryStore::update_web_app(const std::string& id, const WebAppPatch& patch) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (found == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    if (found->desired == "deleted") {
+        return std::unexpected(StoreError{"conflict", "the app is already deleted"});
+    }
+    const int replicas = patch.replicas.value_or(found->replicas);
+    const std::string desired = patch.desired.value_or(found->desired);
+    std::size_t replica_count = 0;
+    for (const WebApp& app : web_apps_) {
+        if (app.customer_id != found->customer_id || app.id == id || app.desired == "deleted") {
+            continue;
+        }
+        replica_count += static_cast<std::size_t>(app.replicas);
+    }
+    if (desired != "deleted") {
+        replica_count += static_cast<std::size_t>(replicas);
+    }
+    if (patch.max_replicas != 0 && replica_count > patch.max_replicas) {
+        return std::unexpected(StoreError{"quota_exceeded", "app replica quota reached"});
+    }
+    if (patch.mode) {
+        found->mode = *patch.mode;
+    }
+    if (patch.source_repository) {
+        found->source_repository = *patch.source_repository;
+    }
+    if (patch.source_revision) {
+        found->source_revision = *patch.source_revision;
+    }
+    if (patch.source_path) {
+        found->source_path = *patch.source_path;
+    }
+    if (patch.source_entrypoint) {
+        found->source_entrypoint = *patch.source_entrypoint;
+    }
+    if (patch.rotate_tokens) {
+        found->token_hashes = nlohmann::json::object();
+    }
+    if (patch.image) {
+        found->image = *patch.image;
+    }
+    found->replicas = replicas;
+    if (patch.auth) {
+        found->auth = *patch.auth;
+    }
+    if (patch.bindings) {
+        found->bindings = *patch.bindings;
+    }
+    if (patch.env) {
+        found->env = *patch.env;
+    }
+    if (patch.secret_env_refs) {
+        found->secret_env_refs = *patch.secret_env_refs;
+    }
+    found->desired = desired;
+    ++found->generation;
+    found->updated_at = now_iso8601();
+    return *found;
+}
+
+Result<void> InMemoryStore::purge_deleted_web_apps() {
+    std::lock_guard lock(mutex_);
+    std::erase_if(web_apps_, [](const WebApp& app) {
+        return app.desired == "deleted" && app.phase == "Deleted";
+    });
+    return {};
+}
+
+Result<void> InMemoryStore::set_web_app_token_hashes(const std::string& id, nlohmann::json hashes) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (app == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    app->token_hashes = std::move(hashes);
+    return {};
+}
+
+Result<void> InMemoryStore::set_web_app_status(const std::string& id,
+                                               std::string phase,
+                                               std::string url,
+                                               bool ready,
+                                               std::string message,
+                                               std::int64_t observed_generation) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find(web_apps_, id, &WebApp::id);
+    if (app == web_apps_.end()) {
+        return std::unexpected(StoreError{"not_found", "no app " + id});
+    }
+    app->phase = std::move(phase);
+    app->url = std::move(url);
+    app->ready = ready;
+    app->message = std::move(message);
+    app->observed_generation = observed_generation;
+    app->updated_at = now_iso8601();
+    return {};
+}
+
+Result<std::vector<Build>> InMemoryStore::list_builds(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Build> result;
+    for (auto build = builds_.rbegin(); build != builds_.rend(); ++build) {
+        if (build->customer_id == customer_id) {
+            result.push_back(*build);
+        }
+    }
+    return result;
+}
+
+Result<Build> InMemoryStore::get_build(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto build = std::ranges::find(builds_, id, &Build::id);
+    if (build == builds_.end()) {
+        return std::unexpected(StoreError{"not_found", "no build " + id});
+    }
+    return *build;
+}
+
+Result<Build> InMemoryStore::create_build(const NewBuild& input) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& customer) {
+            return customer.id == input.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+    }
+    const auto repository = std::ranges::find(repositories_, input.repository, &Repository::id);
+    if (repository == repositories_.end() || repository->customer_id != input.customer_id ||
+        !repository->deleted_at.empty()) {
+        return std::unexpected(StoreError{"not_found", "no such repository in this customer"});
+    }
+    const std::string now = now_iso8601();
+    Build build;
+    build.id = new_uuid_v4();
+    build.customer_id = input.customer_id;
+    build.repository = input.repository;
+    build.revision = input.revision;
+    build.context = input.context;
+    build.dockerfile = input.dockerfile;
+    build.target = input.target;
+    build.build_args = input.build_args;
+    build.created_at = now;
+    build.updated_at = now;
+    builds_.push_back(build);
+    return build;
+}
+
+Result<Build> InMemoryStore::cancel_build(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto build = std::ranges::find(builds_, id, &Build::id);
+    if (build == builds_.end()) {
+        return std::unexpected(StoreError{"not_found", "no build " + id});
+    }
+    if (build->desired == "cancelled" || build->phase == "Cancelled") {
+        return std::unexpected(StoreError{"conflict", "the build is already cancelled"});
+    }
+    if (build->phase == "Succeeded" || build->phase == "Failed") {
+        return std::unexpected(StoreError{"conflict", "the build has already finished"});
+    }
+    build->desired = "cancelled";
+    build->updated_at = now_iso8601();
+    return *build;
+}
+
+Result<void> InMemoryStore::set_build_status(const std::string& id, BuildStatus status) {
+    std::lock_guard lock(mutex_);
+    const auto build = std::ranges::find(builds_, id, &Build::id);
+    if (build == builds_.end()) {
+        return std::unexpected(StoreError{"not_found", "no build " + id});
+    }
+    build->phase = std::move(status.phase);
+    build->digest = std::move(status.digest);
+    build->size = status.size;
+    build->message = std::move(status.message);
+    build->token_hashes = std::move(status.token_hashes);
+    build->updated_at = now_iso8601();
+    return {};
+}
+
 Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedStore> stores;
@@ -998,8 +1259,8 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
     if (schedule == agent_cron_schedules_.end()) {
         return std::unexpected(StoreError{"not_found", "no agent schedule " + schedule_id});
     }
-    auto run = std::ranges::find_if(
-        agent_cron_runs_, [&](const auto& entry) { return entry.second.id == run_id; });
+    auto run = std::ranges::find_if(agent_cron_runs_,
+                                    [&](const auto& entry) { return entry.second.id == run_id; });
     if (run == agent_cron_runs_.end()) {
         AgentLaunch launch;
         launch.id = run_id;
@@ -1023,6 +1284,203 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
     run->second.message = std::move(message);
     run->second.exit_code = exit_code;
     run->second.result = std::move(result);
+    return {};
+}
+
+Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
+    std::lock_guard lock(mutex_);
+    if (in.agent.empty() || in.scopes.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
+    }
+    AgentTask task = in;
+    task.id = new_uuid_v4();
+    task.desired = "present";
+    task.phase.clear();
+    task.created_at = std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    agent_tasks_.push_back(task);
+    const auto now = std::chrono::steady_clock::now();
+    agent_task_clocks_[task.id] = {now, now, {}};
+    return task;
+}
+
+namespace {
+std::string utc_now() {
+    return std::format("{:%FT%TZ}",
+                       std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+}
+} // namespace
+
+Result<AgentTask> InMemoryStore::latest_agent_task(const std::string& customer_id,
+                                                   const std::string& kind) {
+    std::lock_guard lock(mutex_);
+    for (auto task = agent_tasks_.rbegin(); task != agent_tasks_.rend(); ++task) {
+        if (task->customer_id == customer_id && task->kind == kind) {
+            return *task;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no " + kind + " task"});
+}
+
+Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
+                                                  const std::string& agent,
+                                                  const std::string& credential_sha256,
+                                                  std::uint64_t events_from) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end() || found->desired != "present") {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    if (found->agent != agent || !found->phase.empty()) {
+        return std::unexpected(StoreError{"conflict", "the task is not waiting for " + agent});
+    }
+    found->phase = "Running";
+    found->credential_sha256 = credential_sha256;
+    found->events_from = events_from;
+    found->started_at = utc_now();
+    agent_task_clocks_[id].started = std::chrono::steady_clock::now();
+    return *found;
+}
+
+Result<AgentTask> InMemoryStore::record_agent_task_event(const std::string& id,
+                                                         const std::string& agent,
+                                                         const std::string& phase,
+                                                         const std::string& message,
+                                                         const nlohmann::json& result) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end() || found->agent != agent || found->phase != "Running") {
+        return std::unexpected(StoreError{"conflict", "the task is not running on " + agent});
+    }
+    found->phase = phase;
+    found->message = message;
+    if (phase != "Running") {
+        found->result = result;
+        found->finished_at = utc_now();
+        found->credential_sha256.clear(); // a finished task's credential stops
+    }
+    return *found;
+}
+
+Result<void> InMemoryStore::fail_agent_task(const std::string& id, const std::string& message) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    if (found->finished_at.empty()) {
+        found->phase = "Failed";
+        found->message = message;
+        found->finished_at = utc_now();
+        found->credential_sha256.clear();
+    }
+    return {};
+}
+
+Result<void> InMemoryStore::mark_agent_task_published(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    agent_task_clocks_[id].published = std::chrono::steady_clock::now();
+    return {};
+}
+
+Result<StaleAgentTasks> InMemoryStore::stale_agent_tasks(std::chrono::seconds republish_after) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    StaleAgentTasks out;
+    for (const AgentTask& task : agent_tasks_) {
+        if (!task.finished_at.empty() || task.desired != "present") {
+            continue;
+        }
+        const TaskClock& clock = agent_task_clocks_[task.id];
+        const auto deadline = std::chrono::seconds(task.deadline_seconds);
+        if (task.phase.empty()) {
+            if (now - clock.created >= deadline) {
+                out.overdue.push_back(task);
+            } else if (now - clock.published >= republish_after) {
+                out.unclaimed.push_back(task);
+            }
+        } else if (now - clock.started >= deadline) {
+            out.overdue.push_back(task);
+        }
+    }
+    return out;
+}
+
+void InMemoryStore::age_agent_task(const std::string& id, std::chrono::seconds by) {
+    std::lock_guard lock(mutex_);
+    TaskClock& clock = agent_task_clocks_[id];
+    clock.created -= by;
+    clock.published -= by;
+    clock.started -= by;
+}
+
+Result<AgentTask> InMemoryStore::get_agent_task(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    return *found;
+}
+
+Result<void> InMemoryStore::record_opportunities(const std::vector<Opportunity>& rows) {
+    std::lock_guard lock(mutex_);
+    if (!rows.empty() && std::ranges::any_of(opportunities_, [&](const Opportunity& kept) {
+            return kept.task_id == rows.front().task_id;
+        })) {
+        return {};
+    }
+    for (Opportunity row : rows) {
+        row.id = new_uuid_v4();
+        row.created_at =
+            std::format("{:%FT%TZ}",
+                        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+        opportunities_.push_back(std::move(row));
+    }
+    return {};
+}
+
+Result<std::vector<Opportunity>> InMemoryStore::list_opportunities(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Opportunity> out;
+    for (auto it = opportunities_.rbegin(); it != opportunities_.rend(); ++it) {
+        if (it->customer_id == customer_id) {
+            out.push_back(*it);
+        }
+    }
+    std::ranges::stable_sort(out, [](const Opportunity& a, const Opportunity& b) {
+        return a.task_id == b.task_id && a.rank < b.rank;
+    });
+    return out;
+}
+
+Result<Opportunity> InMemoryStore::set_opportunity_status(const std::string& id,
+                                                          const std::string& status,
+                                                          const std::string& project) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(opportunities_, id, &Opportunity::id);
+    if (found == opportunities_.end()) {
+        return std::unexpected(StoreError{"not_found", "no opportunity " + id});
+    }
+    found->status = status;
+    found->project = project;
+    return *found;
+}
+
+Result<void> InMemoryStore::set_agent_task_status(const std::string& id,
+                                                  std::string phase,
+                                                  std::string message,
+                                                  std::string credential_sha256,
+                                                  nlohmann::json result) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent task " + id});
+    }
+    found->phase = std::move(phase);
+    found->message = std::move(message);
+    found->credential_sha256 = std::move(credential_sha256);
+    found->result = std::move(result);
     return {};
 }
 
@@ -2136,6 +2594,85 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
+    const std::string workload_digest = identity_crypto::sha256_hex(secret);
+    std::optional<Principal> build_principal;
+    for (const Build& build : builds_) {
+        const auto purpose = build_token_purpose(build, workload_digest);
+        if (!purpose) {
+            continue;
+        }
+        if (build_principal) {
+            return std::unexpected(StoreError{"unauthorized", "build token is ambiguous"});
+        }
+        build_principal = Principal{"",
+                                    "build:" + build.id + ":" + *purpose,
+                                    "build:" + build.id,
+                                    "",
+                                    "lake",
+                                    "build_" + *purpose,
+                                    build_token_scopes(*purpose),
+                                    std::nullopt,
+                                    build.id,
+                                    build.customer_id,
+                                    build.repository,
+                                    build.revision,
+                                    workload_digest};
+    }
+    if (build_principal) {
+        return *build_principal;
+    }
+    std::optional<Principal> app_principal;
+    for (const WebApp& app : web_apps_) {
+        const auto purpose = web_app_token_purpose(app, workload_digest);
+        if (!purpose) {
+            continue;
+        }
+        if (app_principal) {
+            return std::unexpected(StoreError{"unauthorized", "app token is ambiguous"});
+        }
+        app_principal = Principal{"",
+                                  "app:" + app.id + ":" + *purpose,
+                                  "app:" + app.id,
+                                  "",
+                                  "lake",
+                                  "app_" + *purpose,
+                                  web_app_token_scopes(*purpose),
+                                  std::nullopt,
+                                  app.id,
+                                  app.customer_id,
+                                  app.source_repository,
+                                  app.source_revision,
+                                  workload_digest};
+    }
+    if (app_principal) {
+        return *app_principal;
+    }
+    if (secret.starts_with(agent_task_credential_prefix)) {
+        const auto parsed = parse_agent_credential(secret, agent_task_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto task = std::ranges::find(agent_tasks_, parsed->first, &AgentTask::id);
+        if (task == agent_tasks_.end() || task->desired != "present" ||
+            task->credential_sha256.empty() ||
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                     task->credential_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto user = std::ranges::find_if(
+            users_, [&](const User& row) { return row.id == task->requested_by_user_id; });
+        if (user == users_.end() || user->taap_id.empty()) {
+            return std::unexpected(StoreError{"unauthorized", "task identity is unavailable"});
+        }
+        return Principal{user->id,
+                         user->taap_id,
+                         "task:" + task->id,
+                         "",
+                         "lake",
+                         "agent_task",
+                         task->scopes,
+                         std::nullopt};
+    }
     if (secret.starts_with(agent_schedule_credential_prefix)) {
         const auto parsed = parse_agent_credential(secret, agent_schedule_credential_prefix);
         if (!parsed) {

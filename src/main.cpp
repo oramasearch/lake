@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/api/server.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
@@ -77,12 +78,17 @@ int usage() {
     std::println(
         "  $LAKE_TSA_RENEWAL_SECONDS and $LAKE_TSA_RENEW_BEFORE_SECONDS set renewal policy");
     std::println("  LAKE_OPERATOR_ZETTA_URL and LAKE_OPERATOR_ZETTA_TOKEN enable platform sync");
+    std::println("  LAKE_INTERNAL_URL is lake's in-cluster Service URL for agents and builds");
     std::println("  LAKE_LOGS_URL and optional LAKE_LOGS_TOKEN enable environment logs");
     std::println("  LAKE_PLATFORM_SYNC_SECONDS sets the platform poll interval (default 15)");
     std::println(
         "  LAKE_SERVICE_DIR enables managed services and workspaces (the operator's mount)");
     std::println(
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
+    std::println("  LAKE_APPS_WILDCARD is the required parent domain for Ship app hosts");
+    std::println("  LAKE_APPS_PER_CUSTOMER caps live apps per space (default 0: no limit)");
+    std::println(
+        "  LAKE_APP_REPLICAS_PER_CUSTOMER caps desired app replicas (default 0: no limit)");
     std::println(
         "  LAKE_AGENT_ENDPOINTS lists the Agent Library agents this lake runs (key=url,...)");
     std::println("  LAKE_BASE_AGENT_MODEL is the base-agent checkpoint inside a workspace");
@@ -106,6 +112,10 @@ int main(int argc, char** argv) {
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
+    opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
+    opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
+    opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
+    opts.internal_url = env_or("LAKE_INTERNAL_URL", "");
     const std::string operator_zetta_url = env_or("LAKE_OPERATOR_ZETTA_URL", "");
     const std::string operator_zetta_token = env_or("LAKE_OPERATOR_ZETTA_TOKEN", "");
     const std::string logs_url = env_or("LAKE_LOGS_URL", "");
@@ -243,9 +253,12 @@ int main(int argc, char** argv) {
     if (platform_transport_required) {
         lake::control::install_zetta_control_transport();
     }
-    if (!operator_zetta_url.empty()) {
-        auto control = std::make_shared<lake::control::ZettaControlClient>(operator_zetta_url,
-                                                                           operator_zetta_token);
+    if (!operator_zetta_url.empty() || !logs_url.empty()) {
+        std::shared_ptr<lake::control::ZettaControl> control;
+        if (!operator_zetta_url.empty()) {
+            control = std::make_shared<lake::control::ZettaControlClient>(operator_zetta_url,
+                                                                          operator_zetta_token);
+        }
         std::shared_ptr<lake::control::LokiSource> logs;
         if (!logs_url.empty()) {
             logs = std::make_shared<lake::control::LokiHttpSource>(logs_url, logs_token);
@@ -272,8 +285,10 @@ int main(int argc, char** argv) {
     if (const std::string model = env_or("LAKE_AGENT_MODEL", ""); !model.empty()) {
         workspace_config.frontier_model = model;
     }
-    workspace_config.internal_url = env_or("LAKE_INTERNAL_URL", "");
+    workspace_config.internal_url = opts.internal_url;
     workspace_config.agent_service_token = env_or("LAKE_AGENT_SERVICE_TOKEN", "");
+    workspace_config.agent_bus_tokens =
+        lake::control::read_agent_bus_tokens(env_or("LAKE_AGENT_BUS_DIR", ""));
     if (const std::string limit = env_or("LAKE_SERVICES_PER_CUSTOMER", ""); !limit.empty()) {
         std::size_t parsed = 0;
         const auto [end, error] =
@@ -287,6 +302,26 @@ int main(int argc, char** argv) {
     opts.allow_non_expiring_credentials =
         env_or("LAKE_ALLOW_NON_EXPIRING_CREDENTIALS", "true") != "false";
     const bool workspaces_configured = workspace_config.configured() && opts.store != nullptr;
+    // The agent bus (docs/api/agent-bus.md): lake's own Zetta's pub/sub, or memory for a demo lake.
+    std::vector<std::string> bus_agents;
+    for (const auto& [agent, endpoint] : workspace_config.agent_endpoints) {
+        bus_agents.push_back(agent);
+    }
+    const std::string bus_url = env_or("LAKE_DATA_PLANE_URL", "");
+    const std::string bus_token = env_or("LAKE_DATA_PLANE_TOKEN", "");
+    const bool app_bus_configured = opts.store != nullptr && !opts.apps_wildcard.empty();
+    if ((workspaces_configured && !bus_agents.empty()) || app_bus_configured) {
+        std::shared_ptr<lake::control::AgentBus> bus;
+        if (!bus_url.empty() && !bus_token.empty()) {
+            bus = std::make_shared<lake::control::ZettaAgentBus>(bus_url, bus_token);
+        } else if (memory_store) {
+            bus = std::make_shared<lake::control::MemoryAgentBus>();
+        }
+        if (bus) {
+            opts.agent_bus = std::make_shared<lake::control::AgentTaskBus>(
+                opts.store, std::move(bus), std::move(bus_agents));
+        }
+    }
     if (workspaces_configured) {
         if (!platform_transport_required) {
             lake::control::install_zetta_control_transport();
@@ -324,12 +359,57 @@ int main(int argc, char** argv) {
             {"replication_token_set", opts.replication_token.empty() ? "no" : "yes"},
             {"operator_zetta_configured", operator_zetta_url.empty() ? "no" : "yes"},
             {"logs_configured", logs_url.empty() ? "no" : "yes"},
+            {"agent_bus", opts.agent_bus ? (bus_url.empty() ? "memory" : "zetta") : "no"},
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}
             .dump());
+    // Applies what agents publish and recovers what the bus lost; on its own thread because
+    // each pass long-polls the bus.
+    std::jthread bus_loop;
+    if (opts.agent_bus) {
+        bus_loop = std::jthread([bus = opts.agent_bus](std::stop_token stop) {
+            bool started = false;
+            while (!stop.stop_requested()) {
+                if (!started) {
+                    auto created = liquid::runtime::block_on(bus->start());
+                    started = created && created->has_value();
+                    if (!started) {
+                        std::println(
+                            stderr,
+                            "{}",
+                            nlohmann::json{
+                                {"event", "agent_bus_unavailable"},
+                                {"error", created ? created->error().message : "transport"}}
+                                .dump());
+                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                        continue;
+                    }
+                }
+                auto pumped = liquid::runtime::block_on(bus->pump(std::chrono::seconds(5)));
+                if (!pumped || !pumped->has_value()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                } else if (**pumped == 0) {
+                    // Nothing arrived within the long poll (or the bus does not wait).
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                }
+            }
+        });
+    }
+    auto next_app_cleanup = std::chrono::steady_clock::now();
     while (!stop_requested.load()) {
+        if (app_bus_configured && std::chrono::steady_clock::now() >= next_app_cleanup) {
+            const auto purged = opts.store->purge_deleted_web_apps();
+            if (!purged) {
+                std::println(stderr, "lake: could not remove acknowledged app deletions");
+            }
+            next_app_cleanup = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        }
         server.wait_for_work(std::chrono::milliseconds(100));
         server.drain();
+    }
+    if (bus_loop.joinable()) {
+        bus_loop.request_stop();
+        bus_loop.join();
     }
     server.stop();
     if (platform_transport_required || workspaces_configured) {

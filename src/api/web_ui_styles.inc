@@ -784,6 +784,44 @@ dd {
 .ask-proposal {
   margin-top: var(--lake-space-2);
 }
+/* An agent's markdown reply: tables scroll inside the message rather than widen the page. */
+.ask-reply > :first-child {
+  margin-top: 0;
+}
+.ask-reply .markdown-body {
+  max-width: none;
+}
+.ask-reply table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+/* A page table's header sticks under the top bar; inside this scrolling table that offset would
+   be measured from the table and lay the header over the first row. */
+.ask-reply th {
+  position: static;
+}
+/* A checkbox sits beside its words, never stretched across a grid label's row. */
+form label:has(> input[type='checkbox']),
+form label:has(> span > input[type='checkbox']) {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--lake-space-2);
+}
+label > input[type='checkbox'],
+label > span > input[type='checkbox'] {
+  flex: none;
+  margin: 0.2em 0 0;
+}
+/* An Opportunity's intent is its title: primary text, larger than the line under it. */
+.opportunity-pick {
+  color: var(--lake-text-primary);
+  font-size: var(--lake-text-16);
+  font-weight: var(--lake-weight-semibold);
+}
+.opportunity-pick + .sub {
+  margin-top: var(--lake-space-1);
+}
 .agent-cell {
   display: flex;
   flex-direction: column;
@@ -859,6 +897,44 @@ legend {
 }
 .muted {
   color: var(--lake-text-secondary);
+}
+.app-phase,
+.app-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--lake-space-3);
+}
+.app-stream {
+  max-height: 24rem;
+  overflow: auto;
+  border: var(--lake-border-width) solid var(--lake-border-subtle);
+  padding: var(--lake-space-3);
+  background: var(--lake-layer);
+  font-family: var(--lake-font-mono);
+  font-size: var(--lake-text-12);
+  white-space: pre-wrap;
+}
+.app-stream:empty::before {
+  color: var(--lake-text-secondary);
+  content: 'Waiting for app events…';
+}
+.app-phase-track {
+  height: var(--lake-space-2);
+  overflow: hidden;
+  margin: var(--lake-space-3) 0;
+  border-radius: 9999px;
+  background: var(--lake-layer);
+}
+.app-phase-fill {
+  width: 50%;
+  height: 100%;
+  display: block;
+  background: var(--lake-action);
+}
+.app-phase-fill.ready {
+  width: 100%;
+  background: var(--lake-success-indicator);
 }
 .notice,
 .toast,

@@ -1,5 +1,6 @@
 #pragma once
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -12,8 +13,10 @@
 
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/builds.hpp"
 #include "lake/control/offline_recovery.hpp"
 #include "lake/control/secrets.hpp"
+#include "lake/control/web_apps.hpp"
 
 // The control-plane store: users and organizations (identity), customers (the
 // tenant that owns everything). One interface, two implementations — Postgres
@@ -148,6 +151,11 @@ struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
     std::vector<std::string> scopes;
     std::optional<std::int64_t> expires_at_unix;
+    std::string workload_id;
+    std::string workload_customer_id;
+    std::string workload_repository_id;
+    std::string workload_revision;
+    std::string workload_token_hash;
 };
 struct NewPasswordUser {
     std::string pool_id, email, password, display_name, device_name, identity_document;
@@ -228,7 +236,7 @@ struct ServiceKind {
     int ready_seconds = 60;
 };
 inline constexpr ServiceKind service_kinds[] = {
-    {"zetta", "Zetta", 30}, // Steve, 2026-09-26 (measured once at 41 s)
+    {"zetta", "Zetta", 30},          // Steve, 2026-09-26 (measured once at 41 s)
     {"cassandra", "Cassandra", 420}, // not yet measured without a node scale-up (lake#197)
     {"clickhouse", "ClickHouse", 75},
     {"duckdb", "DuckDB", 30},
@@ -272,6 +280,8 @@ struct ManagedStore {
 // (agent_launch_status, agent_cron_schedule_status); lake compares digests and never stores it.
 inline constexpr std::string_view agent_launch_credential_prefix = "lal.";
 inline constexpr std::string_view agent_schedule_credential_prefix = "las.";
+// A background agent turn's credential (lake#269), resolved the same way.
+inline constexpr std::string_view agent_task_credential_prefix = "lat.";
 inline std::optional<std::pair<std::string, std::string>>
 parse_agent_credential(std::string_view secret, std::string_view prefix) {
     if (!secret.starts_with(prefix)) {
@@ -342,6 +352,36 @@ struct NewAgentCronSchedule {
     std::vector<std::string> scopes;
     std::string created_by_user_id, created_by_taap_id;
 };
+// One agent turn run in the background (lake#269): lake writes it, publishes it on the agent bus
+// (docs/api/agent-bus.md) and answers the request at once. `phase` is empty until an agent claims
+// it, then Running, and Succeeded or Failed once the agent (or lake's deadline) finishes it.
+struct AgentTask {
+    std::string id, customer_id, agent, kind, conversation_id;
+    nlohmann::json body = nlohmann::json::object();
+    std::vector<std::string> scopes;
+    int deadline_seconds = 300;
+    std::string desired = "present";
+    std::string requested_by_user_id, requested_by_taap_id, created_at;
+    std::string phase, message, started_at, finished_at, credential_sha256;
+    nlohmann::json result = nullptr;
+    // The agent-events sequence at or before the task's first event (0: unknown), lake#275.
+    std::uint64_t events_from = 0;
+};
+// What lake's bus loop acts on: tasks nobody claimed since they were last published, and tasks
+// past their deadline (pending or running), which it fails.
+struct StaleAgentTasks {
+    std::vector<AgentTask> unclaimed, overdue;
+};
+
+// One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans.
+struct Opportunity {
+    std::string id, customer_id, task_id;
+    int rank = 0;
+    std::string intent, solution, methodology, why;
+    nlohmann::json payload = nlohmann::json::object();
+    std::string status = "new", project, created_at;
+};
+
 // One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). Kept in lake because
 // the panel renders from any replica.
 struct AskMessage {
@@ -848,6 +888,19 @@ public:
     virtual Result<ManagedService> create_service(const NewManagedService&) = 0;
     // Marks a service absent so the operator deletes it. Refuses one already absent.
     virtual Result<ManagedService> withdraw_service(const std::string& id) = 0;
+    // Ship apps (docs/control-plane/web-apps.md). The apps row carries desired state from lake and
+    // status written by the operator. Acknowledged deletions are removed by the owner loop.
+    virtual Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) = 0;
+    virtual Result<WebApp> get_web_app(const std::string& id) = 0;
+    virtual Result<WebApp> create_web_app(const NewWebApp&) = 0;
+    virtual Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) = 0;
+    virtual Result<void> purge_deleted_web_apps() = 0;
+    // In-cluster image builds (docs/control-plane/builds.md). Lake inserts desired rows; the
+    // operator writes status and the hashes of the three credentials it owns.
+    virtual Result<std::vector<Build>> list_builds(const std::string& customer_id) = 0;
+    virtual Result<Build> get_build(const std::string& id) = 0;
+    virtual Result<Build> create_build(const NewBuild&) = 0;
+    virtual Result<Build> cancel_build(const std::string& id) = 0;
     // Stores (docs/control-plane/storage.md). Lists the customer's stores, oldest first, leaving
     // out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) = 0;
@@ -872,8 +925,41 @@ public:
     // Marks a schedule absent so the operator deletes its CronJob. Refuses one already absent.
     virtual Result<AgentCronSchedule> withdraw_agent_cron_schedule(const std::string& id) = 0;
     // The runs the schedules' CronJobs started, as launches (trigger "schedule"), newest first.
-    virtual Result<std::vector<AgentLaunch>>
-    list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
+    virtual Result<std::vector<AgentLaunch>> list_agent_cron_runs(const std::string& customer_id,
+                                                                  const std::string& agent_id,
+                                                                  int limit) = 0;
+    // Background agent turns (lake#269, docs/api/agent-bus.md).
+    virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
+    virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;
+    // A space's newest task of one kind (a project's pipeline build is kind "build:<project>");
+    // not_found when there is none.
+    virtual Result<AgentTask> latest_agent_task(const std::string& customer_id,
+                                                const std::string& kind) = 0;
+    // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
+    // it and where on agent-events its events will start. Exactly one claim succeeds; another is
+    // a conflict, as is a claim by a different agent.
+    virtual Result<AgentTask> claim_agent_task(const std::string& id,
+                                               const std::string& agent,
+                                               const std::string& credential_sha256,
+                                               std::uint64_t events_from = 0) = 0;
+    // What the claiming agent reported: Running with a message, or Succeeded / Failed with its
+    // answer. Refused for a task that agent has not claimed or that already finished.
+    virtual Result<AgentTask> record_agent_task_event(const std::string& id,
+                                                      const std::string& agent,
+                                                      const std::string& phase,
+                                                      const std::string& message,
+                                                      const nlohmann::json& result) = 0;
+    // Lake's deadline: Failed with a message, claimed or not; a finished task is left alone.
+    virtual Result<void> fail_agent_task(const std::string& id, const std::string& message) = 0;
+    virtual Result<void> mark_agent_task_published(const std::string& id) = 0;
+    virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;
+    // Opportunities: a finished scan's rows are written once (a second call for the same task
+    // writes nothing); newest scan first.
+    virtual Result<void> record_opportunities(const std::vector<Opportunity>&) = 0;
+    virtual Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) = 0;
+    virtual Result<Opportunity> set_opportunity_status(const std::string& id,
+                                                       const std::string& status,
+                                                       const std::string& project) = 0;
     // Ask Orama conversations (lake#236), only ever read back by the person who had them.
     virtual Result<AskMessage> append_ask_message(const AskMessage&) = 0;
     virtual Result<std::vector<AskMessage>>

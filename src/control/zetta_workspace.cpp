@@ -86,6 +86,30 @@ nlohmann::json WorkspaceState::to_json() const {
             {"ready", ready()}};
 }
 
+std::map<std::string, std::string> read_agent_bus_tokens(const std::string& directory) {
+    std::map<std::string, std::string> tokens;
+    std::error_code error;
+    if (directory.empty() || !std::filesystem::is_directory(directory, error)) {
+        return tokens;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+        const std::string name = entry.path().filename().string();
+        // Kubernetes mounts a Secret through ..data symlinks; the keys are the plain names.
+        if (name.starts_with('.') || !entry.is_regular_file(error)) {
+            continue;
+        }
+        std::ifstream file(entry.path());
+        std::string token((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        while (!token.empty() && std::isspace(static_cast<unsigned char>(token.back()))) {
+            token.pop_back();
+        }
+        if (!token.empty()) {
+            tokens.emplace(name, std::move(token));
+        }
+    }
+    return tokens;
+}
+
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::call(
     std::string url, std::string token, std::string capability, bool read, nlohmann::json input) {
     const zetta::connect::AsyncHttpTransport& transport =
@@ -104,6 +128,10 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     // A read that hangs must not hold a page for a minute (zetta#1007: get_run_report never
     // answers); actions such as compile_intent may legitimately take longer.
     request.timeout_seconds = read ? 15 : 60;
+    // receive_events long-polls; through lake it waits at most 10 s, inside the read timeout.
+    if (capability == "receive_events" && input.value("wait_ms", 0LL) > 10'000) {
+        input["wait_ms"] = 10'000;
+    }
     if (read) {
         request.method = "GET";
         std::string query;

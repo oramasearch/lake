@@ -4038,6 +4038,325 @@ public:
         });
     }
 
+    static constexpr const char* web_app_columns =
+        "a.id::text, a.customer_id::text, a.name, a.mode, a.source_repository, "
+        "a.source_revision, a.source_path, a.image, a.framework, a.port, a.replicas, a.host, "
+        "a.auth, a.bindings_json::text, a.env_json::text, a.secret_env_refs::text, a.desired, "
+        "a.generation, a.phase, a.url, a.ready, a.message, a.observed_generation, "
+        "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "a.source_entrypoint, a.token_hashes_json::text";
+
+    static WebApp web_app_from(const pqxx::row& row) {
+        WebApp app;
+        app.id = row[0].as<std::string>();
+        app.customer_id = row[1].as<std::string>();
+        app.name = row[2].as<std::string>();
+        app.mode = row[3].as<std::string>();
+        app.source_repository = row[4].as<std::string>();
+        app.source_revision = row[5].as<std::string>();
+        app.source_path = row[6].as<std::string>();
+        app.image = row[7].as<std::string>();
+        app.framework = row[8].as<std::string>();
+        app.port = row[9].as<int>();
+        app.replicas = row[10].as<int>();
+        app.host = row[11].as<std::string>();
+        app.auth = row[12].as<std::string>();
+        app.bindings = nlohmann::json::parse(row[13].as<std::string>());
+        app.env = nlohmann::json::parse(row[14].as<std::string>());
+        app.secret_env_refs = nlohmann::json::parse(row[15].as<std::string>());
+        app.desired = row[16].as<std::string>();
+        app.generation = row[17].as<std::int64_t>();
+        app.phase = row[18].as<std::string>();
+        app.url = row[19].as<std::string>();
+        app.ready = row[20].as<bool>();
+        app.message = row[21].as<std::string>();
+        app.observed_generation = row[22].as<std::int64_t>();
+        app.updated_at = row[23].as<std::string>();
+        app.source_entrypoint = row[24].as<std::string>();
+        app.token_hashes = nlohmann::json::parse(row[25].as<std::string>());
+        return app;
+    }
+
+    static Result<WebApp> one_web_app(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + web_app_columns + " FROM apps a WHERE a.id = $1::uuid", id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no app " + id});
+        }
+        return web_app_from(rows[0]);
+    }
+
+    Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) override {
+        return with_tx<std::vector<WebApp>>([&](pqxx::work& tx) -> Result<std::vector<WebApp>> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + web_app_columns +
+                                   " FROM apps a WHERE a.customer_id = $1::uuid "
+                                   "AND NOT (a.desired = 'deleted' AND a.phase = 'Deleted') "
+                                   "ORDER BY a.updated_at, a.id",
+                               customer_id);
+            std::vector<WebApp> apps;
+            for (const pqxx::row& row : rows) {
+                apps.push_back(web_app_from(row));
+            }
+            return apps;
+        });
+    }
+
+    Result<WebApp> get_web_app(const std::string& id) override {
+        return with_tx<WebApp>(
+            [&](pqxx::work& tx) -> Result<WebApp> { return one_web_app(tx, id); });
+    }
+
+    Result<WebApp> create_web_app(const NewWebApp& input) override {
+        return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
+            const pqxx::result customers = tx.exec_params(
+                "SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", input.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+            }
+            const pqxx::result conflicts = tx.exec_params(
+                "SELECT customer_id::text, name, host FROM apps WHERE desired <> 'deleted' "
+                "AND ((customer_id = $1::uuid AND name = $2) OR host = $3)",
+                input.customer_id,
+                input.name,
+                input.host);
+            if (!conflicts.empty()) {
+                const bool same_name = conflicts[0][0].as<std::string>() == input.customer_id &&
+                                       conflicts[0][1].as<std::string>() == input.name;
+                return std::unexpected(
+                    StoreError{"conflict",
+                               same_name ? "an app named " + input.name + " already exists"
+                                         : "an app already uses host " + input.host});
+            }
+            const pqxx::result usage =
+                tx.exec_params("SELECT count(*), COALESCE(sum(replicas), 0) FROM apps "
+                               "WHERE customer_id = $1::uuid AND desired <> 'deleted'",
+                               input.customer_id);
+            if (input.max_apps != 0 && usage[0][0].as<std::size_t>() >= input.max_apps) {
+                return std::unexpected(StoreError{"quota_exceeded", "app quota reached"});
+            }
+            if (input.max_replicas != 0 &&
+                usage[0][1].as<std::size_t>() + static_cast<std::size_t>(input.replicas) >
+                    input.max_replicas) {
+                return std::unexpected(StoreError{"quota_exceeded", "app replica quota reached"});
+            }
+            const std::string id = new_uuid_v4();
+            nlohmann::json bindings = input.bindings;
+            tx.exec_params(
+                "INSERT INTO apps (id, customer_id, name, mode, source_repository, "
+                "source_revision, source_path, image, framework, port, replicas, host, auth, "
+                "bindings_json, env_json, secret_env_refs, source_entrypoint) VALUES ($1::uuid, "
+                "$2::uuid, $3, $4, "
+                "$5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, $17)",
+                id,
+                input.customer_id,
+                input.name,
+                input.mode,
+                input.source_repository,
+                input.source_revision,
+                input.source_path,
+                input.image,
+                input.framework,
+                input.port,
+                input.replicas,
+                input.host,
+                input.auth,
+                bindings.dump(),
+                input.env.dump(),
+                input.secret_env_refs.dump(),
+                input.source_entrypoint);
+            tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
+            return one_web_app(tx, id);
+        });
+    }
+
+    Result<WebApp> update_web_app(const std::string& id, const WebAppPatch& patch) override {
+        return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
+            const pqxx::result locked = tx.exec_params(
+                "SELECT customer_id::text FROM apps WHERE id = $1::uuid FOR UPDATE", id);
+            if (locked.empty()) {
+                return std::unexpected(StoreError{"not_found", "no app " + id});
+            }
+            const std::string customer_id = locked[0][0].as<std::string>();
+            tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", customer_id);
+            Result<WebApp> current = one_web_app(tx, id);
+            if (!current) {
+                return current;
+            }
+            if (current->desired == "deleted") {
+                return std::unexpected(StoreError{"conflict", "the app is already deleted"});
+            }
+            const int replicas = patch.replicas.value_or(current->replicas);
+            const std::string desired = patch.desired.value_or(current->desired);
+            if (patch.max_replicas != 0 && desired != "deleted") {
+                const pqxx::result usage = tx.exec_params(
+                    "SELECT COALESCE(sum(replicas), 0) FROM apps WHERE customer_id = $1::uuid "
+                    "AND id <> $2::uuid AND desired <> 'deleted'",
+                    customer_id,
+                    id);
+                if (usage[0][0].as<std::size_t>() + static_cast<std::size_t>(replicas) >
+                    patch.max_replicas) {
+                    return std::unexpected(
+                        StoreError{"quota_exceeded", "app replica quota reached"});
+                }
+            }
+            current->mode = patch.mode.value_or(current->mode);
+            current->source_repository =
+                patch.source_repository.value_or(current->source_repository);
+            current->source_revision = patch.source_revision.value_or(current->source_revision);
+            current->source_path = patch.source_path.value_or(current->source_path);
+            current->source_entrypoint =
+                patch.source_entrypoint.value_or(current->source_entrypoint);
+            current->image = patch.image.value_or(current->image);
+            current->replicas = replicas;
+            current->auth = patch.auth.value_or(current->auth);
+            current->bindings = patch.bindings.value_or(current->bindings);
+            current->env = patch.env.value_or(current->env);
+            current->secret_env_refs = patch.secret_env_refs.value_or(current->secret_env_refs);
+            current->desired = desired;
+            tx.exec_params(
+                "UPDATE apps SET mode = $2, source_repository = $3, source_revision = $4, "
+                "source_path = $5, image = $6, replicas = $7, bindings_json = $8::jsonb, "
+                "env_json = $9::jsonb, secret_env_refs = $10::jsonb, desired = $11, "
+                "source_entrypoint = $12, auth = $13, generation = generation + 1, "
+                "updated_at = now() "
+                "WHERE id = $1::uuid",
+                id,
+                current->mode,
+                current->source_repository,
+                current->source_revision,
+                current->source_path,
+                current->image,
+                current->replicas,
+                current->bindings.dump(),
+                current->env.dump(),
+                current->secret_env_refs.dump(),
+                current->desired,
+                current->source_entrypoint,
+                current->auth);
+            if (patch.rotate_tokens) {
+                tx.exec_params(
+                    "UPDATE apps SET token_hashes_json = '{}'::jsonb WHERE id = $1::uuid", id);
+            }
+            tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
+            return one_web_app(tx, id);
+        });
+    }
+
+    Result<void> purge_deleted_web_apps() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec("DELETE FROM apps WHERE desired = 'deleted' AND phase = 'Deleted'");
+            return {};
+        });
+    }
+
+    static constexpr const char* build_columns =
+        "b.id::text, b.customer_id::text, b.repository, b.revision, b.context, b.dockerfile, "
+        "b.target, b.build_args_json::text, b.desired, b.phase, b.digest, b.size, b.message, "
+        "b.token_hashes_json::text, "
+        "to_char(b.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+    static Build build_from(const pqxx::row& row) {
+        Build build;
+        build.id = row[0].as<std::string>();
+        build.customer_id = row[1].as<std::string>();
+        build.repository = row[2].as<std::string>();
+        build.revision = row[3].as<std::string>();
+        build.context = row[4].as<std::string>();
+        build.dockerfile = row[5].as<std::string>();
+        build.target = row[6].as<std::string>();
+        build.build_args = nlohmann::json::parse(row[7].as<std::string>());
+        build.desired = row[8].as<std::string>();
+        build.phase = row[9].as<std::string>();
+        build.digest = row[10].as<std::string>();
+        build.size = row[11].as<std::int64_t>();
+        build.message = row[12].as<std::string>();
+        build.token_hashes = nlohmann::json::parse(row[13].as<std::string>());
+        build.created_at = row[14].as<std::string>();
+        build.updated_at = row[15].as<std::string>();
+        return build;
+    }
+
+    static Result<Build> one_build(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + build_columns + " FROM builds b WHERE b.id = $1::uuid", id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no build " + id});
+        }
+        return build_from(rows[0]);
+    }
+
+    Result<std::vector<Build>> list_builds(const std::string& customer_id) override {
+        return with_tx<std::vector<Build>>([&](pqxx::work& tx) -> Result<std::vector<Build>> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + build_columns +
+                                   " FROM builds b WHERE b.customer_id = $1::uuid ORDER BY "
+                                   "b.created_at DESC, b.id",
+                               customer_id);
+            std::vector<Build> builds;
+            for (const pqxx::row& row : rows) {
+                builds.push_back(build_from(row));
+            }
+            return builds;
+        });
+    }
+
+    Result<Build> get_build(const std::string& id) override {
+        return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> { return one_build(tx, id); });
+    }
+
+    Result<Build> create_build(const NewBuild& input) override {
+        return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> {
+            const pqxx::result repositories = tx.exec_params(
+                "SELECT 1 FROM repositories WHERE id = $1::uuid AND customer_id = $2::uuid "
+                "AND deleted_at IS NULL",
+                input.repository,
+                input.customer_id);
+            if (repositories.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no such repository in this customer"});
+            }
+            const std::string id = new_uuid_v4();
+            tx.exec_params(
+                "INSERT INTO builds (id, customer_id, repository, revision, context, dockerfile, "
+                "target, build_args_json) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, "
+                "$8::jsonb)",
+                id,
+                input.customer_id,
+                input.repository,
+                input.revision,
+                input.context,
+                input.dockerfile,
+                input.target,
+                input.build_args.dump());
+            tx.exec_params("SELECT pg_notify('lake_builds', $1)", id);
+            return one_build(tx, id);
+        });
+    }
+
+    Result<Build> cancel_build(const std::string& id) override {
+        return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE builds SET desired = 'cancelled', updated_at = now() WHERE id = $1::uuid "
+                "AND desired = 'queued' AND phase NOT IN ('Succeeded', 'Failed', 'Cancelled') "
+                "RETURNING id",
+                id);
+            if (rows.empty()) {
+                const Result<Build> existing = one_build(tx, id);
+                if (!existing) {
+                    return existing;
+                }
+                return std::unexpected(
+                    existing->desired == "cancelled" || existing->phase == "Cancelled"
+                        ? StoreError{"conflict", "the build is already cancelled"}
+                        : StoreError{"conflict", "the build has already finished"});
+            }
+            tx.exec_params("SELECT pg_notify('lake_builds', $1)", id);
+            return one_build(tx, id);
+        });
+    }
+
     static constexpr const char* store_columns =
         "s.id::text, s.customer_id::text, s.type, s.provider, s.name, s.slug, "
         "COALESCE((s.spec->>'size_gi')::int, 10), COALESCE(s.spec->>'region', ''), "
@@ -4403,8 +4722,7 @@ public:
         });
     }
 
-    Result<AgentCronSchedule>
-    create_agent_cron_schedule(const NewAgentCronSchedule& in) override {
+    Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule& in) override {
         if (in.agent_id.empty() || in.cron.empty() || in.scopes.empty()) {
             return std::unexpected(StoreError{"invalid_input", "agent schedule is invalid"});
         }
@@ -4524,6 +4842,320 @@ public:
                 }
                 return runs;
             });
+    }
+
+    static constexpr const char* task_columns =
+        "t.id::text, t.customer_id::text, t.agent, t.kind, COALESCE(t.conversation_id::text, ''), "
+        "t.body::text, array_to_json(t.scopes)::text, t.deadline_seconds, t.desired, "
+        "COALESCE(t.requested_by_user_id::text, ''), t.requested_by_taap_id, "
+        "to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(ts.phase, ''), COALESCE(ts.message, ''), "
+        "COALESCE(to_char(ts.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "''), "
+        "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "''), "
+        "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text, "
+        "COALESCE(ts.events_from, 0)";
+
+    static Result<AgentTask> one_task(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + task_columns +
+                " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                "WHERE t.id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no agent task " + id});
+        }
+        return task_from(rows[0]);
+    }
+
+    static AgentTask task_from(const pqxx::row& row) {
+        AgentTask task;
+        task.id = row[0].as<std::string>();
+        task.customer_id = row[1].as<std::string>();
+        task.agent = row[2].as<std::string>();
+        task.kind = row[3].as<std::string>();
+        task.conversation_id = row[4].as<std::string>();
+        task.body = nlohmann::json::parse(row[5].as<std::string>(), nullptr, false);
+        task.scopes =
+            nlohmann::json::parse(row[6].as<std::string>()).get<std::vector<std::string>>();
+        task.deadline_seconds = row[7].as<int>();
+        task.desired = row[8].as<std::string>();
+        task.requested_by_user_id = row[9].as<std::string>();
+        task.requested_by_taap_id = row[10].as<std::string>();
+        task.created_at = row[11].as<std::string>();
+        task.phase = row[12].as<std::string>();
+        task.message = row[13].as<std::string>();
+        task.started_at = row[14].as<std::string>();
+        task.finished_at = row[15].as<std::string>();
+        task.credential_sha256 = row[16].as<std::string>();
+        task.result = nlohmann::json::parse(row[17].as<std::string>(), nullptr, false);
+        task.events_from = row[18].as<std::uint64_t>();
+        return task;
+    }
+
+    Result<AgentTask> create_agent_task(const AgentTask& in) override {
+        if (in.agent.empty() || in.scopes.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
+        }
+        return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            const std::string id = new_uuid_v4();
+            tx.exec_params(
+                "INSERT INTO agent_tasks (id, customer_id, agent, kind, conversation_id, body, "
+                "scopes, deadline_seconds, requested_by_user_id, requested_by_taap_id) VALUES "
+                "($1::uuid, $2::uuid, $3, $4, NULLIF($5, '')::uuid, $6::jsonb, "
+                "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, NULLIF($9, '')::uuid, "
+                "$10)",
+                id,
+                in.customer_id,
+                in.agent,
+                in.kind.empty() ? std::string("api") : in.kind,
+                in.conversation_id,
+                in.body.dump(),
+                nlohmann::json(in.scopes).dump(),
+                in.deadline_seconds,
+                in.requested_by_user_id,
+                in.requested_by_taap_id);
+            return one_task(tx, id);
+        });
+    }
+
+    Result<AgentTask> latest_agent_task(const std::string& customer_id,
+                                        const std::string& kind) override {
+        return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + task_columns +
+                    " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                    "WHERE t.customer_id = $1::uuid AND t.kind = $2 ORDER BY t.created_at DESC "
+                    "LIMIT 1",
+                customer_id,
+                kind);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no " + kind + " task"});
+            }
+            return task_from(rows[0]);
+        });
+    }
+
+    Result<AgentTask> claim_agent_task(const std::string& id,
+                                       const std::string& agent,
+                                       const std::string& credential_sha256,
+                                       std::uint64_t events_from) override {
+        return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            // The insert is the claim: the primary key lets exactly one through.
+            const pqxx::result claimed = tx.exec_params(
+                "INSERT INTO agent_task_status (task_id, phase, credential_sha256, started_at, "
+                "events_from) SELECT t.id, 'Running', $3, now(), $4 FROM agent_tasks t WHERE "
+                "t.id = $1::uuid AND t.agent = $2 AND t.desired = 'present' ON CONFLICT (task_id) "
+                "DO NOTHING RETURNING task_id",
+                id,
+                agent,
+                credential_sha256,
+                static_cast<std::int64_t>(events_from));
+            if (claimed.empty()) {
+                if (!one_task(tx, id)) {
+                    return std::unexpected(StoreError{"not_found", "no agent task " + id});
+                }
+                return std::unexpected(
+                    StoreError{"conflict", "the task is not waiting for " + agent});
+            }
+            return one_task(tx, id);
+        });
+    }
+
+    Result<AgentTask> record_agent_task_event(const std::string& id,
+                                              const std::string& agent,
+                                              const std::string& phase,
+                                              const std::string& message,
+                                              const nlohmann::json& result) override {
+        return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            const bool finishing = phase != "Running";
+            const pqxx::result updated = tx.exec_params(
+                "UPDATE agent_task_status ts SET phase = $3, message = $4, result = CASE WHEN $5 "
+                "THEN $6::jsonb ELSE ts.result END, finished_at = CASE WHEN $5 THEN now() ELSE "
+                "NULL END, credential_sha256 = CASE WHEN $5 THEN '' ELSE ts.credential_sha256 END, "
+                "updated_at = now() FROM agent_tasks t WHERE ts.task_id = t.id AND "
+                "t.id = $1::uuid AND t.agent = $2 AND ts.phase = 'Running' AND ts.finished_at "
+                "IS NULL RETURNING ts.task_id",
+                id,
+                agent,
+                phase,
+                message,
+                finishing,
+                result.dump());
+            if (updated.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "the task is not running on " + agent});
+            }
+            return one_task(tx, id);
+        });
+    }
+
+    Result<void> fail_agent_task(const std::string& id, const std::string& message) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params(
+                "INSERT INTO agent_task_status (task_id, phase, message, finished_at) VALUES "
+                "($1::uuid, 'Failed', $2, now()) ON CONFLICT (task_id) DO UPDATE SET phase = "
+                "'Failed', message = EXCLUDED.message, finished_at = now(), credential_sha256 = "
+                "'', updated_at = now() "
+                "WHERE agent_task_status.finished_at IS NULL",
+                id,
+                message);
+            return {};
+        });
+    }
+
+    Result<void> mark_agent_task_published(const std::string& id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("UPDATE agent_tasks SET published_at = now() WHERE id = $1::uuid", id);
+            return {};
+        });
+    }
+
+    Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) override {
+        return with_tx<StaleAgentTasks>([&](pqxx::work& tx) -> Result<StaleAgentTasks> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + task_columns +
+                    ", (ts.task_id IS NULL AND t.created_at + make_interval(secs => "
+                    "t.deadline_seconds) > now()) AS unclaimed FROM agent_tasks t LEFT JOIN "
+                    "agent_task_status ts ON ts.task_id = t.id WHERE t.desired = 'present' AND "
+                    "ts.finished_at IS NULL AND ("
+                    "(ts.task_id IS NULL AND (t.created_at + make_interval(secs => "
+                    "t.deadline_seconds) <= now() OR COALESCE(t.published_at, t.created_at) + "
+                    "make_interval(secs => $1) <= now())) OR "
+                    "(ts.task_id IS NOT NULL AND ts.started_at + make_interval(secs => "
+                    "t.deadline_seconds) <= now())) ORDER BY t.created_at LIMIT 200",
+                static_cast<int>(republish_after.count()));
+            StaleAgentTasks out;
+            for (const pqxx::row& row : rows) {
+                (row[19].as<bool>() ? out.unclaimed : out.overdue).push_back(task_from(row));
+            }
+            return out;
+        });
+    }
+
+    static constexpr const char* opportunity_columns =
+        "id::text, customer_id::text, task_id::text, rank, intent, solution, methodology, why, "
+        "payload::text, status, project, to_char(created_at AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+    static Opportunity opportunity_from(const pqxx::row& row) {
+        Opportunity out;
+        out.id = row[0].as<std::string>();
+        out.customer_id = row[1].as<std::string>();
+        out.task_id = row[2].as<std::string>();
+        out.rank = row[3].as<int>();
+        out.intent = row[4].as<std::string>();
+        out.solution = row[5].as<std::string>();
+        out.methodology = row[6].as<std::string>();
+        out.why = row[7].as<std::string>();
+        out.payload = nlohmann::json::parse(row[8].as<std::string>(), nullptr, false);
+        out.status = row[9].as<std::string>();
+        out.project = row[10].as<std::string>();
+        out.created_at = row[11].as<std::string>();
+        return out;
+    }
+
+    Result<void> record_opportunities(const std::vector<Opportunity>& rows) override {
+        if (rows.empty()) {
+            return {};
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            // Written once per scan: a second settle of the same task finds its rows.
+            if (!tx.exec_params("SELECT 1 FROM opportunities WHERE task_id = $1::uuid LIMIT 1",
+                                rows.front().task_id)
+                     .empty()) {
+                return {};
+            }
+            for (const Opportunity& row : rows) {
+                tx.exec_params(
+                    "INSERT INTO opportunities (customer_id, task_id, rank, intent, "
+                    "solution, methodology, why, payload, status) VALUES ($1::uuid, "
+                    "$2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9) ON CONFLICT DO NOTHING",
+                    row.customer_id,
+                    row.task_id,
+                    row.rank,
+                    row.intent,
+                    row.solution,
+                    row.methodology,
+                    row.why,
+                    row.payload.dump(),
+                    row.status);
+            }
+            return {};
+        });
+    }
+
+    Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override {
+        return with_tx<std::vector<Opportunity>>([&](pqxx::work& tx)
+                                                     -> Result<std::vector<Opportunity>> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + opportunity_columns +
+                    " FROM opportunities WHERE customer_id = $1::uuid ORDER BY created_at DESC, "
+                    "rank",
+                customer_id);
+            std::vector<Opportunity> out;
+            for (const pqxx::row& row : rows) {
+                out.push_back(opportunity_from(row));
+            }
+            return out;
+        });
+    }
+
+    Result<Opportunity> set_opportunity_status(const std::string& id,
+                                               const std::string& status,
+                                               const std::string& project) override {
+        return with_tx<Opportunity>([&](pqxx::work& tx) -> Result<Opportunity> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("UPDATE opportunities SET status = $2, project = $3, updated_at = "
+                            "now() WHERE id = $1::uuid RETURNING ") +
+                    opportunity_columns,
+                id,
+                status,
+                project);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no opportunity " + id});
+            }
+            return opportunity_from(rows[0]);
+        });
+    }
+
+    Result<AgentTask> get_agent_task(const std::string& id) override {
+        return with_tx<AgentTask>(
+            [&](pqxx::work& tx) -> Result<AgentTask> { return one_task(tx, id); });
+    }
+
+    // A task credential: as a launch credential, against the task's status row, acting as the
+    // person who asked.
+    Result<Principal> task_principal(const std::string& secret) {
+        const auto parsed = parse_agent_credential(secret, agent_task_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT COALESCE(ts.credential_sha256, ''), array_to_json(t.scopes)::text, "
+                "COALESCE(users.id::text, ''), COALESCE(users.taap_id, '') FROM agent_tasks t "
+                "LEFT JOIN agent_task_status ts ON ts.task_id = t.id LEFT JOIN users ON users.id = "
+                "t.requested_by_user_id WHERE t.id = $1::uuid AND t.desired = 'present'",
+                parsed->first);
+            if (rows.empty() || !constant_time_hex_equal(identity_crypto::sha256_hex(secret),
+                                                         rows[0][0].as<std::string>())) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            if (rows[0][3].as<std::string>().empty()) {
+                return std::unexpected(StoreError{"unauthorized", "task identity is unavailable"});
+            }
+            return Principal{
+                rows[0][2].as<std::string>(),
+                rows[0][3].as<std::string>(),
+                "task:" + parsed->first,
+                "",
+                "lake",
+                "agent_task",
+                nlohmann::json::parse(rows[0][1].as<std::string>()).get<std::vector<std::string>>(),
+                std::nullopt};
+        });
     }
 
     Result<AskMessage> append_ask_message(const AskMessage& message) override {
@@ -5329,12 +5961,94 @@ public:
             return {};
         });
     }
+    Result<Principal> app_principal(const std::string& secret) {
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        if (digest.empty()) {
+            return std::unexpected(StoreError{"not_found", "app token is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + web_app_columns +
+                                   " FROM apps a WHERE a.phase <> 'Deleted' AND "
+                                   "(a.token_hashes_json->>'source' = $1 OR "
+                                   "a.token_hashes_json->>'zetta' = $1 OR "
+                                   "a.token_hashes_json->>'events' = $1)",
+                               digest);
+            if (rows.size() != 1) {
+                return std::unexpected(StoreError{"not_found", "app token is not active"});
+            }
+            const WebApp app = web_app_from(rows[0]);
+            const auto purpose = web_app_token_purpose(app, digest);
+            if (!purpose) {
+                return std::unexpected(StoreError{"not_found", "app token is not active"});
+            }
+            return Principal{"",
+                             "app:" + app.id + ":" + *purpose,
+                             "app:" + app.id,
+                             "",
+                             "lake",
+                             "app_" + *purpose,
+                             web_app_token_scopes(*purpose),
+                             std::nullopt,
+                             app.id,
+                             app.customer_id,
+                             app.source_repository,
+                             app.source_revision,
+                             digest};
+        });
+    }
+    Result<Principal> build_principal(const std::string& secret) {
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        if (digest.empty()) {
+            return std::unexpected(StoreError{"not_found", "build token is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + build_columns +
+                                   " FROM builds b WHERE b.desired = 'queued' AND "
+                                   "b.phase NOT IN ('Succeeded', 'Failed', 'Cancelled') AND "
+                                   "(b.token_hashes_json->>'source' = $1 OR "
+                                   "b.token_hashes_json->>'push' = $1 OR "
+                                   "b.token_hashes_json->>'events' = $1)",
+                               digest);
+            if (rows.size() != 1) {
+                return std::unexpected(StoreError{"not_found", "build token is not active"});
+            }
+            const Build build = build_from(rows[0]);
+            const auto purpose = build_token_purpose(build, digest);
+            if (!purpose) {
+                return std::unexpected(StoreError{"not_found", "build token is not active"});
+            }
+            return Principal{"",
+                             "build:" + build.id + ":" + *purpose,
+                             "build:" + build.id,
+                             "",
+                             "lake",
+                             "build_" + *purpose,
+                             build_token_scopes(*purpose),
+                             std::nullopt,
+                             build.id,
+                             build.customer_id,
+                             build.repository,
+                             build.revision,
+                             digest};
+        });
+    }
     Result<Principal> context_for(const std::string& secret) override {
+        if (auto principal = build_principal(secret)) {
+            return principal;
+        }
+        if (auto principal = app_principal(secret)) {
+            return principal;
+        }
         if (secret.starts_with(agent_launch_credential_prefix)) {
             return launch_principal(secret);
         }
         if (secret.starts_with(agent_schedule_credential_prefix)) {
             return schedule_principal(secret);
+        }
+        if (secret.starts_with(agent_task_credential_prefix)) {
+            return task_principal(secret);
         }
         const auto lookup_id = session_lookup_id(secret);
         if (!lookup_id) {

@@ -12,7 +12,9 @@
 
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
@@ -26,7 +28,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 27> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 39> workspace_reads = {"server_info",
                                                               "score",
                                                               "explain",
                                                               "list_projects",
@@ -52,8 +54,36 @@ constexpr std::array<std::string_view, 27> workspace_reads = {"server_info",
                                                               "list_dataset_generators",
                                                               "list_agents",
                                                               "get_agent",
-                                                              "agent_training_status"};
-constexpr std::array<std::string_view, 31> workspace_actions = {"create_project",
+                                                              "agent_training_status",
+                                                              // The workspace's own pub/sub
+                                                              // (docs/api/agent-bus.md): only
+                                                              // topics created exposed.
+                                                              "list_topics",
+                                                              "receive_events",
+                                                              // What the engine can run
+                                                              // (zetta#1061) and how to
+                                                              // featurize for it (zetta#1062).
+                                                              "list_methodologies",
+                                                              "analyze_dataset",
+                                                              "plan_features",
+                                                              // The solutions catalogue
+                                                              // (zetta#1102).
+                                                              "list_solutions",
+                                                              "get_solution",
+                                                              // A solution project's governed
+                                                              // operating state (zetta#1128).
+                                                              "get_policy",
+                                                              "get_experiment",
+                                                              "list_ledger",
+                                                              "get_monitor",
+                                                              "get_roi_readout"};
+constexpr std::array<std::string_view, 40> workspace_actions = {"create_project",
+                                                                "create_solution",
+                                                                "run_solution",
+                                                                "update_policy",
+                                                                "decide",
+                                                                "approve_decision",
+                                                                "record_outcome",
                                                                 "capture_intent",
                                                                 "compile_intent",
                                                                 "approve_plan",
@@ -83,6 +113,9 @@ constexpr std::array<std::string_view, 31> workspace_actions = {"create_project"
                                                                 "delete_agent",
                                                                 "set_training_schedule",
                                                                 "agent_run",
+                                                                "create_topic",
+                                                                "drop_topic",
+                                                                "publish_event",
                                                                 // A read in Zetta, called with GET,
                                                                 // but it loads a model and spends
                                                                 // compute: `write` in lake.
@@ -1237,8 +1270,13 @@ void register_sql_capability(Registry& registry) {
     registry.add(Capability{
         .name = "workspace_sql",
         .title = "Query the workspace",
-        .description = "Run one read-only SQL query (SELECT or WITH) over the customer's workspace "
-                       "data and answer {columns, rows}. Anything else is refused; the workspace's "
+        .description = "Run one read-only SQL query over the customer's workspace data and answer "
+                       "{columns, rows}. The workspace speaks a SQL subset: SELECT <columns or *> "
+                       "FROM <database>.<table> [WHERE <column> <op> <value>] [GROUP BY <column>] "
+                       "[ORDER BY <column> [DESC], ...] [LIMIT n] [OFFSET n]; one WHERE "
+                       "comparison, aggregates (COUNT, SUM, AVG, MIN, MAX) only with GROUP BY, no "
+                       "joins, expressions or subqueries. list_datasets (through workspace_query) "
+                       "names the tables. Anything but a read is refused; the workspace's "
                        "administrative SQL is not reachable.",
         .input_schema = customer_input_schema(
             {{"statement", {{"type", "string"}}}, {"database", {{"type", "string"}}}},
@@ -1330,6 +1368,91 @@ json launch_json(const control::AgentLaunch& launch) {
             {"created_by_taap_id", launch.created_by_taap_id}};
 }
 
+// A background turn as callers see it (lake#269). A finished Project Agent proposal names the
+// pipeline page where it is reviewed and applied.
+json task_json(const control::AgentTask& task) {
+    const std::string status =
+        task.phase.empty() ? std::string("pending") : [&] {
+            std::string lower = task.phase;
+            std::ranges::transform(lower, lower.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return lower;
+        }();
+    json out{{"task_id", task.id},
+             {"agent", task.agent},
+             {"kind", task.kind},
+             {"status", status},
+             {"message", task.message},
+             {"created_at", task.created_at},
+             {"finished_at", task.finished_at},
+             {"answer", task.result}};
+    if (!task.conversation_id.empty()) {
+        out["conversation_id"] = task.conversation_id;
+    }
+    if (task.kind.starts_with("solution:") && task.body.is_object()) {
+        out["context"] = task.body.value("context", json::object());
+    }
+    const json proposal = task.result.is_object()
+                              ? task.result.value("result", json::object()).value("proposal", json())
+                              : json();
+    if (task.agent == "agent-project" && proposal.is_object()) {
+        out["review_url"] = "/design/pipeline?customer_id=" + task.customer_id + "&project=" +
+                            oauth_url_encode(proposal.value("project", std::string())) +
+                            "&graph=" + oauth_url_encode(proposal.value("graph", std::string())) +
+                            "&task=" + task.id;
+    }
+    return out;
+}
+
+// A finished Discover scan's Opportunities become rows, once (lake#269): what Auto-Suggest
+// suggested (new) and what it declined (not_yet), in its order.
+void settle_discover(ApiContext& context, const control::AgentTask& task) {
+    if (task.kind != "discover" || task.phase != "Succeeded" || !context.store ||
+        !task.result.is_object()) {
+        return;
+    }
+    const json profile = task.result.value("result", json::object())
+                             .value("project_profile", json::object());
+    std::vector<control::Opportunity> rows;
+    int rank = 0;
+    for (const json& item : profile.value("suggested", json::array())) {
+        rows.push_back({.customer_id = task.customer_id,
+                        .task_id = task.id,
+                        .rank = ++rank,
+                        .intent = item.value("intent", std::string()),
+                        .solution = item.value("solution", std::string()),
+                        .methodology = item.value("methodology", std::string()),
+                        .why = item.value("why_this_data_supports_it", std::string()),
+                        .payload = item,
+                        .status = "new"});
+    }
+    for (const json& item : profile.value("declined", json::array())) {
+        rows.push_back({.customer_id = task.customer_id,
+                        .task_id = task.id,
+                        .rank = ++rank,
+                        .intent = item.value("intent", std::string()),
+                        .why = item.value("reason", std::string()),
+                        .payload = item,
+                        .status = "not_yet"});
+    }
+    context.store->record_opportunities(rows);
+}
+
+json opportunity_json(const control::Opportunity& row) {
+    return {{"id", row.id},
+            {"task_id", row.task_id},
+            {"rank", row.rank},
+            {"intent", row.intent},
+            {"solution", row.solution},
+            {"methodology", row.methodology},
+            {"why", row.why},
+            {"status", row.status},
+            {"project", row.project},
+            {"created_at", row.created_at},
+            {"detail", row.payload}};
+}
+
 json schedule_json(const control::AgentCronSchedule& schedule) {
     return {{"id", schedule.id},
             {"customer_id", schedule.customer_id},
@@ -1375,70 +1498,6 @@ void agent_audit(ApiContext& context,
     context.audit_kind = std::move(kind);
     context.audit_details = std::move(details);
     context.audit_details["customer_id"] = customer_id;
-}
-
-// A key for one turn of a library agent, derived from the person's own credential and bounded to
-// `scopes`; revoked when the turn ends (docs/api/agent-launches.md).
-std::expected<control::IssuedSession, ApiResult>
-turn_key(ApiContext& context, const std::string& agent, std::vector<std::string> scopes) {
-    if (context.acting_user_id.empty() || context.store == nullptr) {
-        return std::unexpected(ApiResult::failure(
-            "unauthorized", "talking to " + agent + " needs a signed-in person"));
-    }
-    control::NewToken token{context.acting_user_id,
-                            context.pool_id,
-                            "agent turn: " + agent,
-                            "",
-                            std::move(scopes),
-                            900,
-                            false};
-    if (context.session_credential && !context.credential_session_id.starts_with("launch:") &&
-        !context.credential_session_id.starts_with("schedule:")) {
-        token.parent_session_id = context.credential_session_id;
-    }
-    auto issued = context.store->create_token(token);
-    if (!issued) {
-        return std::unexpected(ApiResult::failure(issued.error().code, issued.error().message));
-    }
-    return std::move(*issued);
-}
-
-void end_turn_key(ApiContext& context, const control::IssuedSession& key) {
-    if (context.store != nullptr) {
-        context.store->revoke_session(context.acting_user_id, key.session.id);
-    }
-}
-
-// The workspace's profile for Auto-Suggest: its datasets and their columns, as lake reads them.
-liquid::runtime::task<json> workspace_profile(ApiContext& context, std::string customer_id) {
-    json profile{{"industry", ""}, {"persona", ""}, {"tables", json::array()}};
-    auto listed =
-        answered(co_await zetta_call(context, customer_id, "list_datasets", json::object()));
-    if (!listed) {
-        co_return profile;
-    }
-    std::size_t read = 0;
-    for (const json& dataset : listed->value("datasets", json::array())) {
-        if (++read > 12) {
-            break;
-        }
-        const std::string name =
-            dataset.is_string() ? dataset.get<std::string>() : dataset.value("name", std::string());
-        const std::string database = dataset.is_object()
-                                         ? dataset.value("database", std::string("datasets"))
-                                         : std::string("datasets");
-        json table{{"database", database}, {"name", name}, {"columns", json::array()}};
-        auto got = answered(co_await zetta_call(
-            context, customer_id, "get_dataset", {{"dataset", name}, {"database", database}}));
-        if (got) {
-            table["columns"] = got->value("columns", json::array());
-            if (got->contains("rows")) {
-                table["rows"] = (*got)["rows"];
-            }
-        }
-        profile["tables"].push_back(std::move(table));
-    }
-    co_return profile;
 }
 
 // Another capability, called as the same person with its own authorization and audit (a copy of
@@ -1535,7 +1594,619 @@ json proposal_files(const json& proposal) {
 // The agent capabilities that were page-only (UX review 2026-09-27): creating an agent from an
 // approved AgentCreator proposal, turning chosen Opportunities into projects, and reading an Ask
 // Orama conversation back. The pages call these, so REST, MCP and the site do the same thing.
+namespace {
+
+// A design field as text: the model writes null (or a number) as readily as a string.
+std::string design_text_field(const json& design, const char* key) {
+    const auto found = design.find(key);
+    return found != design.end() && found->is_string() ? found->get<std::string>() : std::string();
+}
+
+// The one table a Project Agent design trains on: `dataset`, else the first of
+// `training_sources` or `datasets` (the agent's build output names it either way).
+std::string design_dataset(const json& design) {
+    if (const std::string dataset = design_text_field(design, "dataset"); !dataset.empty()) {
+        return dataset;
+    }
+    for (const char* key : {"training_sources", "datasets", "sources"}) {
+        const auto found = design.find(key);
+        const json list = found != design.end() ? *found : json();
+        if (list.is_array() && !list.empty() && list.front().is_string()) {
+            return list.front().get<std::string>();
+        }
+    }
+    return {};
+}
+
+// A design in words for Zetta's compiler: what it predicts, from which data, with which model.
+std::string design_text(const std::string& brief, const json& design) {
+    std::string text = brief;
+    const std::string label = design_text_field(design, "label");
+    if (!label.empty()) {
+        text += " Predict " + label;
+        if (const std::string dataset = design_dataset(design); !dataset.empty()) {
+            text += " from " + dataset;
+        }
+        std::string features;
+        const auto features_found = design.find("features");
+        for (const json& feature : features_found != design.end() && features_found->is_array()
+                                       ? *features_found
+                                       : json::array()) {
+            if (feature.is_string()) {
+                features += (features.empty() ? "" : ", ") + feature.get<std::string>();
+            }
+        }
+        if (!features.empty()) {
+            text += " using " + features;
+        }
+        text += ".";
+    }
+    if (const std::string model = design_text_field(design, "model_kind"); !model.empty()) {
+        text += " Train a " + model + " model";
+        if (design.contains("holdout_fraction") && design["holdout_fraction"].is_number()) {
+            text += " with a " +
+                    std::to_string(static_cast<int>(design["holdout_fraction"].get<double>() * 100)) +
+                    "% hold-out";
+        }
+        text += ".";
+    }
+    return text;
+}
+
+} // namespace
+
+liquid::runtime::task<json> workspace_methodologies(ApiContext& context,
+                                                    std::string customer_id) {
+    const ApiResult listed = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", customer_id}, {"capability", "list_methodologies"}, {"input", json::object()}}));
+    if (!listed.ok || !listed.value.contains("methodologies") ||
+        !listed.value["methodologies"].is_array()) {
+        co_return json(nullptr);
+    }
+    co_return listed.value["methodologies"];
+}
+
+json find_methodology(const json& methodologies,
+                      std::string_view methodology,
+                      std::string_view solution) {
+    // An id written anywhere in the text ("M-3", "M-3 Segmentation"), else the catalogue
+    // solution ("S-5") the registry lists the methodology as serving.
+    const auto token = [](std::string_view text, char prefix) {
+        for (std::size_t at = 0; at + 2 < text.size(); ++at) {
+            if (text[at] != prefix || text[at + 1] != '-') continue;
+            std::size_t end = at + 2;
+            while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) ++end;
+            if (end > at + 2) return std::string(text.substr(at, end - at));
+        }
+        return std::string();
+    };
+    if (!methodologies.is_array()) return nullptr;
+    if (const std::string id = token(methodology, 'M'); !id.empty()) {
+        for (const json& entry : methodologies) {
+            if (entry.value("id", std::string()) == id) return entry;
+        }
+    }
+    if (const std::string id = token(solution, 'S'); !id.empty()) {
+        for (const json& entry : methodologies) {
+            const json solutions = entry.value("solutions", json::array());
+            if (solutions.is_array() &&
+                std::ranges::find(solutions, json(id)) != solutions.end()) {
+                return entry;
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::string methodology_waits(const json& entry) {
+    std::string text = entry.value("name", std::string("This methodology")) + " (" +
+                       entry.value("id", std::string()) + ") does not run in this workspace's "
+                       "engine yet";
+    if (const std::string issue = entry.value("issue", std::string()); !issue.empty()) {
+        text += " (" + issue + ")";
+    }
+    return text + ".";
+}
+
+liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
+                                                std::string customer_id,
+                                                std::string project,
+                                                std::string graph,
+                                                std::string dataset,
+                                                json model) {
+    const ApiResult read = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", customer_id},
+         {"capability", "get_graph"},
+         {"input", {{"project", project}, {"graph", graph}}}}));
+    if (!read.ok) {
+        co_return read;
+    }
+    const std::size_t dot = dataset.find('.');
+    const std::string source = dot == std::string::npos ? std::string("datasets") : dataset.substr(0, dot);
+    const std::string table = dot == std::string::npos ? dataset : dataset.substr(dot + 1);
+    json edits = json::array();
+    bool pointed = false, modelled = false;
+    for (const json& node : read.value.value("nodes", json::array())) {
+        const std::string id = node.value("id", std::string());
+        const std::string kind = node.value("kind", std::string());
+        if (kind == "connect" && !dataset.empty()) {
+            if (!pointed) {
+                edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "source"},
+                                 {"value", source}});
+                edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", "table"},
+                                 {"value", table}});
+                edits.push_back({{"op", "rename_step"}, {"step", id}, {"name", "Load " + dataset}});
+                pointed = true;
+            } else {
+                edits.push_back({{"op", "remove_step"}, {"step", id}});
+            }
+        } else if (kind == "model" && !modelled && model.is_object()) {
+            for (const auto& [name, value] : model.items()) {
+                if (!value.is_null()) {
+                    edits.push_back({{"op", "set_attribute"}, {"step", id}, {"name", name},
+                                     {"value", value}});
+                }
+            }
+            modelled = true;
+        }
+    }
+    if (edits.empty()) {
+        co_return ApiResult::success({{"graph", graph}});
+    }
+    const ApiResult edited = called(co_await call_capability(
+        context,
+        "edit_pipeline",
+        {{"customer_id", customer_id}, {"project", project}, {"graph", graph}, {"edits", edits}}));
+    if (!edited.ok) {
+        co_return edited;
+    }
+    co_return ApiResult::success({{"graph", graph}});
+}
+
+liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
+                                                  std::string customer_id,
+                                                  std::string project,
+                                                  std::string intent,
+                                                  std::string dataset,
+                                                  json model,
+                                                  std::string methodology) {
+    const auto act = [&](std::string capability, json input) {
+        return call_capability(context,
+                               "workspace_act",
+                               {{"customer_id", customer_id},
+                                {"capability", std::move(capability)},
+                                {"input", std::move(input)}});
+    };
+    ApiResult result = called(co_await act("capture_intent", {{"project", project}, {"text", intent}}));
+    if (result.ok) {
+        json input{{"project", project}};
+        if (const std::string input_id = result.value.value("input_id", std::string());
+            !input_id.empty()) {
+            input["input_id"] = input_id;
+        }
+        // The methodology's own pipeline (zetta#1061); an engine that cannot run it refuses
+        // with not_supported, naming the issue, rather than compiling a skeleton.
+        if (!methodology.empty()) {
+            input["methodology"] = methodology;
+        }
+        result = called(co_await act("compile_intent", std::move(input)));
+    }
+    if (!result.ok) {
+        co_return result;
+    }
+    const std::string graph = result.value.value("name", result.value.value("graph", std::string()));
+    if (graph.empty() || (dataset.empty() && !model.is_object())) {
+        co_return ApiResult::success({{"graph", graph}});
+    }
+    co_return called(co_await point_pipeline(context, customer_id, project, graph, dataset, model));
+}
+
+liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::AgentTask task) {
+    if (!task.kind.starts_with("build:") || task.phase != "Succeeded" || !task.result.is_object()) {
+        co_return ApiResult::success(json::object());
+    }
+    const std::string project = task.kind.substr(6);
+    const json answer = task.result.value("result", json());
+    const json design = answer.is_object() && answer.contains("pipeline") &&
+                                answer["pipeline"].is_object()
+                            ? answer["pipeline"]
+                            : json::object();
+    const std::string dataset = design_dataset(design);
+    json model = json::object();
+    if (const std::string label = design_text_field(design, "label"); !label.empty()) {
+        model["target"] = label;
+    }
+    if (const std::string algo = design_text_field(design, "model_kind"); !algo.empty()) {
+        model["algo"] = algo;
+    }
+    // The methodology the design names, else the one of the Opportunity the build came from
+    // (lake#289). An engine with the registry (zetta#1061) builds that methodology's own
+    // pipeline; one it cannot run yet is refused here, never replaced by a skeleton.
+    std::string methodology;
+    auto listed = co_await workspace_methodologies(context, task.customer_id);
+    if (const json registry = listed ? *listed : json(nullptr); registry.is_array()) {
+        const json context_body = task.body.is_object() ? task.body.value("context", json::object())
+                                                        : json::object();
+        const json opportunity = context_body.is_object()
+                                     ? context_body.value("opportunity", json::object())
+                                     : json::object();
+        json entry = find_methodology(registry, design_text_field(design, "methodology"),
+                                      design_text_field(design, "solution"));
+        if (entry.is_null() && opportunity.is_object()) {
+            entry = find_methodology(registry, design_text_field(opportunity, "methodology"),
+                                     design_text_field(opportunity, "solution"));
+        }
+        if (entry.is_object()) {
+            if (!entry.value("runnable", false)) {
+                co_return ApiResult::failure("not_supported", methodology_waits(entry));
+            }
+            methodology = entry.value("id", std::string());
+        }
+    }
+    const ApiResult read = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", task.customer_id},
+         {"capability", "get_project"},
+         {"input", {{"name", project}}}}));
+    if (!read.ok) {
+        co_return read;
+    }
+    const json graphs = read.value.value("graphs", json::array());
+    if (graphs.empty()) {
+        co_return called(co_await compile_pipeline(context,
+                                                   task.customer_id,
+                                                   project,
+                                                   design_text(design_text_field(task.body, "message"), design),
+                                                   dataset,
+                                                   model,
+                                                   methodology));
+    }
+    // The project's own pipeline (Zetta compiles one from its intent when it is created):
+    // the first one not yet approved. Applied once: a connect step that already reads the
+    // design's table means it was.
+    const auto open = std::ranges::find_if(graphs, [](const json& graph) {
+        return design_text_field(graph, "approval") != "approved";
+    });
+    if (open == graphs.end() || dataset.empty()) {
+        co_return ApiResult::success(json::object());
+    }
+    const std::string graph = design_text_field(*open, "name");
+    // A pipeline of another methodology's shape (the churn skeleton a segmentation project got
+    // before zetta#1061) is not repointed: the design's methodology gets its own pipeline.
+    if (!methodology.empty() && design_text_field(*open, "methodology") != methodology) {
+        co_return called(co_await compile_pipeline(context,
+                                                   task.customer_id,
+                                                   project,
+                                                   design_text(design_text_field(task.body, "message"), design),
+                                                   dataset,
+                                                   model,
+                                                   methodology));
+    }
+    const ApiResult current = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", task.customer_id},
+         {"capability", "get_graph"},
+         {"input", {{"project", project}, {"graph", graph}}}}));
+    const std::string table = dataset.substr(dataset.find('.') == std::string::npos ? 0 : dataset.find('.') + 1);
+    for (const json& node : current.ok ? current.value.value("nodes", json::array()) : json::array()) {
+        if (design_text_field(node, "kind") == "connect" && node.contains("attributes") &&
+            node["attributes"].is_object() && design_text_field(node["attributes"], "table") == table) {
+            co_return ApiResult::success({{"graph", graph}});
+        }
+    }
+    co_return called(co_await point_pipeline(context, task.customer_id, project, graph, dataset, model));
+}
+
+namespace {
+
+std::pair<std::string, std::string> dataset_parts(std::string dataset) {
+    const std::size_t dot = dataset.find('.');
+    if (dot == std::string::npos) {
+        return {"datasets", std::move(dataset)};
+    }
+    return {dataset.substr(0, dot), dataset.substr(dot + 1)};
+}
+
+json solution_answer(const control::AgentTask& task) {
+    if (!task.result.is_object()) {
+        return json::object();
+    }
+    const json answer = task.result.value("result", json::object());
+    return answer.is_object() ? answer : json::object();
+}
+
+json solution_proposal(const control::AgentTask& task) {
+    const json answer = solution_answer(task);
+    const json proposed = answer.value("foundation", json::object());
+    return proposed.is_object() ? proposed : json::object();
+}
+
+json task_solution_context(const control::AgentTask& task) {
+    if (!task.body.is_object()) {
+        return json::object();
+    }
+    const json value = task.body.value("context", json::object());
+    return value.is_object() ? value : json::object();
+}
+
+std::expected<std::string, ApiError> task_customer_object(const json& input, ApiContext& context) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto task = context.store->get_agent_task(input.at("task_id"));
+    if (!task) {
+        return std::unexpected(ApiError{"not_found", "no such solution task", "/task_id"});
+    }
+    const auto object = context.store->find_policy_object("customer", task->customer_id);
+    if (!object) {
+        return std::unexpected(ApiError{object.error().code, object.error().message, "/task_id"});
+    }
+    return object->id;
+}
+
+json missing_solution_predicates(const std::string& solution, const json& proposal) {
+    json missing = proposal.value("missing_predicates", json::array());
+    if (!missing.is_array()) {
+        missing = json::array();
+    }
+    if (solution != "S-1") {
+        return missing;
+    }
+    const json predicates = proposal.value("predicates", json::object());
+    for (const char* name : {"in_collections", "open_complaint", "vulnerable"}) {
+        const bool named = predicates.is_object() && predicates.contains(name) &&
+                           predicates.at(name).is_string() &&
+                           !predicates.at(name).get_ref<const std::string&>().empty();
+        if (!named && std::ranges::find(missing, json(name)) == missing.end()) {
+            missing.push_back(name);
+        }
+    }
+    return missing;
+}
+
+} // namespace
+
+liquid::runtime::task<ApiResult>
+settle_solution(ApiContext& context, control::AgentTask task, json edits) {
+    if (!task.kind.starts_with("solution:")) {
+        co_return ApiResult::failure("invalid_input", "this is not a solution proposal task");
+    }
+    if (task.phase != "Succeeded") {
+        co_return ApiResult::failure("invalid_input", "the Project Agent has not finished");
+    }
+    json proposal = solution_proposal(task);
+    if (proposal.empty()) {
+        co_return ApiResult::failure("invalid_input",
+                                     "the Project Agent returned no foundation proposal");
+    }
+    const json start = task_solution_context(task);
+    const std::string project = task.kind.substr(9);
+    const std::string solution = start.value("solution", std::string());
+    const int level = start.value("level", 0);
+    if (project.empty() || solution.empty() || level < 1 || level > 4) {
+        co_return ApiResult::failure("invalid_input", "the solution task has invalid start inputs");
+    }
+
+    // Delivery and economics came from the person, not the agent. They form the proposal's base;
+    // an explicit confirmation edit may change them.
+    proposal["delivery"] = start.value("delivery", json::object());
+    proposal["roi_model"] = start.value("roi_model", json::object());
+    const auto [database, table] = dataset_parts(start.value("dataset", std::string()));
+    json sources =
+        proposal.value("sources", solution_answer(task).value("sources", json::object()));
+    if (!sources.is_object()) {
+        sources = json::object();
+    }
+    sources["source"] = database;
+    sources["table"] = table;
+    proposal["sources"] = std::move(sources);
+    if (!edits.is_null()) {
+        if (!edits.is_object()) {
+            co_return ApiResult::failure("invalid_input", "edits must be an object", "/edits");
+        }
+        proposal.merge_patch(edits);
+    }
+
+    json source_roles = proposal.value("sources", json::object());
+    if (!source_roles.is_object() || source_roles.value("source", std::string()).empty() ||
+        source_roles.value("table", std::string()).empty()) {
+        co_return ApiResult::failure("invalid_input",
+                                     "the proposal must name its source database and table");
+    }
+    const json missing_predicates = missing_solution_predicates(solution, proposal);
+    source_roles["policy_predicates"] = proposal.value("predicates", json::object());
+    source_roles["missing_policy_predicates"] = missing_predicates;
+    json foundation = json::object();
+    for (const char* name : {"snapshot", "dataset", "delivery", "roi_model", "decision_source"}) {
+        if (proposal.contains(name)) {
+            foundation[name] = proposal.at(name);
+        }
+    }
+    for (const char* required : {"snapshot", "dataset", "delivery", "roi_model"}) {
+        if (!foundation.contains(required) || !foundation.at(required).is_object()) {
+            co_return ApiResult::failure("invalid_input",
+                                         "the proposal is missing " + std::string(required),
+                                         "/edits/" + std::string(required));
+        }
+    }
+
+    // Confirmation is idempotent. Zetta's default graph name is stable for a solution and level.
+    const std::string graph_name = solution + " CL-" + std::to_string(level);
+    const ApiResult project_state =
+        called(co_await call_capability(context,
+                                        "workspace_query",
+                                        {{"customer_id", task.customer_id},
+                                         {"capability", "get_project"},
+                                         {"input", {{"name", project}}}}));
+    if (project_state.ok) {
+        const json graphs = project_state.value.value("graphs", json::array());
+        const auto existing = std::ranges::find_if(graphs, [&](const json& graph) {
+            return graph.value("name", std::string()) == graph_name;
+        });
+        if (existing != graphs.end()) {
+            co_return ApiResult::success({{"project", project},
+                                          {"solution", solution},
+                                          {"level", level},
+                                          {"graph", graph_name},
+                                          {"already_confirmed", true},
+                                          {"missing_predicates", missing_predicates},
+                                          {"actions_blocked", !missing_predicates.empty()}});
+        }
+    }
+
+    ApiResult created =
+        called(co_await call_capability(context,
+                                        "workspace_act",
+                                        {{"customer_id", task.customer_id},
+                                         {"capability", "create_solution"},
+                                         {"input",
+                                          {{"project", project},
+                                           {"solution", solution},
+                                           {"level", level},
+                                           {"sources", source_roles},
+                                           {"foundation", std::move(foundation)}}}}));
+    if (!created.ok) {
+        co_return created;
+    }
+    created.value["task_id"] = task.id;
+    created.value["missing_predicates"] = missing_predicates;
+    created.value["actions_blocked"] = !missing_predicates.empty();
+    co_return created;
+}
+
 void register_agent_flow_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "start_solution",
+        .title = "Start a solution project",
+        .description =
+            "Create the named project and ask the Project Agent to inspect one chosen dataset and "
+            "propose the complete solution foundation. Delivery and ROI inputs are the caller's "
+            "own values and are never defaulted. The solution is not created until "
+            "confirm_solution.",
+        .input_schema = customer_input_schema(
+            {{"project", {{"type", "string"}, {"minLength", 1}}},
+             {"solution", {{"type", "string"}, {"minLength", 1}}},
+             {"level", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4}}},
+             {"dataset", {{"type", "string"}, {"minLength", 1}}},
+             {"delivery",
+              {{"type", "object"},
+               {"required", {"kind", "endpoint", "owner"}},
+               {"additionalProperties", false},
+               {"properties",
+                {{"kind", {{"type", "string"}, {"enum", {"webhook", "salesforce", "hubspot"}}}},
+                 {"endpoint", {{"type", "string"}, {"minLength", 1}}},
+                 {"owner", {{"type", "string"}, {"minLength", 1}}}}}}},
+             {"roi_model",
+              {{"type", "object"},
+               {"required", {"value_per_outcome", "investment", "currency"}},
+               {"additionalProperties", false},
+               {"properties",
+                {{"value_per_outcome", {{"type", "number"}}},
+                 {"investment", {{"type", "number"}, {"minimum", 0}}},
+                 {"currency", {{"type", "string"}, {"minLength", 1}}}}}}}},
+            json::array({"project", "solution", "level", "dataset", "delivery", "roi_model"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces || !context.store || !context.agent_bus ||
+                !context.agent_caller ||
+                !context.workspaces->config().agent_endpoints.contains("agent-project")) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the Project Agent is not running on this lake");
+            }
+            if (context.acting_user_id.empty()) {
+                co_return ApiResult::failure("unauthorized",
+                                             "starting a solution needs a signed-in person");
+            }
+            const std::string customer_id = input.at("customer_id");
+            const std::string project = input.at("project");
+            const std::string solution = input.at("solution");
+            const int level = input.at("level");
+            const std::string dataset = input.at("dataset");
+            const ApiResult created = called(
+                co_await call_capability(context,
+                                         "workspace_act",
+                                         {{"customer_id", customer_id},
+                                          {"capability", "create_project"},
+                                          {"input",
+                                           {{"name", project},
+                                            {"description",
+                                             "Solution " + solution + " over " + dataset +
+                                                 ". Foundation awaiting owner confirmation."}}}}));
+            if (!created.ok) {
+                co_return created;
+            }
+            const json solution_context{{"project", project},
+                                        {"solution", solution},
+                                        {"level", level},
+                                        {"dataset", dataset},
+                                        {"delivery", input.at("delivery")},
+                                        {"roi_model", input.at("roi_model")}};
+            const std::string message =
+                "Propose the executable foundation for solution " + solution + " at level " +
+                std::to_string(level) + " in project " + project + " using dataset " + dataset +
+                ". Read get_solution, analyze_dataset, get_dataset and plan_features. Return "
+                "result.foundation with sources (including every selected methodology's roles), "
+                "snapshot, dataset roles, decision_source when required, predicates, delivery, "
+                "roi_model and missing_predicates. Preserve the supplied delivery and ROI values. "
+                "Never fill a missing exclusion predicate with false and do not call "
+                "create_solution.";
+            ApiResult started = called(co_await call_capability(context,
+                                                                "agent_turn",
+                                                                {{"customer_id", customer_id},
+                                                                 {"agent", "agent-project"},
+                                                                 {"kind", "solution:" + project},
+                                                                 {"message", message},
+                                                                 {"context", solution_context}}));
+            if (!started.ok) {
+                co_return started;
+            }
+            started.value["project"] = project;
+            started.value["solution"] = solution;
+            co_return started;
+        }});
+    registry.add(Capability{
+        .name = "confirm_solution",
+        .title = "Confirm a solution foundation",
+        .description =
+            "Confirm one finished solution:<project> Project Agent task. Optional edits are a "
+            "JSON merge patch over result.foundation. This is the only step that calls "
+            "create_solution.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"task_id", {{"type", "string"}, {"minLength", 1}}},
+                           {"edits", {{"type", "object"}}}}},
+                         {"required", json::array({"task_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = task_customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return unavailable();
+            }
+            auto task = context.store->get_agent_task(input.at("task_id"));
+            if (!task || (task->requested_by_user_id != context.acting_user_id &&
+                          context.acting_identity != "admin")) {
+                co_return ApiResult::failure("not_found", "no such solution task");
+            }
+            co_return co_await settle_solution(
+                context, *task, input.value("edits", json::object()));
+        }});
     registry.add(Capability{
         .name = "create_agent_from_proposal",
         .title = "Create an agent from an AgentCreator proposal",
@@ -1716,11 +2387,17 @@ void register_agent_flow_capabilities(Registry& registry) {
         .description =
             "Create one draft project per chosen Opportunity (agent_turn with agent-autosuggest "
             "answers them): named from its intent, with the Opportunity it came from in its "
-            "description. Answers the projects' names.",
+            "description. The Project Agent then designs each project's pipeline in the "
+            "background (builds: {project, task_id}); the project's page compiles the design "
+            "when it is done. A project gets its Opportunity's methodology's own pipeline "
+            "(zetta#1061); one whose methodology the engine cannot run yet gets no pipeline and is "
+            "listed in `waiting` with the issue that tracks it. Answers the projects' names, the "
+            "builds and `waiting`.",
         .input_schema = customer_input_schema(
             {{"opportunities",
-              {{"type", "array"}, {"items", {{"type", "object"}}}, {"minItems", 1}}}},
-            json::array({"opportunities"})),
+              {{"type", "array"}, {"items", {{"type", "object"}}}, {"minItems", 1}}},
+             {"opportunity_ids", {{"type", "array"}, {"items", {{"type", "string"}}}}}},
+            json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -1729,12 +2406,44 @@ void register_agent_flow_capabilities(Registry& registry) {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             const std::string customer_id = input.at("customer_id");
-            agent_audit(context,
-                        "discover.create",
-                        customer_id,
-                        {{"count", input.at("opportunities").size()}});
+            // Saved Opportunities by id (Design → Opportunities), or Opportunities as given.
+            json items = input.value("opportunities", json::array());
+            std::vector<std::string> ids;
+            if (const json chosen = input.value("opportunity_ids", json::array());
+                !chosen.empty() && context.store) {
+                auto saved = context.store->list_opportunities(customer_id);
+                for (const json& id : chosen) {
+                    const auto row = saved ? std::ranges::find(*saved, id.get<std::string>(),
+                                                               &control::Opportunity::id)
+                                           : std::vector<control::Opportunity>::iterator{};
+                    if (!saved || row == saved->end()) {
+                        co_return ApiResult::failure("not_found", "no such Opportunity " +
+                                                                      id.get<std::string>());
+                    }
+                    json item = row->payload.is_object() ? row->payload : json::object();
+                    item["intent"] = row->intent;
+                    if (!row->solution.empty()) item["solution"] = row->solution;
+                    if (!row->methodology.empty()) item["methodology"] = row->methodology;
+                    items.push_back(std::move(item));
+                    ids.push_back(row->id);
+                }
+            }
+            if (items.empty()) {
+                co_return ApiResult::failure("invalid_input", "choose at least one Opportunity");
+            }
+            agent_audit(context, "discover.create", customer_id, {{"count", items.size()}});
             json names = json::array();
-            for (const json& item : input.at("opportunities")) {
+            json builds = json::array();
+            json waiting = json::array();
+            // What the workspace's engine can run (zetta#1061); nullopt on an engine that predates
+            // the registry, which keeps compiling from the intent alone.
+            auto listed = co_await workspace_methodologies(context, customer_id);
+            const json registry = listed ? *listed : json(nullptr);
+            const bool builds_pipelines =
+                context.workspaces && context.agent_bus &&
+                context.workspaces->config().agent_endpoints.contains("agent-project");
+            std::size_t position = 0;
+            for (const json& item : items) {
                 const std::string intent = item.value("intent", std::string());
                 if (intent.empty()) {
                     co_return ApiResult::failure("invalid_input", "every Opportunity needs an intent");
@@ -1747,18 +2456,80 @@ void register_agent_flow_capabilities(Registry& registry) {
                     item.value("solution", std::string()) + ", " +
                     item.value("methodology", std::string()) + ". " +
                     item.value("why_this_data_supports_it", std::string());
+                // The methodology the Opportunity needs (lake#289): the project gets that
+                // methodology's own pipeline, or none, with the reason, when it cannot run yet.
+                const json entry =
+                    find_methodology(registry, item.value("methodology", std::string()),
+                                     item.value("solution", std::string()));
+                const bool known = entry.is_object();
+                const bool runnable = known && entry.value("runnable", false);
+                json project_input{{"name", name}, {"description", description}};
+                if (!known) {
+                    project_input["intent"] = intent;  // the engine compiles from the words
+                } else if (!runnable) {
+                    project_input["description"] = description + "\n\n" + methodology_waits(entry);
+                }
                 const ApiResult created = called(co_await call_capability(
                     context,
                     "workspace_act",
                     {{"customer_id", customer_id},
                      {"capability", "create_project"},
-                     {"input", {{"name", name}, {"description", description}, {"intent", intent}}}}));
+                     {"input", std::move(project_input)}}));
                 if (!created.ok) {
                     co_return created;
                 }
                 names.push_back(name);
+                if (known && !runnable) {
+                    waiting.push_back({{"project", name},
+                                       {"methodology", entry.value("id", std::string())},
+                                       {"name", entry.value("name", std::string())},
+                                       {"issue", entry.value("issue", std::string())},
+                                       {"message", methodology_waits(entry)}});
+                } else if (runnable) {
+                    const ApiResult compiled = called(co_await compile_pipeline(
+                        context, customer_id, name, intent, "", nullptr,
+                        entry.value("id", std::string())));
+                    if (!compiled.ok) {
+                        co_return compiled;
+                    }
+                }
+                if (position < ids.size()) {
+                    context.store->set_opportunity_status(ids[position], "project", name);
+                }
+                ++position;
+                // The Project Agent designs its pipeline in the background; the project page
+                // compiles that design when it is done (kind "build:<project>").
+                if (builds_pipelines && !(known && !runnable)) {
+                    std::string brief = "Design the pipeline for the project " + name + ": " +
+                                        intent + ".";
+                    for (const auto& [field, label] :
+                         {std::pair{"business_action", " What it changes: "},
+                          std::pair{"why_this_data_supports_it", " Why the data supports it: "},
+                          std::pair{"solution", " Catalogue solution: "},
+                          std::pair{"methodology", " Methodology: "}}) {
+                        if (const std::string value = item.value(field, std::string());
+                            !value.empty()) {
+                            brief += label + value;
+                        }
+                    }
+                    const ApiResult started = called(co_await call_capability(
+                        context,
+                        "agent_turn",
+                        {{"customer_id", customer_id},
+                         {"agent", "agent-project"},
+                         {"kind", "build:" + name},
+                         {"message", brief},
+                         {"context", {{"opportunity", item}}}}));
+                    if (started.ok) {
+                        builds.push_back(
+                            {{"project", name},
+                             {"task_id", started.value.value("task_id", std::string())}});
+                    }
+                }
             }
-            co_return ApiResult::success({{"projects", std::move(names)}});
+            co_return ApiResult::success({{"projects", std::move(names)},
+                                          {"builds", std::move(builds)},
+                                          {"waiting", std::move(waiting)}});
         }});
     registry.add(Capability{
         .name = "get_ask_conversation",
@@ -2093,18 +2864,115 @@ void register_agent_run_capabilities(Registry& registry) {
             return ApiResult::success(schedule_json(*removed));
         }});
     registry.add(Capability{
+        .name = "get_agent_task",
+        .title = "Follow an agent turn",
+        .description = "One background agent turn (from agent_turn): its status (pending, "
+                       "running, succeeded, failed) and, once it finished, the agent's answer.",
+        .input_schema = customer_agent_schema({{"task_id", {{"type", "string"}}}},
+                                              json::array({"task_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return unavailable();
+            }
+            auto task = context.store->get_agent_task(input.at("task_id"));
+            if (!task || task->customer_id != input.at("customer_id").get<std::string>() ||
+                (task->requested_by_user_id != context.acting_user_id &&
+                 context.acting_identity != "admin")) {
+                co_return ApiResult::failure("not_found", "no such task in this space");
+            }
+            settle_discover(context, *task);
+            json out = task_json(*task);
+            // A project's pipeline design is applied once it is done, wherever it is read.
+            if (const ApiResult built = called(co_await settle_build(context, *task)); !built.ok) {
+                out["build_error"] = built.error.message;
+            }
+            co_return ApiResult::success(std::move(out));
+        }});
+    registry.add(Capability{
+        .name = "list_opportunities",
+        .title = "List Opportunities",
+        .description = "What Auto-Suggest recommended for the space's data, kept across scans, "
+                       "newest scan first: each Opportunity's intent, catalogue solution, "
+                       "methodology, why the data supports it, and its status (new, project, "
+                       "dismissed, or not_yet when Auto-Suggest declined it). `task_id` settles a "
+                       "scan that just finished.",
+        .input_schema = customer_agent_schema({{"task_id", {{"type", "string"}}}}, json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .authorizes_candidates = true,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return unavailable();
+            }
+            if (auto refused = authorize_customer_read(input, context)) {
+                return *refused;
+            }
+            const std::string customer_id = input.at("customer_id");
+            if (const std::string id = input.value("task_id", std::string()); !id.empty()) {
+                if (auto task = context.store->get_agent_task(id);
+                    task && task->customer_id == customer_id) {
+                    settle_discover(context, *task);
+                }
+            }
+            auto rows = context.store->list_opportunities(customer_id);
+            if (!rows) {
+                return ApiResult::failure(rows.error().code, rows.error().message);
+            }
+            json out = json::array();
+            for (const control::Opportunity& row : *rows) {
+                out.push_back(opportunity_json(row));
+            }
+            return ApiResult::success({{"opportunities", std::move(out)}});
+        }});
+    registry.add(Capability{
+        .name = "dismiss_opportunity",
+        .title = "Dismiss an Opportunity",
+        .description = "Mark one Opportunity as not wanted; it stays listed as dismissed.",
+        .input_schema = customer_agent_schema({{"opportunity_id", {{"type", "string"}}}},
+                                              json::array({"opportunity_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.store) {
+                return unavailable();
+            }
+            agent_audit(context, "opportunity.dismiss", input.at("customer_id"),
+                        {{"opportunity_id", input.at("opportunity_id")}});
+            auto row = context.store->set_opportunity_status(input.at("opportunity_id"),
+                                                             "dismissed", "");
+            if (!row || row->customer_id != input.at("customer_id").get<std::string>()) {
+                return ApiResult::failure("not_found", "no such Opportunity in this space");
+            }
+            return ApiResult::success(opportunity_json(*row));
+        }});
+    registry.add(Capability{
         .name = "agent_turn",
         .title = "Talk to an agent",
         .description =
             "Send one message to any agent: a specialized agent of the Agent Library by its key "
             "(agent-ask-orama, agent-project, agent-autosuggest, agent-creator) or an agent of "
-            "this space by its id. A native agent answers from the workspace; a Python agent from "
-            "its running service (started on first use).",
+            "this space by its id. A library agent's turn runs in the background: the answer is "
+            "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
+            "agent answers from the workspace; a Python agent from its running service (started "
+            "on first use).",
         .input_schema = customer_agent_schema({{"agent", {{"type", "string"}}},
                                                {"message", {{"type", "string"}}},
                                                {"conversation_id", {{"type", "string"}}},
                                                {"context", {{"type", "object"}}},
-                                               {"page", {{"type", "object"}}}},
+                                               {"page", {{"type", "object"}}},
+                                               {"kind", {{"type", "string"}}}},
                                               json::array({"agent", "message"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -2143,21 +3011,27 @@ void register_agent_run_capabilities(Registry& registry) {
                     // its key carries every read capability and agent_turn, never an action.
                     scopes = {"agent_turn", "workspace_openapi"};
                     for (const auto& capability : registry.list()) {
-                        if (capability->kind == CapabilityKind::Read) {
+                        // Every read, including actions that only read (workspace_query).
+                        if (capability->kind == CapabilityKind::Read ||
+                            capability->action == "read") {
                             scopes.push_back(capability->name);
                         }
                     }
                     scopes.push_back("workspace_query");
                 }
-                std::optional<control::IssuedSession> key;
-                if (agent != "agent-autosuggest") {
-                    auto issued = turn_key(context, agent, std::move(scopes));
-                    if (!issued) {
-                        co_return issued.error();
-                    }
-                    key = std::move(*issued);
-                    body["lake_token"] = key->secret;
-                    body["lake_url"] = config.internal_url;
+                // The turn runs in the background (lake#269): lake records it, publishes it on
+                // the agent bus and answers at once. The agent claims it through lake, which
+                // replaces "{{credential}}" with a credential it hands over once and never stores
+                // (docs/api/agent-bus.md).
+                scopes.push_back("get_agent_task");
+                body["lake_token"] = "{{credential}}";
+                body["lake_url"] = config.internal_url;
+                // The agents that read the person's workspace get lake's read-only path to it.
+                if (agent == "agent-project" || agent == "agent-autosuggest" ||
+                    agent == "agent-creator" || agent == "agent-project-corpus") {
+                    body["zetta_base_url"] =
+                        config.internal_url + "/workspaces/" + customer_id + "/zetta";
+                    body["zetta_token"] = "{{credential}}";
                 }
                 if (agent == "agent-project") {
                     body["request"] = message;
@@ -2181,57 +3055,44 @@ void register_agent_run_capabilities(Registry& registry) {
                         }
                         handed["pipeline"] = std::move(*graph);
                     }
-                    body["zetta_base_url"] =
-                        config.internal_url + "/workspaces/" + customer_id + "/zetta";
-                    body["zetta_token"] = body["lake_token"];
+                } else if (agent == "agent-eval-generator" || agent == "agent-autosuggest-corpus" ||
+                           agent == "agent-project-corpus") {
+                    body["request"] = message;
                 } else if (agent == "agent-autosuggest") {
-                    json profile = input.value("context", json::object()).value("profile", json());
-                    if (!profile.is_object()) {
-                        auto built = co_await workspace_profile(context, customer_id);
-                        profile = built ? std::move(*built) : json::object();
+                    // Auto-Suggest builds the workspace profile itself, with the task's
+                    // read-only credential; lake reads nothing inside the request.
+                    if (const json profile =
+                            input.value("context", json::object()).value("profile", json());
+                        profile.is_object()) {
+                        body["profile"] = profile;
                     }
-                    body["profile"] = std::move(profile);
                     body["request"] = message;
                 }
-                auto reply = co_await context.agent_caller->turn(
-                    endpoint->second, config.agent_service_token, std::move(body));
-                if (key) {
-                    end_turn_key(context, *key);
+                if (context.acting_user_id.empty()) {
+                    co_return ApiResult::failure(
+                        "unauthorized", "talking to " + agent + " needs a signed-in person");
                 }
-                if (!reply) {
-                    co_return ApiResult::failure("store_error", reply.error().message);
+                if (context.agent_bus == nullptr) {
+                    co_return ApiResult::failure("store_unavailable",
+                                                 "the agent bus is not configured on this lake");
                 }
-                if (!*reply) {
-                    co_return ApiResult::failure(reply->error().code, reply->error().message);
+                auto task = context.store->create_agent_task(
+                    control::AgentTask{.customer_id = customer_id,
+                                       .agent = agent,
+                                       .kind = input.value("kind", std::string("api")),
+                                       .conversation_id =
+                                           input.value("conversation_id", std::string()),
+                                       .body = std::move(body),
+                                       .scopes = std::move(scopes),
+                                       .requested_by_user_id = context.acting_user_id,
+                                       .requested_by_taap_id = context.acting_identity});
+                if (!task) {
+                    co_return ApiResult::failure(task.error().code, task.error().message);
                 }
-                json answer = std::move(**reply);
-                answer["agent"] = agent;
-                // A Project Agent proposal is kept for the person to review on the pipeline page,
-                // where it is applied only on their confirmation (lake#249).
-                if (const json proposal = answer.value("result", json::object())
-                                              .value("proposal", json());
-                    agent == "agent-project" && proposal.is_object() &&
-                    !context.acting_user_id.empty() && context.store != nullptr) {
-                    const std::string review = control::new_uuid_v4();
-                    auto kept = context.store->append_ask_message(
-                        control::AskMessage{.conversation_id = review,
-                                            .customer_id = customer_id,
-                                            .user_id = context.acting_user_id,
-                                            .role = "assistant",
-                                            .content = answer["result"].value("reply", std::string()),
-                                            .payload = {{"proposal", proposal}}});
-                    if (kept) {
-                        answer["review_url"] =
-                            "/design/pipeline?customer_id=" + customer_id + "&project=" +
-                            oauth_url_encode(proposal.value("project", std::string())) + "&graph=" +
-                            oauth_url_encode(proposal.value("graph", std::string())) +
-                            "&proposal=" + review;
-                    }
-                }
-                co_return answer.value("ok", false)
-                    ? ApiResult::success(std::move(answer))
-                    : ApiResult::failure("engine_error",
-                                         answer.value("error", std::string("the agent failed")));
+                // A publish that fails is not the caller's failure: the task is recorded, and
+                // lake's bus loop publishes an unclaimed task again.
+                static_cast<void>(co_await context.agent_bus->publish_task(*task));
+                co_return ApiResult::success(task_json(*task));
             }
 
             auto record =
@@ -2393,9 +3254,292 @@ json workspace_openapi(const json& document, std::string_view base) {
     return filtered;
 }
 
+// Agent traffic over Zetta pub/sub (docs/api/agent-bus.md, lake#269). The first three are the
+// library agents' side, each agent authenticated by its own bus credential; receive_agent_events
+// is for anyone who may read the task.
+namespace {
+// True when the caller is that library agent, by its own bus credential.
+bool agent_service(const ApiContext& context, const json& input) {
+    return context.credential_kind == "agent_service" && !context.agent_service.empty() &&
+           input.value("agent", std::string()) == context.agent_service;
+}
+
+// The bus's agent side is authorized by the service token, not by policy; this names the
+// object for the audit trail.
+std::expected<std::string, ApiError> agent_bus_object(const json&, ApiContext&) {
+    return std::string("agent_bus");
+}
+
+ApiResult not_agent_service() {
+    return ApiResult::failure("unauthorized",
+                              "only that library agent, with its own bus credential, may call this");
+}
+
+// Replaces every "{{credential}}" string in a task body.
+void fill_credential(json& value, const std::string& credential) {
+    if (value.is_string() && value.get<std::string>() == "{{credential}}") {
+        value = credential;
+    } else if (value.is_structured()) {
+        for (json& item : value) {
+            fill_credential(item, credential);
+        }
+    }
+}
+
+json bus_wait_schema() {
+    return {{"type", "integer"},
+            {"minimum", 0},
+            {"maximum", 10000},
+            {"description", "long poll: wait up to this many milliseconds for an event"}};
+}
+} // namespace
+
+void register_agent_bus_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "receive_agent_tasks",
+        .title = "Receive agent tasks",
+        .description =
+            "A library agent's inbox (topic agent-tasks.<agent> on lake's Zetta pub/sub): the "
+            "tasks published for it from `from_sequence` on, oldest first, without those "
+            "already claimed. Long-polls up to `wait_ms`. Pass the returned `next_sequence` to "
+            "continue. Only that agent may call it, with its own bus credential.",
+        .input_schema = {{"type", "object"},
+                         {"required", json::array({"agent"})},
+                         {"additionalProperties", false},
+                         {"properties",
+                          {{"agent", {{"type", "string"}}},
+                           {"from_sequence", {{"type", "integer"}, {"minimum", 1}}},
+                           {"wait_ms", bus_wait_schema()}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "agent_bus",
+        .action = "read",
+        .resolve_object = agent_bus_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!agent_service(context, input)) {
+                co_return not_agent_service();
+            }
+            if (context.agent_bus == nullptr || context.store == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the agent bus is not configured on this lake");
+            }
+            const std::string agent = input.at("agent");
+            if (!std::ranges::contains(context.agent_bus->agents(), agent)) {
+                co_return ApiResult::failure("not_found", "no library agent " + agent, "/agent");
+            }
+            const std::uint64_t from = input.value("from_sequence", std::uint64_t{1});
+            auto batch = control::settled(co_await context.agent_bus->bus().receive(
+                control::agent_tasks_topic(agent),
+                from,
+                100,
+                std::chrono::milliseconds(input.value("wait_ms", 0))));
+            if (!batch) {
+                co_return ApiResult::failure("store_unavailable", batch.error().message);
+            }
+            json tasks = json::array();
+            for (const control::BusEvent& event : batch->events) {
+                auto task = context.store->get_agent_task(event.correlation_id);
+                if (!task || !task->phase.empty() || task->desired != "present") {
+                    continue;
+                }
+                tasks.push_back({{"sequence", event.sequence},
+                                 {"task_id", task->id},
+                                 {"customer_id", task->customer_id},
+                                 {"kind", task->kind}});
+            }
+            co_return ApiResult::success(
+                {{"tasks", std::move(tasks)}, {"next_sequence", batch->next_sequence}});
+        }});
+    registry.add(Capability{
+        .name = "claim_agent_task",
+        .title = "Claim an agent task",
+        .description =
+            "A library agent takes one task it received: exactly one claim succeeds (another is "
+            "a conflict). Answers the task's body with the task's own credential in it, handed "
+            "over this once; lake keeps only its SHA-256. Only that agent may call it, with "
+            "its own bus credential.",
+        .input_schema = {{"type", "object"},
+                         {"required", json::array({"task_id", "agent"})},
+                         {"additionalProperties", false},
+                         {"properties",
+                          {{"task_id", {{"type", "string"}}}, {"agent", {{"type", "string"}}}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "agent_bus",
+        .action = "write",
+        .resolve_object = agent_bus_object,
+        .handler = [](const json& input, ApiContext& context) {
+            if (!agent_service(context, input)) {
+                return not_agent_service();
+            }
+            if (context.store == nullptr) {
+                return unavailable();
+            }
+            const std::string task_id = input.at("task_id");
+            const std::string credential = std::string(control::agent_task_credential_prefix) +
+                                           task_id + "." +
+                                           control::identity_crypto::random_secret();
+            // Where its events will start on agent-events, so following it never reads the
+            // topic's whole history (lake#275).
+            auto task = context.store->claim_agent_task(
+                task_id,
+                input.at("agent"),
+                control::identity_crypto::sha256_hex(credential),
+                context.agent_bus ? context.agent_bus->cursor() : 0);
+            if (!task) {
+                return ApiResult::failure(task.error().code, task.error().message, "/task_id");
+            }
+            json body = task->body;
+            fill_credential(body, credential);
+            context.audit_customer_id = task->customer_id;
+            context.audit_object = "agent_task/" + task->id;
+            return ApiResult::success({{"task_id", task->id},
+                                       {"customer_id", task->customer_id},
+                                       {"agent", task->agent},
+                                       {"kind", task->kind},
+                                       {"deadline_seconds", task->deadline_seconds},
+                                       {"body", std::move(body)}});
+        }});
+    registry.add(Capability{
+        .name = "publish_agent_event",
+        .title = "Publish an agent event",
+        .description =
+            "A library agent reports on a task it claimed, on topic agent-events: `progress` "
+            "(a message while it works), `result` (its answer, which finishes the task) or "
+            "`failed`. Lake applies it to the task. Only that agent may call it, with its own "
+            "bus credential, and only for a task it claimed that has not finished.",
+        .input_schema = {{"type", "object"},
+                         {"required", json::array({"task_id", "agent", "type"})},
+                         {"additionalProperties", false},
+                         {"properties",
+                          {{"task_id", {{"type", "string"}}},
+                           {"agent", {{"type", "string"}}},
+                           {"type",
+                            {{"type", "string"},
+                             {"enum", json::array({"progress", "result", "failed"})}}},
+                           {"message", {{"type", "string"}}},
+                           {"result", {{"type", "object"}}}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "agent_bus",
+        .action = "write",
+        .resolve_object = agent_bus_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!agent_service(context, input)) {
+                co_return not_agent_service();
+            }
+            if (context.agent_bus == nullptr || context.store == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the agent bus is not configured on this lake");
+            }
+            const std::string task_id = input.at("task_id");
+            auto task = context.store->get_agent_task(task_id);
+            if (!task || task->agent != input.at("agent").get<std::string>() ||
+                task->phase != "Running") {
+                co_return ApiResult::failure(
+                    "conflict", "the task is not running on this agent", "/task_id");
+            }
+            json event = input;
+            auto published = control::settled(co_await context.agent_bus->bus().publish(
+                std::string(control::agent_events_topic), std::move(event), task_id));
+            if (!published) {
+                co_return ApiResult::failure("store_unavailable", published.error().message);
+            }
+            co_return ApiResult::success({{"event_id", *published}});
+        }});
+    registry.add(Capability{
+        .name = "receive_agent_events",
+        .title = "Follow an agent turn live",
+        .description =
+            "What the agent of one background turn has published (topic agent-events on lake's "
+            "Zetta pub/sub): progress messages and its result, from `from_sequence` on, "
+            "long-polling up to `wait_ms`. Always answers the task as it stands (as "
+            "get_agent_task); pass `next_sequence` to continue.",
+        .input_schema = customer_input_schema({{"task_id", {{"type", "string"}}},
+                                               {"from_sequence", {{"type", "integer"}, {"minimum", 1}}},
+                                               {"wait_ms", bus_wait_schema()}},
+                                              json::array({"task_id"})),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (context.store == nullptr) {
+                co_return unavailable();
+            }
+            const std::string task_id = input.at("task_id");
+            const auto owned = [&](const control::Result<control::AgentTask>& task) {
+                return task && task->customer_id == input.at("customer_id").get<std::string>() &&
+                       (task->requested_by_user_id == context.acting_user_id ||
+                        context.acting_identity == "admin");
+            };
+            if (!owned(context.store->get_agent_task(task_id))) {
+                co_return ApiResult::failure("not_found", "no such task in this space");
+            }
+            if (context.agent_bus == nullptr) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the agent bus is not configured on this lake");
+            }
+            // Never before the task's own first event (lake#275): the topic only grows.
+            std::uint64_t next = std::max(input.value("from_sequence", std::uint64_t{1}),
+                                          context.store->get_agent_task(task_id)->events_from);
+            const auto until = std::chrono::steady_clock::now() +
+                               std::chrono::milliseconds(input.value("wait_ms", 0));
+            json events = json::array();
+            // Other tasks' events share the topic: read past them until one of this task's
+            // arrives or the wait is over.
+            for (int page = 0; page < 50; ++page) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    until - std::chrono::steady_clock::now());
+                auto batch = control::settled(co_await context.agent_bus->bus().receive(
+                    std::string(control::agent_events_topic),
+                    next,
+                    1000,
+                    std::max(left, std::chrono::milliseconds(0))));
+                if (!batch) {
+                    co_return ApiResult::failure("store_unavailable", batch.error().message);
+                }
+                for (const control::BusEvent& event : batch->events) {
+                    if (event.correlation_id != task_id || !event.payload.is_object()) {
+                        continue;
+                    }
+                    json row{{"sequence", event.sequence},
+                             {"type", event.payload.value("type", std::string())},
+                             {"message", event.payload.value("message", std::string())}};
+                    if (event.payload.contains("result")) {
+                        row["result"] = event.payload["result"];
+                    }
+                    events.push_back(std::move(row));
+                }
+                const bool moved = batch->next_sequence > next;
+                next = std::max(next, batch->next_sequence);
+                if (!events.empty() || (!moved && std::chrono::steady_clock::now() >= until)) {
+                    break;
+                }
+            }
+            auto task = context.store->get_agent_task(task_id);
+            if (!task) {
+                co_return ApiResult::failure(task.error().code, task.error().message);
+            }
+            settle_discover(context, *task);
+            static_cast<void>(co_await settle_build(context, *task));
+            co_return ApiResult::success({{"events", std::move(events)},
+                                          {"next_sequence", next},
+                                          {"task", task_json(*task)}});
+        }});
+}
+
 void register_workspace_capabilities(Registry& registry) {
     register_agent_run_capabilities(registry);
     register_agent_flow_capabilities(registry);
+    register_agent_bus_capabilities(registry);
     register_sql_capability(registry);
     register_pipeline_capabilities(registry);
     register_parity_capabilities(registry);

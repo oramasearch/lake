@@ -1,3 +1,43 @@
+# Design → Opportunities
+
+**Updated 2026-09-27 (lake#269):** Discover became **Design → Opportunities** (`/design/opportunities`;
+`/design/discover` still answers). *Scan my workspace* is a background Auto-Suggest turn
+(`agent_turn`, kind `discover`); the page follows it and the Opportunities it recommends (and the
+ones it declines, *Not yet*) are **kept** as rows of `opportunities`, across scans. Each can become a
+project draft (`create_projects_from_opportunities {opportunity_ids}`, on confirmation) or be dismissed
+(`dismiss_opportunity`). `list_opportunities {task_id?}` reads them over REST and MCP. Each names the
+catalogue solution it maps to; the catalogue itself in lake is lake#270.
+
+**A project made from an Opportunity gets its pipeline.** Creating the project starts a Project
+Agent task in the background (kind `build:<project>`), briefed with the Opportunity: its intent, what
+it changes, why the data supports it, its catalogue solution and methodology. The agent reads the
+workspace and answers a design (the dataset, the label, the features, the model and the hold-out),
+never a change. The project's page says *The Project Agent is designing this project's pipeline…*
+while it works. Once it is done, reading the task (the project page, `get_agent_task`,
+`receive_agent_events`) applies the design, once: Zetta compiles a pipeline from a project's intent
+when the project is created, so the project's first unapproved pipeline is pointed at the design's
+table (`dataset`, else the first of `training_sources`), its other connect steps removed, and its
+model step given the design's `target` (label) and `algo` (model kind). A project with no pipeline
+is compiled from the design first, exactly as *Build a Pipeline* does. A pipeline that already reads
+the design's table is left alone. A design that cannot be compiled, or a failed task, is
+said on the page, with *Build a Pipeline* still there. `create_projects_from_opportunities` answers
+the tasks as `builds`. Verify: `HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnConfirmation`.
+
+**Each project gets the methodology its Opportunity needs (lake#289).** lake resolves the Opportunity's methodology against the engine's `list_methodologies`: an `M-n` written in its `methodology`, else the methodology that serves its catalogue `solution`.
+
+- **It runs:** the project is created without an intent, so the engine compiles no skeleton, and its pipeline is compiled with `compile_intent {methodology}`. The Project Agent's design is applied to it.
+- **It does not run yet:** the project is created with no pipeline, and its description says so. It is answered in `waiting: [{project, methodology, name, issue, message}]`, and no build starts.
+- **`settle_build`** uses the design's methodology, else the Opportunity's. A design whose methodology does not run is refused with `not_supported`, shown on the project page. A pipeline of another methodology's shape (the old churn skeleton) gets a new pipeline compiled with the right one instead of being repointed.
+- **On the page:** each Opportunity card says *Runs today: <name> (M-n)* or *Needs M-n, not supported yet (zetta#…)*. The project page's pipelines show their methodology, or *Trains nothing yet*. A pipeline that cannot train says so at the top of its page. *Build a Pipeline* offers the methodologies that run.
+- Verify: `WorkspaceAgents` in `tests/test_workspaces.cpp` (lake#289 block).
+
+**The latest scan is the recommendation (lake#287).** *Recommended* lists the newest scan's
+Opportunities. What earlier scans recommended and nobody acted on folds under *Earlier scans (N)* in the
+same form, where it can still be picked or dismissed; *Not yet* is the newest scan's. Nothing is
+deleted or rewritten: the grouping is decided when the page is drawn, and everything a person acted on
+(made into a project, dismissed) keeps its own section. `list_opportunities` still returns every row,
+each with its `task_id`. Verify: `WebUi.TheLatestScanIsTheRecommendationAndEarlierOnesFold`.
+
 # Discover Opportunities
 
 **Status: implemented 2026-09-27 (lake#237, epic lake#228).** Design's *Discover Opportunities*

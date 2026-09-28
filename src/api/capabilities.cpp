@@ -12,6 +12,8 @@
 #include <string>
 #include <string_view>
 
+#include <openssl/evp.h>
+
 #include "lake/audit/audit.hpp"
 
 #include "lake/api/apps.hpp"
@@ -103,19 +105,65 @@ ApiResult from_sync_store_error(const SyncStoreError& error) {
     return ApiResult::failure(error.code, error.message);
 }
 
-std::expected<control::Repository, ApiError> readable_repository(const json& input,
-                                                                 ApiContext& context) {
+std::string repository_input_value(const json& input,
+                                   std::string_view canonical,
+                                   std::string_view builder_name) {
+    const std::string canonical_value = input.value(std::string(canonical), "");
+    const std::string builder_value = input.value(std::string(builder_name), "");
+    if (!canonical_value.empty() && !builder_value.empty() && canonical_value != builder_value) {
+        return {};
+    }
+    return canonical_value.empty() ? builder_value : canonical_value;
+}
+
+std::expected<std::string, ApiError> repository_content_object(const json& input,
+                                                               ApiContext& context) {
+    const std::string id = repository_input_value(input, "id", "repository");
+    if (id.empty()) {
+        return std::unexpected(
+            ApiError{"invalid_input", "id or repository is required", "/repository"});
+    }
+    if (context.store == nullptr) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto object = context.store->find_policy_object("repository", id);
+    if (!object) {
+        return std::unexpected(
+            ApiError{object.error().code, object.error().message, "/repository"});
+    }
+    context.audit_object = object->id;
+    return object->id;
+}
+
+std::expected<control::Repository, ApiError>
+readable_repository(const json& input, ApiContext& context, bool revision_required = false) {
     if (!context.store) {
         return std::unexpected(
             ApiError{"store_unavailable", "no control-plane store is configured", {}});
     }
-    const auto repository = context.store->get_repository(input.at("id"));
+    const std::string id = repository_input_value(input, "id", "repository");
+    const std::string ref = repository_input_value(input, "ref", "revision");
+    if (id.empty() || (revision_required && ref.empty())) {
+        return std::unexpected(ApiError{"invalid_input",
+                                        revision_required ? "repository and revision are required"
+                                                          : "repository is required",
+                                        id.empty() ? "/repository" : "/revision"});
+    }
+    const auto repository = context.store->get_repository(id);
     if (!repository) {
         return std::unexpected(
             ApiError{repository.error().code, repository.error().message, "/id"});
     }
     if (!context.authorized && repository->visibility != "public") {
         return std::unexpected(ApiError{"unauthorized", "the repository is not public", "/id"});
+    }
+    if (context.authorized &&
+        (context.credential_kind == "app_source" || context.credential_kind == "build_source") &&
+        repository->id == context.credential_repository_id &&
+        repository->customer_id == context.credential_customer_id &&
+        ref == context.credential_revision) {
+        return *repository;
     }
     if (context.authorized) {
         const auto object = context.store->find_policy_object("repository", repository->id);
@@ -255,8 +303,26 @@ json repository_tree_entry_json(const RepositoryTreeEntry& entry) {
 }
 
 json repository_file_json(const RepositoryFile& file) {
-    return {
-        {"path", file.path}, {"blob", file.blob}, {"contents", file.contents}, {"size", file.size}};
+    std::span<const std::byte> bytes = file.raw_contents;
+    std::vector<std::byte> text_bytes;
+    if (bytes.empty() && !file.contents.empty()) {
+        text_bytes.reserve(file.contents.size());
+        std::ranges::transform(file.contents, std::back_inserter(text_bytes), [](char byte) {
+            return static_cast<std::byte>(byte);
+        });
+        bytes = text_bytes;
+    }
+    std::string encoded((bytes.size() + 2) / 3 * 4, '\0');
+    if (!bytes.empty()) {
+        EVP_EncodeBlock(reinterpret_cast<unsigned char*>(encoded.data()),
+                        reinterpret_cast<const unsigned char*>(bytes.data()),
+                        static_cast<int>(bytes.size()));
+    }
+    return {{"path", file.path},
+            {"blob", file.blob},
+            {"contents", file.contents},
+            {"content_base64", std::move(encoded)},
+            {"size", file.size}};
 }
 
 json repository_change_json(const RepositoryChange& change) {
@@ -3278,18 +3344,21 @@ void register_repository_capabilities(Registry& registry) {
         .description = "Every tree entry at one libliquid ref.",
         .input_schema = {{"type", "object"},
                          {"properties",
-                          {{"id", {{"type", "string"}}}, {"ref", {{"type", "string"}}}}},
-                         {"required", json::array({"id", "ref"})},
+                          {{"id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"repository", {{"type", "string"}}},
+                           {"revision", {{"type", "string"}}},
+                           {"recursive", {{"type", "boolean"}}}}},
                          {"additionalProperties", false}},
         .output_schema = list_schema(repository_tree_entry_schema()),
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",
-        .resolve_object = entity_object("repository", "id"),
+        .resolve_object = repository_content_object,
         .authorizes_candidates = true,
         .allows_anonymous_public_read = true,
         .handler = [](const json& in, ApiContext& ctx) {
-            const auto repository = readable_repository(in, ctx);
+            const auto repository = readable_repository(in, ctx, true);
             if (!repository) {
                 return ApiResult::failure(
                     repository.error().code, repository.error().message, repository.error().path);
@@ -3298,51 +3367,56 @@ void register_repository_capabilities(Registry& registry) {
                 return no_repository_store();
             }
             return repository_content_list_result(
-                ctx.sync_store->repository_tree(
-                    repository->customer_id, repository->id, in.at("ref").get<std::string>()),
+                ctx.sync_store->repository_tree(repository->customer_id,
+                                                repository->id,
+                                                repository_input_value(in, "ref", "revision")),
                 repository_tree_entry_json);
         }});
-    registry.add(Capability{
-        .name = "repository_file",
-        .title = "Read a repository file",
-        .description = "One file and the blob backing it at a libliquid ref.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"id", {{"type", "string"}}},
-                           {"ref", {{"type", "string"}}},
-                           {"path", {{"type", "string"}}}}},
-                         {"required", json::array({"id", "ref", "path"})},
-                         {"additionalProperties", false}},
-        .output_schema = {{"type", "object"},
-                          {"properties",
-                           {{"path", {{"type", "string"}}},
-                            {"blob", {{"type", "string"}}},
-                            {"contents", {{"type", "string"}}},
-                            {"size", {{"type", "integer"}}}}}},
-        .kind = CapabilityKind::Read,
-        .object = "repository",
-        .action = "read",
-        .resolve_object = entity_object("repository", "id"),
-        .authorizes_candidates = true,
-        .allows_anonymous_public_read = true,
-        .handler = [](const json& in, ApiContext& ctx) {
-            const auto repository = readable_repository(in, ctx);
-            if (!repository) {
-                return ApiResult::failure(
-                    repository.error().code, repository.error().message, repository.error().path);
-            }
-            if (!ctx.sync_store) {
-                return no_repository_store();
-            }
-            const auto file = ctx.sync_store->repository_file(repository->customer_id,
-                                                              repository->id,
-                                                              in.at("ref").get<std::string>(),
-                                                              in.at("path").get<std::string>());
-            if (!file) {
-                return from_sync_store_error(file.error());
-            }
-            return ApiResult::success(repository_file_json(*file));
-        }});
+    registry.add(Capability{.name = "repository_file",
+                            .title = "Read a repository file",
+                            .description = "One file and the blob backing it at a libliquid ref.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties",
+                                              {{"id", {{"type", "string"}}},
+                                               {"ref", {{"type", "string"}}},
+                                               {"repository", {{"type", "string"}}},
+                                               {"revision", {{"type", "string"}}},
+                                               {"path", {{"type", "string"}}}}},
+                                             {"required", json::array({"path"})},
+                                             {"additionalProperties", false}},
+                            .output_schema = {{"type", "object"},
+                                              {"properties",
+                                               {{"path", {{"type", "string"}}},
+                                                {"blob", {{"type", "string"}}},
+                                                {"contents", {{"type", "string"}}},
+                                                {"content_base64", {{"type", "string"}}},
+                                                {"size", {{"type", "integer"}}}}}},
+                            .kind = CapabilityKind::Read,
+                            .object = "repository",
+                            .action = "read",
+                            .resolve_object = repository_content_object,
+                            .authorizes_candidates = true,
+                            .allows_anonymous_public_read = true,
+                            .handler = [](const json& in, ApiContext& ctx) {
+                                const auto repository = readable_repository(in, ctx, true);
+                                if (!repository) {
+                                    return ApiResult::failure(repository.error().code,
+                                                              repository.error().message,
+                                                              repository.error().path);
+                                }
+                                if (!ctx.sync_store) {
+                                    return no_repository_store();
+                                }
+                                const auto file = ctx.sync_store->repository_file(
+                                    repository->customer_id,
+                                    repository->id,
+                                    repository_input_value(in, "ref", "revision"),
+                                    in.at("path").get<std::string>());
+                                if (!file) {
+                                    return from_sync_store_error(file.error());
+                                }
+                                return ApiResult::success(repository_file_json(*file));
+                            }});
     registry.add(Capability{
         .name = "list_changes",
         .title = "List repository changes",
@@ -4588,6 +4662,8 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_application_capabilities(registry);
     register_agent_capabilities(registry);
     register_platform_capabilities(registry);
+    register_web_app_capabilities(registry);
+    register_build_capabilities(registry);
     register_workspace_capabilities(registry);
 }
 

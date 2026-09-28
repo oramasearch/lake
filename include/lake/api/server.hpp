@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include <cstddef>
 #include <memory>
 #include <string>
 
@@ -15,6 +16,7 @@ class Store;
 class PlatformService;
 class WorkspaceService;
 class AgentCaller;
+class AgentTaskBus;
 } // namespace lake::control
 namespace lake::control::callers {
 class TokenReviewer;
@@ -59,6 +61,14 @@ struct ServerOptions {
     bool allow_non_expiring_credentials = true;
     // Talks to agent services (lake#231); tests inject a double, main the HTTP caller.
     std::shared_ptr<control::AgentCaller> agent_caller;
+    // The agent bus (docs/api/agent-bus.md): agent turns are published and followed on it.
+    std::shared_ptr<control::AgentTaskBus> agent_bus;
+    // Ship Apps wildcard and per-space quotas. Zero quotas mean no limit.
+    std::string apps_wildcard;
+    std::size_t apps_per_customer = 0;
+    std::size_t app_replicas_per_customer = 0;
+    // In-cluster Service URL used in build registry targets (LAKE_INTERNAL_URL).
+    std::string internal_url;
     // The admin bearer token (LAKE_ADMIN_TOKEN). Empty = every capability except
     // server_info refuses with unauthorized.
     std::string admin_token;

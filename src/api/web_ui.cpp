@@ -1,5 +1,6 @@
 #include "lake/api/web_ui.hpp"
 
+#include "lake/api/capabilities.hpp"
 #include "lake/api/markdown.hpp"
 
 #include <algorithm>
@@ -250,13 +251,21 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view shared[] = {"/shared-with-me", "/share"};
     static constexpr std::string_view search[] = {"/search"};
     static constexpr std::string_view deployments[] = {"/deployments"};
-    static constexpr std::string_view projects[] = {"/design"};
+    // Each Design page owns its own routes; Projects keeps the bare /design and its detail pages.
+    static constexpr std::string_view projects[] = {
+        "/design/projects", "/design/project", "/design/pipeline"};
+    static constexpr std::string_view opportunities[] = {"/design/opportunities", "/design/discover"};
+    static constexpr std::string_view solutions[] = {"/design/solutions", "/design/solution"};
+    static constexpr std::string_view methodologies[] = {"/design/methodologies",
+                                                         "/design/methodology"};
+    static constexpr std::string_view agent_library[] = {"/design/agent-library"};
     static constexpr std::string_view agents[] = {"/train/agents", "/train/agent"};
     static constexpr std::string_view data[] = {"/train/data", "/train/dataset", "/train/query"};
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
     static constexpr std::string_view models[] = {"/ship/models"};
     static constexpr std::string_view indexes[] = {"/ship/indexes", "/ship/index"};
     static constexpr std::string_view packages[] = {"/ship/packages"};
+    static constexpr std::string_view apps[] = {"/ship/apps", "/ship/app"};
     static constexpr std::string_view services[] = {"/services"};
     static constexpr std::string_view activity[] = {"/activity"};
     static constexpr std::string_view customers[] = {"/customers"};
@@ -288,6 +297,14 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return deployments;
     if (key == "projects")
         return projects;
+    if (key == "opportunities")
+        return opportunities;
+    if (key == "solutions")
+        return solutions;
+    if (key == "methodologies")
+        return methodologies;
+    if (key == "agent library")
+        return agent_library;
     if (key == "agents")
         return agents;
     if (key == "data")
@@ -302,6 +319,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return services;
     if (key == "packages")
         return packages;
+    if (key == "apps")
+        return apps;
     if (key == "activity")
         return activity;
     if (key == "customers")
@@ -324,6 +343,10 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
 bool route_owns(std::string_view path, std::string_view route) {
     if (route == "/") {
         return path == "/";
+    }
+    // The bare Design stage link lands on Projects.
+    if (route == "/design/projects" && path == "/design") {
+        return true;
     }
     return path == route ||
            (path.starts_with(route) && path.size() > route.size() && path[route.size()] == '/');
@@ -411,8 +434,6 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
                                 viewer.signed_in ? "Repositories" : "Public Repositories",
                                 "repository",
                                 "repositories"}};
-    // The Docs section (lake#252) is for everyone, signed in or not.
-    items.push_back({"", "/docs", "Docs", "docs", "docs"});
     if (viewer.signed_in) {
         if (!viewer.administrator) {
             items.push_back(
@@ -420,12 +441,19 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         }
         items.push_back({"", "/search", "Search", "search", "search"});
         items.push_back({"Design", "/design/projects", "Projects", "audit", "projects"});
+        items.push_back(
+            {"Design", "/design/opportunities", "Opportunities", "search", "opportunities"});
+        items.push_back({"Design", "/design/solutions", "Solutions", "audit", "solutions"});
+        items.push_back(
+            {"Design", "/design/methodologies", "Methodologies", "metering", "methodologies"});
+        items.push_back({"Design", "/design/agent-library", "Agent Library", "agent", "agent library"});
         items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
         items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
         items.push_back({"Ship", "/ship/models", "Models", "api", "models"});
         items.push_back({"Ship", "/ship/indexes", "Search Indexes", "search", "indexes"});
         items.push_back({"Ship", "/ship/packages", "Packages", "repository", "packages"});
+        items.push_back({"Ship", "/ship/apps", "Apps", "api", "apps"});
         items.push_back({"Ship", "/deployments", "Deployments", "api", "deployments"});
         items.push_back({"Ship", "/services", "Services", "api", "services"});
     }
@@ -451,6 +479,8 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Developer", "/v1/openapi.json", "API", "api", "api"});
         items.push_back({"Developer", "/developer/mcp", "MCP", "api", "mcp"});
     }
+    // The Docs section (lake#252), last under Developer, is for everyone, signed in or not.
+    items.push_back({"Developer", "/docs", "Docs", "docs", "docs"});
     return items;
 }
 
@@ -1378,6 +1408,21 @@ std::string web_ui_repository(const control::Repository& repository,
                                web_ui_escape(repository.deleted_at),
                                web_ui_escape(repository.retention_until));
     }
+    if (viewer.signed_in && repository.deleted_at.empty()) {
+        content += std::format(
+            "<section class=\"panel\"><div class=\"section-heading\"><div><h2>Build image</h2>"
+            "<p class=\"muted\">Queue an in-cluster build from this repository.</p></div>"
+            "<form method=\"post\" action=\"/repository/build\">"
+            "<input type=\"hidden\" name=\"customer_id\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"repository\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"revision\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"target\" value=\"{}:latest\">"
+            "<button class=\"primary\" type=\"submit\">Build image</button></form></div></section>",
+            web_ui_escape(repository.customer_id),
+            web_ui_escape(repository.id),
+            web_ui_escape(default_ref),
+            web_ui_escape(repository.name));
+    }
     content +=
         "<section class=\"panel repository-browser\"><div class=\"section-heading\">"
         "<div><h2>Files</h2><p class=\"muted\">The published tree at <code>" +
@@ -1617,7 +1662,7 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 15> workspace_sections{{
+constexpr std::array<WorkspaceSection, 22> workspace_sections{{
     {"projects",
      "Design",
      "Projects",
@@ -1626,11 +1671,32 @@ constexpr std::array<WorkspaceSection, 15> workspace_sections{{
      "will measure it. Its pipelines are built from that intent."},
     {"discover",
      "Design",
-     "Discover Opportunities",
-     "/design/projects",
-     "Not sure where to start? Auto-Suggest studies the data your workspace can reach and "
-     "recommends what you could build from it. It reads only your approved data and never "
-     "changes it."},
+     "Opportunities",
+     "/design/opportunities",
+     "What your data could be used for. Auto-Suggest reads the data your workspace can reach and "
+     "recommends what to build, from Orama's solutions catalogue; it never changes your data. "
+     "Turn an Opportunity into a project, or dismiss it."},
+    {"solutions",
+     "Design",
+     "Solutions",
+     "/design/solutions",
+     "Orama's solutions catalogue: each module answers one business problem end to end, from the "
+     "methodologies it composes to the decision it drives and how its return is measured. Start "
+     "one and it becomes a project in your workspace."},
+    {"solution", "Design", "Solution", "/design/solutions", ""},
+    {"methodologies",
+     "Design",
+     "Methodologies",
+     "/design/methodologies",
+     "The modelling methods your workspace's engine knows: what each needs, what it makes, how it "
+     "is measured, and whether it runs here today. Solutions compose them."},
+    {"methodology", "Design", "Methodology", "/design/methodologies", ""},
+    {"library",
+     "Design",
+     "Agent Library",
+     "/design/agent-library",
+     "Agents Orama provides, each for one job. Use them where they appear, or ask Orama and it "
+     "brings in the right one."},
     {"project", "Design", "Project", "/design/projects", ""},
     {"pipeline",
      "Design",
@@ -1678,6 +1744,12 @@ constexpr std::array<WorkspaceSection, 15> workspace_sections{{
      "/ship/indexes",
      "Search it here, publish it, and call it from your own code with a key that can only "
      "search."},
+    {"apps",
+     "Ship",
+     "Apps",
+     "/ship/apps",
+     "Create, deploy and operate customer applications with live rollout status."},
+    {"app", "Ship", "App", "/ship/apps", ""},
     {"services",
      "Ship",
      "Services",
@@ -2434,6 +2506,27 @@ std::string pipeline_content(const WorkspacePage& page) {
                                   : " " + web_ui_escape(graph.approved_at.substr(0, 16)) + " UTC",
         graph.steps.size(),
         graph.edges.size());
+    // What this pipeline trains (lake#289, zetta#1061): an engine with the methodology registry
+    // says which methodology owns its model step, and whether it can run.
+    if (const nlohmann::json read = page.data.value("get_graph", nlohmann::json::object());
+        read.contains("runnable")) {
+        const std::string methodology = json_text(read, "methodology");
+        if (read.value("runnable", false)) {
+            out += "<p class=\"sub\">Trains with <span class=\"badge status-success\">" +
+                   web_ui_escape(methodology.empty() ? std::string("its model step") : methodology) +
+                   "</span></p>";
+        } else {
+            out += "<section class=\"panel notice\" role=\"status\"><h2>This Pipeline Trains "
+                   "Nothing Yet</h2><p>" +
+                   (methodology.empty()
+                        ? std::string("It has no model step the engine can run, so a run only "
+                                      "passes through its steps.")
+                        : "It needs " + web_ui_escape(methodology) +
+                              ", which this workspace's engine does not run yet.") +
+                   " Build a pipeline with a methodology that runs, or ask the Project Agent "
+                   "below to change it.</p></section>";
+        }
+    }
     if (const auto gate = page.data.find("gate"); gate != page.data.end()) {
         out += gate_panel(*gate, "Checks");
     }
@@ -2500,6 +2593,17 @@ std::string pipeline_content(const WorkspacePage& page) {
                                          : std::string()))
                 : std::string(),
             base);
+    }
+
+    if (page.data.value("project_agent_working", false)) {
+        out += "<section class=\"panel notice\" id=\"proposal\" role=\"status\"><p><strong>The "
+               "Project Agent is working on it…</strong> It reads your data and prepares the "
+               "edits; nothing changes until you apply them. This page checks again every 3 "
+               "seconds.</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
+    } else if (!json_text(page.data, "project_agent_error").empty()) {
+        out += "<p class=\"error\" role=\"alert\" id=\"proposal\">The Project Agent did not propose "
+               "a change: " +
+               web_ui_escape(json_text(page.data, "project_agent_error")) + "</p>";
     }
 
     // Ask the Project Agent for a change instead of editing by hand (lake#249).
@@ -3203,7 +3307,10 @@ std::string agent_content(const WorkspacePage& page) {
 // Design > Discover Opportunities (docs/api/discover.md, lake#237): Auto-Suggest's answer as
 // ranked Opportunities, what it declined, and project drafts created only on confirmation.
 std::string discover_content(const WorkspacePage& page) {
+    // Design → Opportunities (lake#269): saved Opportunities, a scan that runs in the background,
+    // and what was done with each.
     std::string out;
+    const std::string query = customer_query(page.customer_id);
     const nlohmann::json library = page.data.value("list_agent_library", nlohmann::json::object());
     bool running = false;
     for (const nlohmann::json& agent : library.value("agents", nlohmann::json::array())) {
@@ -3211,89 +3318,672 @@ std::string discover_content(const WorkspacePage& page) {
             running = agent.value("deployed", false);
         }
     }
-    if (!running) {
-        return "<div class=\"panel empty\">Auto-Suggest is not running on this lake yet, so "
-               "Discover Opportunities is not available. Create a project from your own goal "
-               "instead.</div>";
-    }
-    const nlohmann::json answer = page.data.value("autosuggest", nlohmann::json());
-    if (!json_text(page.data, "scan_error").empty()) {
+    const nlohmann::json task = page.data.value("task", nlohmann::json::object());
+    const std::string status = json_text(task, "status");
+    const bool scanning = status == "pending" || status == "running";
+    if (scanning) {
+        out += "<section class=\"panel notice\" role=\"status\"><p><strong>Scanning your "
+               "workspace…</strong> Auto-Suggest is reading your datasets and matching them to "
+               "the solutions catalogue. You can leave this page; the Opportunities are kept "
+               "when it finishes. This page checks again every 3 seconds.</p><meta "
+               "http-equiv=\"refresh\" content=\"3\"></section>";
+    } else if (status == "failed") {
         out += std::format("<p class=\"error\" role=\"alert\">The scan did not finish: {}</p>",
-                           web_ui_escape(json_text(page.data, "scan_error")));
+                           web_ui_escape(json_text(task, "message")));
     }
-    if (!answer.is_object()) {
-        return out +
-               std::format(
-                   "<section class=\"panel\"><h2>Scan Your Workspace</h2><p>Auto-Suggest reads "
-                   "your "
-                   "workspace's datasets and their columns: reading approved sources, measuring "
-                   "coverage, checking suitability, preparing recommendations. It takes a minute "
-                   "and "
-                   "changes nothing.</p><form method=\"post\" "
-                   "action=\"/design/discover/scan\">{}<button "
-                   "class=\"button button-primary\" type=\"submit\">Scan my "
-                   "workspace</button></form>"
-                   "</section>",
-                   hidden("customer_id", page.customer_id));
-    }
-    const nlohmann::json profile = answer.value("result", nlohmann::json::object())
-                                       .value("project_profile", nlohmann::json::object());
-    const nlohmann::json suggested = profile.value("suggested", nlohmann::json::array());
-    const nlohmann::json declined = profile.value("declined", nlohmann::json::array());
-    out += "<section class=\"panel\"><h2>Recommended Opportunities</h2>";
-    if (suggested.empty()) {
-        out += "<p>Auto-Suggest found nothing your data supports yet.</p>";
-    } else {
-        std::string cards;
-        for (std::size_t index = 0; index < suggested.size(); ++index) {
-            const nlohmann::json& item = suggested[index];
-            std::string first;
-            for (const nlohmann::json& step :
-                 item.value("required_first", nlohmann::json::array())) {
-                first += (first.empty() ? "" : "; ") +
-                         (step.is_string() ? step.get<std::string>() : step.dump());
-            }
-            cards += std::format(
-                "<article class=\"panel ask-proposal\"><label><input type=\"checkbox\" "
-                "name=\"pick\" value=\"{}\"> <strong>{}</strong></label><p class=\"sub\">{} · "
-                "{}</p><p>{}</p>{}{}</article>",
-                index,
-                web_ui_escape(json_text(item, "intent")),
-                web_ui_escape(json_text(item, "solution")),
-                web_ui_escape(json_text(item, "methodology")),
-                web_ui_escape(json_text(item, "why_this_data_supports_it")),
-                first.empty() ? std::string()
-                              : "<p><strong>First:</strong> " + web_ui_escape(first) + "</p>",
-                json_text(item, "business_action").empty()
-                    ? std::string()
-                    : "<p><strong>What it changes:</strong> " +
-                          web_ui_escape(json_text(item, "business_action")) + "</p>");
+    const nlohmann::json rows = page.data.value("list_opportunities", nlohmann::json::object())
+                                    .value("opportunities", nlohmann::json::array());
+    // The newest scan's Opportunities are the recommendation; what earlier scans recommended and
+    // nobody acted on is kept, collapsed, so each idea is not listed once per scan (lake#287).
+    std::string last_scan, latest_task;
+    for (const nlohmann::json& row : rows) {
+        if (json_text(row, "created_at") > last_scan) {
+            last_scan = json_text(row, "created_at");
+            latest_task = json_text(row, "task_id");
         }
+    }
+    if (!running) {
+        out += "<div class=\"panel empty\">Auto-Suggest is not running on this lake, so a new "
+               "scan is not available.</div>";
+    } else if (!scanning) {
         out += std::format(
-            "<form class=\"stack\" method=\"post\" action=\"/design/discover/create\">{}{}{}"
-            "<label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> Create a "
-            "project draft for each selected Opportunity. Nothing runs until you approve a "
-            "plan.</label><button class=\"button button-primary\" type=\"submit\">Create project "
-            "drafts</button></form>",
+            "<section class=\"panel\"><h2>Scan Your Workspace</h2><p>{}</p><form method=\"post\" "
+            "action=\"/design/opportunities/scan\">{}<button class=\"button button-primary\" "
+            "type=\"submit\">{}</button></form></section>",
+            last_scan.empty()
+                ? std::string("Auto-Suggest reads your workspace's datasets and their columns and "
+                              "recommends what to build. It runs in the background and changes "
+                              "nothing.")
+                : "Last scanned " + web_ui_escape(last_scan.substr(0, 16)) +
+                      " UTC. Scan again after your data changes; earlier Opportunities stay.",
             hidden("customer_id", page.customer_id),
-            hidden("opportunities", suggested.dump()),
-            cards);
+            last_scan.empty() ? "Scan my workspace" : "Scan again");
     }
-    out += "</section>";
-    if (!declined.empty()) {
-        out += "<section class=\"panel\"><h2>Not Yet</h2><ul>";
-        for (const nlohmann::json& item : declined) {
-            out += std::format("<li><strong>{}</strong>: {} <span class=\"badge\">{}</span></li>",
-                               web_ui_escape(json_text(item, "intent")),
-                               web_ui_escape(json_text(item, "reason")),
-                               web_ui_escape(json_text(item, "answer")));
+    // Whether the engine runs what each Opportunity needs (lake#289, zetta#1061). Absent on an
+    // engine that predates the registry: then no badge.
+    const nlohmann::json methodologies = page.data.value("list_methodologies", nlohmann::json());
+    const auto runs_badge = [&](const nlohmann::json& row) -> std::string {
+        const nlohmann::json entry = lake::api::find_methodology(
+            methodologies, json_text(row, "methodology"), json_text(row, "solution"));
+        if (!entry.is_object()) return {};
+        if (entry.value("runnable", false)) {
+            return "<p><span class=\"badge status-success\">Runs today: " +
+                   web_ui_escape(json_text(entry, "name")) + " (" +
+                   web_ui_escape(json_text(entry, "id")) + ")</span></p>";
         }
-        out += "</ul></section>";
+        return "<p><span class=\"badge status-warning\">Needs " +
+               web_ui_escape(json_text(entry, "id")) + ", not supported yet" +
+               (json_text(entry, "issue").empty()
+                    ? std::string()
+                    : " (" + web_ui_escape(json_text(entry, "issue")) + ")") +
+               "</span></p>";
+    };
+    std::string fresh, earlier, made, later, dismissed;
+    std::size_t earlier_count = 0;
+    for (const nlohmann::json& row : rows) {
+        const std::string state = json_text(row, "status");
+        const std::string id = json_text(row, "id");
+        const nlohmann::json detail = row.value("detail", nlohmann::json::object());
+        const bool current = json_text(row, "task_id") == latest_task;
+        if (state == "new") {
+            earlier_count += current ? 0 : 1;
+            (current ? fresh : earlier) += std::format(
+                "<article class=\"panel ask-proposal\"><label class=\"opportunity-pick\"><input "
+                "type=\"checkbox\" name=\"pick\" value=\"{}\"> <span>{}</span></label><p "
+                "class=\"sub\">{}{}</p>"
+                "{}{}{}<p><button type=\"submit\" formaction=\"/design/opportunities/dismiss\" "
+                "formnovalidate name=\"opportunity_id\" value=\"{}\">Dismiss</button></p></article>",
+                web_ui_escape(id),
+                web_ui_escape(json_text(row, "intent")),
+                json_text(row, "solution").empty()
+                    ? std::string()
+                    : "Catalogue solution " + web_ui_escape(json_text(row, "solution")) + " · ",
+                web_ui_escape(json_text(row, "methodology")),
+                runs_badge(row),
+                // Auto-Suggest writes inline markdown (`table` names); the renderer escapes first.
+                markdown_to_html(json_text(row, "why")),
+                json_text(detail, "business_action").empty()
+                    ? std::string()
+                    : markdown_to_html("**What it changes:** " +
+                                       json_text(detail, "business_action")),
+                web_ui_escape(id));
+        } else if (state == "project") {
+            made += "<li>" + web_ui_escape(json_text(row, "intent")) + " → " +
+                    row_link("/design/project?" + query + "&name=" +
+                                 url_component(json_text(row, "project")),
+                             json_text(row, "project")) +
+                    "</li>";
+        } else if (state == "not_yet" && current) {
+            later += "<li><strong>" + web_ui_escape(json_text(row, "intent")) + "</strong>: " +
+                     web_ui_escape(json_text(row, "why")) + "</li>";
+        } else if (state == "dismissed") {
+            dismissed += "<li>" + web_ui_escape(json_text(row, "intent")) + "</li>";
+        }
+    }
+    if (rows.empty() && !scanning) {
+        out += "<div class=\"panel empty\">No Opportunities yet. Scan your workspace to see what "
+               "your data could be used for.</div>";
+    }
+    if (!fresh.empty() || !earlier.empty()) {
+        out += std::format(
+            "<section class=\"panel\"><h2>Recommended</h2><form class=\"stack\" method=\"post\" "
+            "action=\"/design/opportunities/create\">{}{}{}<label><input type=\"checkbox\" "
+            "name=\"confirm\" value=\"yes\" required> Create a project draft for each selected "
+            "Opportunity. Nothing runs until you approve a plan.</label><button class=\"button "
+            "button-primary\" type=\"submit\">Create project drafts</button></form></section>",
+            hidden("customer_id", page.customer_id),
+            fresh.empty() ? std::string("<p class=\"sub\">The latest scan recommended nothing "
+                                        "new.</p>")
+                          : fresh,
+            earlier.empty()
+                ? std::string()
+                : std::format("<details class=\"earlier-scans\"><summary>Earlier scans ({})"
+                              "</summary><p class=\"sub\">What earlier scans recommended and "
+                              "nobody has acted on. The latest scan above replaces them; you can "
+                              "still pick or dismiss one.</p>{}</details>",
+                              earlier_count,
+                              earlier));
+    }
+    if (!made.empty()) {
+        out += "<section class=\"panel\"><h2>Made into Projects</h2><ul>" + made + "</ul></section>";
+    }
+    if (!later.empty()) {
+        out += "<section class=\"panel\"><h2>Not Yet</h2><p class=\"sub\">What your data does not "
+               "support yet, and why.</p><ul>" +
+               later + "</ul></section>";
+    }
+    if (!dismissed.empty()) {
+        out += "<details class=\"panel\"><summary>Dismissed</summary><ul>" + dismissed +
+               "</ul></details>";
     }
     return out;
 }
 
+namespace {
+
+// A registry list as text: ["M-1", "M-2"] → "M-1, M-2".
+std::string joined(const nlohmann::json& list, std::string_view separator = ", ") {
+    std::string out;
+    for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
+        const std::string text = item.is_string() ? item.get<std::string>()
+                                 : item.is_object() ? json_text(item, "role").empty()
+                                                          ? json_text(item, "name")
+                                                          : json_text(item, "role")
+                                                    : item.dump();
+        if (text.empty()) continue;
+        if (!out.empty()) out += separator;
+        out += text;
+    }
+    return out;
+}
+
+// "Churn & Retention" → "churn-retention": a default project name.
+std::string slug_text(std::string_view text) {
+    std::string out;
+    for (const char c : text) {
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        } else if (!out.empty() && out.back() != '-') {
+            out += '-';
+        }
+    }
+    while (!out.empty() && out.back() == '-') out.pop_back();
+    return out;
+}
+
+std::string runs_badge_of(const nlohmann::json& entry) {
+    if (json_text(entry, "status") == "sketch") {
+        return "<span class=\"badge\">In design</span>";
+    }
+    if (entry.value("runnable", false)) {
+        return std::string("<span class=\"badge status-success\">") +
+               (entry.value("partial", false) ? "Runs, in part" : "Runs today") + "</span>";
+    }
+    return "<span class=\"badge status-warning\">Not yet</span>";
+}
+
+// Design → Methodologies (lake#291): the engine's methodology registry (zetta#1061).
+std::string methodologies_content(const WorkspacePage& page) {
+    const std::string query = customer_query(page.customer_id);
+    const nlohmann::json listed = page.data.value("list_methodologies", nlohmann::json::object())
+                                      .value("methodologies", nlohmann::json::array());
+    const nlohmann::json solutions = page.data.value("list_solutions", nlohmann::json::object())
+                                         .value("solutions", nlohmann::json::array());
+    if (listed.empty()) {
+        return "<div class=\"panel empty\">This workspace's engine does not list its methodologies "
+               "yet. It runs tabular prediction (M-1).</div>";
+    }
+    const auto used_by = [&](const std::string& id) {
+        std::string out;
+        for (const nlohmann::json& solution : solutions) {
+            for (const char* key : {"methodologies", "composition"}) {
+                const nlohmann::json list = solution.value(key, nlohmann::json::array());
+                bool found = false;
+                for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
+                    const std::string text = item.is_string() ? item.get<std::string>()
+                                             : !json_text(item, "methodology").empty()
+                                                 ? json_text(item, "methodology")
+                                                 : json_text(item, "id");
+                    if (text == id) found = true;
+                }
+                if (found) {
+                    if (!out.empty()) out += ", ";
+                    out += row_link("/design/solution?" + query + "&id=" +
+                                        url_component(json_text(solution, "id")),
+                                    json_text(solution, "id") + " " + json_text(solution, "name"));
+                    break;
+                }
+            }
+        }
+        return out;
+    };
+    if (page.section == "methodology") {
+        for (const nlohmann::json& entry : listed) {
+            if (json_text(entry, "id") != page.subject) continue;
+            std::string out = std::format(
+                "<p class=\"sub\">{} · {}</p><section class=\"panel\"><table><tbody>"
+                "<tr><th>What it needs</th><td>{}</td></tr><tr><th>What it makes</th><td>{}</td></tr>"
+                "<tr><th>How it is measured</th><td>{}</td></tr><tr><th>Model kinds</th><td>{}</td></tr>"
+                "<tr><th>Solutions that use it</th><td>{}</td></tr>{}</tbody></table></section>",
+                web_ui_escape(json_text(entry, "family")),
+                runs_badge_of(entry),
+                web_ui_escape(joined(entry.value("inputs", nlohmann::json::array()))),
+                web_ui_escape(joined(entry.value("outputs", nlohmann::json::array()))),
+                web_ui_escape(joined(entry.value("metrics", nlohmann::json::array()))),
+                web_ui_escape(joined(entry.value("model_kinds", nlohmann::json::array()))),
+                used_by(json_text(entry, "id")).empty() ? std::string("—")
+                                                        : used_by(json_text(entry, "id")),
+                entry.value("runnable", false) || json_text(entry, "issue").empty()
+                    ? std::string()
+                    : "<tr><th>Tracked in</th><td>" + web_ui_escape(json_text(entry, "issue")) +
+                          "</td></tr>");
+            if (entry.value("runnable", false)) {
+                out += "<p><a class=\"button button-primary\" href=\"/design/projects?" + query +
+                       "\">Build a pipeline with it</a> <span class=\"sub\">Open a project and "
+                       "choose " + web_ui_escape(json_text(entry, "id")) +
+                       " under Build a Pipeline.</span></p>";
+            }
+            return out;
+        }
+        return "<div class=\"panel empty\">No methodology " + web_ui_escape(page.subject) +
+               ".</div>";
+    }
+    std::string out, family;
+    for (const nlohmann::json& entry : listed) {
+        if (json_text(entry, "family") != family) {
+            if (!family.empty()) out += "</tbody></table></section>";
+            family = json_text(entry, "family");
+            out += "<section class=\"panel\"><h2>" + web_ui_escape(family) +
+                   "</h2><table><thead><tr><th>Methodology</th><th>What it makes</th><th>Status</th>"
+                   "</tr></thead><tbody>";
+        }
+        out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                           row_link("/design/methodology?" + query + "&id=" +
+                                        url_component(json_text(entry, "id")),
+                                    json_text(entry, "id") + " " + json_text(entry, "name")),
+                           web_ui_escape(joined(entry.value("outputs", nlohmann::json::array()))),
+                           runs_badge_of(entry));
+    }
+    if (!family.empty()) out += "</tbody></table></section>";
+    return out;
+}
+
+// Design → Solutions (lake#290): the engine's solution registry (zetta#1102). Product copy only.
+std::string solutions_content(const WorkspacePage& page) {
+    const std::string query = customer_query(page.customer_id);
+    const bool listed_any =
+        page.data.value("list_solutions", nlohmann::json::object()).contains("solutions") ||
+        page.data.value("get_solution", nlohmann::json::object()).contains("id") ||
+        page.data.value("get_solution", nlohmann::json::object()).contains("solution");
+    if (!listed_any) {
+        return "<div class=\"panel empty\">This workspace's engine does not list solutions yet. "
+               "The solutions catalogue arrives with the next engine update; meanwhile see "
+               "<a href=\"/design/methodologies?" + query + "\">Methodologies</a>.</div>";
+    }
+    const auto methodology_links = [&](const nlohmann::json& list) {
+        std::string out;
+        for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
+            const std::string id = item.is_string()                          ? item.get<std::string>()
+                                   : !json_text(item, "methodology").empty() ? json_text(item, "methodology")
+                                                                             : json_text(item, "id");
+            if (id.empty()) continue;
+            if (!out.empty()) out += ", ";
+            const int level = item.is_object() ? item.value("minimum_level", 1) : 1;
+            out += row_link("/design/methodology?" + query + "&id=" + url_component(id), id) +
+                   (level > 1 ? " <span class=\"sub\">(level " + std::to_string(level) + "+)</span>" : "");
+        }
+        return out.empty() ? std::string("—") : out;
+    };
+    if (page.section == "solution") {
+        const nlohmann::json entry = page.data.value("get_solution", nlohmann::json::object());
+        const nlohmann::json solution =
+            entry.contains("solution") && entry["solution"].is_object() ? entry["solution"] : entry;
+        if (json_text(solution, "id").empty()) {
+            return "<div class=\"panel empty\">No solution " + web_ui_escape(page.subject) + ".</div>";
+        }
+        std::string levels;
+        for (const nlohmann::json& level : solution.value("capability_levels", solution.value("levels", nlohmann::json::array()))) {
+            levels += "<li><strong>" + web_ui_escape(json_text(level, "name").empty()
+                                                         ? json_text(level, "id")
+                                                         : json_text(level, "name")) +
+                      "</strong> " + web_ui_escape(json_text(level, "description")) + "</li>";
+        }
+        std::string out = std::format(
+            "<p class=\"sub\">{} · {}</p><section class=\"panel\"><p>{}</p><table><tbody>"
+            "<tr><th>The problem</th><td>{}</td></tr><tr><th>Methodologies</th><td>{}</td></tr>"
+            "<tr><th>How it acts</th><td>{}</td></tr><tr><th>Decision speed</th><td>{}</td></tr>"
+            "<tr><th>What data it needs</th><td>{}</td></tr>{}</tbody></table>{}</section>",
+            web_ui_escape(json_text(solution, "id")),
+            runs_badge_of(solution),
+            web_ui_escape(json_text(solution, "promise")),
+            web_ui_escape(json_text(solution, "problem").empty() ? json_text(solution, "use_case")
+                                                                 : json_text(solution, "problem")),
+            methodology_links(solution.value("methodologies",
+                                             solution.value("composition", nlohmann::json::array()))),
+            web_ui_escape(joined(solution.value("action_patterns", nlohmann::json::array()))),
+            web_ui_escape(json_text(solution, "latency").empty()
+                              ? joined(solution.value("latency_classes", nlohmann::json::array()))
+                              : json_text(solution, "latency")),
+            web_ui_escape(joined(solution.value("required_data_roles", solution.value("data_roles", nlohmann::json::array())))),
+            solution.value("runnable", false) || json_text(solution, "issue").empty()
+                ? std::string()
+                : "<tr><th>Tracked in</th><td>" + web_ui_escape(json_text(solution, "issue")) +
+                      "</td></tr>",
+            levels.empty() ? std::string() : "<h2>Levels</h2><ul>" + levels + "</ul>");
+        const bool startable = solution.value("runnable", false) || json_text(solution, "status") == "preview";
+        if (startable) {
+            std::string options;
+            for (const nlohmann::json& level : solution.value("capability_levels", solution.value("levels", nlohmann::json::array()))) {
+                const std::string value = level.contains("level") && level["level"].is_number()
+                                              ? std::to_string(level["level"].get<int>())
+                                              : json_text(level, "id");
+                options += "<option value=\"" + web_ui_escape(value) + "\">" +
+                           web_ui_escape(json_text(level, "name").empty() ? json_text(level, "id")
+                                                                         : json_text(level, "name")) +
+                           "</option>";
+            }
+            std::string datasets;
+            for (const nlohmann::json& dataset :
+                 page.data.value("list_datasets", nlohmann::json::object())
+                     .value("datasets", nlohmann::json::array())) {
+                const std::string database = json_text(dataset, "database").empty()
+                                                 ? std::string("datasets")
+                                                 : json_text(dataset, "database");
+                const std::string path = database + "." + json_text(dataset, "name");
+                datasets += "<option value=\"" + web_ui_escape(path) + "\">" + web_ui_escape(path) +
+                            "</option>";
+            }
+            out += std::format(
+                "<section class=\"panel\"><h2>Start This Solution</h2><form class=\"stack\" "
+                "method=\"post\" action=\"/design/solutions/start\">{}{}<label>Project name<input "
+                "name=\"name\" required value=\"{}\"></label>{}<label>Dataset<select "
+                "name=\"dataset\" required><option value=\"\" selected disabled>Choose a dataset"
+                "</option>{}</select></label><fieldset><legend>Where Actions Go</legend><label>"
+                "Delivery<select name=\"delivery_kind\" required><option value=\"\" selected "
+                "disabled>Choose delivery</option><option value=\"webhook\">Webhook</option>"
+                "<option value=\"salesforce\">Salesforce connector</option><option "
+                "value=\"hubspot\">"
+                "HubSpot connector</option></select></label><label>Webhook URL or connector "
+                "endpoint"
+                "<input name=\"delivery_endpoint\" required></label><label>Owner<input "
+                "name=\"owner\" "
+                "required></label></fieldset><fieldset><legend>Economics</legend><label>Value per "
+                "outcome<input name=\"value_per_outcome\" type=\"number\" step=\"any\" required>"
+                "</label><label>Investment<input name=\"investment\" type=\"number\" step=\"any\" "
+                "min=\"0\" required></label><label>Currency<input name=\"currency\" required "
+                "placeholder=\"USD\"></label><small>These are your inputs. lake does not supply "
+                "defaults.</small></fieldset><button class=\"button "
+                "button-primary\" type=\"submit\">Start</button></form></section>",
+                hidden("customer_id", page.customer_id),
+                hidden("solution", json_text(solution, "id")),
+                web_ui_escape(slug_text(json_text(solution, "name"))),
+                options.empty()
+                    ? std::string("<label>Level<input name=\"level\" type=\"number\" min=\"1\" "
+                                  "max=\"4\" required></label>")
+                    : "<label>Level<select name=\"level\">" + options + "</select></label>",
+                datasets);
+        }
+        return out;
+    }
+    const nlohmann::json listed = page.data.value("list_solutions", nlohmann::json::object())
+                                      .value("solutions", nlohmann::json::array());
+    std::string modules, sketches;
+    for (const nlohmann::json& entry : listed) {
+        const std::string row = std::format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            row_link("/design/solution?" + query + "&id=" + url_component(json_text(entry, "id")),
+                     json_text(entry, "id") + " " + json_text(entry, "name")),
+            web_ui_escape(json_text(entry, "promise")),
+            methodology_links(entry.value("methodologies", entry.value("composition", nlohmann::json::array()))),
+            runs_badge_of(entry));
+        (json_text(entry, "status") == "sketch" ? sketches : modules) += row;
+    }
+    std::string out;
+    const std::string head = "<table><thead><tr><th>Solution</th><th>What it does</th>"
+                             "<th>Methodologies</th><th>Status</th></tr></thead><tbody>";
+    if (!modules.empty()) out += "<section class=\"panel\"><h2>Modules</h2>" + head + modules + "</tbody></table></section>";
+    if (!sketches.empty()) out += "<section class=\"panel\"><h2>In Design</h2>" + head + sketches + "</tbody></table></section>";
+    return out.empty() ? "<div class=\"panel empty\">No solutions listed.</div>" : out;
+}
+
+nlohmann::json proposed_solution_foundation(const nlohmann::json& task) {
+    const nlohmann::json answer = task.value("answer", nlohmann::json::object());
+    const nlohmann::json result = answer.value("result", nlohmann::json::object());
+    nlohmann::json proposal = result.value("foundation", nlohmann::json::object());
+    if (!proposal.is_object()) {
+        return nlohmann::json::object();
+    }
+    const nlohmann::json context = task.value("context", nlohmann::json::object());
+    if (context.contains("delivery")) {
+        proposal["delivery"] = context["delivery"];
+    }
+    if (context.contains("roi_model")) {
+        proposal["roi_model"] = context["roi_model"];
+    }
+    nlohmann::json sources = proposal.value("sources", nlohmann::json::object());
+    if (!sources.is_object()) {
+        sources = nlohmann::json::object();
+    }
+    const std::string dataset = context.value("dataset", std::string());
+    const std::size_t dot = dataset.find('.');
+    if (!dataset.empty()) {
+        sources["source"] = dot == std::string::npos ? "datasets" : dataset.substr(0, dot);
+        sources["table"] = dot == std::string::npos ? dataset : dataset.substr(dot + 1);
+    }
+    proposal["sources"] = std::move(sources);
+    return proposal;
+}
+
+nlohmann::json missing_solution_predicates(const nlohmann::json& task,
+                                           const nlohmann::json& proposal) {
+    nlohmann::json missing = proposal.value("missing_predicates", nlohmann::json::array());
+    if (!missing.is_array()) {
+        missing = nlohmann::json::array();
+    }
+    if (task.value("context", nlohmann::json::object()).value("solution", std::string()) != "S-1") {
+        return missing;
+    }
+    const nlohmann::json predicates = proposal.value("predicates", nlohmann::json::object());
+    for (const char* name : {"in_collections", "open_complaint", "vulnerable"}) {
+        const bool named = predicates.is_object() && predicates.contains(name) &&
+                           predicates.at(name).is_string() &&
+                           !predicates.at(name).get_ref<const std::string&>().empty();
+        if (!named && std::ranges::find(missing, nlohmann::json(name)) == missing.end()) {
+            missing.push_back(name);
+        }
+    }
+    return missing;
+}
+
+std::string solution_proposal_content(const WorkspacePage& page, const nlohmann::json& task) {
+    const std::string status = json_text(task, "status");
+    if (status == "pending" || status == "running") {
+        return "<section class=\"panel notice\" role=\"status\"><h2>Foundation Proposal</h2>"
+               "<p><strong>The Project Agent is reading the dataset…</strong> It is proposing "
+               "the snapshot boundary, column roles, methodology inputs and policy predicates. "
+               "Nothing is created until you confirm. This page checks again every 3 seconds."
+               "</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
+    }
+    if (status == "failed") {
+        return "<p class=\"error\" role=\"alert\">The Project Agent could not propose the "
+               "foundation: " +
+               web_ui_escape(json_text(task, "message")) + "</p>";
+    }
+    const nlohmann::json proposal = proposed_solution_foundation(task);
+    if (proposal.empty()) {
+        return status == "succeeded"
+                   ? "<p class=\"error\" role=\"alert\">The Project Agent returned no foundation "
+                     "proposal.</p>"
+                   : std::string();
+    }
+    std::string missing;
+    for (const nlohmann::json& name : missing_solution_predicates(task, proposal)) {
+        if (!missing.empty()) {
+            missing += ", ";
+        }
+        missing += name.is_string() ? name.get<std::string>() : name.dump();
+    }
+    std::string notice;
+    if (!missing.empty()) {
+        notice = "<p class=\"error\" role=\"alert\"><strong>Actions will remain blocked.</strong> "
+                 "The dataset is missing these exclusion predicates: " +
+                 web_ui_escape(missing) + ". They are not treated as false.</p>";
+    }
+    return std::format(
+        "<section class=\"panel\"><h2>Foundation Proposal</h2><p>Review and edit the exact "
+        "foundation sent to the engine. Delivery and economics are your inputs from Start.</p>{}"
+        "<form class=\"stack\" method=\"post\" action=\"/design/solution/confirm\">{}{}{}"
+        "<label>Foundation (JSON)<textarea name=\"foundation\" rows=\"28\" required>{}</textarea>"
+        "</label><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> I "
+        "reviewed this snapshot, these roles, predicates, delivery settings and economics.</label>"
+        "<button class=\"button button-primary\" type=\"submit\">Confirm and create solution"
+        "</button></form></section>",
+        notice,
+        hidden("customer_id", page.customer_id),
+        hidden("project", page.subject),
+        hidden("task_id", json_text(task, "task_id")),
+        web_ui_escape(proposal.dump(2)));
+}
+
+std::string solution_decisions_content(const WorkspacePage& page, const nlohmann::json& solution) {
+    const nlohmann::json decisions = solution.value("decisions", nlohmann::json::array());
+    std::string rows;
+    for (const nlohmann::json& decision : decisions) {
+        const std::string status = json_text(decision, "status");
+        std::string approval = "—";
+        if (json_text(decision, "autonomy") == "A1" && status == "pending_approval") {
+            approval = std::format(
+                "<form method=\"post\" action=\"/design/solution/approve\">{}{}{}"
+                "<input type=\"hidden\" name=\"confirm\" value=\"yes\"><button type=\"submit\">"
+                "Approve A1</button></form>",
+                hidden("customer_id", page.customer_id),
+                hidden("project", page.subject),
+                hidden("decision_id", json_text(decision, "id")));
+        }
+        rows += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            web_ui_escape(json_text(decision, "entity_id")),
+                            web_ui_escape(json_text(decision, "tier")),
+                            web_ui_escape(json_text(decision, "action")),
+                            web_ui_escape(json_text(decision, "autonomy") + " · " + status),
+                            approval);
+    }
+    if (rows.empty()) {
+        return "<section class=\"panel\"><h2>Actions and A1 Queue</h2><p>No decisions have been "
+               "produced yet. "
+               "Run the solution to populate delivered, held and approval-pending actions.</p>"
+               "</section>";
+    }
+    return "<section class=\"panel\"><h2>Actions and A1 "
+           "Queue</h2><table><thead><tr><th>Entity</th><th>Tier"
+           "</th><th>Action</th><th>Governance</th><th></th></tr></thead><tbody>" +
+           rows +
+           "</tbody></table><p class=\"sub\">Approvals change the decision state; they do not "
+           "silently deliver an action.</p></section>";
+}
+
+std::string solution_ledger_content(const WorkspacePage& page, const nlohmann::json& solution) {
+    const nlohmann::json entries = solution.value("ledger", nlohmann::json::object())
+                                       .value("entries", nlohmann::json::array());
+    std::set<std::string> decision_ids;
+    for (const nlohmann::json& decision : solution.value("decisions", nlohmann::json::array())) {
+        decision_ids.insert(json_text(decision, "id"));
+    }
+    std::string rows;
+    for (const nlohmann::json& entry : entries) {
+        if (json_text(entry, "kind") != "action" ||
+            !decision_ids.contains(json_text(entry, "decision"))) {
+            continue;
+        }
+        const std::string action = json_text(entry, "action");
+        std::string outcome = "—";
+        if (action != "no_contact") {
+            outcome = std::format(
+                "<details><summary>Record outcome</summary><form class=\"stack\" method=\"post\" "
+                "action=\"/design/solution/outcome\">{}{}{}<label>Outcome<input name=\"outcome\" "
+                "required></label><label>Value<input name=\"value\" type=\"number\" step=\"any\" "
+                "required></label><label>Currency<input name=\"currency\" required value=\"{}\">"
+                "</label><label>Occurred at<input name=\"occurred_at\" required placeholder=\""
+                "2026-09-28T12:00:00Z\"></label><button type=\"submit\">Record</button></form>"
+                "</details>",
+                hidden("customer_id", page.customer_id),
+                hidden("project", page.subject),
+                hidden("action_id", json_text(entry, "id")),
+                web_ui_escape(json_text(entry, "currency")));
+        }
+        rows += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            web_ui_escape(json_text(entry, "subject")),
+                            web_ui_escape(action),
+                            web_ui_escape(json_text(entry, "recorded_at")),
+                            outcome);
+    }
+    return rows.empty()
+               ? std::string()
+               : "<section class=\"panel\"><h2>Delivered and Held Actions</h2><table><thead><tr>"
+                 "<th>Entity</th><th>Action</th><th>Recorded</th><th></th></tr></thead><tbody>" +
+                     rows + "</tbody></table></section>";
+}
+
+std::string active_solution_content(const WorkspacePage& page,
+                                    const nlohmann::json& solution,
+                                    const nlohmann::json& task) {
+    std::string stages;
+    for (const nlohmann::json& stage : solution.value("stages", nlohmann::json::array())) {
+        stages += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                              web_ui_escape(json_text(stage, "stage")),
+                              web_ui_escape(json_text(stage, "name")),
+                              web_ui_escape(json_text(stage, "kind")));
+    }
+    const nlohmann::json proposal = proposed_solution_foundation(task);
+    const nlohmann::json sources = solution.value("sources", nlohmann::json::object());
+    const nlohmann::json missing = sources.contains("missing_policy_predicates")
+                                       ? sources["missing_policy_predicates"]
+                                       : missing_solution_predicates(task, proposal);
+    std::string run;
+    if (missing.empty()) {
+        run = std::format(
+            "<form class=\"stack\" method=\"post\" action=\"/design/solution/run\">{}{}{}"
+            "<label>Delivery token (optional, used for this run only)<input type=\"password\" "
+            "name=\"delivery_token\" autocomplete=\"off\"></label><button class=\"button "
+            "button-primary\" type=\"submit\">Run</button></form>",
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject),
+            hidden("graph", json_text(solution, "graph")));
+    } else {
+        run = "<p class=\"error\" role=\"alert\">Run is blocked because an exclusion predicate "
+              "is missing. Missing evidence is never treated as false.</p>";
+    }
+    std::string out =
+        "<section class=\"panel\"><h2>Solution Stages</h2><table><thead><tr><th>Stage</th><th>Name"
+        "</th><th>Kind</th></tr></thead><tbody>" +
+        stages + "</tbody></table>" + run + "</section>";
+
+    const nlohmann::json policy = solution.value("policy", nlohmann::json::object());
+    nlohmann::json config = policy.value("config", nlohmann::json::object());
+    const nlohmann::json versions = policy.value("versions", nlohmann::json::array());
+    if (versions.is_array() && !versions.empty() && versions.back().is_object()) {
+        config = versions.back().value("config", config);
+    }
+    if (!policy.empty()) {
+        out += std::format(
+            "<section class=\"panel\"><h2>Decision Policy</h2><pre>{}</pre><details><summary>"
+            "Propose a New Policy Version</summary><form class=\"stack\" method=\"post\" action=\""
+            "/design/solution/policy\">{}{}{}<label>Configuration (JSON)<textarea name=\"config\" "
+            "rows=\"16\" required>{}</textarea></label><label>Reason<input name=\"reason\" "
+            "required></label><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" "
+            "required> I approve creating this policy version.</label><button type=\"submit\">"
+            "Create policy version</button></form></details></section>",
+            web_ui_escape(policy.dump(2)),
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject),
+            hidden("policy_id", json_text(policy, "id")),
+            web_ui_escape(config.dump(2)));
+    }
+    if (solution.contains("experiment")) {
+        out += "<section class=\"panel\"><h2>Experiment and Holdout</h2><pre>" +
+               web_ui_escape(solution["experiment"].dump(2)) + "</pre></section>";
+    }
+    out += solution_decisions_content(page, solution);
+    out += solution_ledger_content(page, solution);
+    if (solution.contains("monitor")) {
+        out += "<section class=\"panel\"><h2>Monitor</h2><pre>" +
+               web_ui_escape(solution["monitor"].dump(2)) + "</pre></section>";
+    }
+    if (solution.contains("roi")) {
+        out += "<section class=\"panel\"><h2>ROI Readout</h2><pre>" +
+               web_ui_escape(solution["roi"].dump(2)) + "</pre></section>";
+    }
+    return out;
+}
+
+} // namespace
+
 std::string workspace_content(const WorkspacePage& page) {
+    if (page.section == "methodologies" || page.section == "methodology") {
+        return methodologies_content(page);
+    }
+    if (page.section == "solutions" || page.section == "solution") {
+        return solutions_content(page);
+    }
     if (page.section == "pipeline") {
         return pipeline_content(page);
     }
@@ -3327,9 +4017,9 @@ std::string workspace_content(const WorkspacePage& page) {
             }
             out += "</tbody></table>";
         }
-        out += std::format("<p><a class=\"button\" href=\"/design/discover?{}\">Discover "
-                           "Opportunities</a> Not sure where to start? Let Auto-Suggest study "
-                           "your data.</p>",
+        out += std::format("<p><a class=\"button\" href=\"/design/opportunities?{}\">See your "
+                           "Opportunities</a> Not sure where to start? Auto-Suggest recommends "
+                           "what your data could be used for.</p>",
                            query);
         out += std::format(
             "<section class=\"panel\"><h2>New Project</h2><form class=\"stack\" method=\"post\" "
@@ -3349,26 +4039,69 @@ std::string workspace_content(const WorkspacePage& page) {
                                              ? "No description."
                                              : json_text(project, "description")));
         const nlohmann::json graphs = project.value("graphs", nlohmann::json::array());
+        const nlohmann::json solution_task = data.value("solution_task", nlohmann::json::object());
+        const nlohmann::json solution_project =
+            data.value("solution_project", nlohmann::json::object());
+        if (!solution_project.empty()) {
+            out += active_solution_content(page, solution_project, solution_task);
+        } else if (!solution_task.empty()) {
+            out += solution_proposal_content(page, solution_task);
+        }
+        // Made from an Opportunity: the Project Agent designs the pipeline in the background.
+        const nlohmann::json build = data.value("build", nlohmann::json::object());
+        const std::string build_status = json_text(build, "status");
+        const bool designing = graphs.empty() && (build_status == "pending" ||
+                                                  build_status == "Running");
+        if (designing) {
+            out += "<section class=\"panel notice\" role=\"status\"><p><strong>The Project Agent "
+                   "is designing this project's pipeline…</strong> It reads your data and the "
+                   "Opportunity this project came from; the pipeline appears here when it is "
+                   "done. You can leave this page. This page checks again every 3 seconds.</p>"
+                   "<meta http-equiv=\"refresh\" content=\"3\"></section>";
+        } else if (graphs.empty() && build_status == "Failed") {
+            out += std::format("<p class=\"error\" role=\"alert\">The Project Agent could not "
+                               "design this project's pipeline: {} Describe it below instead."
+                               "</p>",
+                               web_ui_escape(json_text(build, "message")));
+        }
         out += "<section class=\"panel\"><h2>Pipelines</h2>";
-        if (graphs.empty()) {
+        if (graphs.empty() && designing) {
+            out += "<p>Designing…</p>";
+        } else if (graphs.empty()) {
             out += "<p>No pipelines yet. Describe what the project should predict or answer, "
                    "and Zetta builds one.</p>";
         } else {
-            out += "<table><thead><tr><th>Pipeline</th><th>Approval</th><th></th></tr></thead>"
-                   "<tbody>";
+            out += "<table><thead><tr><th>Pipeline</th><th>Methodology</th><th>Approval</th>"
+                   "<th></th></tr></thead><tbody>";
             for (const nlohmann::json& graph : graphs) {
                 const std::string id = json_text(graph, "id");
                 // Zetta verifies and runs only an approved plan; a person approves it here first.
                 const bool approved = json_text(graph, "approval") == "approved";
                 const std::string graph_name =
                     json_text(graph, "name").empty() ? id : json_text(graph, "name");
+                // What it trains (lake#289): the engine reports each pipeline's methodology
+                // and whether it can run; one that cannot trains nothing.
+                std::string trains = "—";
+                if (graph.contains("runnable")) {
+                    const std::string methodology = json_text(graph, "methodology");
+                    trains = graph.value("runnable", false)
+                                 ? "<span class=\"badge status-success\">" +
+                                       web_ui_escape(methodology.empty() ? "Runs" : methodology) +
+                                       "</span>"
+                                 : "<span class=\"badge status-warning\">Trains nothing yet" +
+                                       (methodology.empty()
+                                            ? std::string()
+                                            : ": needs " + web_ui_escape(methodology)) +
+                                       "</span>";
+                }
                 out += std::format(
-                    "<tr><td>{}</td><td>{}</td><td><form method=\"post\" action=\"{}\">{}{}{}"
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td><form method=\"post\" action=\"{}\">{}{}{}"
                     "<button type=\"submit\">{}</button></form></td></tr>",
                     row_link("/design/pipeline?" + query +
                                  "&project=" + url_component(page.subject) +
                                  "&graph=" + url_component(graph_name),
                              graph_name),
+                    trains,
                     web_ui_escape(json_text(graph, "approval")),
                     approved ? "/design/project/run" : "/design/project/approve",
                     hidden("customer_id", page.customer_id),
@@ -3385,7 +4118,7 @@ std::string workspace_content(const WorkspacePage& page) {
             "accounts will churn in the next 90 days, with the reasons\"></textarea></label>"
             "<label>From data<select name=\"dataset\"><option value=\"\">Let the builder describe "
             "its sources</option>{}</select><small>Choose a dataset and the pipeline reads it, and "
-            "its runs train on it.</small></label>"
+            "its runs train on it.</small></label>{}"
             "<button class=\"button button-primary\" type=\"submit\">Build pipeline</button>"
             "</form></section>",
             hidden("customer_id", page.customer_id),
@@ -3404,6 +4137,24 @@ std::string workspace_content(const WorkspacePage& page) {
                                            web_ui_escape(json_text(dataset, "name")));
                 }
                 return options;
+            }(),
+            // The methodologies the engine runs (lake#289); absent on an older engine.
+            [&] {
+                const nlohmann::json listed = data.value("list_methodologies", nlohmann::json::object())
+                                                  .value("methodologies", nlohmann::json::array());
+                std::string options;
+                for (const nlohmann::json& entry : listed) {
+                    if (!entry.value("runnable", false)) continue;
+                    options += std::format("<option value=\"{}\">{} ({})</option>",
+                                           web_ui_escape(json_text(entry, "id")),
+                                           web_ui_escape(json_text(entry, "name")),
+                                           web_ui_escape(json_text(entry, "id")));
+                }
+                if (options.empty()) return std::string();
+                return "<label>Methodology<select name=\"methodology\"><option value=\"\">Let Zetta "
+                       "choose from the description</option>" + options +
+                       "</select><small>Only the methodologies this workspace's engine runs are "
+                       "listed.</small></label>";
             }());
         // Other ways to make a pipeline (docs/design/zetta-parity.md).
         out += std::format(
@@ -4080,6 +4831,9 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
             std::format("<div class=\"panel empty\">{}</div>", web_ui_escape(page.unavailable));
     } else if (page.section == "services") {
         content += services_content(page);
+    } else if (page.section == "library") {
+        // The Agent Library is lake's, not the workspace's: shown whether it is ready or not.
+        content += agent_library_content(page);
     } else if (!page.state.value("ready", false)) {
         if (page.section == "data") {
             content += store_connection_notice(page);
@@ -4115,11 +4869,13 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
 std::string web_ui_packages(const nlohmann::json& catalog,
                             bool available,
                             std::string_view origin,
-                            WebUiViewer viewer) {
+                            WebUiViewer viewer,
+                            const nlohmann::json& builds,
+                            std::string_view customer_id) {
     std::string content =
         "<p class=\"eyebrow\">Ship</p><h1>Packages</h1><p class=\"sub\">Container images, npm "
-        "packages and Python distributions published to this lake. Anyone can install them; "
-        "publishing needs the operator credential for now.</p>";
+        "packages and Python distributions published to this lake. Private images are visible "
+        "only to their space.</p>";
     if (!available) {
         content += "<div class=\"panel empty\">This lake has no registry storage configured.</div>";
         return web_ui_shell("lake — packages", "Packages", content, viewer);
@@ -4175,7 +4931,468 @@ std::string web_ui_packages(const nlohmann::json& catalog,
         }
         content += "</tbody></table></section>";
     }
+    content += "<section class=\"panel\"><h2>Builds</h2>";
+    if (builds.empty()) {
+        content += "<p class=\"muted\">No image builds in this space.</p></section>";
+    } else {
+        content += "<table><thead><tr><th>Image</th><th>Phase</th><th>Digest</th><th>Log</th>"
+                   "</tr></thead><tbody>";
+        for (const nlohmann::json& build : builds) {
+            const std::string id = build.value("id", std::string());
+            content += std::format(
+                "<tr data-build-id=\"{}\"><td><code>{}</code></td><td class=\"build-phase\">{}"
+                "</td><td><code>{}</code></td><td><details><summary>Live log</summary>"
+                "<pre class=\"build-log\"></pre></details></td></tr>",
+                web_ui_escape(id),
+                web_ui_escape(build.value("target", std::string())),
+                web_ui_escape(build.value("phase", std::string())),
+                web_ui_escape(build.value("digest", std::string())));
+        }
+        content += "</tbody></table></section>";
+        content += std::format(
+            R"(<script>(()=>{{const customer={};for(const row of document.querySelectorAll('[data-build-id]')){{let next=1;const follow=async()=>{{const query=new URLSearchParams({{customer_id:customer,build_id:row.dataset.buildId,from_sequence:String(next),wait_ms:'25000'}});try{{const response=await fetch('/v1/receive_build_events?'+query);const envelope=await response.json();if(envelope.ok){{for(const event of envelope.value.events){{next=Math.max(next,event.sequence+1);if(event.phase)row.querySelector('.build-phase').textContent=event.phase;for(const line of event.lines||[])row.querySelector('.build-log').textContent+=line+'\n';}}next=Math.max(next,envelope.value.next_sequence||next);}}}}catch(error){{}}setTimeout(follow,250);}};follow();}}}})();</script>)",
+            nlohmann::json(std::string(customer_id)).dump());
+    }
     return web_ui_shell("lake — packages", "Packages", content, viewer);
+}
+
+namespace {
+
+std::string app_customer_selector(const std::vector<WorkspaceCustomer>& customers,
+                                  std::string_view customer_id,
+                                  std::string_view path) {
+    if (customers.size() < 2) {
+        return {};
+    }
+    std::string output =
+        std::format("<form class=\"filters\" method=\"get\" action=\"{}\"><label>Space<select "
+                    "name=\"customer_id\" onchange=\"this.form.submit()\">",
+                    web_ui_escape(path));
+    for (const WorkspaceCustomer& customer : customers) {
+        output += std::format("<option value=\"{}\"{}>{}{}</option>",
+                              web_ui_escape(customer.id),
+                              customer.id == customer_id ? " selected" : "",
+                              web_ui_escape(customer.handle),
+                              customer.yours ? " (Yours)" : "");
+    }
+    return output + "</select></label><button type=\"submit\">Show</button></form>";
+}
+
+std::string app_phase_badge(std::string_view phase, bool ready) {
+    const std::string modifier = ready                ? " status-success"
+                                 : phase == "Failed"  ? " status-danger"
+                                 : phase == "Pending" ? " status-warning"
+                                                      : "";
+    return std::format("<span class=\"badge{}\" data-app-phase>{}</span>",
+                       modifier,
+                       web_ui_escape(phase.empty() ? "Pending" : phase));
+}
+
+std::string app_url(const nlohmann::json& app) {
+    const std::string url = json_text(app, "url");
+    if (url.empty()) {
+        return "<span class=\"muted\">Not assigned</span>";
+    }
+    if (!url.starts_with("https://") && !url.starts_with("http://")) {
+        return web_ui_escape(url);
+    }
+    return std::format(
+        "<a href=\"{}\" rel=\"noreferrer\">{}</a>", web_ui_escape(url), web_ui_escape(url));
+}
+
+std::string app_bindings_summary(const nlohmann::json& app) {
+    const nlohmann::json bindings = app.value("bindings", nlohmann::json::object());
+    const bool zetta = bindings.contains("zetta") && !bindings.at("zetta").is_null();
+    const std::size_t services = bindings.value("services", nlohmann::json::array()).size();
+    if (!zetta && services == 0) {
+        return "None";
+    }
+    return std::format(
+        "{}Zetta, {} service{}", zetta ? "" : "No ", services, services == 1 ? "" : "s");
+}
+
+std::string app_hidden(std::string_view customer_id, std::string_view app_id) {
+    return hidden("customer_id", customer_id) + hidden("app_id", app_id);
+}
+
+std::string app_action_form(std::string_view path,
+                            std::string_view action,
+                            std::string_view customer_id,
+                            std::string_view app_id,
+                            std::string_view extra = {}) {
+    return std::format("<form method=\"post\" action=\"{}\">{}{}<button type=\"submit\">{}</button>"
+                       "</form>",
+                       path,
+                       app_hidden(customer_id, app_id),
+                       extra,
+                       action);
+}
+
+std::string app_live_script(std::string_view customer_id,
+                            std::string_view app_id,
+                            const nlohmann::json& events) {
+    std::string customer = nlohmann::json(std::string(customer_id)).dump();
+    std::string app = nlohmann::json(std::string(app_id)).dump();
+    std::uint64_t next_sequence = 1;
+    for (const nlohmann::json& event : events) {
+        if (event.contains("sequence") && event.at("sequence").is_number_unsigned()) {
+            next_sequence = std::max(next_sequence, event.at("sequence").get<std::uint64_t>() + 1);
+        }
+    }
+    return std::format(
+        R"(<script id="app-live-events">(()=>{{const customer={};const app={};const key=`lake-app-events:${{app}}`;let next={};try{{next=Math.max(next,Number(localStorage.getItem(key))||1);}}catch{{}}const log=document.querySelector('[data-app-events]');const phase=document.querySelector('[data-app-phase]');const fill=document.querySelector('.app-phase-fill');const show=e=>{{if(log){{const line=document.createElement('div');line.textContent=`${{e.sequence||''}}  ${{e.type||'event'}}  ${{e.message||JSON.stringify(e.status||{{}})}}`;log.append(line);log.scrollTop=log.scrollHeight;}}const p=e.status&&e.status.phase;if(p&&phase)phase.textContent=p;if(p&&fill)fill.classList.toggle('ready',p==='Running'||p==='Ready');}};const follow=async()=>{{while(document.body.isConnected){{try{{const q=new URLSearchParams({{customer_id:customer,app_id:app,from_sequence:String(next),wait_ms:'25000'}});const response=await fetch('/v1/receive_app_events?'+q,{{credentials:'same-origin'}});if(!response.ok)throw new Error('event request failed');const body=await response.json();const value=body.value||body.data||body;for(const event of value.events||[])show(event);next=value.next_sequence||next;try{{localStorage.setItem(key,String(next));}}catch{{}}}}catch{{await new Promise(resolve=>setTimeout(resolve,2000));}}}}}};follow();}})();</script>)",
+        customer,
+        app,
+        next_sequence);
+}
+
+std::string build_live_script(std::string_view customer_id, const nlohmann::json& builds) {
+    nlohmann::json ids = nlohmann::json::array();
+    for (const nlohmann::json& build : builds) {
+        const std::string id = build.value("id", build.value("build_id", std::string()));
+        if (!id.empty()) {
+            ids.push_back(id);
+        }
+    }
+    return std::format(
+        R"(<script id="build-live-events">(()=>{{const customer={};const builds={};const follow=async id=>{{const key=`lake-build-events:${{id}}`;let next=1;try{{next=Number(localStorage.getItem(key))||1;}}catch{{}}const log=document.querySelector(`[data-build-events="${{CSS.escape(id)}}"]`);while(document.body.isConnected){{try{{const q=new URLSearchParams({{customer_id:customer,build_id:id,from_sequence:String(next),wait_ms:'25000'}});const response=await fetch('/v1/receive_build_events?'+q,{{credentials:'same-origin'}});if(!response.ok)throw new Error('event request failed');const body=await response.json();const value=body.value||body.data||body;for(const event of value.events||[]){{if(log){{const line=document.createElement('div');line.textContent=`${{event.sequence||''}}  ${{event.message||event.type||JSON.stringify(event)}}`;log.append(line);}}}}next=value.next_sequence||next;try{{localStorage.setItem(key,String(next));}}catch{{}}}}catch{{await new Promise(resolve=>setTimeout(resolve,2000));}}}}}};for(const id of builds)follow(id);}})();</script>)",
+        nlohmann::json(std::string(customer_id)).dump(),
+        ids.dump());
+}
+
+std::string app_event_history(const AppPage& page) {
+    std::string output = "<section class=\"panel\"><h2>Deploy History</h2>";
+    bool found = false;
+    output += "<table><thead><tr><th>Sequence</th><th>Action</th><th>Generation</th>"
+              "<th>Actor</th><th>Target</th><th>Message</th><th></th></tr></thead><tbody>";
+    const std::string app_id = json_text(page.app, "id");
+    for (auto it = page.events.rbegin(); it != page.events.rend(); ++it) {
+        const nlohmann::json& event = *it;
+        const std::string type = json_text(event, "type");
+        if (type != "deploy" && type != "rollback" && type != "create") {
+            continue;
+        }
+        found = true;
+        const nlohmann::json status = event.value("status", nlohmann::json::object());
+        const nlohmann::json source = status.value("source", nlohmann::json::object());
+        const std::string image = json_text(status, "image");
+        const std::string target =
+            image.empty() ? json_text(source, "repository") + " @ " + json_text(source, "revision")
+                          : image;
+        std::string rollback;
+        if (!image.empty()) {
+            rollback = app_action_form(
+                "/ship/app/rollback", "Rollback", page.customer_id, app_id, hidden("image", image));
+        } else if (!source.empty()) {
+            rollback = app_action_form("/ship/app/rollback",
+                                       "Rollback",
+                                       page.customer_id,
+                                       app_id,
+                                       hidden("repository", json_text(source, "repository")) +
+                                           hidden("revision", json_text(source, "revision")) +
+                                           hidden("path", json_text(source, "path")) +
+                                           hidden("entrypoint", json_text(source, "entrypoint")));
+        }
+        output += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code>"
+                              "</td><td>{}</td><td>{}</td></tr>",
+                              web_ui_escape(json_text(event, "sequence")),
+                              web_ui_escape(type),
+                              web_ui_escape(json_text(event, "generation")),
+                              web_ui_escape(json_text(event, "principal")),
+                              web_ui_escape(target),
+                              web_ui_escape(json_text(event, "message")),
+                              rollback);
+    }
+    output += "</tbody></table>";
+    if (!found) {
+        output += "<p class=\"muted\">No deployments recorded yet.</p>";
+    }
+    return output + "</section>";
+}
+
+} // namespace
+
+std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
+    std::string content =
+        "<p class=\"eyebrow\">Ship</p><h1>Apps</h1><p class=\"sub\">Create, deploy and "
+        "operate customer applications with live rollout status.</p>";
+    content += app_customer_selector(page.customers, page.customer_id, "/ship/apps");
+    if (!page.error.empty()) {
+        content +=
+            std::format("<p class=\"error\" role=\"alert\">{}</p>", web_ui_escape(page.error));
+    }
+    if (page.customer_id.empty()) {
+        content += "<div class=\"panel empty\">You have no space to work in yet.</div>";
+        return web_ui_shell("lake — apps", "Apps", content, viewer);
+    }
+    if (page.apps.empty()) {
+        content += "<div class=\"panel empty\">No apps yet. Create one from a Lake repository or "
+                   "a container image.</div>";
+    } else {
+        content += "<table><thead><tr><th>Name</th><th>URL</th><th>Status</th><th>Mode</th>"
+                   "<th>Revision</th><th>Bindings</th></tr></thead><tbody>";
+        for (const nlohmann::json& app : page.apps) {
+            const nlohmann::json source = app.value("source", nlohmann::json::object());
+            content += std::format(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td>"
+                "<td>{}</td></tr>",
+                row_link("/ship/app?" + customer_query(page.customer_id) +
+                             "&app_id=" + url_component(json_text(app, "id")),
+                         json_text(app, "name")),
+                app_url(app),
+                app_phase_badge(json_text(app, "phase"), app.value("ready", false)),
+                web_ui_escape(json_text(app, "mode")),
+                web_ui_escape(app.value("mode", "") == "runtime" ? json_text(source, "revision")
+                                                                 : json_text(app, "image")),
+                web_ui_escape(app_bindings_summary(app)));
+        }
+        content += "</tbody></table>";
+    }
+    content += "<div class=\"grid\"><section class=\"panel\"><h2>Create From a Repository</h2>"
+               "<form class=\"stack\" method=\"post\" action=\"/ship/apps/create\">" +
+               hidden("customer_id", page.customer_id) +
+               "<input type=\"hidden\" name=\"mode\" value=\"runtime\"><label>Name<input "
+               "name=\"name\" required pattern=\"[a-z][a-z0-9-]{0,30}\"></label><label>Repository"
+               "<select name=\"repository\" required>";
+    for (const nlohmann::json& repository : page.repositories) {
+        content += std::format("<option value=\"{}\">{}</option>",
+                               web_ui_escape(json_text(repository, "id")),
+                               web_ui_escape(json_text(repository, "name")));
+    }
+    content +=
+        "</select></label><label>Revision<input name=\"revision\" value=\"main\" required>"
+        "</label><label>Path<input name=\"path\" value=\".\"></label><label>Framework<input "
+        "name=\"framework\" value=\"auto\" required></label><label>Port<input type=\"number\" "
+        "name=\"port\" value=\"3000\" min=\"1\" max=\"65535\" required></label><button "
+        "type=\"submit\">Create App</button></form></section><section class=\"panel\"><h2>Create "
+        "From an Image</h2><form class=\"stack\" method=\"post\" action=\"/ship/apps/create\">" +
+        hidden("customer_id", page.customer_id) +
+        "<input type=\"hidden\" name=\"mode\" value=\"image\"><label>Name<input name=\"name\" "
+        "required pattern=\"[a-z][a-z0-9-]{0,30}\"></label><label>Image<input name=\"image\" "
+        "placeholder=\"registry.example/app:tag\" required></label><label>Framework<input "
+        "name=\"framework\" value=\"container\" required></label><label>Port<input "
+        "type=\"number\" name=\"port\" value=\"3000\" min=\"1\" max=\"65535\" required>"
+        "</label><button type=\"submit\">Create App</button></form></section></div>";
+    content +=
+        "<section class=\"panel\"><h2>Build an App With the ApplicationAgent</h2><p class=\"sub\">"
+        "Describe the app. The agent proposes files and app settings for you to confirm.</p><form "
+        "class=\"stack\" method=\"post\" action=\"/ship/apps/agent\">";
+    content += hidden("customer_id", page.customer_id);
+    content += "<label>Description<textarea name=\"description\" placeholder=\"What should the app "
+               "do?\"";
+    if (!page.application_agent) {
+        content += " disabled";
+    }
+    content += "></textarea></label><button type=\"submit\"";
+    if (!page.application_agent) {
+        content += " disabled";
+    }
+    content += ">Start ApplicationAgent</button></form>";
+    if (!page.application_agent) {
+        content += "<p class=\"notice status-warning\">ApplicationAgent is not registered on this "
+                   "lake yet.</p>";
+    }
+    content += "</section>";
+    return web_ui_shell("lake — apps", "Apps", content, viewer);
+}
+
+std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
+    const std::string id = json_text(page.app, "id");
+    const std::string name = json_text(page.app, "name");
+    const nlohmann::json source = page.app.value("source", nlohmann::json::object());
+    std::string content = "<p class=\"eyebrow\">Ship · Apps</p><h1>" + web_ui_escape(name) +
+                          "</h1><p class=\"sub\">" + app_url(page.app) + "</p>";
+    if (!page.error.empty()) {
+        content +=
+            std::format("<p class=\"error\" role=\"alert\">{}</p>", web_ui_escape(page.error));
+    }
+    content += std::format(
+        "<section class=\"panel\"><h2>Status</h2><div class=\"app-phase\"><span>Desired: "
+        "{}</span>{}<span>Generation {} / observed {}</span></div><div class=\"app-phase-track\" "
+        "aria-label=\"Rollout progress\"><span class=\"app-phase-fill{}\"></span></div><p>{}</p>"
+        "</section>",
+        web_ui_escape(json_text(page.app, "desired")),
+        app_phase_badge(json_text(page.app, "phase"), page.app.value("ready", false)),
+        web_ui_escape(json_text(page.app, "generation")),
+        web_ui_escape(json_text(page.app, "observed_generation")),
+        page.app.value("ready", false) ? " ready" : "",
+        web_ui_escape(json_text(page.app, "message")));
+    content += "<section class=\"panel\"><h2>Controls</h2><div class=\"app-controls\">";
+    content += app_action_form("/ship/app/restart", "Restart", page.customer_id, id);
+    content += app_action_form("/ship/app/stop", "Stop", page.customer_id, id);
+    content += app_action_form("/ship/app/start", "Start", page.customer_id, id);
+    content += "</div><form class=\"filters\" method=\"post\" action=\"/ship/app/scale\">" +
+               app_hidden(page.customer_id, id) +
+               "<label>Replicas<input type=\"number\" name=\"replicas\" min=\"1\" max=\"100\" "
+               "value=\"" +
+               web_ui_escape(json_text(page.app, "replicas")) +
+               "\"></label><button type=\"submit\">Scale</button></form>";
+    content += "<form class=\"stack\" method=\"post\" action=\"/ship/app/deploy\">" +
+               app_hidden(page.customer_id, id);
+    if (page.app.value("mode", "") == "runtime") {
+        content += hidden("repository", json_text(source, "repository")) +
+                   hidden("path", json_text(source, "path")) +
+                   hidden("entrypoint", json_text(source, "entrypoint")) +
+                   "<label>Deploy Revision<input name=\"revision\" value=\"" +
+                   web_ui_escape(json_text(source, "revision")) + "\" required></label>";
+    } else {
+        content += "<label>Deploy Image<input name=\"image\" value=\"" +
+                   web_ui_escape(json_text(page.app, "image")) + "\" required></label>";
+    }
+    content += "<button type=\"submit\">Deploy</button></form></section>";
+    content += app_event_history(page);
+    content += "<section class=\"panel\"><h2>Live Events</h2><div class=\"app-stream\" "
+               "data-app-events role=\"log\">";
+    for (const nlohmann::json& event : page.events) {
+        content += std::format("<div>{}  {}  {}</div>",
+                               web_ui_escape(json_text(event, "sequence")),
+                               web_ui_escape(json_text(event, "type")),
+                               web_ui_escape(json_text(event, "message")));
+    }
+    content += "</div></section>";
+    content += "<section class=\"panel\"><h2>Logs</h2><pre class=\"app-stream\">";
+    if (page.logs.contains("entries")) {
+        for (const nlohmann::json& entry : page.logs.at("entries")) {
+            content +=
+                web_ui_escape(entry.is_string() ? entry.get<std::string>() : entry.dump()) + "\n";
+        }
+    } else {
+        content += "Logs are not available on this lake yet.";
+    }
+    content += "</pre></section>";
+    content += "<section class=\"panel\"><h2>Builds</h2>";
+    if (!page.builds_available) {
+        content += "<p class=\"muted\">Builds are not available on this lake yet.</p>";
+        content += "<button type=\"button\" disabled>Build</button>";
+    } else if (page.builds.empty()) {
+        content += "<p class=\"muted\">No builds yet.</p>";
+    } else {
+        content += "<table><thead><tr><th>Build</th><th>Status</th><th>Revision</th><th></th></tr>"
+                   "</thead><tbody>";
+        for (const nlohmann::json& build : page.builds) {
+            const std::string build_id = build.value("id", build.value("build_id", std::string()));
+            const std::string built_image =
+                build.value("image", build.value("target", std::string()));
+            std::string build_log;
+            const nlohmann::json logs = build.value("logs", nlohmann::json::object());
+            for (const nlohmann::json& entry : logs.value(
+                     "lines",
+                     logs.value("entries", logs.value("events", nlohmann::json::array())))) {
+                build_log +=
+                    web_ui_escape(entry.is_string() ? entry.get<std::string>() : entry.dump()) +
+                    "\n";
+            }
+            std::string build_actions = app_action_form("/ship/app/build/cancel",
+                                                        "Cancel Build",
+                                                        page.customer_id,
+                                                        id,
+                                                        hidden("build_id", build_id));
+            if (!built_image.empty()) {
+                build_actions += app_action_form("/ship/app/deploy",
+                                                 "Deploy Build",
+                                                 page.customer_id,
+                                                 id,
+                                                 hidden("image", built_image));
+            }
+            content += std::format("<tr><td><code>{}</code></td><td>{}</td><td><code>{}</code></td>"
+                                   "<td>{}<details><summary>Logs</summary><pre>{}</pre><div "
+                                   "class=\"app-stream\" data-build-events=\"{}\"></div></details>"
+                                   "</td></tr>",
+                                   web_ui_escape(build_id),
+                                   web_ui_escape(build.value(
+                                       "phase", build.value("status", std::string()))),
+                                   web_ui_escape(json_text(build, "revision")),
+                                   build_actions,
+                                   build_log,
+                                   web_ui_escape(build_id));
+        }
+        content += "</tbody></table>";
+    }
+    if (page.builds_available) {
+        content += app_action_form(
+            "/ship/app/build", page.builds.empty() ? "Build" : "Rebuild", page.customer_id, id);
+    }
+    content += "</section>";
+    content += "<section class=\"panel\"><h2>Environment</h2><table><thead><tr><th>Key</th>"
+               "<th>Value</th><th></th></tr></thead><tbody>";
+    for (const auto& [key, value] : page.app.value("env", nlohmann::json::object()).items()) {
+        content += std::format(
+            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+            web_ui_escape(key),
+            web_ui_escape(value.is_string() ? value.get<std::string>() : value.dump()),
+            app_action_form(
+                "/ship/app/env/unset", "Unset", page.customer_id, id, hidden("key", key)));
+    }
+    for (const auto& [key, value] :
+         page.app.value("secret_env_refs", nlohmann::json::object()).items()) {
+        content += std::format(
+            "<tr><td><code>{}</code></td><td>••••••</td><td>{}</td></tr>",
+            web_ui_escape(key),
+            app_action_form(
+                "/ship/app/env/unset", "Unset", page.customer_id, id, hidden("key", key)));
+    }
+    content +=
+        "</tbody></table><form class=\"filters\" method=\"post\" action=\"/ship/app/env/set\">" +
+        app_hidden(page.customer_id, id) +
+        "<label>Key<input name=\"key\" required></label><label>Value<input name=\"value\">"
+        "</label><label>Secret Reference<input name=\"secret_ref\"></label><button "
+        "type=\"submit\">Set Environment</button></form></section>";
+    const nlohmann::json bindings = page.app.value("bindings", nlohmann::json::object());
+    const bool has_zetta = bindings.contains("zetta") && !bindings.at("zetta").is_null();
+    content += "<section class=\"panel\"><h2>Bindings</h2><p>Workspace Zetta: <span class=\"badge" +
+               std::string(has_zetta ? " status-success\">Attached" : "\">Detached") +
+               "</span></p>" +
+               app_action_form("/ship/app/zetta",
+                               has_zetta ? "Detach Zetta" : "Attach Zetta",
+                               page.customer_id,
+                               id,
+                               hidden("attached", has_zetta ? "0" : "1"));
+    for (const nlohmann::json& service_id : bindings.value("services", nlohmann::json::array())) {
+        if (!service_id.is_string()) {
+            continue;
+        }
+        content += "<p><code>" + web_ui_escape(service_id.get<std::string>()) + "</code> " +
+                   app_action_form("/ship/app/service/unbind",
+                                   "Detach",
+                                   page.customer_id,
+                                   id,
+                                   hidden("service_id", service_id.get<std::string>())) +
+                   "</p>";
+    }
+    content += "<form class=\"filters\" method=\"post\" action=\"/ship/app/service/bind\">" +
+               app_hidden(page.customer_id, id) + "<label>Service<select name=\"service_id\">";
+    for (const nlohmann::json& service : page.services) {
+        content += std::format("<option value=\"{}\">{} · {}</option>",
+                               web_ui_escape(json_text(service, "id")),
+                               web_ui_escape(json_text(service, "name")),
+                               web_ui_escape(json_text(service, "kind")));
+    }
+    content += "</select></label><button type=\"submit\">Attach Service</button></form>"
+               "<form class=\"filters\" method=\"post\" action=\"/ship/app/service/create\">" +
+               app_hidden(page.customer_id, id) +
+               "<label>Name<input name=\"name\" required></label><label>Kind<input name=\"kind\" "
+               "required></label><label>Size<input name=\"size\"></label><button type=\"submit\">"
+               "Create and Attach</button></form></section>";
+    content += "<section class=\"panel\"><h2>Authentication</h2><form class=\"stack\" "
+               "method=\"post\" action=\"/ship/app/auth\">" +
+               app_hidden(page.customer_id, id) +
+               "<label>Access<select name=\"auth\"><option value=\"lake\">Lake Sign-In</option>"
+               "<option value=\"none\">Public</option></select></label><label><input "
+               "type=\"checkbox\" name=\"confirm_public\" value=\"1\"> Confirm public access"
+               "</label><button type=\"submit\">Change Authentication</button></form></section>";
+    content += "<section class=\"panel danger\"><h2>Danger Zone</h2><form class=\"stack\" "
+               "method=\"post\" action=\"/ship/app/delete\">" +
+               app_hidden(page.customer_id, id) + "<label>Type <code>" + web_ui_escape(name) +
+               "</code> to delete<input name=\"confirm\" required></label><button type=\"submit\">"
+               "Delete App</button></form></section>";
+    content += app_live_script(page.customer_id, id, page.events);
+    if (page.builds_available) {
+        content += build_live_script(page.customer_id, page.builds);
+    }
+    std::vector<WebUiCrumb> trail = default_trail(viewer, "lake — apps", "");
+    trail.push_back({"Apps", "/ship/apps?" + customer_query(page.customer_id), {}});
+    trail.push_back(web_ui_entity_crumb(name));
+    return web_ui_shell("lake — " + name, trail, content, viewer);
 }
 
 std::string web_ui_deployments(const std::vector<DeploymentSummary>& environments,
@@ -7403,13 +8620,17 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
         const bool person = json_text(message, "role") == "user";
         const nlohmann::json payload = message.value("payload", nlohmann::json::object());
         const std::string agent = payload.is_object() ? json_text(payload, "agent") : "";
+        // An agent answers in markdown (tables, lists, code); the renderer escapes every
+        // character before adding markup, so a reply cannot inject HTML.
         content += std::format(
-            "<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p><p>{}</p>",
+            "<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p>{}",
             person ? "ask-person" : "ask-agent",
             person ? std::string("You")
                    : (agent.empty() || agent == "agent-ask-orama" ? std::string("Ask Orama")
                                                                   : web_ui_escape(agent)),
-            web_ui_escape(json_text(message, "content")));
+            person ? "<p>" + web_ui_escape(json_text(message, "content")) + "</p>"
+                   : "<div class=\"ask-reply\">" +
+                         web_ui_markdown(json_text(message, "content")) + "</div>");
         if (payload.is_object()) {
             for (const nlohmann::json& delegation :
                  payload.value("delegations", nlohmann::json::array())) {
@@ -7452,6 +8673,12 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
             }
         }
         content += "</article>";
+    }
+    if (page.working) {
+        content += "<article class=\"ask-message ask-agent\" role=\"status\"><p class=\"eyebrow\">"
+                   "Ask Orama</p><p><em>Thinking…</em> It keeps working if you leave; this page "
+                   "checks again every 2 seconds.</p><meta http-equiv=\"refresh\" "
+                   "content=\"2\"></article>";
     }
     content += "</section>";
     std::string options;
@@ -7502,15 +8729,23 @@ std::string web_ui_factory(const FactoryPage& page, WebUiViewer viewer) {
     for (const nlohmann::json& message : page.messages) {
         const bool person = json_text(message, "role") == "user";
         content +=
-            std::format("<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p><p>{}</p>"
+            std::format("<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p>{}"
                         "</article>",
                         person ? "ask-person" : "ask-agent",
                         person ? "You" : "AgentCreator",
-                        web_ui_escape(json_text(message, "content")));
+                        person ? "<p>" + web_ui_escape(json_text(message, "content")) + "</p>"
+                               : "<div class=\"ask-reply\">" +
+                                     web_ui_markdown(json_text(message, "content")) + "</div>");
     }
     if (page.messages.empty()) {
         content += "<p>Describe the agent: what it is for, what it may touch, and what done looks "
                    "like.</p>";
+    }
+    if (page.working) {
+        content += "<article class=\"ask-message ask-agent\" role=\"status\"><p class=\"eyebrow\">"
+                   "AgentCreator</p><p><em>Working on it…</em> It keeps working if you leave; this "
+                   "page checks again every 2 seconds.</p><meta http-equiv=\"refresh\" "
+                   "content=\"2\"></article>";
     }
     content += "</section>";
     const nlohmann::json& latest = page.latest;

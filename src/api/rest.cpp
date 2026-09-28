@@ -245,6 +245,11 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
         operation["summary"] = capability->title;
         operation["description"] = capability->description;
         operation["tags"] = nlohmann::json::array({std::string(to_string(capability->kind))});
+        // What the call does, apart from how it is sent: an action (POST) may only read, like
+        // workspace_query or predict. Agents decide what they may call on their own from this.
+        if (!capability->action.empty()) {
+            operation["x-lake-action"] = capability->action;
+        }
         if (!capability->requires_auth)
             operation["security"] = nlohmann::json::array();
         const std::string method = rest_method(*capability);

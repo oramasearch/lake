@@ -5,6 +5,13 @@ Train → Agents → Create an Agent (`/train/agents/new`): a conversation with 
 ([`oramasearch/agent-creator`](https://github.com/oramasearch/agent-creator)), which asks what it must
 and proposes an agent in Studio's shape. **Nothing is created until the person approves.**
 
+
+**AgentCreator's answer (agent-creator#1).** Its turn answers words a person reads in `reply` (the
+question, or the proposal in one sentence) and the structured answer in `result`
+(`{kind: question | proposal, question?, proposal?, defects, facts}`), so an API or MCP caller reads
+`result` without parsing text. The Factory page reads `result`, falling back to the JSON an older
+AgentCreator put in `reply`.
+
 ## The conversation
 
 `POST /train/agents/new/send` sends one `agent_turn` to `agent-creator` (a turn key limited to the

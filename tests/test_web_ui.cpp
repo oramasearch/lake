@@ -463,6 +463,7 @@ TEST(WebUi, NavigationMatchesVisitorAccountAndOperatorAccess) {
     EXPECT_EQ(account.find("Administration"), std::string::npos);
     EXPECT_NE(account.find("href=\"/tokens\""), std::string::npos);
     EXPECT_NE(account.find("href=\"/shared-with-me\""), std::string::npos);
+    EXPECT_NE(account.find("href=\"/ship/apps\""), std::string::npos);
     EXPECT_NE(account.find("action=\"/logout\""), std::string::npos);
     EXPECT_NE(account.find("aria-current=\"page\""), std::string::npos);
     const std::string administrator = lake::api::web_ui_home({true, true});
@@ -714,6 +715,8 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     repo.retention_until = "2026-10-03T00:00:00Z";
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
 
+    repo.deleted_at.clear();
+    repo.retention_until.clear();
     const lake::api::RepositoryHomeData data{
         .refs = {{"main", "blake3:123456789012345678901234567890"}},
         .tree = {{"README.md", "blob", "blob-1", 0644, "node-1", 48, 32},
@@ -737,6 +740,26 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     EXPECT_NE(home.find("C++"), std::string::npos);
     EXPECT_NE(home.find("Markdown"), std::string::npos);
     EXPECT_NE(home.find("Effective Access"), std::string::npos);
+    EXPECT_NE(home.find("action=\"/repository/build\""), std::string::npos);
+    EXPECT_NE(home.find("Build image"), std::string::npos);
+}
+
+TEST(WebUi, BuildPagesRenderLiveHistoryWithoutExposingCredentials) {
+    const nlohmann::json catalog{
+        {"oci", {{{"name", "ada/service"}, {"versions", nlohmann::json::array({"latest"})}}}},
+        {"npm", nlohmann::json::array()},
+        {"python", nlohmann::json::array()}};
+    const nlohmann::json builds = nlohmann::json::array({{{"id", "build-1"},
+                                                          {"repository", "repo-1"},
+                                                          {"target", "registry/ada/service:latest"},
+                                                          {"phase", "Running"},
+                                                          {"digest", ""}}});
+    const std::string packages =
+        lake::api::web_ui_packages(catalog, true, "https://lake.test", true, builds, "customer-1");
+    EXPECT_NE(packages.find("ada/service"), std::string::npos);
+    EXPECT_NE(packages.find("data-build-id=\"build-1\""), std::string::npos);
+    EXPECT_NE(packages.find("receive_build_events"), std::string::npos);
+    EXPECT_EQ(packages.find("token_hashes"), std::string::npos);
 }
 
 TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {
@@ -1247,6 +1270,9 @@ TEST(WebUi, NavigationFollowsTheRequestPath) {
     const std::string deployments = lake::api::web_ui_home(viewer);
     EXPECT_NE(deployments.find("href=\"/deployments\" aria-current=\"page\""), std::string::npos);
     EXPECT_EQ(deployments.find("href=\"/repositories\" aria-current=\"page\""), std::string::npos);
+    viewer.path = "/ship/app";
+    const std::string app = lake::api::web_ui_home(viewer);
+    EXPECT_NE(app.find("href=\"/ship/apps\" aria-current=\"page\""), std::string::npos);
     viewer.path = "/drivers";
     // No sidebar item owns the path (the breadcrumb still marks its own current level).
     const std::string unowned = lake::api::web_ui_home(viewer);
@@ -1272,6 +1298,72 @@ TEST(WebUi, AccountPagesLiveInTheAccountMenu) {
     EXPECT_NE(account.find("<p class=\"nav-label\">Ship</p>"), std::string::npos);
     EXPECT_EQ(lake::api::web_ui_home({true, true}).find("account-menu"), std::string::npos);
     EXPECT_EQ(lake::api::web_ui_home().find("account-menu"), std::string::npos);
+}
+
+TEST(WebUi, ShipAppsRenderControlsMaskedSecretsAndLiveEvents) {
+    lake::api::AppsPage list;
+    list.customer_id = "customer-1";
+    list.customers = {{"customer-1", "Personal", true}};
+    list.apps = {{{"id", "app-1"},
+                  {"name", "customer-portal"},
+                  {"mode", "runtime"},
+                  {"source", {{"repository", "repo-1"}, {"revision", "main"}}},
+                  {"phase", "Running"},
+                  {"ready", true},
+                  {"url", "https://portal.example.test"},
+                  {"bindings", {{"zetta", {{"scopes", {"read"}}}}, {"services", {"db-1"}}}}}};
+    const std::string apps = lake::api::web_ui_apps(list, true);
+    EXPECT_NE(apps.find("<h1>Apps</h1>"), std::string::npos);
+    EXPECT_NE(apps.find("customer-portal"), std::string::npos);
+    EXPECT_NE(apps.find("Zetta, 1 service"), std::string::npos);
+    EXPECT_NE(apps.find("ApplicationAgent is not registered"), std::string::npos);
+
+    lake::api::AppPage detail;
+    detail.customer_id = "customer-1";
+    detail.app = {
+        {"id", "app-1"},
+        {"name", "customer-portal"},
+        {"mode", "runtime"},
+        {"source",
+         {{"repository", "repo-1"}, {"revision", "main"}, {"path", "."}, {"entrypoint", ""}}},
+        {"replicas", 2},
+        {"desired", "running"},
+        {"generation", 3},
+        {"observed_generation", 3},
+        {"phase", "Running"},
+        {"ready", true},
+        {"message", "Ready"},
+        {"env", {{"REGION", "ca-west"}}},
+        {"secret_env_refs", {{"API_TOKEN", "secret/app-token"}}},
+        {"bindings", {{"zetta", {{"scopes", {"read"}}}}, {"services", {"db-1"}}}}};
+    detail.events = {{{"sequence", 4},
+                      {"type", "deploy"},
+                      {"generation", 3},
+                      {"principal", "user:1"},
+                      {"message", "Ready"},
+                      {"status",
+                       {{"source",
+                         {{"repository", "repo-1"},
+                          {"revision", "main"},
+                          {"path", "."},
+                          {"entrypoint", ""}}}}}}};
+    detail.builds_available = true;
+    detail.builds = {{{"id", "build-1"},
+                      {"phase", "Building"},
+                      {"revision", "main"},
+                      {"target", "lake.test/customer-1/customer-portal:build-1"},
+                      {"logs", {{"lines", nlohmann::json::array({"step one"})}}}}};
+    const std::string app = lake::api::web_ui_app(detail, true);
+    EXPECT_NE(app.find("action=\"/ship/app/restart\""), std::string::npos);
+    EXPECT_NE(app.find("action=\"/ship/app/rollback\""), std::string::npos);
+    EXPECT_NE(app.find("build-1"), std::string::npos);
+    EXPECT_NE(app.find("Building"), std::string::npos);
+    EXPECT_NE(app.find("step one"), std::string::npos);
+    EXPECT_NE(app.find("receive_build_events"), std::string::npos);
+    EXPECT_NE(app.find("••••••"), std::string::npos);
+    EXPECT_EQ(app.find("secret/app-token"), std::string::npos);
+    EXPECT_NE(app.find("id=\"app-live-events\""), std::string::npos);
+    EXPECT_NE(app.find("receive_app_events"), std::string::npos);
 }
 
 TEST(WebUi, RepositoryTabsOpenOnFilesAndNameDeployments) {

@@ -36,11 +36,19 @@ struct WorkspaceConfig {
     // (LAKE_AGENT_SERVICE_TOKEN).
     std::string internal_url;
     std::string agent_service_token;
+    // Each library agent's own credential on the agent bus (docs/api/agent-bus.md): a file per
+    // agent in LAKE_AGENT_BUS_DIR, named by its key, which the operator mounts into that agent
+    // alone. Never the service token, which user-created agents on agent-runtime also hold.
+    std::map<std::string, std::string> agent_bus_tokens;
 
     bool configured() const {
         return !service_dir.empty();
     }
 };
+
+// Reads LAKE_AGENT_BUS_DIR: one file per library agent, its name the agent's key and its
+// content (trimmed) the agent's bus credential. Missing or empty files are skipped.
+std::map<std::string, std::string> read_agent_bus_tokens(const std::string& directory);
 
 // `ws-` followed by the first 12 hexadecimal digits of the customer id; empty when the id is not
 // a UUID. The slug of a customer's first workspace, which decision 45 created clusters under.

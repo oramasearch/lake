@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `custodial_identity_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `builds_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -1595,3 +1595,241 @@ CREATE TABLE IF NOT EXISTS agent_cron_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0031_agent_cron_schedules') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0032_agent_tasks: agent turns run in the background (lake#269, docs/api/agent-bus.md). lake
+-- writes the turn, publishes it on the agent bus (Zetta pub/sub, topic agent-tasks.<agent>) and
+-- answers the HTTP request at once. The agent claims it through lake, which hands it a fresh
+-- credential (lat.<task id>.<secret>, only its SHA-256 stored); what the agent publishes on
+-- agent-events lake writes into agent_task_status. No page or capability waits on an agent.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id                   uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id          uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    -- The agent of the Agent Library the turn goes to (agent-ask-orama, agent-project, …).
+    agent                text        NOT NULL,
+    -- What asked: ask, factory, discover, pipeline or api; and the conversation it belongs to.
+    kind                 text        NOT NULL DEFAULT 'api',
+    conversation_id      uuid,
+    -- The body the agent receives when it claims the task; "{{credential}}" is replaced by the
+    -- task's credential, which lake hands over once and never stores.
+    body                 jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    -- The lake capabilities the task's credential may call.
+    scopes               text[]      NOT NULL,
+    deadline_seconds     integer     NOT NULL DEFAULT 300,
+    desired              text        NOT NULL DEFAULT 'present',
+    generation           bigint      NOT NULL DEFAULT 1,
+    requested_by_user_id uuid        REFERENCES users(id) ON DELETE CASCADE,
+    requested_by_taap_id text        NOT NULL DEFAULT '',
+    -- When lake last published it on the bus; an unclaimed task is published again.
+    published_at         timestamptz,
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    updated_at           timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT agent_task_desired_check CHECK (desired IN ('present', 'absent')),
+    CONSTRAINT agent_task_scopes_check CHECK (cardinality(scopes) > 0)
+);
+CREATE INDEX IF NOT EXISTS agent_tasks_conversation_idx
+    ON agent_tasks (conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS agent_tasks_customer_idx ON agent_tasks (customer_id, created_at DESC);
+
+-- Written by lake: inserted when the agent claims the task, updated by what it publishes.
+CREATE TABLE IF NOT EXISTS agent_task_status (
+    task_id             uuid        PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+    phase               text        NOT NULL DEFAULT '',
+    message             text        NOT NULL DEFAULT '',
+    result              jsonb       NOT NULL DEFAULT 'null'::jsonb,
+    credential_sha256   text        NOT NULL DEFAULT '',
+    started_at          timestamptz,
+    finished_at         timestamptz,
+    observed_generation bigint      NOT NULL DEFAULT 0,
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+
+-- Design → Opportunities (lake#269): what Auto-Suggest recommended, kept across scans. A scan task
+-- that finished writes its rows once; a person turns them into projects or dismisses them.
+CREATE TABLE IF NOT EXISTS opportunities (
+    id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id        uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    task_id            uuid        NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+    rank               integer     NOT NULL DEFAULT 0,
+    intent             text        NOT NULL,
+    solution           text        NOT NULL DEFAULT '',
+    methodology        text        NOT NULL DEFAULT '',
+    why                text        NOT NULL DEFAULT '',
+    payload            jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    -- new, project (made into a project), dismissed, or not_yet (Auto-Suggest declined it)
+    status             text        NOT NULL DEFAULT 'new',
+    project            text        NOT NULL DEFAULT '',
+    created_by_user_id uuid        REFERENCES users(id) ON DELETE SET NULL,
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    updated_at         timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT opportunity_status_check CHECK (status IN ('new', 'project', 'dismissed', 'not_yet'))
+);
+CREATE INDEX IF NOT EXISTS opportunities_customer_idx ON opportunities (customer_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS opportunities_task_rank_idx ON opportunities (task_id, rank, status);
+
+CREATE TABLE IF NOT EXISTS agent_tasks_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0032_agent_tasks') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0033_agent_task_events: where a task's events start on the agent bus (lake#275). When an agent
+-- claims a task, lake records the agent-events sequence its bus loop has reached: every event the
+-- task publishes comes after it, so following the task reads from there instead of from the start
+-- of a topic that only grows. 0 means unknown (read from the start).
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE agent_task_status ADD COLUMN IF NOT EXISTS events_from bigint NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS agent_task_events_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0033_agent_task_events') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0034_web_apps: Ship apps desired state and the status the Orama operator observes (lake#293).
+-- lake writes the desired fields, increments generation, and NOTIFYs lake_apps. The operator
+-- reconciles one LakeApp per row and writes phase through observed_generation back on this row.
+-- The operator writes token hashes; bindings contain read scopes and service IDs only.
+-- env_json never contains clear credentials. See docs/control-plane/web-apps.md.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS apps (
+    id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id         uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    name                text        NOT NULL,
+    mode                text        NOT NULL,
+    source_repository   text        NOT NULL DEFAULT '',
+    source_revision     text        NOT NULL DEFAULT '',
+    source_path         text        NOT NULL DEFAULT '',
+    source_entrypoint   text        NOT NULL DEFAULT '',
+    image               text        NOT NULL DEFAULT '',
+    framework           text        NOT NULL DEFAULT '',
+    port                integer     NOT NULL,
+    replicas            integer     NOT NULL DEFAULT 1,
+    host                text        NOT NULL,
+    auth                text        NOT NULL DEFAULT 'lake',
+    bindings_json       jsonb       NOT NULL DEFAULT '{"zetta":null,"services":[]}'::jsonb,
+    env_json            jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    secret_env_refs     jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    token_hashes_json   jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    desired             text        NOT NULL DEFAULT 'running',
+    generation          bigint      NOT NULL DEFAULT 1,
+    phase               text        NOT NULL DEFAULT 'Pending',
+    url                 text        NOT NULL DEFAULT '',
+    ready               boolean     NOT NULL DEFAULT false,
+    message             text        NOT NULL DEFAULT '',
+    observed_generation bigint      NOT NULL DEFAULT 0,
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT app_name_format CHECK (name ~ '^[a-z]([a-z0-9-]{0,29}[a-z0-9])?$'),
+    CONSTRAINT app_mode_check CHECK (mode IN ('runtime', 'image')),
+    CONSTRAINT app_source_or_image_check CHECK (
+        (mode = 'runtime' AND source_repository <> '' AND source_revision <> '' AND image = '') OR
+        (mode = 'image' AND image <> '' AND source_repository = '' AND source_revision = '')
+    ),
+    CONSTRAINT app_port_check CHECK (port BETWEEN 1 AND 65535),
+    CONSTRAINT app_replicas_check CHECK (replicas BETWEEN 1 AND 100),
+    CONSTRAINT app_auth_check CHECK (auth IN ('lake', 'none')),
+    CONSTRAINT app_desired_check CHECK (desired IN ('running', 'stopped', 'deleted')),
+    CONSTRAINT app_bindings_object CHECK (jsonb_typeof(bindings_json) = 'object'),
+    CONSTRAINT app_env_object CHECK (jsonb_typeof(env_json) = 'object'),
+    CONSTRAINT app_secret_refs_object CHECK (jsonb_typeof(secret_env_refs) = 'object')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS apps_customer_name_idx
+    ON apps (customer_id, name) WHERE desired <> 'deleted';
+CREATE UNIQUE INDEX IF NOT EXISTS apps_host_idx ON apps (host) WHERE desired <> 'deleted';
+CREATE INDEX IF NOT EXISTS apps_customer_idx ON apps (customer_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS web_apps_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0034_web_apps') ON CONFLICT DO NOTHING;
+
+-- 0035_web_apps_operator_contract: upgrade earlier Apps rows to the operator-owned token contract.
+-- This also works after 0034 has already been applied. No app bearer material is retained by lake.
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS source_entrypoint text NOT NULL DEFAULT '';
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS token_hashes_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS app_mode_check;
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS app_source_or_image_check;
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS app_desired_check;
+-- Earlier partial indexes exclude absent rows. Remove them before converting historical rows,
+-- which may legitimately reuse a name or host after deletion.
+DROP INDEX IF EXISTS apps_customer_name_idx;
+DROP INDEX IF EXISTS apps_host_idx;
+UPDATE apps SET mode = 'runtime' WHERE mode = 'source';
+UPDATE apps SET desired = 'deleted' WHERE desired = 'absent';
+UPDATE apps SET phase = 'Running' WHERE phase = 'Ready';
+ALTER TABLE apps ALTER COLUMN phase SET DEFAULT 'Pending';
+ALTER TABLE apps ALTER COLUMN bindings_json SET DEFAULT '{"zetta":null,"services":[]}'::jsonb;
+ALTER TABLE apps ADD CONSTRAINT app_mode_check CHECK (mode IN ('runtime', 'image'));
+ALTER TABLE apps ADD CONSTRAINT app_source_or_image_check CHECK (
+    (mode = 'runtime' AND source_repository <> '' AND source_revision <> '' AND image = '') OR
+    (mode = 'image' AND image <> '' AND source_repository = '' AND source_revision = '')
+);
+ALTER TABLE apps ADD CONSTRAINT app_desired_check CHECK (desired IN ('running', 'stopped', 'deleted'));
+UPDATE apps SET bindings_json = jsonb_build_object(
+    'zetta', CASE WHEN jsonb_typeof(bindings_json->'zetta') = 'object'
+        OR bindings_json->'zetta' = 'true'::jsonb
+        THEN '{"scopes":["read"]}'::jsonb ELSE 'null'::jsonb END,
+    'services', COALESCE((SELECT jsonb_agg(CASE WHEN jsonb_typeof(value) = 'object'
+        THEN value->'id' ELSE value END)
+        FROM jsonb_array_elements(COALESCE(bindings_json->'services', '[]'::jsonb))), '[]'::jsonb)
+) WHERE NOT EXISTS (
+    SELECT 1 FROM schema_migrations WHERE version = '0035_web_apps_operator_contract'
+);
+CREATE UNIQUE INDEX apps_customer_name_idx ON apps (customer_id, name) WHERE desired <> 'deleted';
+CREATE UNIQUE INDEX apps_host_idx ON apps (host) WHERE desired <> 'deleted';
+CREATE INDEX IF NOT EXISTS apps_source_token_idx ON apps ((token_hashes_json->>'source'));
+CREATE INDEX IF NOT EXISTS apps_zetta_token_idx ON apps ((token_hashes_json->>'zetta'));
+CREATE INDEX IF NOT EXISTS apps_events_token_idx ON apps ((token_hashes_json->>'events'));
+DROP TABLE IF EXISTS app_credentials;
+CREATE TABLE IF NOT EXISTS web_apps_operator_contract_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0035_web_apps_operator_contract')
+    ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0036_builds: in-cluster image build intent and operator observation (lake#295). Lake writes
+-- queued/cancelled desired state and NOTIFYs lake_builds. The operator owns phase, result and the
+-- SHA-256 hashes of its source, push and event credentials. Plain credentials never enter this
+-- database. See docs/control-plane/builds.md.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS builds (
+    id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id         uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    repository          text        NOT NULL,
+    revision            text        NOT NULL,
+    context             text        NOT NULL DEFAULT '.',
+    dockerfile          text        NOT NULL DEFAULT 'Dockerfile',
+    target              text        NOT NULL,
+    build_args_json     jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    desired             text        NOT NULL DEFAULT 'queued',
+    phase               text        NOT NULL DEFAULT 'Queued',
+    digest              text        NOT NULL DEFAULT '',
+    size                bigint      NOT NULL DEFAULT 0,
+    message             text        NOT NULL DEFAULT '',
+    token_hashes_json   jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT build_desired_check CHECK (desired IN ('queued', 'cancelled')),
+    CONSTRAINT build_phase_check CHECK (
+        phase IN ('Queued', 'Running', 'Succeeded', 'Failed', 'Cancelled')
+    ),
+    CONSTRAINT build_args_object CHECK (jsonb_typeof(build_args_json) = 'object'),
+    CONSTRAINT build_token_hashes_object CHECK (jsonb_typeof(token_hashes_json) = 'object'),
+    CONSTRAINT build_size_check CHECK (size >= 0)
+);
+CREATE INDEX IF NOT EXISTS builds_customer_idx ON builds (customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS builds_source_token_idx ON builds ((token_hashes_json->>'source'));
+CREATE INDEX IF NOT EXISTS builds_push_token_idx ON builds ((token_hashes_json->>'push'));
+CREATE INDEX IF NOT EXISTS builds_events_token_idx ON builds ((token_hashes_json->>'events'));
+
+CREATE TABLE IF NOT EXISTS builds_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0036_builds') ON CONFLICT DO NOTHING;
