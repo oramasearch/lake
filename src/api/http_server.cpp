@@ -7690,6 +7690,19 @@ struct ApiServer::Impl {
                                  "applied: " + followed.value.value("build_error", std::string());
                 }
             }
+            if (auto solution = context.store->latest_agent_task(page.customer_id,
+                                                                 "solution:" + page.subject)) {
+                const ApiResult followed = unwrap(co_await workspace_call(
+                    "get_agent_task",
+                    {{"customer_id", page.customer_id}, {"task_id", solution->id}},
+                    context));
+                if (followed.ok) {
+                    page.data["solution_task"] = followed.value;
+                } else if (page.error.empty()) {
+                    page.error = "The Project Agent's foundation proposal could not be read: " +
+                                 followed.error.message;
+                }
+            }
         }
         if (page.unavailable.empty() && page.state.value("ready", false)) {
             std::vector<std::pair<std::string, nlohmann::json>> reads;
@@ -7699,7 +7712,8 @@ struct ApiServer::Impl {
             } else if (section == "solutions") {
                 reads = {{"list_solutions", nlohmann::json::object()}};
             } else if (section == "solution") {
-                reads = {{"get_solution", {{"solution", page.subject}}}};
+                reads = {{"get_solution", {{"solution", page.subject}}},
+                         {"list_datasets", nlohmann::json::object()}};
             } else if (section == "projects") {
                 reads = {{"list_projects", nlohmann::json::object()}};
             } else if (section == "project") {
@@ -7853,6 +7867,139 @@ struct ApiServer::Impl {
                            !(capability == "get_solution" &&
                              result.error.code == "unknown_capability")) {
                     page.error = result.error.message;
+                }
+            }
+            if (section == "project" && page.data.contains("get_project")) {
+                // A solution graph identifies itself through its manifest. That durable engine
+                // record carries the policy, experiment, monitor and readout ids, so the project
+                // page needs no duplicate lake-side solution state (lake#292).
+                const nlohmann::json graphs =
+                    page.data["get_project"].value("graphs", nlohmann::json::array());
+                for (const nlohmann::json& summary : graphs) {
+                    const std::string graph = summary.value("name", std::string());
+                    const ApiResult detail = unwrap(co_await workspace_call(
+                        "workspace_query",
+                        {{"customer_id", page.customer_id},
+                         {"capability", "get_graph"},
+                         {"input", {{"project", page.subject}, {"graph", graph}}}},
+                        context));
+                    if (!detail.ok) {
+                        continue;
+                    }
+                    nlohmann::json foundation;
+                    nlohmann::json source_roles;
+                    nlohmann::json stages = nlohmann::json::array();
+                    for (const nlohmann::json& node :
+                         detail.value.value("nodes", nlohmann::json::array())) {
+                        const nlohmann::json attributes =
+                            node.value("attributes", nlohmann::json::object());
+                        if (node.value("id", std::string()) == "solution_manifest" &&
+                            attributes.contains("foundation") &&
+                            attributes["foundation"].is_object()) {
+                            foundation = attributes["foundation"];
+                            source_roles = attributes.value("sources", nlohmann::json::object());
+                        }
+                        if (attributes.contains("solution_stage")) {
+                            stages.push_back({{"id", node.value("id", std::string())},
+                                              {"name", node.value("name", std::string())},
+                                              {"kind", node.value("kind", std::string())},
+                                              {"stage", attributes["solution_stage"]}});
+                        }
+                    }
+                    if (!foundation.is_object()) {
+                        continue;
+                    }
+                    nlohmann::json solution_project{
+                        {"graph", graph},
+                        {"graph_id",
+                         detail.value.value("graph_id", summary.value("id", std::string()))},
+                        {"foundation", foundation},
+                        {"sources", source_roles},
+                        {"stages", std::move(stages)}};
+                    const auto read_state =
+                        [&](std::string capability,
+                            nlohmann::json input) -> liquid::runtime::task<ApiResult> {
+                        co_return unwrap(
+                            co_await workspace_call("workspace_query",
+                                                    {{"customer_id", page.customer_id},
+                                                     {"capability", std::move(capability)},
+                                                     {"input", std::move(input)}},
+                                                    context));
+                    };
+                    for (const auto& [key, capability, input] :
+                         std::array<std::tuple<const char*, const char*, nlohmann::json>, 5>{
+                             {{"policy",
+                               "get_policy",
+                               {{"policy_id", foundation.value("policy_id", std::string())}}},
+                              {"experiment",
+                               "get_experiment",
+                               {{"experiment", foundation.value("experiment_id", std::string())}}},
+                              {"ledger", "list_ledger", nlohmann::json::object()},
+                              {"monitor",
+                               "get_monitor",
+                               {{"solution", foundation.value("monitor_id", std::string())}}},
+                              {"roi",
+                               "get_roi_readout",
+                               {{"solution",
+                                 foundation.value("readout_id",
+                                                  foundation.value("scope", std::string()))}}}}}) {
+                        const ApiResult state = unwrap(co_await read_state(capability, input));
+                        if (state.ok) {
+                            solution_project[key] = state.value;
+                        }
+                    }
+                    const ApiResult listed_runs =
+                        unwrap(co_await read_state("list_runs", nlohmann::json::object()));
+                    nlohmann::json latest;
+                    if (listed_runs.ok) {
+                        for (const nlohmann::json& run :
+                             listed_runs.value.value("runs", nlohmann::json::array())) {
+                            const std::string of = run.value("graph", std::string());
+                            if (of != solution_project.value("graph", std::string()) &&
+                                of != solution_project.value("graph_id", std::string())) {
+                                continue;
+                            }
+                            if (latest.is_null() || run.value("created", std::string()) >
+                                                        latest.value("created", std::string())) {
+                                latest = run;
+                            }
+                        }
+                    }
+                    if (latest.is_object()) {
+                        const ApiResult run = unwrap(co_await read_state(
+                            "get_run", {{"run_id", latest.value("id", std::string())}}));
+                        if (run.ok) {
+                            solution_project["run"] = run.value;
+                            std::string decisions;
+                            for (const nlohmann::json& output :
+                                 run.value.value("outputs", nlohmann::json::array())) {
+                                if (output.value("name", std::string()) == "solution decisions") {
+                                    decisions = output.value("ref", std::string());
+                                }
+                            }
+                            const bool safe = !decisions.empty() &&
+                                              std::ranges::all_of(decisions, [](unsigned char c) {
+                                                  return std::isalnum(c) || c == '_' || c == '.';
+                                              });
+                            if (safe) {
+                                const ApiResult rows = unwrap(co_await workspace_call(
+                                    "workspace_sql",
+                                    {{"customer_id", page.customer_id},
+                                     {"statement", "SELECT * FROM " + decisions}},
+                                    context));
+                                if (rows.ok) {
+                                    nlohmann::json values =
+                                        rows.value.value("rows", nlohmann::json::array());
+                                    if (values.is_array() && values.size() > 100) {
+                                        values.erase(values.begin() + 100, values.end());
+                                    }
+                                    solution_project["decisions"] = std::move(values);
+                                }
+                            }
+                        }
+                    }
+                    page.data["solution_project"] = std::move(solution_project);
+                    break;
                 }
             }
         }
@@ -8535,35 +8682,121 @@ struct ApiServer::Impl {
                 }
             }
         } else if (action == "solution_start") {
-            // A catalogue solution becomes a project with its composed pipeline (lake#290,
-            // zetta#1102): the project first, then the solution built into it.
+            // The person supplies the business inputs; the Project Agent proposes the engine's
+            // remaining foundation. create_solution runs only after confirmation (lake#292).
             const std::string solution = form_field(body, "solution");
             const std::string name = form_field(body, "name");
             back = "/design/solution?" + query + "&id=" + oauth_url_encode(solution);
-            result = unwrap(co_await workspace_call(
-                "workspace_act",
-                {{"customer_id", customer_id},
-                 {"capability", "create_project"},
-                 {"input", {{"name", name}, {"description", "Solution " + solution}}}},
-                context));
-            if (result.ok) {
-                nlohmann::json input{{"project", name}, {"solution", solution}};
-                // The engine's levels are integers 1–4 (zetta#1102).
-                if (const std::string level = form_field(body, "level"); !level.empty()) {
-                    int number = 0;
-                    const auto [end, error] =
-                        std::from_chars(level.data(), level.data() + level.size(), number);
-                    if (error == std::errc() && end == level.data() + level.size()) {
-                        input["level"] = number;
-                    }
-                }
-                result = unwrap(co_await workspace_call(
-                    "workspace_act",
-                    {{"customer_id", customer_id}, {"capability", "create_solution"}, {"input", std::move(input)}},
-                    context));
+            int level = 0;
+            const std::string level_text = form_field(body, "level");
+            const auto [level_end, level_error] =
+                std::from_chars(level_text.data(), level_text.data() + level_text.size(), level);
+            const std::string value_text = form_field(body, "value_per_outcome");
+            const std::string investment_text = form_field(body, "investment");
+            char* value_end = nullptr;
+            char* investment_end = nullptr;
+            const double value = std::strtod(value_text.c_str(), &value_end);
+            const double investment = std::strtod(investment_text.c_str(), &investment_end);
+            if (level_error != std::errc() || level_end != level_text.data() + level_text.size() ||
+                value_text.empty() || value_end == value_text.c_str() || *value_end != '\0' ||
+                investment_text.empty() || investment_end == investment_text.c_str() ||
+                *investment_end != '\0') {
+                result = ApiResult::failure("invalid_input",
+                                            "Level and economics must be valid numbers.");
+            } else {
+                result = unwrap(
+                    co_await workspace_call("start_solution",
+                                            {{"customer_id", customer_id},
+                                             {"project", name},
+                                             {"solution", solution},
+                                             {"level", level},
+                                             {"dataset", form_field(body, "dataset")},
+                                             {"delivery",
+                                              {{"kind", form_field(body, "delivery_kind")},
+                                               {"endpoint", form_field(body, "delivery_endpoint")},
+                                               {"owner", form_field(body, "owner")}}},
+                                             {"roi_model",
+                                              {{"value_per_outcome", value},
+                                               {"investment", investment},
+                                               {"currency", form_field(body, "currency")}}}},
+                                            context));
                 if (result.ok) {
-                    back = "/design/project?" + query + "&name=" + oauth_url_encode(name);
+                    back =
+                        "/design/project?" + query + "&name=" + oauth_url_encode(name) +
+                        "&task=" + oauth_url_encode(result.value.value("task_id", std::string()));
                 }
+            }
+        } else if (action == "solution_confirm") {
+            const std::string project = form_field(body, "project");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            nlohmann::json edits =
+                nlohmann::json::parse(form_field(body, "foundation"), nullptr, false);
+            if (!edits.is_object()) {
+                result =
+                    ApiResult::failure("invalid_input", "The foundation must be a JSON object.");
+            } else if (form_field(body, "confirm") != "yes") {
+                result = ApiResult::failure("invalid_input",
+                                            "Confirm that you reviewed the foundation.");
+            } else {
+                result = unwrap(co_await workspace_call(
+                    "confirm_solution",
+                    {{"task_id", form_field(body, "task_id")}, {"edits", std::move(edits)}},
+                    context));
+            }
+        } else if (action == "solution_run") {
+            const std::string project = form_field(body, "project");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            nlohmann::json input{{"project", project}, {"graph", form_field(body, "graph")}};
+            if (const std::string token = form_field(body, "delivery_token"); !token.empty()) {
+                input["delivery_token"] = token;
+            }
+            result = unwrap(co_await act("run_solution", std::move(input)));
+            if (result.ok) {
+                back += "&run=" + oauth_url_encode(result.value.value("run_id", std::string()));
+            }
+        } else if (action == "solution_policy") {
+            const std::string project = form_field(body, "project");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            nlohmann::json config =
+                nlohmann::json::parse(form_field(body, "config"), nullptr, false);
+            if (!config.is_object()) {
+                result = ApiResult::failure("invalid_input",
+                                            "The policy configuration must be a JSON object.");
+            } else if (form_field(body, "confirm") != "yes") {
+                result = ApiResult::failure(
+                    "invalid_input", "Approve the proposed policy version before applying it.");
+            } else {
+                result = unwrap(co_await act("update_policy",
+                                             {{"policy_id", form_field(body, "policy_id")},
+                                              {"config", std::move(config)},
+                                              {"reason", form_field(body, "reason")}}));
+            }
+        } else if (action == "solution_approve") {
+            const std::string project = form_field(body, "project");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            if (form_field(body, "confirm") != "yes") {
+                result = ApiResult::failure("invalid_input",
+                                            "Confirm this A1 decision before approving it.");
+            } else {
+                result = unwrap(co_await act("approve_decision",
+                                             {{"decision_id", form_field(body, "decision_id")}}));
+            }
+        } else if (action == "solution_outcome") {
+            const std::string project = form_field(body, "project");
+            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
+            const std::string value_text = form_field(body, "value");
+            char* value_end = nullptr;
+            const double value = std::strtod(value_text.c_str(), &value_end);
+            if (value_text.empty() || value_end == value_text.c_str() || *value_end != '\0') {
+                result = ApiResult::failure("invalid_input", "The outcome value must be a number.");
+            } else {
+                result = unwrap(co_await act("record_outcome",
+                                             {{"action_id", form_field(body, "action_id")},
+                                              {"outcome", form_field(body, "outcome")},
+                                              {"value", value},
+                                              {"currency", form_field(body, "currency")},
+                                              {"source", "manual"},
+                                              {"occurred_at", form_field(body, "occurred_at")}}));
             }
         } else if (action == "discover_dismiss") {
             back = "/design/opportunities?" + query;
@@ -12967,9 +13200,14 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 44>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 49>{
              {{"/workspace/start", "start"},
               {"/design/solutions/start", "solution_start"},
+              {"/design/solution/confirm", "solution_confirm"},
+              {"/design/solution/run", "solution_run"},
+              {"/design/solution/policy", "solution_policy"},
+              {"/design/solution/approve", "solution_approve"},
+              {"/design/solution/outcome", "solution_outcome"},
               {"/train/agents/create", "agent_create"},
               {"/train/agent/run", "agent_run"},
               {"/train/agent/grant", "agent_grant"},
