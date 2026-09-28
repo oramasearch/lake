@@ -28,6 +28,19 @@ struct GroupRule {
 
 // First match wins, so the narrow groups come before Repositories, which takes the rest.
 constexpr std::array group_rules{
+    GroupRule{"Experiments",
+              "Read training studies, run metrics, comparisons and bounded live events in a space. "
+              "These tools are distinct from the solutions holdout get_experiment. Start and stop "
+              "require write permission and the person's confirmation; promote_trial requires "
+              "space administration and confirmation. Curves are suppressed for differential privacy.",
+              [](std::string_view n) {
+                  return n == "list_experiments" || n == "get_experiment_study" ||
+                         n == "list_experiment_trials" || n == "get_experiment_analysis" ||
+                         n == "tail_experiment_events" || n == "stop_experiment_trial" ||
+                         n == "get_run_metrics" ||
+                         n == "compare_runs" || n == "start_study" || n == "stop_study" ||
+                         n == "promote_trial";
+              }},
     GroupRule{"Streams",
               "Ask Orama and ApplicationAgent may freely read list_streams, get_stream and "
               "browse_stream. Stream writes require the person's confirmation; deletes require "
@@ -147,7 +160,8 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 11> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 12> group_order{"Workspace: Design, Train and Ship",
+                                                       "Experiments",
                                                        "Streams",
                                                        "Agents",
                                                        "Services",

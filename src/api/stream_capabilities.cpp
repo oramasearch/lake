@@ -172,6 +172,7 @@ std::string topic_name(std::string name) {
 bool reserved(const std::string& name) {
     return name == "agent-events" || name.starts_with("agent-") ||
            name.starts_with("app-events.") || name.starts_with("build-events.") ||
+           name.starts_with("run-metrics.") || name.starts_with("study-events.") ||
            name.starts_with("inbox:");
 }
 

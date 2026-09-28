@@ -22,6 +22,7 @@
 #include "objects/records.hpp"
 #include "temporary_directory.hpp"
 #include "stream_fixture.hpp"
+#include "experiment_fixture.hpp"
 
 extern char** environ;
 
@@ -244,10 +245,12 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         checked(store->create_repository({customer.id, "schema-fixture", "", "private"}));
     const auto conflict = prepare_conflict(root, customer.id, repository.id);
     lake::test::StreamWorkspace streams(store, customer.id);
+    lake::test::ExperimentWorkspace experiments(store, customer.id);
+    experiments.caller->fallback = streams.caller;
     lake::api::ApiServer server({.port = 0,
                                  .node_name = "schema-test",
                                  .store = store,
-                                 .workspaces = streams.service,
+                                 .workspaces = experiments.service,
                                  .admin_token = "schema-test",
                                  .instance_kek = kek,
                                  .store_root = root.string()});
@@ -257,6 +260,12 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         http.call(tool.at("name"), json::object(), false);
     }
     http.call("server_info");
+    for (const auto& [name, input] : lake::test::experiment_calls(customer.id)) {
+        http.call(name, input);
+        const auto [status, body] = http.request("POST", "/v1/" + name, input);
+        EXPECT_EQ(status, 200U);
+        http.document["rest"].push_back({{"name", name}, {"status", status}, {"body", body}});
+    }
     json stream{{"customer_id", customer.id}, {"zetta", "workspace"}, {"topic", "schema-orders"}};
     http.call("create_stream", stream);
     http.call("list_streams", {{"customer_id", customer.id}});

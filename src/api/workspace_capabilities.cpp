@@ -28,7 +28,14 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 39> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 46> workspace_reads = {"server_info",
+                                                              "get_run_metrics",
+                                                              "compare_runs",
+                                                              "get_study",
+                                                              "list_studies",
+                                                              "list_trials",
+                                                              "get_study_analysis",
+                                                              "browse_topic",
                                                               "score",
                                                               "explain",
                                                               "list_projects",
@@ -77,7 +84,11 @@ constexpr std::array<std::string_view, 39> workspace_reads = {"server_info",
                                                               "list_ledger",
                                                               "get_monitor",
                                                               "get_roi_readout"};
-constexpr std::array<std::string_view, 37> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 41> workspace_actions = {"create_project",
+                                                                "create_study",
+                                                                "stop_study",
+                                                                "stop_trial",
+                                                                "promote_trial",
                                                                 "create_solution",
                                                                 "run_solution",
                                                                 "update_policy",
@@ -188,6 +199,16 @@ void register_workspace_call(Registry& registry, bool read) {
                                              "/capability");
             }
             set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
+            const std::map<std::string, std::string> study_actions = {
+                {"create_study", "start_study"}, {"stop_study", "stop_study"},
+                {"stop_trial", "stop_experiment_trial"}, {"promote_trial", "promote_trial"}};
+            if (!read && study_actions.contains(capability)) {
+                auto arguments = input.value("input", json::object());
+                arguments["customer_id"] = input.at("customer_id");
+                const auto result = co_await context.registry->call_async(
+                    study_actions.at(capability), arguments, context);
+                co_return result ? *result : ApiResult::failure("store_error", result.error().message);
+            }
             auto called = co_await context.workspaces->call(input.at("customer_id"),
                                                             capability,
                                                             workspace_uses_get(capability),
@@ -3307,6 +3328,16 @@ json workspace_openapi(const json& document, std::string_view base) {
         for (const auto& [method, operation] : operations.items()) {
             if ((method == "get" && read) || (method == "post" && action)) {
                 json shown = operation;
+                if (method == "post" && (name == "create_study" || name == "stop_study" ||
+                    name == "stop_trial" || name == "promote_trial")) {
+                    auto& schema = shown["requestBody"]["content"]["application/json"]["schema"];
+                    schema["properties"]["confirm"] = {{"type", "boolean"}, {"const", true}};
+                    auto required = schema.value("required", json::array());
+                    if (std::ranges::find(required, "confirm") == required.end()) {
+                        required.push_back("confirm");
+                    }
+                    schema["required"] = std::move(required);
+                }
                 for (const char* key : {"description", "summary"}) {
                     if (shown.is_object() && shown.contains(key) && shown[key].is_string()) {
                         shown[key] = customer_description(shown[key].get<std::string>());

@@ -50,7 +50,8 @@ hidden. Sequence numbers remain those of the source topic, so gaps are normal. T
 high-water mark is not a count of a filtered view's messages. Up to 32 source pages are scanned
 per browse call; continue with `next_page_sequence`, even when the filtered page is empty.
 
-All bus topics and reserved workspace `agent-*`, `app-events.*`, `build-events.*` and inbox names
+All bus topics and reserved workspace `agent-*`, `app-events.*`, `build-events.*`,
+`run-metrics.*`, `study-events.*` and inbox names
 are system, browse-only. Every write refuses them, including message writes. Other existing
 workspace topics can be read and their messages changed with space permission, but only a
 creator recorded by Lake can reconfigure or drop them. Ownership is durable and tied to the

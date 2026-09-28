@@ -29,6 +29,7 @@ void register_platform_capabilities(Registry& registry);
 void register_web_app_capabilities(Registry& registry);
 void register_build_capabilities(Registry& registry);
 void register_stream_capabilities(Registry& registry);
+void register_experiment_capabilities(Registry& registry);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // Running and talking to agents (docs/api/agent-launches.md): launch_agent, list_agent_launches,

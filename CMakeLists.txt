@@ -182,6 +182,7 @@ add_library(lake-core STATIC
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
   src/api/stream_capabilities.cpp
+  src/api/experiment_capabilities.cpp
   src/api/web_ui_streams.cpp
   src/api/pipeline.cpp
   src/api/registry.cpp
