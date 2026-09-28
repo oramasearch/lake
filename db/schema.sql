@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `custodial_identity_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `builds_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -1791,3 +1791,45 @@ CREATE TABLE IF NOT EXISTS web_apps_operator_contract_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0035_web_apps_operator_contract')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0036_builds: in-cluster image build intent and operator observation (lake#295). Lake writes
+-- queued/cancelled desired state and NOTIFYs lake_builds. The operator owns phase, result and the
+-- SHA-256 hashes of its source, push and event credentials. Plain credentials never enter this
+-- database. See docs/control-plane/builds.md.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS builds (
+    id                  uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id         uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    repository          text        NOT NULL,
+    revision            text        NOT NULL,
+    context             text        NOT NULL DEFAULT '.',
+    dockerfile          text        NOT NULL DEFAULT 'Dockerfile',
+    target              text        NOT NULL,
+    build_args_json     jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    desired             text        NOT NULL DEFAULT 'queued',
+    phase               text        NOT NULL DEFAULT 'Queued',
+    digest              text        NOT NULL DEFAULT '',
+    size                bigint      NOT NULL DEFAULT 0,
+    message             text        NOT NULL DEFAULT '',
+    token_hashes_json   jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT build_desired_check CHECK (desired IN ('queued', 'cancelled')),
+    CONSTRAINT build_phase_check CHECK (
+        phase IN ('Queued', 'Running', 'Succeeded', 'Failed', 'Cancelled')
+    ),
+    CONSTRAINT build_args_object CHECK (jsonb_typeof(build_args_json) = 'object'),
+    CONSTRAINT build_token_hashes_object CHECK (jsonb_typeof(token_hashes_json) = 'object'),
+    CONSTRAINT build_size_check CHECK (size >= 0)
+);
+CREATE INDEX IF NOT EXISTS builds_customer_idx ON builds (customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS builds_source_token_idx ON builds ((token_hashes_json->>'source'));
+CREATE INDEX IF NOT EXISTS builds_push_token_idx ON builds ((token_hashes_json->>'push'));
+CREATE INDEX IF NOT EXISTS builds_events_token_idx ON builds ((token_hashes_json->>'events'));
+
+CREATE TABLE IF NOT EXISTS builds_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO schema_migrations (version) VALUES ('0036_builds') ON CONFLICT DO NOTHING;

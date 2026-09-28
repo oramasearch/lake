@@ -158,6 +158,7 @@ add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
   src/control/apps.cpp
+  src/control/builds.cpp
   ${LAKE_EMBEDDED_FONTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
   src/control/lake_identity.cpp

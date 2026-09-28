@@ -4247,6 +4247,113 @@ public:
         });
     }
 
+    static constexpr const char* build_columns =
+        "b.id::text, b.customer_id::text, b.repository, b.revision, b.context, b.dockerfile, "
+        "b.target, b.build_args_json::text, b.desired, b.phase, b.digest, b.size, b.message, "
+        "b.token_hashes_json::text, "
+        "to_char(b.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+    static Build build_from(const pqxx::row& row) {
+        Build build;
+        build.id = row[0].as<std::string>();
+        build.customer_id = row[1].as<std::string>();
+        build.repository = row[2].as<std::string>();
+        build.revision = row[3].as<std::string>();
+        build.context = row[4].as<std::string>();
+        build.dockerfile = row[5].as<std::string>();
+        build.target = row[6].as<std::string>();
+        build.build_args = nlohmann::json::parse(row[7].as<std::string>());
+        build.desired = row[8].as<std::string>();
+        build.phase = row[9].as<std::string>();
+        build.digest = row[10].as<std::string>();
+        build.size = row[11].as<std::int64_t>();
+        build.message = row[12].as<std::string>();
+        build.token_hashes = nlohmann::json::parse(row[13].as<std::string>());
+        build.created_at = row[14].as<std::string>();
+        build.updated_at = row[15].as<std::string>();
+        return build;
+    }
+
+    static Result<Build> one_build(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + build_columns + " FROM builds b WHERE b.id = $1::uuid", id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no build " + id});
+        }
+        return build_from(rows[0]);
+    }
+
+    Result<std::vector<Build>> list_builds(const std::string& customer_id) override {
+        return with_tx<std::vector<Build>>([&](pqxx::work& tx) -> Result<std::vector<Build>> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + build_columns +
+                                   " FROM builds b WHERE b.customer_id = $1::uuid ORDER BY "
+                                   "b.created_at DESC, b.id",
+                               customer_id);
+            std::vector<Build> builds;
+            for (const pqxx::row& row : rows) {
+                builds.push_back(build_from(row));
+            }
+            return builds;
+        });
+    }
+
+    Result<Build> get_build(const std::string& id) override {
+        return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> { return one_build(tx, id); });
+    }
+
+    Result<Build> create_build(const NewBuild& input) override {
+        return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> {
+            const pqxx::result repositories = tx.exec_params(
+                "SELECT 1 FROM repositories WHERE id = $1::uuid AND customer_id = $2::uuid "
+                "AND deleted_at IS NULL",
+                input.repository,
+                input.customer_id);
+            if (repositories.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no such repository in this customer"});
+            }
+            const std::string id = new_uuid_v4();
+            tx.exec_params(
+                "INSERT INTO builds (id, customer_id, repository, revision, context, dockerfile, "
+                "target, build_args_json) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, "
+                "$8::jsonb)",
+                id,
+                input.customer_id,
+                input.repository,
+                input.revision,
+                input.context,
+                input.dockerfile,
+                input.target,
+                input.build_args.dump());
+            tx.exec_params("SELECT pg_notify('lake_builds', $1)", id);
+            return one_build(tx, id);
+        });
+    }
+
+    Result<Build> cancel_build(const std::string& id) override {
+        return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE builds SET desired = 'cancelled', updated_at = now() WHERE id = $1::uuid "
+                "AND desired = 'queued' AND phase NOT IN ('Succeeded', 'Failed', 'Cancelled') "
+                "RETURNING id",
+                id);
+            if (rows.empty()) {
+                const Result<Build> existing = one_build(tx, id);
+                if (!existing) {
+                    return existing;
+                }
+                return std::unexpected(
+                    existing->desired == "cancelled" || existing->phase == "Cancelled"
+                        ? StoreError{"conflict", "the build is already cancelled"}
+                        : StoreError{"conflict", "the build has already finished"});
+            }
+            tx.exec_params("SELECT pg_notify('lake_builds', $1)", id);
+            return one_build(tx, id);
+        });
+    }
+
     static constexpr const char* store_columns =
         "s.id::text, s.customer_id::text, s.type, s.provider, s.name, s.slug, "
         "COALESCE((s.spec->>'size_gi')::int, 10), COALESCE(s.spec->>'region', ''), "
@@ -5887,7 +5994,47 @@ public:
                              digest};
         });
     }
+    Result<Principal> build_principal(const std::string& secret) {
+        const std::string digest = identity_crypto::sha256_hex(secret);
+        if (digest.empty()) {
+            return std::unexpected(StoreError{"not_found", "build token is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + build_columns +
+                                   " FROM builds b WHERE b.desired = 'queued' AND "
+                                   "b.phase NOT IN ('Succeeded', 'Failed', 'Cancelled') AND "
+                                   "(b.token_hashes_json->>'source' = $1 OR "
+                                   "b.token_hashes_json->>'push' = $1 OR "
+                                   "b.token_hashes_json->>'events' = $1)",
+                               digest);
+            if (rows.size() != 1) {
+                return std::unexpected(StoreError{"not_found", "build token is not active"});
+            }
+            const Build build = build_from(rows[0]);
+            const auto purpose = build_token_purpose(build, digest);
+            if (!purpose) {
+                return std::unexpected(StoreError{"not_found", "build token is not active"});
+            }
+            return Principal{"",
+                             "build:" + build.id + ":" + *purpose,
+                             "build:" + build.id,
+                             "",
+                             "lake",
+                             "build_" + *purpose,
+                             build_token_scopes(*purpose),
+                             std::nullopt,
+                             build.id,
+                             build.customer_id,
+                             build.repository,
+                             build.revision,
+                             digest};
+        });
+    }
     Result<Principal> context_for(const std::string& secret) override {
+        if (auto principal = build_principal(secret)) {
+            return principal;
+        }
         if (auto principal = app_principal(secret)) {
             return principal;
         }

@@ -906,6 +906,86 @@ Result<void> InMemoryStore::set_web_app_status(const std::string& id,
     return {};
 }
 
+Result<std::vector<Build>> InMemoryStore::list_builds(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Build> result;
+    for (auto build = builds_.rbegin(); build != builds_.rend(); ++build) {
+        if (build->customer_id == customer_id) {
+            result.push_back(*build);
+        }
+    }
+    return result;
+}
+
+Result<Build> InMemoryStore::get_build(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto build = std::ranges::find(builds_, id, &Build::id);
+    if (build == builds_.end()) {
+        return std::unexpected(StoreError{"not_found", "no build " + id});
+    }
+    return *build;
+}
+
+Result<Build> InMemoryStore::create_build(const NewBuild& input) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_, [&](const Customer& customer) {
+            return customer.id == input.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+    }
+    const auto repository = std::ranges::find(repositories_, input.repository, &Repository::id);
+    if (repository == repositories_.end() || repository->customer_id != input.customer_id ||
+        !repository->deleted_at.empty()) {
+        return std::unexpected(StoreError{"not_found", "no such repository in this customer"});
+    }
+    const std::string now = now_iso8601();
+    Build build;
+    build.id = new_uuid_v4();
+    build.customer_id = input.customer_id;
+    build.repository = input.repository;
+    build.revision = input.revision;
+    build.context = input.context;
+    build.dockerfile = input.dockerfile;
+    build.target = input.target;
+    build.build_args = input.build_args;
+    build.created_at = now;
+    build.updated_at = now;
+    builds_.push_back(build);
+    return build;
+}
+
+Result<Build> InMemoryStore::cancel_build(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto build = std::ranges::find(builds_, id, &Build::id);
+    if (build == builds_.end()) {
+        return std::unexpected(StoreError{"not_found", "no build " + id});
+    }
+    if (build->desired == "cancelled" || build->phase == "Cancelled") {
+        return std::unexpected(StoreError{"conflict", "the build is already cancelled"});
+    }
+    if (build->phase == "Succeeded" || build->phase == "Failed") {
+        return std::unexpected(StoreError{"conflict", "the build has already finished"});
+    }
+    build->desired = "cancelled";
+    build->updated_at = now_iso8601();
+    return *build;
+}
+
+Result<void> InMemoryStore::set_build_status(const std::string& id, BuildStatus status) {
+    std::lock_guard lock(mutex_);
+    const auto build = std::ranges::find(builds_, id, &Build::id);
+    if (build == builds_.end()) {
+        return std::unexpected(StoreError{"not_found", "no build " + id});
+    }
+    build->phase = std::move(status.phase);
+    build->digest = std::move(status.digest);
+    build->size = status.size;
+    build->message = std::move(status.message);
+    build->token_hashes = std::move(status.token_hashes);
+    build->updated_at = now_iso8601();
+    return {};
+}
+
 Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedStore> stores;
@@ -2511,10 +2591,36 @@ Result<void> InMemoryStore::revoke_device(const std::string& user_id,
 
 Result<Principal> InMemoryStore::context_for(const std::string& secret) {
     std::lock_guard lock(mutex_);
-    const std::string app_digest = identity_crypto::sha256_hex(secret);
+    const std::string workload_digest = identity_crypto::sha256_hex(secret);
+    std::optional<Principal> build_principal;
+    for (const Build& build : builds_) {
+        const auto purpose = build_token_purpose(build, workload_digest);
+        if (!purpose) {
+            continue;
+        }
+        if (build_principal) {
+            return std::unexpected(StoreError{"unauthorized", "build token is ambiguous"});
+        }
+        build_principal = Principal{"",
+                                    "build:" + build.id + ":" + *purpose,
+                                    "build:" + build.id,
+                                    "",
+                                    "lake",
+                                    "build_" + *purpose,
+                                    build_token_scopes(*purpose),
+                                    std::nullopt,
+                                    build.id,
+                                    build.customer_id,
+                                    build.repository,
+                                    build.revision,
+                                    workload_digest};
+    }
+    if (build_principal) {
+        return *build_principal;
+    }
     std::optional<Principal> app_principal;
     for (const WebApp& app : web_apps_) {
-        const auto purpose = web_app_token_purpose(app, app_digest);
+        const auto purpose = web_app_token_purpose(app, workload_digest);
         if (!purpose) {
             continue;
         }
@@ -2533,7 +2639,7 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
                                   app.customer_id,
                                   app.source_repository,
                                   app.source_revision,
-                                  app_digest};
+                                  workload_digest};
     }
     if (app_principal) {
         return *app_principal;
