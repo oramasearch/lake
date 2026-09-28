@@ -63,6 +63,10 @@ std::string web_ui_icon(std::string_view name);
 // A self-hosted IBM Plex WOFF2 face embedded in the binary. Unknown names return an empty view.
 std::string_view web_ui_font(std::string_view name);
 
+std::span<const std::string_view> web_ui_experiment_asset_names();
+std::string_view web_ui_experiment_asset(std::string_view name);
+std::string_view web_ui_experiment_asset_url(std::string_view name);
+
 // One level of the top bar's breadcrumb (docs/ui/breadcrumb.md). `href` empty means the level is
 // the current page (or has no page of its own). `full` is the unabbreviated text, shown on hover
 // when `label` is an abbreviated id.
@@ -238,6 +242,17 @@ struct StreamsPage {
     bool can_admin = false;
 };
 std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer = true);
+
+struct ExperimentsPage {
+    std::vector<WorkspaceCustomer> customers;
+    std::string customer_id, mode = "list", study, run, project, state, error;
+    std::vector<std::string> runs;
+    nlohmann::json data = nlohmann::json::object();
+    nlohmann::json analysis = nlohmann::json::object();
+    bool can_write = false;
+    bool can_promote = false;
+};
+std::string web_ui_experiments(const ExperimentsPage& page, WebUiViewer viewer = true);
 
 // Ask Orama (docs/api/ask-orama.md, lake#236): one conversation, whose messages are lake's
 // ask_messages rows as JSON ({id, role, content, payload}). `agents` is the selector: Ask Orama

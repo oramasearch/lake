@@ -1,0 +1,88 @@
+#experiments .experiment-fields,
+#experiments .experiment-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--lake-space-4);
+  margin-block: var(--lake-space-4);
+}
+
+#experiments .experiment-fields > label {
+  flex: 1 1 16rem;
+}
+
+#experiments label {
+  display: block;
+}
+
+#experiments input[type="checkbox"] {
+  width: auto;
+}
+
+#experiments .experiment-chart {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+#experiments .experiment-plot,
+#experiments .experiment-artifact {
+  padding-block: var(--lake-space-4);
+  border-bottom: var(--lake-border-width) solid var(--lake-border-subtle);
+}
+
+#experiments .uplot {
+  font-family: var(--lake-font-sans);
+  color: var(--lake-text-primary);
+}
+
+#experiments .u-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: start;
+  color: var(--lake-text-primary);
+}
+
+#experiments .u-cursor-x,
+#experiments .u-cursor-y {
+  border-color: var(--lake-text-tertiary);
+}
+
+#experiments .u-select {
+  background: var(--lake-selection);
+}
+
+#experiments #trial-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lake-space-3);
+}
+
+#experiments dialog {
+  max-width: min(44rem, 90vw);
+  max-height: 85vh;
+  overflow: auto;
+  color: var(--lake-text-primary);
+  background: var(--lake-surface);
+  border: var(--lake-border-width) solid var(--lake-border-strong);
+  border-radius: var(--lake-overlay-radius);
+  box-shadow: var(--lake-shadow-dialog);
+  padding: var(--lake-space-6);
+}
+
+#experiments dialog::backdrop {
+  background: var(--lake-overlay);
+}
+
+#experiments pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#experiments table td {
+  overflow-wrap: anywhere;
+}
+
+#experiments .table-scroll {
+  overflow-x: auto;
+}
