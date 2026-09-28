@@ -9609,10 +9609,16 @@ struct ApiServer::Impl {
                         }
                     } else {
                         page.agent_task = task.value;
-                        const nlohmann::json answer =
+                        // A failed task carries "answer": null; treat any non-object as empty.
+                        nlohmann::json answer =
                             task.value.value("answer", nlohmann::json::object());
-                        const nlohmann::json proposal =
-                            answer.value("result", nlohmann::json::object());
+                        if (!answer.is_object()) {
+                            answer = nlohmann::json::object();
+                        }
+                        nlohmann::json proposal = answer.value("result", nlohmann::json::object());
+                        if (!proposal.is_object()) {
+                            proposal = nlohmann::json::object();
+                        }
                         if (proposal.value("kind", std::string()) == "proposal" &&
                             proposal.value("confirm", false)) {
                             page.proposal_sha256 = proposal_digest(proposal);
