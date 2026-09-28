@@ -201,8 +201,9 @@ rows after the operator acknowledges deletion. This App entity is distinct from 
 identity pools. Its contracts are `docs/api/web-apps.md` and
 `docs/control-plane/web-apps.md`.
 The server-rendered Ship → Apps list and detail pages use those capabilities for creation and all
-controls, mask Secret references, follow retained app/build events, and disable ApplicationAgent
-creation until `agent-application` is registered. Their contract is `docs/ui/apps.md`.
+controls, mask Secret references, follow retained app/build events, and start ApplicationAgent app
+turns with exact proposal confirmation before repository or App writes. Their contract is
+`docs/ui/apps.md`.
 
 Agent-session custody adds migration `0017_agent_sessions` and a maximum 15-minute Ed25519 key
 delegated to a durable agent by a canonical `delegation/1` attestation. The attestation is appended

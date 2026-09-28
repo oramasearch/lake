@@ -135,6 +135,26 @@ number for each delivery.
 Signing seeds and webhook secrets are AES-256-GCM protected through application-specific keystore
 purposes before Postgres storage. They never appear in list, application, event, or audit output.
 
+## ApplicationAgent and Ship Apps
+
+ApplicationAgent builds customer-hosted **Ship Apps**; it does not register the identity
+applications described above. It is the `agent-application` Agent Library service, runs on the
+agent bus topic `agent-tasks.agent-application`, and authenticates its bus calls with the
+`lake-<name>-agent-bus` Secret key for that agent.
+
+An initial `agent_turn` has kind `app` and only read capabilities: workspace dataset discovery and
+read-only SQL, Service and App reads, and repository reads. Its answer contract is
+`{reply, result: {kind, files, app, confirm}}`. When `kind` is `proposal` and `confirm` is true, a
+person reviews the files and App settings. Lake starts a later turn with that exact object at
+`context.confirmed_proposal`; only the later turn receives `create_repository`,
+`commit_repository_files`, `create_app`, and `deploy_app`.
+
+ApplicationAgent's App shape maps `auth: public` to Ship App `auth: none`, accepts a missing or null
+host as the generated wildcard host, and represents an operator-managed environment credential as
+`{"NAME":{"secret":"reference"}}`. `deploy_app` accepts the service's `app` key as an alias for
+`app_id`. The full desired-state contract is [web-apps.md](web-apps.md), and the review page is
+[the Ship Apps UI](../ui/apps.md).
+
 ## How to verify
 
 ```sh

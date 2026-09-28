@@ -41,3 +41,7 @@ keeps REST and MCP customer policy, `x-lake-action`, audit, lifecycle bus events
 Secret-reference validation identical. Operator hash credentials are restricted in the registry to
 source repository/revision reads, customer workspace reads, or one app's event publication. See
 `docs/api/web-apps.md`.
+
+ApplicationAgent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
+turn, repository/App writes only when the reviewed proposal is present. `http_server.cpp` and
+`web_ui.cpp` display and hash that stored proposal before starting the confirmed turn.

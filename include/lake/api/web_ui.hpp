@@ -269,7 +269,10 @@ struct AppsPage {
     std::string customer_id;
     nlohmann::json apps = nlohmann::json::array();
     nlohmann::json repositories = nlohmann::json::array();
+    nlohmann::json agent_task = nlohmann::json::object();
     bool application_agent = false;
+    bool agent_working = false;
+    std::string proposal_sha256;
     std::string error;
 };
 std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer = true);

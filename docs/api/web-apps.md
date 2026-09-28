@@ -13,7 +13,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 |---|---|---|
 | `list_apps`, `get_app` | `app_id` for get | desired and observed state |
 | `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env | generation 1 and create event |
-| `deploy_app`, `rollback_app` | `app_id`, source or image | new desired deployment and generation |
+| `deploy_app`, `rollback_app` | `app_id` (ApplicationAgent may use `app` for deploy), source or image | new desired deployment and generation |
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
 | `set_app_env`, `unset_app_env` | `app_id`, key; set takes value or secret_ref | scanned environment update |
 | `set_app_auth` | `app_id`, auth; public also requires `confirm_public` | lake sign-in or public access |
@@ -42,7 +42,8 @@ image input. The old `source` mode value is rejected.
 `bindings.zetta` accepts `true`, `["read"]`, or `{"scopes":["read"]}` to bind; false/null/omitted
 means no binding. Writes normalize to the quoted contract. Service IDs stay strings. Lake never
 adds a workspace token or an opaque token Secret reference to bindings, code, or environment.
-`auth` defaults to `lake`; names are DNS labels and hosts must be one label beneath
+`auth` defaults to `lake`; `public` on ApplicationAgent input is normalized to stored `none`.
+Names are DNS labels and hosts must be one label beneath
 `LAKE_APPS_WILDCARD`. `LAKE_APPS_PER_CUSTOMER` and `LAKE_APP_REPLICAS_PER_CUSTOMER` enforce quotas;
 zero means no configured limit.
 
@@ -89,10 +90,21 @@ workload to zero; starting restores that count. Delete requires the app name, th
 operator's `Deleted` acknowledgement before Lake physically removes the row. Status exposes
 `phase`, `url`, `ready`, `message`, and `observed_generation`.
 
-Plain environment values are scanned; detected credentials return `secret_required`. Secret
-environment updates use a reference instead of a clear value. Audit records contain the key and
+Plain environment values are scanned; detected credentials return `secret_required`. On create,
+ApplicationAgent may supply `{"KEY":{"secret":"operator-reference"}}`; Lake separates it into
+the App's masked Secret references. Secret environment updates use a reference instead of a clear
+value. Audit records contain the key and
 whether it is secret, never its value. Bindings and operator tokens are delivered as mounted
 Secrets.
+
+## ApplicationAgent confirmation
+
+`agent-application` is read-only on its first `app` task. A later task receives repository writes,
+`create_app`, and `deploy_app` only when its body contains the exact reviewed proposal at
+`context.confirmed_proposal`. Ship → Apps verifies that proposal against the completed task before
+starting the later turn. Ask Orama can delegate app requests through `agent_turn`; it never receives
+the App write capabilities itself. See [agent-launches.md](agent-launches.md) and
+[the page contract](../ui/apps.md).
 
 ## Verification
 

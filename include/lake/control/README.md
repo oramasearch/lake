@@ -15,3 +15,6 @@ and the telemetry wrapper preserve these filters; see `docs/build/testing.md`.
 with a Zetta implementation and an in-memory one for tests. `AgentTaskBus` is lake's side of it.
 `Store::claim_agent_task`, `record_agent_task_event`, `fail_agent_task` and `stale_agent_tasks`
 back it in both stores.
+
+`agent_library.hpp` registers ApplicationAgent as `agent-application`, a chat-capable service used
+from Ship → Apps and Ask Orama. Its bus identity is independent from every other library agent.

@@ -11,5 +11,6 @@ Rules for writing them:
 - Write for a customer who has never seen lake. Every step names where to click, then the REST call
   and the MCP tool for the same step.
 - Describe what runs today. A capability that is planned is not in the Docs.
+- Keep Ship's ApplicationAgent steps explicit about reviewing the exact proposal before any write.
 - A new page is a new `.md` here **and** its slug in `GUIDE_FILES`; the first line is `# <Title>`.
 - `Docs.EveryGuideRendersWithContentsAndTheNextGuide` (tests/test_markdown.cpp) renders every page.

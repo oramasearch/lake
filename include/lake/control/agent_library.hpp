@@ -21,7 +21,7 @@ struct LibraryAgent {
     bool chat = false;        // takes a conversation in Ask Orama
 };
 
-inline constexpr std::array<LibraryAgent, 7> agent_library{{
+inline constexpr std::array<LibraryAgent, 8> agent_library{{
     {"agent-ask-orama",
      "Ask Orama",
      "Answers questions about anything in your lake and hands work to the right agent, including "
@@ -34,6 +34,13 @@ inline constexpr std::array<LibraryAgent, 7> agent_library{{
      "Builds a pipeline from what you want to predict, and proposes changes to an existing one "
      "for you to review and apply.",
      "Design → a project → Build a Pipeline; on a pipeline, Ask the Project Agent",
+     "service",
+     true},
+    {"agent-application",
+     "ApplicationAgent",
+     "Builds web and data apps in a private Lake repository, then creates and deploys the app "
+     "only after you confirm its proposal.",
+     "Ship → Apps → Build an App; Ask Orama",
      "service",
      true},
     {"agent-autosuggest",

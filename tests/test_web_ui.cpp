@@ -1282,6 +1282,7 @@ TEST(WebUi, ShipAppsRenderControlsMaskedSecretsAndLiveEvents) {
     lake::api::AppsPage list;
     list.customer_id = "customer-1";
     list.customers = {{"customer-1", "Personal", true}};
+    list.application_agent = true;
     list.apps = {{{"id", "app-1"},
                   {"name", "customer-portal"},
                   {"mode", "runtime"},
@@ -1294,7 +1295,31 @@ TEST(WebUi, ShipAppsRenderControlsMaskedSecretsAndLiveEvents) {
     EXPECT_NE(apps.find("<h1>Apps</h1>"), std::string::npos);
     EXPECT_NE(apps.find("customer-portal"), std::string::npos);
     EXPECT_NE(apps.find("Zetta, 1 service"), std::string::npos);
-    EXPECT_NE(apps.find("ApplicationAgent is not registered"), std::string::npos);
+    EXPECT_EQ(apps.find("ApplicationAgent is not registered"), std::string::npos);
+    EXPECT_NE(apps.find("Start ApplicationAgent"), std::string::npos);
+
+    list.agent_task = {
+        {"task_id", "task-1"},
+        {"status", "succeeded"},
+        {"answer",
+         {{"reply", "Review it."},
+          {"result",
+           {{"kind", "proposal"},
+            {"confirm", true},
+            {"files", nlohmann::json::array({{{"path", "app.py"}, {"contents", "ok"}}})},
+            {"app",
+             {{"name", "health-report"},
+              {"mode", "runtime"},
+              {"framework", "fastapi"},
+              {"auth", "lake"},
+              {"repository", {{"name", "app-health-report"}}},
+              {"path", "."}}}}}}}};
+    list.proposal_sha256 = std::string(64, 'a');
+    const std::string proposal = lake::api::web_ui_apps(list, true);
+    EXPECT_NE(proposal.find("Proposed App: health-report"), std::string::npos);
+    EXPECT_NE(proposal.find("app.py"), std::string::npos);
+    EXPECT_NE(proposal.find("Confirm and deploy"), std::string::npos);
+    EXPECT_NE(proposal.find(std::string(64, 'a')), std::string::npos);
 
     lake::api::AppPage detail;
     detail.customer_id = "customer-1";

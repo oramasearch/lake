@@ -54,6 +54,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{model, rows, top_k?}`; checks the model is published (`get_model`), then Zetta's `score`; answers rows ranked by risk with their drivers. Ship → Models shows each published model's `curl` |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value; null clears), rename), or `edits`: a list applied in order as one save, all or nothing (how a Project Agent proposal is applied). Every step keeps its `attributes` (source, table, target, algo) through every edit. It reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
 | `workspace_sql` | read | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`) through Zetta's `sql`; DDL, writes, users and several statements are refused before anything reaches the workspace. The workspace speaks Zetta's SQL subset — one `WHERE` comparison, `GROUP BY` one key with `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, `ORDER BY`, `LIMIT`, `OFFSET` (zetta#1039), no joins or expressions — and the description says so, because agents write their queries from it. Audit kind `workspace.sql` |
+| `list_datasets` | read | `read` | ApplicationAgent's direct dataset catalogue. It calls Zetta `list_datasets` and adds a stable `<database>/<name>` id to each row |
 | `get_pipeline` | read | `read` | A pipeline's graph, approval, `step_status` from the latest run, and its `runs`, newest first — what the pipeline page shows |
 | `run_pipeline` | action | `write` | `gate`, then `run` when it passes, with optional `dataset_path`, `holdout_fraction`, `model_name`; answers `{gate, run}`, or `{gate}` alone when the checks fail. Audit kind `pipeline.run` |
 | `create_pipeline` | action | `write` | `from` `empty` (one connect step), `n8n` (`import_n8n` then `compile_n8n` over `content`) or `python` (`compile_python` over `content`). Audit kind `pipeline.create` |
@@ -142,6 +143,9 @@ works unchanged when pointed here:
 - **Tools from the filtered OpenAPI.** Agents derive their tool list from this document (the
   `new-agent` rule), so they see exactly what they may call. `sql` is not in it: SQL reaches a
   workspace only through `workspace_sql`, which runs one read-only query.
+- **ApplicationAgent's Lake tools.** Its client calls `list_datasets` and `get_dataset` directly,
+  so Lake exposes those read tools without changing Zetta's ordinary workspace API. Dataset ids
+  are `<database>/<dataset>`; the app task's credential binds the customer.
 
 Verify: `HttpServer/HttpResponseIsolation.AgentsReachAWorkspacesZettaThroughLakeInZettasShape`.
 

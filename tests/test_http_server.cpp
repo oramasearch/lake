@@ -346,6 +346,7 @@ protected:
         lake::control::WorkspaceConfig workspace_config{workspace_dir_.string(), 0};
         workspace_config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"},
                                             {"agent-project", "http://project:8080"},
+                                            {"agent-application", "http://application:8080"},
                                             {"agent-autosuggest", "http://suggest:8080"},
                                             {"agent-creator", "http://creator:8080"}};
         workspace_config.internal_url = "http://lake.internal";
@@ -405,7 +406,7 @@ protected:
             "GET", "/v1/receive_agent_tasks?agent=" + task->agent, "", "", "HTTP/1.1",
             "the-service-token");
         EXPECT_NE(shared.find("\"unauthorized\""), std::string::npos)
-            << "the service token user-created agents also hold never reaches the bus";
+            << "the service token user-created agents also hold never reaches the bus: " << shared;
         const nlohmann::json inbox =
             call("GET", "/v1/receive_agent_tasks?agent=" + task->agent, nullptr);
         EXPECT_EQ(inbox["ok"], true) << inbox.dump();
@@ -1403,10 +1404,101 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
         connection->request("GET", "/ship/apps?customer_id=" + customer_id, "", cookie);
     ASSERT_TRUE(empty.starts_with("HTTP/1.1 200")) << empty.substr(0, 300);
     EXPECT_NE(empty.find("No apps yet"), std::string::npos);
-    EXPECT_NE(empty.find("ApplicationAgent is not registered"), std::string::npos);
+    EXPECT_EQ(empty.find("ApplicationAgent is not registered"), std::string::npos);
     EXPECT_NE(empty.find("name=\"description\""), std::string::npos);
-    EXPECT_NE(empty.find("name=\"description\" placeholder=\"What should the app do?\" disabled"),
+    EXPECT_EQ(empty.find("name=\"description\" placeholder=\"What should the app do?\" disabled"),
               std::string::npos);
+
+    const std::string agent_started = connection->request(
+        "POST",
+        "/ship/apps/agent",
+        "customer_id=" + customer_id + "&description=Build+a+customer+health+app",
+        cookie);
+    ASSERT_TRUE(agent_started.starts_with("HTTP/1.1 302")) << agent_started.substr(0, 300);
+    const std::string agent_task = task_of(agent_started);
+    ASSERT_FALSE(agent_task.empty()) << response_header(agent_started, "location");
+    const auto first_task = store_->get_agent_task(agent_task);
+    ASSERT_TRUE(first_task);
+    EXPECT_EQ(first_task->agent, "agent-application");
+    EXPECT_EQ(first_task->kind, "app");
+    EXPECT_EQ(first_task->body["context"], nlohmann::json::object());
+    EXPECT_EQ(std::ranges::find(first_task->scopes, "create_app"), first_task->scopes.end());
+    const std::string agent_location = response_header(agent_started, "location");
+    ASSERT_FALSE(agent_location.empty()) << agent_started;
+    const std::string working = connection->request("GET", agent_location, "", cookie);
+    EXPECT_NE(working.find("ApplicationAgent Is Working"), std::string::npos) << working;
+
+    const nlohmann::json proposal = {
+        {"kind", "proposal"},
+        {"confirm", true},
+        {"files",
+         nlohmann::json::array(
+             {{{"path", "app.py"}, {"contents", "def health():\n    return 'healthy'\n"}}})},
+        {"app",
+         {{"name", "customer-health"},
+          {"mode", "runtime"},
+          {"repository", {{"name", "app-customer-health"}}},
+          {"path", "."},
+          {"framework", "fastapi"},
+          {"port", 8080},
+          {"auth", "lake"}}}};
+    agents_->answer = {{"ok", true},
+                       {"reply", "Review the customer health app."},
+                       {"result", proposal}};
+    connection.reset();
+    connection = connect();
+    run_agent_task(*connection, agent_task);
+    connection.reset();
+    connection = connect();
+    const std::string review = connection->request(
+        "GET", agent_location, "", cookie);
+    EXPECT_NE(review.find("Proposed App: customer-health"), std::string::npos);
+    EXPECT_NE(review.find("app.py"), std::string::npos);
+    const std::string sha_marker = "name=\"proposal_sha256\" value=\"";
+    const auto sha_at = review.find(sha_marker);
+    ASSERT_NE(sha_at, std::string::npos);
+    const std::string proposal_sha = review.substr(sha_at + sha_marker.size(), 64);
+
+    const std::string stale = connection->request(
+        "POST",
+        "/ship/apps/agent/confirm",
+        "customer_id=" + customer_id + "&task_id=" + agent_task +
+            "&proposal_sha256=" + std::string(64, '0'),
+        cookie);
+    EXPECT_NE(response_header(stale, "location").find("error="), std::string::npos);
+
+    connection.reset();
+    connection = connect();
+    const std::string confirmed = connection->request(
+        "POST",
+        "/ship/apps/agent/confirm",
+        "customer_id=" + customer_id + "&task_id=" + agent_task +
+            "&proposal_sha256=" + proposal_sha,
+        cookie);
+    ASSERT_TRUE(confirmed.starts_with("HTTP/1.1 302")) << confirmed.substr(0, 300);
+    const std::string confirmed_task_id = task_of(confirmed);
+    const auto confirmed_task = store_->get_agent_task(confirmed_task_id);
+    ASSERT_TRUE(confirmed_task);
+    EXPECT_EQ(confirmed_task->body["context"]["confirmed_proposal"], proposal);
+    EXPECT_NE(std::ranges::find(confirmed_task->scopes, "create_app"),
+              confirmed_task->scopes.end());
+    EXPECT_NE(std::ranges::find(confirmed_task->scopes, "deploy_app"),
+              confirmed_task->scopes.end());
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "The app is deployed."},
+        {"result",
+         {{"kind", "deployed"},
+          {"app", {{"url", "https://customer-health.apps.example.test"}}}}}};
+    connection.reset();
+    connection = connect();
+    run_agent_task(*connection, confirmed_task_id);
+    connection.reset();
+    connection = connect();
+    const std::string deployed =
+        connection->request("GET", response_header(confirmed, "location"), "", cookie);
+    EXPECT_NE(deployed.find("ApplicationAgent Result"), std::string::npos);
+    EXPECT_NE(deployed.find("https://customer-health.apps.example.test"), std::string::npos);
 
     const std::string repository = connection->request(
         "POST",

@@ -9,8 +9,9 @@ key it holds, and never waits inside a request: every turn is followed with rece
 
 <token-file> holds a lake API key with every tool (Developer → MCP). The token is never printed. The
 workspace needs the UX-review datasets (datasets.ux_review_churn and churn_results.at_risk_*).
-Scenarios that only propose change nothing; nothing here confirms a proposal. Prints one line per
-scenario and exits 1 when any failed. docs/api/agent-bus.md describes the bus.
+Scenarios that only propose change nothing. T11 confirms its exact ApplicationAgent proposal,
+deploys that App, and requests its URL. Prints one line per scenario and exits 1 when any failed.
+docs/api/agent-bus.md describes the bus.
 """
 import json
 import sys
@@ -41,6 +42,16 @@ def api(method, capability, body=None):
             return json.load(response)
     except urllib.error.HTTPError as error:
         return json.loads(error.read() or b"{}")
+
+
+def app_answers(url):
+    request = urllib.request.Request(
+        url, method="GET", headers={"Authorization": token, "User-Agent": "lake-e2e-agents"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return 200 <= response.status < 300 and bool(response.read())
+    except urllib.error.HTTPError:
+        return False
 
 
 def turn(agent, message, kind="api", context=None, budget=330):
@@ -220,6 +231,40 @@ def t10_workspace_pubsub():
     return problems, 0
 
 
+def t11_application_agent():
+    app_name = f"e2e-health-{int(time.time())}"
+    task, seconds, request, _ = turn(
+        "agent-application",
+        f"Build a lake-authenticated FastAPI data app named {app_name} that reads "
+        "datasets.ux_review_churn and answers with a churn summary at its root URL.",
+        "app")
+    answer = task.get("answer") or {}
+    proposal = answer.get("result") or {}
+    problems = base_checks(task, request, 150)
+    if proposal.get("kind") != "proposal" or proposal.get("confirm") is not True:
+        problems.append(f"the first turn did not return a confirmed proposal: {proposal}")
+        return problems, seconds
+    confirmed, confirm_seconds, confirm_request, _ = turn(
+        "agent-application",
+        "Confirm and deploy the reviewed proposal.",
+        "app",
+        {"confirmed_proposal": proposal},
+        420)
+    seconds += confirm_seconds
+    deployed = (confirmed.get("answer") or {}).get("result") or {}
+    problems += base_checks(confirmed, confirm_request, 420)
+    if deployed.get("kind") != "deployed":
+        problems.append(f"the confirmed turn did not deploy: {deployed}")
+        return problems, seconds
+    app = deployed.get("app") or {}
+    url = app.get("url") or (app.get("rollout") or {}).get("url")
+    if not url:
+        problems.append("the deployed result has no URL")
+    elif not app_answers(url):
+        problems.append(f"the deployed URL did not answer: {url}")
+    return problems, seconds
+
+
 SCENARIOS = {
     "T1": ("Ask Orama lists the datasets", t1_datasets),
     "T2": ("Ask Orama describes one dataset", t2_columns),
@@ -231,6 +276,7 @@ SCENARIOS = {
     "T8": ("The Agent Factory asks or proposes", t8_factory),
     "T9": ("A person cannot reach the agents' side of the bus", t9_bus_refuses_people),
     "T10": ("A workspace's pub/sub works through lake's API", t10_workspace_pubsub),
+    "T11": ("ApplicationAgent builds, confirms, deploys, and answers", t11_application_agent),
 }
 
 failed = 0

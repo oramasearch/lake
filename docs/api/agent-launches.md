@@ -57,7 +57,7 @@ table is no longer read, and is left for a deliberate drop.
 ## Background turns (lake#269)
 
 **No lake page or capability waits on a library agent inside an HTTP request.** `agent_turn` to
-Ask Orama, the Project Agent, Auto-Suggest or AgentCreator writes a task to `agent_tasks`
+Ask Orama, the Project Agent, ApplicationAgent, Auto-Suggest or AgentCreator writes a task to `agent_tasks`
 (migration `0032_agent_tasks`: agent, kind, conversation, the body, scopes, deadline, who asked),
 publishes it on the agent bus, and answers `{task_id, status: pending}` at once. The agent claims
 it, is handed the body with a `lat.` credential lake never stores, and publishes its progress and
@@ -70,6 +70,7 @@ once and follow the task:
 - Ask Orama and the Agent Factory show *Thinking…* / *Working on it…* and record the answer in the
   conversation once;
 - the pipeline page shows *The Project Agent is working on it…*;
+- Ship → Apps shows ApplicationAgent working, then the exact proposal and its confirmation;
 - Design → Opportunities shows *Scanning your workspace…*.
 
 Auto-Suggest builds the workspace profile itself with its read-only credential. Your own Python and
@@ -83,6 +84,7 @@ native agents still answer within the call (a follow-up).
 |---|---|---|
 | **Ask Orama** (`agent-ask-orama`) | its service, `LAKE_AGENT_ENDPOINTS` | a key for this turn derived from the person's credential, carrying **every read capability and `agent_turn`, never an action**, and `lake_url` |
 | **Project Agent** (`agent-project`) | its service | a turn key limited to `workspace_query` / `workspace_openapi`, and `zetta_base_url` = lake's agent path for the workspace. A `context` naming `project` and `graph` is a **change request**: lake adds the graph as it is (`pipeline`), the agent answers with a proposal (agent-project edit mode), and lake keeps it as an Ask Orama message and returns `review_url` (the pipeline page with `&proposal=`), where the person applies it (lake#249) |
+| **ApplicationAgent** (`agent-application`) | its service | an `app` task with read-only workspace, dataset, Service, repository and App tools. A completed proposal returns a Ship → Apps `review_url`. A later task carrying the reviewed object at `context.confirmed_proposal` also receives `create_repository`, `commit_repository_files`, `create_app`, and `deploy_app` |
 | **Auto-Suggest** (`agent-autosuggest`) | its service | the workspace's profile, which lake builds (`list_datasets`, then `get_dataset` for up to twelve); no key: it reads nothing itself |
 | **AgentCreator** (`agent-creator`) | its service | a turn key limited to `workspace_query` / `workspace_openapi` |
 | a **native** agent of the space | the workspace's `chat` (`GET`) | the message |

@@ -9127,6 +9127,53 @@ struct ApiServer::Impl {
                     }
                 }
             }
+            const std::string task_id = query_value(route, "task");
+            if (!task_id.empty()) {
+                std::optional<control::AgentTask> pending;
+                if (options.store) {
+                    const auto found = options.store->get_agent_task(task_id);
+                    if (found) {
+                        pending = *found;
+                    }
+                }
+                if (pending && pending->customer_id == page.customer_id &&
+                    pending->requested_by_user_id == context.acting_user_id &&
+                    pending->agent == "agent-application" && pending->kind == "app" &&
+                    (pending->phase.empty() || pending->phase == "Pending" ||
+                     pending->phase == "Running")) {
+                    page.agent_task = {{"task_id", pending->id},
+                                       {"agent", pending->agent},
+                                       {"kind", pending->kind},
+                                       {"status", pending->phase == "Running" ? "running"
+                                                                               : "pending"}};
+                    page.agent_working = true;
+                } else {
+                    const ApiResult task = unwrap(co_await workspace_call(
+                        "get_agent_task",
+                        {{"customer_id", page.customer_id}, {"task_id", task_id}},
+                        context));
+                    if (!task.ok) {
+                        if (page.error.empty()) {
+                            page.error = task.error.message;
+                        }
+                    } else if (task.value.value("agent", std::string()) != "agent-application" ||
+                               task.value.value("kind", std::string()) != "app") {
+                        if (page.error.empty()) {
+                            page.error = "That is not an ApplicationAgent app task.";
+                        }
+                    } else {
+                        page.agent_task = task.value;
+                        const nlohmann::json answer =
+                            task.value.value("answer", nlohmann::json::object());
+                        const nlohmann::json proposal =
+                            answer.value("result", nlohmann::json::object());
+                        if (proposal.value("kind", std::string()) == "proposal" &&
+                            proposal.value("confirm", false)) {
+                            page.proposal_sha256 = proposal_digest(proposal);
+                        }
+                    }
+                }
+            }
         }
         co_return co_await send_text(route,
                                      boost::http::status::ok,
@@ -9226,6 +9273,7 @@ struct ApiServer::Impl {
         const std::string customer_id = form_field(body, "customer_id");
         const std::string app_id = form_field(body, "app_id");
         nlohmann::json input{{"customer_id", customer_id}};
+        std::optional<ApiResult> prepared;
         if (!app_id.empty()) {
             input["app_id"] = app_id;
         }
@@ -9307,17 +9355,50 @@ struct ApiServer::Impl {
             input["agent"] = "agent-application";
             input["kind"] = "app";
             input["message"] = form_field(body, "description");
+        } else if (action == "agent_confirm") {
+            const std::string task_id = form_field(body, "task_id");
+            const ApiResult task = unwrap(co_await workspace_call(
+                "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
+            if (!task.ok) {
+                prepared = task;
+            } else {
+                const nlohmann::json answer =
+                    task.value.value("answer", nlohmann::json::object());
+                const nlohmann::json proposal =
+                    answer.value("result", nlohmann::json::object());
+                if (task.value.value("agent", std::string()) != "agent-application" ||
+                    task.value.value("kind", std::string()) != "app" ||
+                    task.value.value("status", std::string()) != "succeeded" ||
+                    proposal.value("kind", std::string()) != "proposal" ||
+                    !proposal.value("confirm", false)) {
+                    prepared = ApiResult::failure(
+                        "invalid_input", "That task has no ApplicationAgent proposal to confirm.");
+                } else if (form_field(body, "proposal_sha256") != proposal_digest(proposal)) {
+                    prepared = ApiResult::failure(
+                        "conflict", "The ApplicationAgent proposal changed before confirmation.");
+                } else {
+                    capability = "agent_turn";
+                    input["agent"] = "agent-application";
+                    input["kind"] = "app";
+                    input["message"] = "Confirm and deploy the reviewed proposal.";
+                    input["context"] = {{"confirmed_proposal", proposal}};
+                }
+            }
         }
-        ApiResult result = capability.empty()
+        ApiResult result = prepared ? std::move(*prepared)
+                           : capability.empty()
                                ? ApiResult::failure("invalid_input", "unknown app action")
                                : unwrap(co_await workspace_call(capability, input, context));
-        std::string back = action == "create" || action == "agent"
+        std::string back = action == "create" || action == "agent" || action == "agent_confirm"
                                ? "/ship/apps?customer_id=" + oauth_url_encode(customer_id)
                                : "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
                                      "&app_id=" + oauth_url_encode(app_id);
         if (result.ok && action == "create") {
             back = "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
                    "&app_id=" + oauth_url_encode(result.value.value("id", std::string()));
+        } else if (result.ok && (action == "agent" || action == "agent_confirm")) {
+            back += "&task=" +
+                    oauth_url_encode(result.value.value("task_id", std::string()));
         }
         if (!result.ok) {
             back += "&error=" + oauth_url_encode(result.error.message);
@@ -13065,9 +13146,10 @@ bool ApiServer::start() {
         http::method::get, "/ship/app", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/ship/app", impl.serve_app_page(route));
         });
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 18>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 19>{
              {{"/ship/apps/create", "create"},
               {"/ship/apps/agent", "agent"},
+              {"/ship/apps/agent/confirm", "agent_confirm"},
               {"/ship/app/restart", "restart"},
               {"/ship/app/stop", "stop"},
               {"/ship/app/start", "start"},

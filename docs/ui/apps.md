@@ -28,11 +28,18 @@ When the independently delivered build capabilities are present, the page calls 
 
 ## ApplicationAgent
 
-The Apps list checks the Agent Library for the deployed `agent-application` registration. Until
-that registration is delivered, the description box and its submit button are disabled and the
-page explains why. Once registered, the form starts an `agent_turn` with `agent:
-agent-application` and `kind: app`; proposal review and confirmation are owned by that agent's
-registration contract.
+The Apps list checks the Agent Library for the deployed `agent-application` registration. When it
+is available, **Build an App With the ApplicationAgent** starts an `agent_turn` with `agent:
+agent-application` and `kind: app`, redirects with the task id, and follows the background turn.
+The first turn has read tools only.
+
+A successful proposal renders the agent's reply, App settings, and every proposed file. The
+confirmation form carries the SHA-256 of the exact stored proposal. Lake reloads the task for the
+same customer, verifies that it is a succeeded ApplicationAgent `app` task and that the digest is
+unchanged, then starts a second turn with the proposal at `context.confirmed_proposal`. Only that
+turn receives repository writes plus `create_app` and `deploy_app`. A changed digest, another kind
+of task, or a proposal that did not request confirmation is refused. A deployed result shows its
+URL.
 
 ## Controls
 
@@ -47,5 +54,6 @@ references render only as `••••••` and are not included in page sour
 `WebUi.ShipAppsRenderControlsMaskedSecretsAndLiveEvents` verifies the pure renderers, masking,
 history-bound rollback, build history, and both polling endpoints. The four
 `HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` variants exercise the
-real HTTP routes with memory and Postgres stores; the memory variants add fake operator status.
+ApplicationAgent start, immutable proposal confirmation and deployed result, then the ordinary App
+routes, with memory and Postgres stores; the memory variants add fake operator status.
 `tools/ui/test-token-gates.sh` checks that the added styles use only design tokens.

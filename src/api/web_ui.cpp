@@ -4837,6 +4837,61 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
                    "lake yet.</p>";
     }
     content += "</section>";
+    if (!page.agent_task.empty()) {
+        const nlohmann::json answer =
+            page.agent_task.value("answer", nlohmann::json::object());
+        const nlohmann::json result = answer.value("result", nlohmann::json::object());
+        const std::string reply = answer.value("reply", page.agent_task.value("message", ""));
+        if (page.agent_working) {
+            content +=
+                "<section class=\"panel\" aria-live=\"polite\"><h2>ApplicationAgent Is "
+                "Working</h2><p>It keeps working if you leave; this page checks again every 2 "
+                "seconds.</p><meta http-equiv=\"refresh\" content=\"2\"></section>";
+        } else if (result.value("kind", std::string()) == "proposal" &&
+                   result.value("confirm", false)) {
+            const nlohmann::json app = result.value("app", nlohmann::json::object());
+            std::string files;
+            for (const nlohmann::json& file :
+                 result.value("files", nlohmann::json::array())) {
+                files += std::format("<h3><code>{}</code></h3><pre><code>{}</code></pre>",
+                                     web_ui_escape(json_text(file, "path")),
+                                     web_ui_escape(json_text(file, "contents")));
+            }
+            content += std::format(
+                "<section class=\"panel\" id=\"proposal\"><h2>Proposed App: {}</h2><div "
+                "class=\"ask-reply\">{}</div><dl><dt>Mode</dt><dd>{}</dd><dt>Framework</dt>"
+                "<dd>{}</dd><dt>Access</dt><dd>{}</dd><dt>Repository</dt><dd>{}</dd><dt>Path</dt>"
+                "<dd>{}</dd></dl>{}<form class=\"stack\" method=\"post\" "
+                "action=\"/ship/apps/agent/confirm\">{}{}{}<button class=\"button "
+                "button-primary\" type=\"submit\">Confirm and deploy</button></form></section>",
+                web_ui_escape(json_text(app, "name")),
+                web_ui_markdown(reply),
+                web_ui_escape(json_text(app, "mode")),
+                web_ui_escape(json_text(app, "framework")),
+                web_ui_escape(json_text(app, "auth")),
+                web_ui_escape(app.value("repository", nlohmann::json::object())
+                                  .value("id",
+                                         app.value("repository", nlohmann::json::object())
+                                             .value("name", std::string()))),
+                web_ui_escape(json_text(app, "path")),
+                files,
+                hidden("customer_id", page.customer_id),
+                hidden("task_id", page.agent_task.value("task_id", std::string())),
+                hidden("proposal_sha256", page.proposal_sha256));
+        } else {
+            const nlohmann::json app = result.value("app", nlohmann::json::object());
+            const std::string url = app.value(
+                "url", app.value("rollout", nlohmann::json::object()).value("url", std::string()));
+            content += "<section class=\"panel\"><h2>ApplicationAgent Result</h2><div "
+                       "class=\"ask-reply\">" +
+                       web_ui_markdown(reply) + "</div>";
+            if (!url.empty()) {
+                content += std::format("<p><a href=\"{}\">Open the app</a></p>",
+                                       web_ui_escape(url));
+            }
+            content += "</section>";
+        }
+    }
     return web_ui_shell("lake — apps", "Apps", content, viewer);
 }
 
