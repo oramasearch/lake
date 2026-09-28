@@ -12,7 +12,7 @@ The words lake uses, in the order you meet them.
 | **Storage** | A volume or bucket lake provisions for your services. |
 | **Project** | A business question and the decision it should improve. It holds pipelines. |
 | **Methodology** | A modelling method the engine runs, such as segmentation, forecasting or anomaly detection. **Design → Methodologies** lists all 21: what each needs, what it makes, how it is measured, and whether it runs in your workspace. |
-| **Solution** | A module from Orama's catalogue that answers one business problem end to end: the methodologies it composes, the decision it drives, and how its return is measured. **Design → Solutions** lists them; **Start this solution** makes it a project. |
+| **Solution** | A module from Orama's catalogue that answers one business problem end to end: the methodologies it composes, the decision it drives, and how its return is measured. **Design → Solutions** lists them. **Start this solution** asks which data to use, where actions go and the economics, then a Project Agent proposes the technical foundation for you to edit and confirm. The project shows its policy, holdout, actions, monitor and ROI. |
 | **Pipeline** | The steps that turn data into a result: connect, clean, model, index, serve, act, joined by arrows. A pipeline must be **approved** before it runs, and again after any change. |
 | **Run** | One execution of a pipeline, with its report, lineage, log and timing. |
 | **Hold-out** | The share of rows kept out of training to measure the model honestly. A score without one is *in-sample* and flatters. |

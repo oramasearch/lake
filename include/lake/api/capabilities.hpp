@@ -80,5 +80,11 @@ liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
 // when the project has no pipeline, otherwise its first unapproved pipeline pointed at the design's
 // dataset with the design's target and model.
 liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::AgentTask task);
+// Confirm a finished Project Agent solution proposal (kind "solution:<project>") by calling the
+// engine's create_solution once. `edits` is a JSON merge patch over result.foundation. The agent
+// never creates the solution itself; only this person-confirmed path does.
+liquid::runtime::task<ApiResult> settle_solution(ApiContext& context,
+                                                 control::AgentTask task,
+                                                 nlohmann::json edits = nlohmann::json::object());
 
 } // namespace lake::api
