@@ -37,6 +37,18 @@ std::string agent_tasks_topic(std::string_view agent) {
 ZettaAgentBus::ZettaAgentBus(std::string url, std::string token)
     : url_(std::move(url)), token_(std::move(token)) {}
 
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+AgentBus::call(std::string, nlohmann::json) {
+    co_return bus_failure<nlohmann::json>("not_supported", "stream inspection is unavailable");
+}
+
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+ZettaAgentBus::call(std::string capability, nlohmann::json input) {
+    ZettaWorkspaceCaller caller;
+    co_return settled(co_await caller.call(url_, token_, std::move(capability), false,
+                                          std::move(input)));
+}
+
 liquid::runtime::task<ZettaControlResult<void>> ZettaAgentBus::create_topic(std::string topic) {
     ZettaWorkspaceCaller caller;
     auto created = settled(co_await caller.call(
@@ -86,6 +98,61 @@ liquid::runtime::task<ZettaControlResult<BusBatch>> ZettaAgentBus::receive(
         co_return bus_failure<BusBatch>(received.error().code, received.error().message);
     }
     co_return batch_from(*received, from);
+}
+
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+MemoryAgentBus::call(std::string capability, nlohmann::json input) {
+    using nlohmann::json;
+    std::lock_guard lock(mutex_);
+    if (capability == "list_topics") {
+        json topics = json::array();
+        for (const auto& [name, events] : topics_) {
+            topics.push_back({{"topic", "topic:" + name}, {"subscribers", 0},
+                              {"held_events", events.size()}, {"next_sequence", events.size() + 1}});
+        }
+        co_return json{{"topics", std::move(topics)}};
+    }
+    std::string topic = input.at("topic");
+    if (topic.starts_with("topic:")) {
+        topic.erase(0, 6);
+    }
+    const auto found = topics_.find(topic);
+    if (found == topics_.end()) {
+        co_return bus_failure<json>("not_found", "topic does not exist");
+    }
+    const auto& held = found->second;
+    const auto next = held.size() + 1;
+    if (capability == "get_topic") {
+        co_return json{{"topic", "topic:" + topic}, {"settings", {{"exposed", true}}},
+                       {"subscriber_count", 0}, {"subscriptions", json::array()},
+                       {"held_events", held.size()}, {"earliest_sequence", held.empty() ? next : 1},
+                       {"next_sequence", next}};
+    }
+    if (capability != "browse_topic") {
+        co_return bus_failure<json>("not_supported", "the memory bus exposes stream reads only");
+    }
+    const bool backward = input.value("direction", "forward") == "backward";
+    const auto from = input.value("from_sequence", backward ? next : std::size_t{1});
+    json events = json::array();
+    for (const auto& event : held) {
+        if ((backward && event.sequence > from) || (!backward && event.sequence < from)) {
+            continue;
+        }
+        const auto payload = event.payload.dump();
+        events.push_back({{"sequence", event.sequence}, {"id", event.id}, {"from", "service:lake"},
+                          {"published_at", 0}, {"payload", payload}, {"size", payload.size()},
+                          {"revision", 1}, {"encoding", "json"}, {"headers", json::array()},
+                          {"edited_at", nullptr}, {"edited_by", ""}});
+    }
+    if (backward) {
+        std::reverse(events.begin(), events.end());
+    }
+    const auto limit = std::clamp(input.value("limit", 100), 1, 1000);
+    while (events.size() > static_cast<std::size_t>(limit)) {
+        events.erase(events.end() - 1);
+    }
+    co_return json{{"topic", "topic:" + topic}, {"events", std::move(events)},
+                   {"earliest_sequence", held.empty() ? next : 1}, {"next_sequence", next}};
 }
 
 liquid::runtime::task<ZettaControlResult<void>> MemoryAgentBus::create_topic(std::string topic) {

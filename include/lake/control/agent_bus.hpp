@@ -53,6 +53,9 @@ struct BusBatch {
 class AgentBus {
 public:
     virtual ~AgentBus() = default;
+    // Non-consuming stream inspection through the same service credential.
+    virtual liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+    call(std::string capability, nlohmann::json input);
     // Creates an exposed topic; one that already exists is fine.
     virtual liquid::runtime::task<ZettaControlResult<void>> create_topic(std::string topic) = 0;
     // Returns the event id.
@@ -67,6 +70,8 @@ public:
 class ZettaAgentBus final : public AgentBus {
 public:
     ZettaAgentBus(std::string url, std::string token);
+    liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+    call(std::string capability, nlohmann::json input) override;
     liquid::runtime::task<ZettaControlResult<void>> create_topic(std::string topic) override;
     liquid::runtime::task<ZettaControlResult<std::string>>
     publish(std::string topic, nlohmann::json payload, std::string correlation_id) override;
@@ -83,6 +88,8 @@ private:
 // The same contract in memory, for tests and a lake run with --memory-store. It never waits.
 class MemoryAgentBus final : public AgentBus {
 public:
+    liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+    call(std::string capability, nlohmann::json input) override;
     liquid::runtime::task<ZettaControlResult<void>> create_topic(std::string topic) override;
     liquid::runtime::task<ZettaControlResult<std::string>>
     publish(std::string topic, nlohmann::json payload, std::string correlation_id) override;

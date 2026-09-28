@@ -138,7 +138,7 @@ bool role_valid_for_object_type(std::string_view object_type, std::string_view r
         return object_type != "member";
     }
     if (role == "write") {
-        return object_type != "customer" && object_type != "member";
+        return object_type != "member";
     }
     return false;
 }

@@ -81,9 +81,10 @@ So the truth is the store, and every 15 seconds lake's bus loop:
 
 A customer's workspace Zetta has pub/sub too, and it is reachable through lake like the rest of
 the workspace: `list_topics` and `receive_events` through `workspace_query` (or
-`GET /workspaces/<customer>/zetta/v1/…`), and `create_topic`, `drop_topic` and `publish_event`
-through `workspace_act`. As on Zetta, only topics created with `exposed: true` are reachable.
-Through lake a `receive_events` long poll waits at most 10 seconds.
+`GET /workspaces/<customer>/zetta/v1/…`). Only exposed topics are reachable; a `receive_events`
+long poll waits at most 10 seconds. Topic/message writes use the dedicated [Streams](streams.md)
+capabilities, not `workspace_act`. Streams browses without consuming and adds space-scoped
+app/build topics and filtered agent-turn views of the bus; global agent topics remain private.
 
 ## Configuration
 

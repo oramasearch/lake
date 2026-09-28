@@ -483,3 +483,10 @@ writes repository, revision, context, Dockerfile, target, allowed build argument
 cancelled intent. The operator writes phase, digest, size, message and only SHA-256 hashes for its
 source, push and event credentials. Desired changes notify `lake_builds`. Idempotent; guard
 `builds_guard`. The ownership and Job handoff contract is [`builds.md`](builds.md).
+
+## Streams migration
+
+`0037_streams` records topic creators in `stream_owners`, keyed by customer, workspace service
+incarnation and concrete topic name. Idempotent; the newest guard is `streams_guard`. Apply it
+before the Streams binary and vendor it in the operator rollout. Ownership failure behavior and
+space-scoped bus views are specified in [`streams.md`](streams.md).

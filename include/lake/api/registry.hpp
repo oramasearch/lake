@@ -191,6 +191,8 @@ struct Capability {
                                   // additionalProperties false
     nlohmann::json output_schema; // the success value's shape
     CapabilityKind kind = CapabilityKind::Read;
+    // Read capabilities may also accept a JSON body without becoming actions.
+    bool post_alias = false;
     CapabilityTransport transport = CapabilityTransport::Json;
     bool requires_auth = true;
     std::string object;

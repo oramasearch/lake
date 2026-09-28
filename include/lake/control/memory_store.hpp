@@ -194,6 +194,10 @@ public:
                                     std::string message,
                                     std::int64_t observed_generation);
     Result<std::vector<Build>> list_builds(const std::string& customer_id) override;
+    Result<void> create_stream_owner(const StreamOwner&) override;
+    Result<std::string> stream_owner(const StreamOwner&) override;
+    Result<void> delete_stream_owner(const StreamOwner&) override;
+    Result<std::vector<std::string>> list_agent_task_ids(const std::string& customer_id) override;
     Result<Build> get_build(const std::string& id) override;
     Result<Build> create_build(const NewBuild&) override;
     Result<Build> cancel_build(const std::string& id) override;
@@ -506,6 +510,7 @@ private:
     std::vector<ManagedService> services_;
     std::vector<WebApp> web_apps_;
     std::vector<Build> builds_;
+    std::vector<StreamOwner> stream_owners_;
     std::vector<ManagedStore> stores_;
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;

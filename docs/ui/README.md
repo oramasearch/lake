@@ -12,6 +12,9 @@ The top-bar breadcrumb (every page's trail, mirroring its URL) is in [`breadcrum
 Developer → MCP (keys, copy-ready agent setup, the lake skill and `llms.txt`) is in [`../api/mcp.md`](../api/mcp.md).
 Ship → Apps list, detail, ApplicationAgent proposal confirmation, controls, and live event behavior
 are in [`apps.md`](apps.md).
+Ship → Apps list, detail, controls, and live event behavior are in [`apps.md`](apps.md).
+Train → Streams topic/message CRUD, Live/pause, paging and capability mappings are in
+[`streams.md`](streams.md). Apps, build logs and Runs link into that space's Streams pages.
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed

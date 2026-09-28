@@ -286,7 +286,15 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
                                           "fault; the error carries the reason");
         responses["5XX"] = error_response("the control-plane store is unavailable or failed");
         operation["responses"] = std::move(responses);
-        paths[rest_path(*capability)][method == "GET" ? "get" : "post"] = std::move(operation);
+        paths[rest_path(*capability)][method == "GET" ? "get" : "post"] = operation;
+        if (method == "GET" && capability->post_alias) {
+            paths[rest_path(*capability)]["get"]["operationId"] = capability->name + "_get";
+            operation.erase("parameters");
+            operation["requestBody"] = {
+                {"required", true},
+                {"content", {{"application/json", {{"schema", capability->input_schema}}}}}};
+            paths[rest_path(*capability)]["post"] = std::move(operation);
+        }
     }
     paths["/mcp"]["post"] = {
         {"operationId", "mcp"},

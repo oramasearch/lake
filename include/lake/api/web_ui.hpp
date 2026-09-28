@@ -227,6 +227,17 @@ struct WorkspacePage {
 };
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
 
+struct StreamsPage {
+    std::vector<WorkspaceCustomer> customers;
+    std::string customer_id, zetta = "workspace", topic, prefix, error;
+    nlohmann::json listing = nlohmann::json::object();
+    nlohmann::json detail = nlohmann::json::object();
+    nlohmann::json messages = nlohmann::json::object();
+    bool can_write = false;
+    bool can_admin = false;
+};
+std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer = true);
+
 // Ask Orama (docs/api/ask-orama.md, lake#236): one conversation, whose messages are lake's
 // ask_messages rows as JSON ({id, role, content, payload}). `agents` is the selector: Ask Orama
 // first, then every other agent that takes a conversation ({id, name}).

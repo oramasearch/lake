@@ -77,7 +77,7 @@ constexpr std::array<std::string_view, 39> workspace_reads = {"server_info",
                                                               "list_ledger",
                                                               "get_monitor",
                                                               "get_roi_readout"};
-constexpr std::array<std::string_view, 40> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 37> workspace_actions = {"create_project",
                                                                 "create_solution",
                                                                 "run_solution",
                                                                 "update_policy",
@@ -113,9 +113,6 @@ constexpr std::array<std::string_view, 40> workspace_actions = {"create_project"
                                                                 "delete_agent",
                                                                 "set_training_schedule",
                                                                 "agent_run",
-                                                                "create_topic",
-                                                                "drop_topic",
-                                                                "publish_event",
                                                                 // A read in Zetta, called with GET,
                                                                 // but it loads a model and spends
                                                                 // compute: `write` in lake.

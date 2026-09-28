@@ -57,7 +57,7 @@ action has meaning:
 
 | Object type | Additional roles |
 |---|---|
-| customer | `share` |
+| customer | `write`, `share` |
 | organization, team | `write`, `share` |
 | member | none |
 | repository, path | `write`, `review`, `share` |

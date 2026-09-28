@@ -1,5 +1,8 @@
 # Control-plane contracts
 
+[streams.md](streams.md) describes creator ownership bound to a workspace incarnation,
+server-side shared-bus isolation and migration `0037_streams` with `streams_guard`.
+
 [schema.md](schema.md) describes persisted tables, migrations and the operator handoff, including
 token ancestry and the one-use invalidation of legacy API/static tokens. See
 [postgres.md](postgres.md) for the backing store and deployment contract.

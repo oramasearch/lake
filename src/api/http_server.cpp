@@ -9474,6 +9474,69 @@ struct ApiServer::Impl {
             "no-store");
     }
 
+    boost::http::route_task serve_streams_page(boost::http::route_params& route, bool detail) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        StreamsPage page;
+        if (!options.store) {
+            page.error = "The control store is unavailable.";
+            co_return co_await send_text(route, boost::http::status::service_unavailable,
+                web_ui_streams(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
+        }
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        page.prefix = query_value(route, "prefix");
+        const auto object = options.store->find_policy_object("customer", page.customer_id);
+        if (object) {
+            const auto write = control::authorize(*options.store, context.acting_identity,
+                                                 object->id, "write", context.authorization_cache);
+            const auto admin = control::authorize(*options.store, context.acting_identity,
+                                                 object->id, "admin", context.authorization_cache);
+            page.can_write = context.operator_credential || (write && write->allowed);
+            page.can_admin = context.operator_credential || (admin && admin->allowed);
+        }
+        nlohmann::json input{{"customer_id", page.customer_id}};
+        if (detail) {
+            page.topic = query_value(route, "topic");
+            page.zetta = query_value(route, "zetta");
+            input["zetta"] = page.zetta;
+            input["topic"] = page.topic;
+            const auto info = unwrap(co_await workspace_call("get_stream", input, context));
+            if (info.ok) {
+                page.detail = info.value;
+                const auto from = query_value(route, "from_sequence");
+                if (!from.empty()) {
+                    input["from_sequence"] = nlohmann::json::parse(from, nullptr, false);
+                    if (input["from_sequence"].is_discarded()) {
+                        input["from_sequence"] = from;
+                    }
+                }
+                input["direction"] = "backward";
+                const auto messages = unwrap(co_await workspace_call("browse_stream", input, context));
+                if (messages.ok) {
+                    page.messages = messages.value;
+                } else {
+                    page.error = messages.error.message;
+                }
+            } else {
+                page.error = info.error.message;
+            }
+        } else {
+            input["prefix"] = page.prefix;
+            const auto listed = unwrap(co_await workspace_call("list_streams", input, context));
+            if (listed.ok) {
+                page.listing = listed.value;
+            } else {
+                page.error = listed.error.message;
+            }
+        }
+        co_return co_await send_text(route, boost::http::status::ok,
+            web_ui_streams(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
+    }
+
     boost::http::route_task serve_apps_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
@@ -14219,6 +14282,13 @@ bool ApiServer::start() {
                                                    impl.serve_workspace_zetta(route, false));
                    });
     }
+    for (const std::string path : {"/train/streams", "/train/stream"}) {
+        router.add(http::method::get, path,
+                   [&impl, path](http::route_params& route) -> http::route_task {
+                       return impl.observe_request(route, path,
+                           impl.serve_streams_page(route, path == "/train/stream"));
+                   });
+    }
     for (const auto& capability : impl.registry.list()) {
         if (capability->transport != CapabilityTransport::Json) {
             continue;
@@ -14226,6 +14296,13 @@ bool ApiServer::start() {
         const auto method =
             rest_method(*capability) == "GET" ? http::method::get : http::method::post;
         const std::string path = rest_path(*capability);
+        if (capability->kind == CapabilityKind::Read && capability->post_alias) {
+            router.add(http::method::post, path,
+                       [&impl, capability, path](http::route_params& route) -> http::route_task {
+                           return impl.observe_request(
+                               route, path, impl.serve_capability(route, capability));
+                       });
+        }
         router.add(
             method, path, [&impl, capability, path](http::route_params& route) -> http::route_task {
                 return impl.observe_request(route, path, impl.serve_capability(route, capability));

@@ -1,5 +1,10 @@
 # The `/v1` API and MCP
 
+[streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
+with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.
+Read tools advertise `readOnlyHint`; writes conservatively advertise `destructiveHint`. Streams reads
+retain GET and add POST without changing their read classification.
+
 The [sync protocol](sync.md) also backs the repository page's configured-origin clone/push
 instructions. The [private-instance proof](../deployment/private-install.md) executes those
 instructions against the existing registry operations.

@@ -52,6 +52,10 @@ std::optional<std::string> mcp_dispatch(const Registry& registry,
                                    {"title", capability->title},
                                    {"description", capability->description},
                                    {"inputSchema", capability->input_schema}};
+            const bool read_only = capability->kind == CapabilityKind::Read ||
+                                   capability->action == "read";
+            tool["annotations"] = {{"readOnlyHint", read_only},
+                                   {"destructiveHint", !read_only}};
             if (capability->output_schema.is_object() && !capability->output_schema.empty()) {
                 tool["outputSchema"] = success_envelope_schema(capability->output_schema);
             }

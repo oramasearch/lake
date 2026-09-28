@@ -15,6 +15,9 @@ and reflected in [status.md](status.md).
 The customer landing journey and viewer navigation are recorded in
 [../ui/front-door.md](../ui/front-door.md) and reflected in [status.md](status.md).
 
+Train → Streams is tracked separately from deployment in [status.md](status.md), with its
+[API](../api/streams.md), [UI](../ui/streams.md) and ownership contracts linked there.
+
 Indexed PostgreSQL session authentication and the legacy-session migration are specified in
 [../api/auth.md](../api/auth.md) and recorded separately from deployment in [status.md](status.md).
 
