@@ -2,9 +2,10 @@
 
 `experiment_capabilities.cpp` registers eleven space-scoped study/run operations using the
 closed contracts in `experiment_schemas.hpp`. `web_ui_experiments.cpp` is their pure page renderer;
-embedded, hashed chart assets call only registered capabilities. Workspace action aliases retain
-the same confirmation, scope and promotion checks. See [API](../../docs/api/experiments.md) and
-[UI](../../docs/ui/experiments.md) contracts.
+embedded, hashed chart assets call only registered capabilities. The page's ExperimentsAgent box
+uses `agent_turn`; the HTTP adapter hashes the stored proposal and sends the edited study only in a
+confirmed turn. Workspace action aliases retain the same confirmation, scope and promotion checks.
+See [API](../../docs/api/experiments.md) and [UI](../../docs/ui/experiments.md) contracts.
 
 `stream_capabilities.cpp` registers the nine Streams REST/MCP operations, enforces space and
 creator policy, pages one `list_topics` result per Zetta, filters shared bus topics and proxies
@@ -58,6 +59,9 @@ source repository/revision reads, customer workspace reads, or one app's event p
 ApplicationAgent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
 turn, repository/App writes only when the reviewed proposal is present. `http_server.cpp` and
 `web_ui.cpp` display and hash that stored proposal before starting the confirmed turn.
+ExperimentsAgent turns use the workspace adapter and grant raw study operations by turn kind;
+`create_study` and `promote_trial` appear only with their reviewed confirmation. The adapter sends
+those actions through the canonical experiment capabilities.
 `build_capabilities.cpp` owns customer-scoped build creation, app image builds, status,
 cancellation and retained Zetta progress. Build source and event credentials are rechecked against
 the current row on every call. See `docs/api/builds.md`.

@@ -27,6 +27,11 @@ std::string input(std::string_view label, std::string_view name, std::string_vie
         web_ui_escape(value) + "\" " + std::string(attributes) + "></label>";
 }
 
+std::string hidden(std::string_view name, std::string_view value) {
+    return "<input type=\"hidden\" name=\"" + std::string(name) + "\" value=\"" +
+           web_ui_escape(value) + "\">";
+}
+
 std::string action(const std::string& capability, const std::string& label,
                    const std::string& study, const std::string& run = "") {
     return "<button type=\"button\" data-action=\"" + capability + "\" data-capability=\"" +
@@ -65,6 +70,83 @@ std::string start_form() {
         "The final test split is never used for tuning.</p>"
         "<button type=\"submit\" data-start disabled>Review and start study</button></form></details>";
     return html;
+}
+
+std::string agent_panel(const ExperimentsPage& page) {
+    std::string html =
+        "<section class=\"panel\"><h2>Run an Experiment</h2><p class=\"sub\">Describe the "
+        "training or tuning goal. ExperimentsAgent proposes a complete study for you to edit and "
+        "confirm before it starts.</p><form class=\"stack\" method=\"post\" "
+        "action=\"/train/experiments/agent\" data-capability=\"agent_turn\">" +
+        hidden("customer_id", page.customer_id) +
+        "<label>Goal<textarea name=\"goal\" rows=\"4\" placeholder=\"Tune a churn model for "
+        "validation AUC with a bounded trial budget.\" required";
+    if (!page.experiments_agent) {
+        html += " disabled";
+    }
+    html += "></textarea></label><button type=\"submit\"";
+    if (!page.experiments_agent) {
+        html += " disabled";
+    }
+    html += ">Ask ExperimentsAgent</button></form>";
+    if (!page.experiments_agent) {
+        html += "<p class=\"notice status-warning\">ExperimentsAgent is not registered on this "
+                "lake yet.</p>";
+    }
+    html += "</section>";
+    if (page.agent_task.empty()) {
+        return html;
+    }
+    json answer = page.agent_task.value("answer", json::object());
+    if (!answer.is_object()) {
+        answer = json::object();
+    }
+    json result = answer.value("result", json::object());
+    if (!result.is_object()) {
+        result = json::object();
+    }
+    const std::string reply =
+        answer.value("reply", page.agent_task.value("message", std::string()));
+    if (page.agent_working) {
+        return html +
+               "<section class=\"panel\" aria-live=\"polite\"><h2>ExperimentsAgent Is "
+               "Working</h2><p>It keeps working if you leave; this page checks again every 2 "
+               "seconds.</p><meta http-equiv=\"refresh\" content=\"2\"></section>";
+    }
+    if (result.value("kind", std::string()) == "proposal" &&
+        result.value("confirm", false) && result.value("study", json()).is_object()) {
+        return html + "<section class=\"panel\" id=\"experiment-proposal\"><h2>Proposed "
+                      "Study</h2><div class=\"ask-reply\">" +
+               web_ui_markdown(reply) +
+               "</div><p>Edit the study JSON if needed. The reviewed object is validated again "
+               "before the agent can start it.</p><form class=\"stack\" method=\"post\" "
+               "action=\"/train/experiments/agent/confirm\" "
+               "data-capability=\"agent_turn\">" +
+               hidden("customer_id", page.customer_id) +
+               hidden("task_id", page.agent_task.value("task_id", std::string())) +
+               hidden("proposal_sha256", page.proposal_sha256) +
+               "<label>Study proposal (JSON)<textarea name=\"study\" rows=\"18\" required>" +
+               web_ui_escape(result.at("study").dump(2)) +
+               "</textarea></label><details><summary>Why these choices</summary><pre>" +
+               web_ui_escape(result.value("explanations", json::object()).dump(2)) +
+               "</pre></details><button class=\"button button-primary\" type=\"submit\">Confirm "
+               "and start study</button></form></section>";
+    }
+    std::string result_link;
+    const json study = result.value("study", json::object());
+    if (result.value("kind", std::string()) == "running" && study.is_object() &&
+        study.value("id", std::string()) != "") {
+        result_link = "<p>" + link(page,
+                                   "/train/experiment",
+                                   "study",
+                                   study.at("id"),
+                                   "Open the running study",
+                                   "get_experiment_study") +
+                      "</p>";
+    }
+    return html + "<section class=\"panel\"><h2>ExperimentsAgent Result</h2><div "
+                  "class=\"ask-reply\">" +
+           web_ui_markdown(reply) + "</div>" + result_link + "</section>";
 }
 
 std::string study_listing(const ExperimentsPage& page) {
@@ -298,6 +380,7 @@ std::string web_ui_experiments(const ExperimentsPage& page, WebUiViewer viewer) 
     }
     json details = json::array();
     if (page.mode == "list") {
+        html += agent_panel(page);
         html += list_page(page);
     } else if (page.mode == "study") {
         html += study_page(page);

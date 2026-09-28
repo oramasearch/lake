@@ -16,9 +16,10 @@ exercised locally, deployed, and exercised-in-deployment behavior; do not infer 
 deployment exercise from a route's presence in OpenAPI.
 
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
-live charts and confirmed promotion, against workspace Zetta `dev-a1d74b21`. The build's authorized
-bridge transport source is unchanged. Deletion has no engine contract; deployed study/training
-acceptance is not claimed. See `docs/api/experiments.md` and `docs/ui/experiments.md`.
+live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
+against workspace Zetta `dev-a1d74b21`. The build's authorized bridge transport source is
+unchanged. Deletion has no engine contract; deployed study/training acceptance is not claimed.
+See `docs/api/experiments.md` and `docs/ui/experiments.md`.
 
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in

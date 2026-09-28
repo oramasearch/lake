@@ -1,9 +1,10 @@
 # Public API types
 
-`ExperimentsPage` contains capability values and resolved display permissions for the pure
-study/run/comparison renderer. Experiment asset declarations expose embedded bytes and hashed
-URLs without filesystem or HTTP dependencies. See [the UI contract](../../../docs/ui/experiments.md)
-and [registered API operations](../../../docs/api/experiments.md).
+`ExperimentsPage` contains capability values, resolved display permissions, ExperimentsAgent task
+state and the stored proposal digest for the pure study/run/comparison renderer. Experiment asset
+declarations expose embedded bytes and hashed URLs without filesystem or HTTP dependencies. See
+[the UI contract](../../../docs/ui/experiments.md) and
+[registered API operations](../../../docs/api/experiments.md).
 
 `Capability::post_alias` gives read capabilities a JSON POST route as well as GET, preserving
 read policy and identical OpenAPI/MCP schemas. `StreamsPage` holds only capability values and

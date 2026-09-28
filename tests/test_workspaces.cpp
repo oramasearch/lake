@@ -23,6 +23,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "experiment_fixture.hpp"
 #include "temporary_directory.hpp"
 
 namespace {
@@ -1812,8 +1813,9 @@ TEST(Workspaces, AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet) {
 TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     const auto endpoints = lake::control::parse_agent_endpoints(
         "agent-ask-orama=http://ask:8080,agent-project=http://project:8080,"
-        "agent-application=http://application:8080,unknown=http://x,bad");
-    EXPECT_EQ(endpoints.size(), 3U) << "unknown keys and malformed pairs are ignored";
+        "agent-application=http://application:8080,"
+        "agent-experiments=http://experiments:8080,unknown=http://x,bad");
+    EXPECT_EQ(endpoints.size(), 4U) << "unknown keys and malformed pairs are ignored";
     const json library = lake::control::agent_library_json(endpoints);
     const json agents = library.at("agents");
     std::vector<std::string> keys;
@@ -1824,6 +1826,7 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
               (std::vector<std::string>{"agent-ask-orama",
                                         "agent-project",
                                         "agent-application",
+                                        "agent-experiments",
                                         "agent-autosuggest",
                                         "agent-creator",
                                         "agent-eval-generator",
@@ -1833,10 +1836,12 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     EXPECT_EQ(agents[0].at("status"), "Available");
     EXPECT_EQ(agents[2].at("name"), "ApplicationAgent");
     EXPECT_EQ(agents[2].at("status"), "Available");
-    EXPECT_EQ(agents[3].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[3].at("name"), "ExperimentsAgent");
+    EXPECT_EQ(agents[3].at("status"), "Available");
+    EXPECT_EQ(agents[4].at("status"), "Not running on this lake");
     // Every library agent is one you can talk to (lake#263): the generators too.
-    EXPECT_EQ(agents[5].at("status"), "Not running on this lake");
-    EXPECT_EQ(agents[5].at("runs_as"), "service");
+    EXPECT_EQ(agents[6].at("status"), "Not running on this lake");
+    EXPECT_EQ(agents[6].at("runs_as"), "service");
     for (const auto& agent : agents) {
         EXPECT_TRUE(agent.at("chat").get<bool>()) << agent.at("key");
     }
@@ -1965,6 +1970,7 @@ struct AgentRuns {
             std::vector<std::string>{"agent-ask-orama",
                                      "agent-project",
                                      "agent-application",
+                                     "agent-experiments",
                                      "agent-autosuggest",
                                      "agent-creator"},
             std::chrono::seconds(0));
@@ -2613,6 +2619,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     config.agent_endpoints = {{"agent-ask-orama", "http://ask:8080"},
                               {"agent-project", "http://project:8080"},
                               {"agent-application", "http://application:8080"},
+                              {"agent-experiments", "http://experiments:8080"},
                               {"agent-autosuggest", "http://suggest:8080"}};
     config.internal_url = "http://lake.internal:4900";
     config.agent_service_token = "service-token";
@@ -2661,6 +2668,16 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     EXPECT_EQ(delegated_task->agent, "agent-application");
     EXPECT_EQ(delegated_task->kind, "app");
     EXPECT_EQ(r.bus->events("agent-tasks.agent-application").size(), 1U);
+    const auto delegated_experiment = r.call_as(
+        *acting,
+        "agent_turn",
+        {{"agent", "agent-experiments"}, {"message", "Tune the churn pipeline"}});
+    ASSERT_TRUE(delegated_experiment.ok) << delegated_experiment.error.message;
+    const auto delegated_experiment_task =
+        r.store.get_agent_task(delegated_experiment.value["task_id"]);
+    ASSERT_TRUE(delegated_experiment_task);
+    EXPECT_EQ(delegated_experiment_task->kind, "experiment");
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-experiments").size(), 1U);
     ASSERT_TRUE(r.store.record_agent_task_event(
         ask_task->id, "agent-ask-orama", "Succeeded", "", {{"ok", true}, {"reply", "hello"}}));
     EXPECT_FALSE(r.store.context_for(credential)) << "a finished task's credential stops";
@@ -2671,8 +2688,26 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
 
     const auto built = r.call("agent_turn", {{"agent", "agent-project"}, {"message", "churn"}});
     ASSERT_TRUE(built.ok) << built.error.message;
-    EXPECT_EQ(r.store.get_agent_task(built.value["task_id"])->body["zetta_base_url"],
+    const auto project_task = r.store.get_agent_task(built.value["task_id"]);
+    ASSERT_TRUE(project_task);
+    EXPECT_EQ(project_task->body["zetta_base_url"],
               "http://lake.internal:4900/workspaces/" + r.w.customer_id + "/zetta");
+    EXPECT_NE(std::ranges::find(project_task->scopes, "agent_turn"),
+              project_task->scopes.end());
+    const std::string project_credential =
+        "lat." + project_task->id + ".abcdef0123456789abcdef0123456789";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        project_task->id,
+        "agent-project",
+        lake::control::identity_crypto::sha256_hex(project_credential)));
+    const auto project_principal = r.store.context_for(project_credential);
+    ASSERT_TRUE(project_principal);
+    const auto project_delegated = r.call_as(
+        *project_principal,
+        "agent_turn",
+        {{"agent", "agent-experiments"}, {"message", "Tune this project"}});
+    ASSERT_TRUE(project_delegated.ok) << project_delegated.error.message;
+    EXPECT_EQ(r.store.get_agent_task(project_delegated.value["task_id"])->kind, "experiment");
 
     // A change to an existing pipeline: the agent is handed the graph, and a finished proposal
     // names the pipeline page where it is reviewed (lake#249).
@@ -2829,19 +2864,169 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(deployed.value["image"], "registry.example.test/reports:confirmed");
 }
 
+TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-experiments", "http://experiments:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+
+    const auto started = r.call(
+        "agent_turn",
+        {{"agent", "agent-experiments"}, {"message", "Tune retention"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.store.get_agent_task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->kind, "experiment");
+    EXPECT_EQ(first->body["kind"], "experiment");
+    EXPECT_EQ(first->body["context"], json::object());
+    EXPECT_EQ(first->body["lake_url"],
+              "http://lake.internal:4900/workspaces/" + r.w.customer_id + "/zetta");
+    EXPECT_NE(std::ranges::find(first->scopes, "analyze_dataset"), first->scopes.end());
+    EXPECT_EQ(std::ranges::find(first->scopes, "workspace_act"), first->scopes.end());
+    EXPECT_EQ(std::ranges::find(first->scopes, "create_study"), first->scopes.end());
+
+    const json proposal{{"kind", "proposal"},
+                        {"study", lake::test::experiment_study().at("spec")},
+                        {"explanations", {{"objective", "Retention quality"}}},
+                        {"confirm", true}};
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        first->id,
+        "Succeeded",
+        "",
+        "",
+        {{"ok", true}, {"reply", "Review it."}, {"result", proposal}}));
+    const auto review = r.call("get_agent_task", {{"task_id", first->id}});
+    ASSERT_TRUE(review.ok);
+    EXPECT_EQ(review.value["review_url"],
+              "/train/experiments?customer_id=" + r.w.customer_id + "&task=" + first->id +
+                  "#experiment-proposal");
+
+    const auto confirmed = r.call(
+        "agent_turn",
+        {{"agent", "agent-experiments"},
+         {"kind", "experiment"},
+         {"message", "Confirm and start the reviewed study proposal."},
+         {"context", {{"confirmed_proposal", proposal}}}});
+    ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
+    const auto second = r.store.get_agent_task(confirmed.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_NE(std::ranges::find(second->scopes, "workspace_act"), second->scopes.end());
+    EXPECT_NE(std::ranges::find(second->scopes, "create_study"), second->scopes.end());
+    EXPECT_NE(std::ranges::find(second->scopes, "start_study"), second->scopes.end());
+    EXPECT_EQ(std::ranges::find(second->scopes, "stop_trial"), second->scopes.end());
+    const std::string confirmed_credential =
+        "lat." + second->id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        second->id,
+        "agent-experiments",
+        lake::control::identity_crypto::sha256_hex(confirmed_credential)));
+    const auto confirmed_principal = r.store.context_for(confirmed_credential);
+    ASSERT_TRUE(confirmed_principal);
+    r.w.caller->answers["create_study"] = lake::test::experiment_study();
+    const auto created = r.call_as(
+        *confirmed_principal,
+        "workspace_act",
+        {{"capability", "create_study"}, {"input", proposal.at("study")}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(r.w.caller->capability, "create_study");
+    EXPECT_FALSE(r.w.caller->input.contains("confirm"));
+    const auto refused = r.call_as(
+        *confirmed_principal,
+        "workspace_act",
+        {{"capability", "promote_trial"},
+         {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
+
+    const auto status = r.call(
+        "agent_turn",
+        {{"agent", "agent-experiments"},
+         {"kind", "experiment_status"},
+         {"message", "Watch study-one"},
+         {"context", {{"study", "study-one"}}}});
+    ASSERT_TRUE(status.ok) << status.error.message;
+    const auto status_task = r.store.get_agent_task(status.value["task_id"]);
+    ASSERT_TRUE(status_task);
+    EXPECT_NE(std::ranges::find(status_task->scopes, "stop_trial"),
+              status_task->scopes.end());
+    EXPECT_NE(std::ranges::find(status_task->scopes, "stop_experiment_trial"),
+              status_task->scopes.end());
+    EXPECT_EQ(std::ranges::find(status_task->scopes, "create_study"),
+              status_task->scopes.end());
+    const std::string status_credential =
+        "lat." + status_task->id + ".abcdef0123456789abcdef0123456789";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        status_task->id,
+        "agent-experiments",
+        lake::control::identity_crypto::sha256_hex(status_credential)));
+    const auto status_principal = r.store.context_for(status_credential);
+    ASSERT_TRUE(status_principal);
+    r.w.caller->answers["stop_trial"] = {
+        {"study", "study-one"}, {"run", "trial-2"}, {"state", "failed"}};
+    const auto stopped = r.call_as(
+        *status_principal,
+        "workspace_act",
+        {{"capability", "stop_trial"},
+         {"input", {{"study", "study-one"}, {"run", "trial-2"}}}});
+    ASSERT_TRUE(stopped.ok) << stopped.error.message;
+
+    const json promotion{{"kind", "explanation"},
+                         {"promotion", {{"study", "study-one"}, {"run", "trial-1"}}},
+                         {"confirm", true}};
+    const auto explained = r.call(
+        "agent_turn",
+        {{"agent", "agent-experiments"},
+         {"kind", "experiment_explain"},
+         {"message", "Promote the reviewed best trial."},
+         {"context", {{"confirmed_promotion", promotion}}}});
+    ASSERT_TRUE(explained.ok) << explained.error.message;
+    const auto explained_task = r.store.get_agent_task(explained.value["task_id"]);
+    ASSERT_TRUE(explained_task);
+    EXPECT_NE(std::ranges::find(explained_task->scopes, "promote_trial"),
+              explained_task->scopes.end());
+    EXPECT_EQ(std::ranges::find(explained_task->scopes, "stop_trial"),
+              explained_task->scopes.end());
+    const std::string explained_credential =
+        "lat." + explained_task->id + ".fedcba9876543210fedcba9876543210";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        explained_task->id,
+        "agent-experiments",
+        lake::control::identity_crypto::sha256_hex(explained_credential)));
+    const auto explained_principal = r.store.context_for(explained_credential);
+    ASSERT_TRUE(explained_principal);
+    r.w.caller->answers["promote_trial"] = {{"study", "study-one"},
+                                             {"run", "trial-1"},
+                                             {"model", "model-one"},
+                                             {"project", "retention"}};
+    const auto promoted = r.call_as(
+        *explained_principal,
+        "workspace_act",
+        {{"capability", "promote_trial"},
+         {"input", {{"study", "study-one"}, {"run", "trial-1"}}}});
+    ASSERT_TRUE(promoted.ok) << promoted.error.message;
+
+    EXPECT_EQ(r.call("agent_turn",
+                     {{"agent", "agent-experiments"},
+                      {"kind", "app"},
+                      {"message", "wrong kind"}})
+                  .error.code,
+              "invalid_input");
+}
+
 TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {
     const auto dir = lake::test::fixture_path("agent-bus-" + lake::control::new_uuid_v4());
     std::filesystem::create_directories(dir);
     std::ofstream(dir / "agent-project") << "project-token\n";
     std::ofstream(dir / "agent-ask-orama") << "ask-token";
     std::ofstream(dir / "agent-application") << "application-token";
+    std::ofstream(dir / "agent-experiments") << "experiments-token";
     std::ofstream(dir / "empty") << "\n";
     std::filesystem::create_directories(dir / "..data");
     const auto tokens = lake::control::read_agent_bus_tokens(dir.string());
-    EXPECT_EQ(tokens.size(), 3U) << "an empty file and the mount's own entries are skipped";
+    EXPECT_EQ(tokens.size(), 4U) << "an empty file and the mount's own entries are skipped";
     EXPECT_EQ(tokens.at("agent-project"), "project-token");
     EXPECT_EQ(tokens.at("agent-ask-orama"), "ask-token");
     EXPECT_EQ(tokens.at("agent-application"), "application-token");
+    EXPECT_EQ(tokens.at("agent-experiments"), "experiments-token");
     EXPECT_TRUE(lake::control::read_agent_bus_tokens("").empty());
     std::filesystem::remove_all(dir);
 }

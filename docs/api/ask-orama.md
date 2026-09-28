@@ -31,9 +31,10 @@ shows it and keeps it honest.
   proposal and the conversation shows *Review the proposed change*, a link to the pipeline page where
   it is applied (lake#249).
 - **It delegates to any agent** (`delegate` → `agent_turn`): the Project Agent, ApplicationAgent,
-  Auto-Suggest, and any agent the person built; an unattended agent is started by proposing
+  ExperimentsAgent, Auto-Suggest, and any agent the person built; an unattended agent is started by proposing
   `launch_agent`. An ApplicationAgent delegation creates an `app` task, whose proposal is reviewed
-  and confirmed before that agent receives App writes.
+  and confirmed before that agent receives App writes. An ExperimentsAgent delegation creates an
+  `experiment` task, whose editable study is reviewed before that agent receives `create_study`.
 - **Conversations are lake's.** Every message is an `ask_messages` row (migration `0030`): the
   person's text, and for Ask Orama's the reply with its proposals, reads, delegations and trace id.
   Only the person who had a conversation reads it back, from any replica.

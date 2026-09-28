@@ -49,6 +49,51 @@ Examples below show the request followed by the successful `value`. The common R
 is `{ "ok": true, "value": ..., "duration_ms": 1.0 }`. Study examples abbreviate full records
 where noted; the generated OpenAPI is the complete schema.
 
+## ExperimentsAgent Turns
+
+ExperimentsAgent is the Agent Library service `agent-experiments`. Its public operation is the
+existing registered `agent_turn` action (`write` on the customer): REST clients use
+`POST /v1/agent_turn`, MCP clients use the `agent_turn` tool, and the Experiments page calls the
+same capability. Ask Orama and the Project Agent may delegate training and tuning requests to it.
+The three accepted turn kinds are:
+
+| Kind | Purpose | Turn credential |
+|---|---|---|
+| `experiment` | turn a goal into an editable proposal; after confirmation, start that exact study | proposal reads; workspace `create_study` and backing `start_study` only when `context.confirmed_proposal` is valid |
+| `experiment_status` | report the study and its trials | study, trial, metric and bounded event reads; workspace `stop_trial` and backing `stop_experiment_trial` |
+| `experiment_explain` | explain analysis and a best trial | study and analysis reads; `promote_trial` only when a confirmed promotion is supplied |
+
+An initial goal returns a background task immediately. Its service receives only a task id on
+`agent-tasks.agent-experiments`; when it claims the task, Lake hands it a task credential and a
+workspace URL. Study data stays in the workspace Zetta. The agent's raw engine tool names are
+restricted to the current turn's scopes, and study actions enter the canonical registered Lake
+operations above, retaining customer policy, confirmation and audit checks.
+
+Initial proposal request (`POST /v1/agent_turn`; MCP tool `agent_turn`):
+
+```json
+{"customer_id":"space-id","agent":"agent-experiments","kind":"experiment","message":"Tune retention for validation AUC with four trials."}
+```
+```json
+{"task_id":"task-id","status":"pending"}
+```
+
+`get_agent_task` returns a successful proposal with `kind:"proposal"`, `confirm:true`, an editable
+`study` object and explanations. No study write is present on that task credential. The reviewed
+object is sent in a second turn:
+
+```json
+{"customer_id":"space-id","agent":"agent-experiments","kind":"experiment","message":"Confirm and start the reviewed study proposal.","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"study":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"validation.auc","direction":"maximize","validation_split":"validation"},"budgets":{"max_trials":4,"max_parallel_trials":1,"max_wall_time_ms":60000,"cost_cap":5}},"explanations":{"objective":"Use validation AUC."}}}}
+```
+```json
+{"task_id":"confirmed-task-id","status":"pending"}
+```
+
+The confirmed task alone receives workspace `create_study` and backing `start_study`. Status and
+explanation use the same REST/MCP operation with `kind:"experiment_status"` or
+`kind:"experiment_explain"` and `context:{"study":"study-id"}`. A promotion is a separate
+reviewed confirmation; an explanation turn without it remains read-only.
+
 ## Reads
 
 `list_experiments` (MCP: `list_experiments`) returns complete Study records and summaries of
@@ -199,7 +244,12 @@ confirmation before making the request.
 
 `Experiments.*` verifies space authorization, confirmation and alias refusal, bounds, DP behavior,
 service-credential proxying, audit targets, REST/MCP input and output schema parity, a successful
-call per transport per operation, and every rendered control's registered capability. The shared
+call per transport per operation, and every rendered control's registered capability.
+`AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations` verifies the three turn kinds,
+the workspace task URL, confirmed write grants and cross-operation refusal.
+`HttpServer/HttpResponseIsolation.ExperimentsAgentRestMcpAndPageUseTheSameConfirmedTurn` compares
+the `agent_turn` REST/OpenAPI and MCP schemas, calls both transports, and proves an edited page
+proposal is the object granted `create_study`. The shared
 `SchemaConformance.*` fixture validates successful responses using independent JSON Schema
 validation. `lake-experiment-charts` checks EMA, missing-step alignment, time axes, nonpositive
 log values, DP suppression, parameter differences and bounded-page cursors.

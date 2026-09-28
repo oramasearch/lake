@@ -12,5 +12,7 @@ Rules for writing them:
   and the MCP tool for the same step.
 - Describe what runs today. A capability that is planned is not in the Docs.
 - Keep Ship's ApplicationAgent steps explicit about reviewing the exact proposal before any write.
+- Keep Train's ExperimentsAgent steps explicit about editing and confirming the exact study before
+  it starts.
 - A new page is a new `.md` here **and** its slug in `GUIDE_FILES`; the first line is `# <Title>`.
 - `Docs.EveryGuideRendersWithContentsAndTheNextGuide` (tests/test_markdown.cpp) renders every page.

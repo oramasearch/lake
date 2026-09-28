@@ -160,6 +160,21 @@ ApiResult unavailable() {
     return ApiResult::failure("store_unavailable", "workspaces are not configured on this lake");
 }
 
+std::optional<control::AgentTask> calling_agent_task(const ApiContext& context) {
+    constexpr std::string_view prefix = "task:";
+    if (context.credential_kind != "agent_task" || context.store == nullptr ||
+        !context.credential_session_id.starts_with(prefix)) {
+        return std::nullopt;
+    }
+    const auto task =
+        context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
+    return task ? std::optional<control::AgentTask>(*task) : std::nullopt;
+}
+
+bool has_scope(const ApiContext& context, std::string_view scope) {
+    return std::ranges::find(context.scopes, scope) != context.scopes.end();
+}
+
 void set_audit(ApiContext& context, std::string kind, const json& input, std::string capability) {
     context.audit_kind = std::move(kind);
     context.audit_details = {
@@ -198,12 +213,22 @@ void register_workspace_call(Registry& registry, bool read) {
                                                  (read ? "read" : "action"),
                                              "/capability");
             }
+            const auto agent_task = calling_agent_task(context);
+            if (agent_task && agent_task->agent == "agent-experiments" &&
+                !has_scope(context, capability)) {
+                co_return ApiResult::failure(
+                    "unauthorized", "this ExperimentsAgent turn does not grant " + capability);
+            }
             set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
             const std::map<std::string, std::string> study_actions = {
                 {"create_study", "start_study"}, {"stop_study", "stop_study"},
                 {"stop_trial", "stop_experiment_trial"}, {"promote_trial", "promote_trial"}};
             if (!read && study_actions.contains(capability)) {
                 auto arguments = input.value("input", json::object());
+                if (agent_task && agent_task->agent == "agent-experiments" &&
+                    has_scope(context, capability)) {
+                    arguments["confirm"] = true;
+                }
                 arguments["customer_id"] = input.at("customer_id");
                 const auto result = co_await context.registry->call_async(
                     study_actions.at(capability), arguments, context);
@@ -1471,6 +1496,12 @@ json task_json(const control::AgentTask& task) {
         app_proposal.value("confirm", false)) {
         out["review_url"] =
             "/ship/apps?customer_id=" + task.customer_id + "&task=" + task.id + "#proposal";
+    }
+    if (task.agent == "agent-experiments" && task.kind == "experiment" &&
+        app_proposal.value("kind", std::string()) == "proposal" &&
+        app_proposal.value("confirm", false)) {
+        out["review_url"] = "/train/experiments?customer_id=" + task.customer_id +
+                            "&task=" + task.id + "#experiment-proposal";
     }
     return out;
 }
@@ -3032,8 +3063,8 @@ void register_agent_run_capabilities(Registry& registry) {
         .title = "Talk to an agent",
         .description =
             "Send one message to any agent: a specialized agent of the Agent Library by its key "
-            "(agent-ask-orama, agent-project, agent-application, agent-autosuggest, "
-            "agent-creator) or an agent of "
+            "(agent-ask-orama, agent-project, agent-application, agent-experiments, "
+            "agent-autosuggest, agent-creator) or an agent of "
             "this space by its id. A library agent's turn runs in the background: the answer is "
             "{task_id, status} at once, and get_agent_task follows it to its answer. A native "
             "agent answers from the workspace; a Python agent from its running service (started "
@@ -3077,6 +3108,8 @@ void register_agent_run_capabilities(Registry& registry) {
                                                                               "this lake");
                 }
                 std::vector<std::string> scopes{"workspace_query", "workspace_openapi"};
+                std::string task_kind = input.value("kind", std::string("api"));
+                std::string lake_url = config.internal_url;
                 if (agent == "agent-ask-orama") {
                     // Ask Orama reads everything the person may read and changes nothing itself:
                     // its key carries every read capability and agent_turn, never an action.
@@ -3090,6 +3123,7 @@ void register_agent_run_capabilities(Registry& registry) {
                     }
                     scopes.push_back("workspace_query");
                 } else if (agent == "agent-application") {
+                    task_kind = "app";
                     scopes = {"workspace_query",
                               "workspace_openapi",
                               "workspace_sql",
@@ -3114,6 +3148,54 @@ void register_agent_run_capabilities(Registry& registry) {
                         scopes.push_back("create_app");
                         scopes.push_back("deploy_app");
                     }
+                } else if (agent == "agent-experiments") {
+                    task_kind = input.value("kind", std::string("experiment"));
+                    if (task_kind != "experiment" && task_kind != "experiment_status" &&
+                        task_kind != "experiment_explain") {
+                        co_return ApiResult::failure(
+                            "invalid_input",
+                            "an ExperimentsAgent turn kind is experiment, experiment_status or "
+                            "experiment_explain",
+                            "/kind");
+                    }
+                    body["kind"] = task_kind;
+                    body["context"] = input.value("context", json::object());
+                    lake_url = config.internal_url + "/workspaces/" + customer_id + "/zetta";
+                    if (task_kind == "experiment") {
+                        scopes.insert(scopes.end(),
+                                      {"analyze_dataset",
+                                       "plan_features",
+                                       "list_methodologies",
+                                       "get_solution"});
+                        const json confirmed =
+                            body["context"].value("confirmed_proposal", json());
+                        if (confirmed.is_object() &&
+                            confirmed.value("kind", std::string()) == "proposal" &&
+                            confirmed.value("confirm", false) &&
+                            confirmed.value("study", json()).is_object()) {
+                            scopes.push_back("workspace_act");
+                            scopes.push_back("create_study");
+                            scopes.push_back("start_study");
+                        }
+                    } else if (task_kind == "experiment_status") {
+                        scopes.insert(scopes.end(),
+                                      {"get_study",
+                                       "list_trials",
+                                       "get_run_metrics",
+                                       "receive_events",
+                                       "workspace_act",
+                                       "stop_trial",
+                                       "stop_experiment_trial"});
+                    } else {
+                        scopes.insert(scopes.end(), {"get_study", "get_study_analysis"});
+                        const json confirmed =
+                            body["context"].value("confirmed_promotion", json());
+                        if (confirmed.is_object() && confirmed.value("confirm", false) &&
+                            confirmed.value("promotion", json()).is_object()) {
+                            scopes.push_back("workspace_act");
+                            scopes.push_back("promote_trial");
+                        }
+                    }
                 }
                 // The turn runs in the background (lake#269): lake records it, publishes it on
                 // the agent bus and answers at once. The agent claims it through lake, which
@@ -3121,7 +3203,7 @@ void register_agent_run_capabilities(Registry& registry) {
                 // (docs/api/agent-bus.md).
                 scopes.push_back("get_agent_task");
                 body["lake_token"] = "{{credential}}";
-                body["lake_url"] = config.internal_url;
+                body["lake_url"] = lake_url;
                 // The agents that read the person's workspace get lake's read-only path to it.
                 if (agent == "agent-project" || agent == "agent-autosuggest" ||
                     agent == "agent-creator" || agent == "agent-project-corpus") {
@@ -3130,6 +3212,7 @@ void register_agent_run_capabilities(Registry& registry) {
                     body["zetta_token"] = "{{credential}}";
                 }
                 if (agent == "agent-project") {
+                    scopes.push_back("agent_turn");
                     body["request"] = message;
                     body["context"] = input.value("context", json::object());
                     // A request about an existing pipeline is a change request (lake#249): the
@@ -3175,9 +3258,7 @@ void register_agent_run_capabilities(Registry& registry) {
                 auto task = context.store->create_agent_task(
                     control::AgentTask{.customer_id = customer_id,
                                        .agent = agent,
-                                       .kind = agent == "agent-application"
-                                                   ? std::string("app")
-                                                   : input.value("kind", std::string("api")),
+                                       .kind = std::move(task_kind),
                                        .conversation_id =
                                            input.value("conversation_id", std::string()),
                                        .body = std::move(body),

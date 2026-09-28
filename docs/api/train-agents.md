@@ -49,6 +49,7 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 | `agent-ask-orama` | Ask Orama | The Ask Orama panel on every page; delegates to any agent | its own service |
 | `agent-project` | Project Agent | Design: Create a Solution and revised plans; Ask Orama's subagent | its own service |
 | `agent-application` | ApplicationAgent | Ship → Apps: Build an App; Ask Orama's app delegate | its own service |
+| `agent-experiments` | ExperimentsAgent | Train → Experiments: Run an Experiment; Ask Orama and Project Agent training delegates | its own service |
 | `agent-autosuggest` | Auto-Suggest | Design: Discover Opportunities; Ask Orama's subagent | its own service |
 | `agent-creator` | AgentCreator | Train: Agents, Create with the Agent Factory | `agent-runtime` |
 | `agent-eval-generator` | Eval Generator | A realistic test case on request (a role, their problem, real-looking data), with its own invented tables; publishes nothing (lake#263) | service |
@@ -58,6 +59,10 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS`, *Not running on
 this lake* otherwise, and *Offline tool* for the three agents that produce evaluations and
 training data rather than serving people. People do not create or delete library agents.
+
+ExperimentsAgent is deployed from `oramasearch/agent-experiments:f5be471`. Lake gives it the
+independent `agent-experiments` bus topic and credential. It runs as a chat-capable service; its
+study records and trial data stay in the selected workspace Zetta.
 
 The page (2026-09-27, the UX review) says what each agent does for the person and where to use it,
 in plain words: *Agent · What it does for you · Where to use it* and a badge (*Available*, *Not

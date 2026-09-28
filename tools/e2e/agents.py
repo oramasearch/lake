@@ -10,7 +10,8 @@ key it holds, and never waits inside a request: every turn is followed with rece
 <token-file> holds a lake API key with every tool (Developer → MCP). The token is never printed. The
 workspace needs the UX-review datasets (datasets.ux_review_churn and churn_results.at_risk_*).
 Scenarios that only propose change nothing. T11 confirms its exact ApplicationAgent proposal,
-deploys that App, and requests its URL. Prints one line per scenario and exits 1 when any failed.
+deploys that App, and requests its URL. T12 confirms an ExperimentsAgent study, observes its
+trials, and asks for the explanation. Prints one line per scenario and exits 1 when any failed.
 docs/api/agent-bus.md describes the bus.
 """
 import json
@@ -265,6 +266,72 @@ def t11_application_agent():
     return problems, seconds
 
 
+def t12_experiments_agent():
+    task, seconds, request, _ = turn(
+        "agent-experiments",
+        "Tune a churn model on datasets.ux_review_churn for validation AUC with no more than "
+        "four trials, one trial at a time, and a fixed seed.",
+        "experiment")
+    answer = task.get("answer") or {}
+    proposal = answer.get("result") or {}
+    problems = base_checks(task, request, 180)
+    if proposal.get("kind") != "proposal" or proposal.get("confirm") is not True:
+        problems.append(f"the goal did not produce a confirmable proposal: {proposal}")
+        return problems, seconds
+    if not isinstance(proposal.get("study"), dict):
+        problems.append("the proposal has no editable study object")
+        return problems, seconds
+
+    confirmed, confirm_seconds, confirm_request, _ = turn(
+        "agent-experiments",
+        "Confirm and start the reviewed study proposal.",
+        "experiment",
+        {"confirmed_proposal": proposal},
+        420)
+    seconds += confirm_seconds
+    running = (confirmed.get("answer") or {}).get("result") or {}
+    problems += base_checks(confirmed, confirm_request, 420)
+    study = running.get("study") or {}
+    study_id = study.get("id")
+    if running.get("kind") != "running" or not study_id:
+        problems.append(f"the confirmed proposal did not start a study: {running}")
+        return problems, seconds
+
+    trials = study.get("trials") or []
+    status_result = {}
+    for _ in range(5):
+        if trials:
+            break
+        status, status_seconds, status_request, _ = turn(
+            "agent-experiments",
+            f"Report the current trials for study {study_id}.",
+            "experiment_status",
+            {"study": study_id},
+            180)
+        seconds += status_seconds
+        problems += base_checks(status, status_request, 180)
+        status_result = (status.get("answer") or {}).get("result") or {}
+        trials = status_result.get("trials") or (status_result.get("study") or {}).get("trials") or []
+    if not trials:
+        problems.append(f"no trials arrived for study {study_id}: {status_result}")
+        return problems, seconds
+
+    explained, explain_seconds, explain_request, _ = turn(
+        "agent-experiments",
+        f"Explain the result of study {study_id}, including the best trial and what to do next.",
+        "experiment_explain",
+        {"study": study_id},
+        180)
+    seconds += explain_seconds
+    explanation = (explained.get("answer") or {}).get("result") or {}
+    problems += base_checks(explained, explain_request, 180)
+    if explanation.get("kind") != "explanation":
+        problems.append(f"the final turn did not explain the study: {explanation}")
+    if not ((explained.get("answer") or {}).get("reply") or "").strip():
+        problems.append("the explanation has no readable reply")
+    return problems, seconds
+
+
 SCENARIOS = {
     "T1": ("Ask Orama lists the datasets", t1_datasets),
     "T2": ("Ask Orama describes one dataset", t2_columns),
@@ -277,6 +344,9 @@ SCENARIOS = {
     "T9": ("A person cannot reach the agents' side of the bus", t9_bus_refuses_people),
     "T10": ("A workspace's pub/sub works through lake's API", t10_workspace_pubsub),
     "T11": ("ApplicationAgent builds, confirms, deploys, and answers", t11_application_agent),
+    "T12": (
+        "ExperimentsAgent proposes, confirms, observes trials, and explains",
+        t12_experiments_agent),
 }
 
 failed = 0
