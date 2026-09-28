@@ -7691,7 +7691,7 @@ struct ApiServer::Impl {
             } else if (section == "solutions") {
                 reads = {{"list_solutions", nlohmann::json::object()}};
             } else if (section == "solution") {
-                reads = {{"get_solution", {{"id", page.subject}}}};
+                reads = {{"get_solution", {{"solution", page.subject}}}};
             } else if (section == "projects") {
                 reads = {{"list_projects", nlohmann::json::object()}};
             } else if (section == "project") {
@@ -8540,8 +8540,14 @@ struct ApiServer::Impl {
                 context));
             if (result.ok) {
                 nlohmann::json input{{"project", name}, {"solution", solution}};
+                // The engine's levels are integers 1–4 (zetta#1102).
                 if (const std::string level = form_field(body, "level"); !level.empty()) {
-                    input["level"] = level;
+                    int number = 0;
+                    const auto [end, error] =
+                        std::from_chars(level.data(), level.data() + level.size(), number);
+                    if (error == std::errc() && end == level.data() + level.size()) {
+                        input["level"] = number;
+                    }
                 }
                 result = unwrap(co_await workspace_call(
                     "workspace_act",

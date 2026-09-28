@@ -1127,11 +1127,16 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
               {{"id", "B-1"}, {"name", "Dynamic Pricing & Discount Governance"},
                {"status", "sketch"}, {"runnable", false}}})}};
     workspace_caller_->answers["get_solution"] = {
-        {"id", "S-1"}, {"name", "Churn & Retention"}, {"promise", "Which customers will leave"},
-        {"methodologies", nlohmann::json::array({"M-1", "M-2", "M-3"})},
-        {"action_patterns", nlohmann::json::array({"tasks in CRM", "driver report"})},
-        {"latency", "L1"}, {"runnable", true},
-        {"levels", nlohmann::json::array({{{"id", "CL-1"}, {"name", "Propensity core"}}})}};
+        {"solution",
+         {{"id", "S-1"}, {"name", "Churn & Retention"}, {"promise", "Which customers will leave"},
+          {"composition",
+           nlohmann::json::array({{{"methodology", "M-1"}, {"minimum_level", 1}},
+                                  {{"methodology", "M-5"}, {"minimum_level", 2}}})},
+          {"action_patterns", nlohmann::json::array({"tasks in CRM", "driver report"})},
+          {"latency_classes", nlohmann::json::array({"L1"})}, {"runnable", true},
+          {"required_data_roles", nlohmann::json::array({{{"role", "entity"}}})},
+          {"capability_levels",
+           nlohmann::json::array({{{"level", 1}, {"name", "CL-1"}, {"description", "Propensity core"}}})}}}};
     const std::string catalogue = connection->request(
         "GET", "/design/solutions?customer_id=" + customer_id, "", cookie);
     EXPECT_NE(catalogue.find("S-1 Churn &amp; Retention"), std::string::npos);
@@ -1139,18 +1144,19 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
     const std::string module = connection->request(
         "GET", "/design/solution?customer_id=" + customer_id + "&id=S-1", "", cookie);
     EXPECT_NE(module.find("tasks in CRM"), std::string::npos);
+    EXPECT_NE(module.find("level 2+"), std::string::npos) << "attachable heads show their level";
     EXPECT_NE(module.find("action=\"/design/solutions/start\""), std::string::npos);
     workspace_caller_->answers["create_project"] = {{"name", "churn"}};
     workspace_caller_->answers["create_solution"] = {{"project", "churn"}};
     const std::string started = connection->request(
         "POST", "/design/solutions/start",
-        "customer_id=" + customer_id + "&solution=S-1&name=churn&level=CL-1", cookie);
+        "customer_id=" + customer_id + "&solution=S-1&name=churn&level=1", cookie);
     ASSERT_TRUE(started.starts_with("HTTP/1.1 302")) << started.substr(0, 300);
     EXPECT_NE(response_header(started, "location").find("/design/project?"), std::string::npos);
     const auto& [name, read, input] = workspace_caller_->calls.back();
     EXPECT_EQ(name, "create_solution");
     EXPECT_EQ(input["solution"], "S-1");
-    EXPECT_EQ(input["level"], "CL-1");
+    EXPECT_EQ(input["level"], 1);
     EXPECT_EQ(input["project"], "churn");
 }
 

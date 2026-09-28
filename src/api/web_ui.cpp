@@ -3476,8 +3476,10 @@ std::string methodologies_content(const WorkspacePage& page) {
                 const nlohmann::json list = solution.value(key, nlohmann::json::array());
                 bool found = false;
                 for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
-                    const std::string text =
-                        item.is_string() ? item.get<std::string>() : json_text(item, "id");
+                    const std::string text = item.is_string() ? item.get<std::string>()
+                                             : !json_text(item, "methodology").empty()
+                                                 ? json_text(item, "methodology")
+                                                 : json_text(item, "id");
                     if (text == id) found = true;
                 }
                 if (found) {
@@ -3557,10 +3559,14 @@ std::string solutions_content(const WorkspacePage& page) {
     const auto methodology_links = [&](const nlohmann::json& list) {
         std::string out;
         for (const nlohmann::json& item : list.is_array() ? list : nlohmann::json::array()) {
-            const std::string id = item.is_string() ? item.get<std::string>() : json_text(item, "id");
+            const std::string id = item.is_string()                          ? item.get<std::string>()
+                                   : !json_text(item, "methodology").empty() ? json_text(item, "methodology")
+                                                                             : json_text(item, "id");
             if (id.empty()) continue;
             if (!out.empty()) out += ", ";
-            out += row_link("/design/methodology?" + query + "&id=" + url_component(id), id);
+            const int level = item.is_object() ? item.value("minimum_level", 1) : 1;
+            out += row_link("/design/methodology?" + query + "&id=" + url_component(id), id) +
+                   (level > 1 ? " <span class=\"sub\">(level " + std::to_string(level) + "+)</span>" : "");
         }
         return out.empty() ? std::string("—") : out;
     };
@@ -3572,7 +3578,7 @@ std::string solutions_content(const WorkspacePage& page) {
             return "<div class=\"panel empty\">No solution " + web_ui_escape(page.subject) + ".</div>";
         }
         std::string levels;
-        for (const nlohmann::json& level : solution.value("levels", nlohmann::json::array())) {
+        for (const nlohmann::json& level : solution.value("capability_levels", solution.value("levels", nlohmann::json::array()))) {
             levels += "<li><strong>" + web_ui_escape(json_text(level, "name").empty()
                                                          ? json_text(level, "id")
                                                          : json_text(level, "name")) +
@@ -3591,8 +3597,10 @@ std::string solutions_content(const WorkspacePage& page) {
             methodology_links(solution.value("methodologies",
                                              solution.value("composition", nlohmann::json::array()))),
             web_ui_escape(joined(solution.value("action_patterns", nlohmann::json::array()))),
-            web_ui_escape(json_text(solution, "latency")),
-            web_ui_escape(joined(solution.value("inputs", solution.value("data_roles", nlohmann::json::array())))),
+            web_ui_escape(json_text(solution, "latency").empty()
+                              ? joined(solution.value("latency_classes", nlohmann::json::array()))
+                              : json_text(solution, "latency")),
+            web_ui_escape(joined(solution.value("required_data_roles", solution.value("data_roles", nlohmann::json::array())))),
             solution.value("runnable", false) || json_text(solution, "issue").empty()
                 ? std::string()
                 : "<tr><th>Tracked in</th><td>" + web_ui_escape(json_text(solution, "issue")) +
@@ -3601,8 +3609,11 @@ std::string solutions_content(const WorkspacePage& page) {
         const bool startable = solution.value("runnable", false) || json_text(solution, "status") == "preview";
         if (startable) {
             std::string options;
-            for (const nlohmann::json& level : solution.value("levels", nlohmann::json::array())) {
-                options += "<option value=\"" + web_ui_escape(json_text(level, "id")) + "\">" +
+            for (const nlohmann::json& level : solution.value("capability_levels", solution.value("levels", nlohmann::json::array()))) {
+                const std::string value = level.contains("level") && level["level"].is_number()
+                                              ? std::to_string(level["level"].get<int>())
+                                              : json_text(level, "id");
+                options += "<option value=\"" + web_ui_escape(value) + "\">" +
                            web_ui_escape(json_text(level, "name").empty() ? json_text(level, "id")
                                                                          : json_text(level, "name")) +
                            "</option>";
