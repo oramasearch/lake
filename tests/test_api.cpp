@@ -2511,6 +2511,61 @@ TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
     }
 }
 
+TEST(WebApps, SourceTokenReadsOnlyItsPrivateRepositoryRevision) {
+    Surface surface;
+    RepositoryFixtureStore content;
+    surface.ctx.sync_store = &content;
+    const auto user =
+        surface.store.create_user({"taap:app-source-owner", "source@example.test", "Source"});
+    ASSERT_TRUE(user);
+    const auto customer =
+        surface.store.create_customer({"individual", user->id, "", "app-source-owner"});
+    ASSERT_TRUE(customer);
+    const auto repository = surface.store.create_repository({customer->id, "app", "", "private"});
+    ASSERT_TRUE(repository);
+    const auto other = surface.store.create_repository({customer->id, "other", "", "public"});
+    ASSERT_TRUE(other);
+    lake::control::NewWebApp input;
+    input.customer_id = customer->id;
+    input.name = "reader";
+    input.mode = "runtime";
+    input.source_repository = repository->id;
+    input.source_revision = "main";
+    input.port = 8080;
+    input.host = "reader.apps.example.test";
+    const auto app = surface.store.create_web_app(input);
+    ASSERT_TRUE(app);
+    ASSERT_TRUE(surface.store.set_web_app_token_hashes(
+        app->id, {{"source", lake::control::identity_crypto::sha256_hex("operator-source")}}));
+    const auto principal = surface.store.context_for("operator-source");
+    ASSERT_TRUE(principal);
+    surface.ctx.operator_credential = false;
+    surface.ctx.session_credential = true;
+    surface.ctx.acting_identity = principal->taap_id;
+    surface.ctx.credential_kind = principal->kind;
+    surface.ctx.credential_workload_id = principal->workload_id;
+    surface.ctx.credential_customer_id = principal->workload_customer_id;
+    surface.ctx.credential_repository_id = principal->workload_repository_id;
+    surface.ctx.credential_revision = principal->workload_revision;
+    surface.ctx.credential_token_hash = principal->workload_token_hash;
+    surface.ctx.scopes = principal->scopes;
+    const auto tree = surface.call("repository_tree", {{"id", repository->id}, {"ref", "main"}});
+    ASSERT_TRUE(tree.ok) << tree.error.message;
+    EXPECT_EQ(tree.value["items"][0]["path"], "readme.md");
+    const auto file = surface.call(
+        "repository_file", {{"id", repository->id}, {"ref", "main"}, {"path", "readme.md"}});
+    ASSERT_TRUE(file.ok) << file.error.message;
+    EXPECT_EQ(file.value["contents"], "new\nshared\n");
+    EXPECT_EQ(
+        surface.call("repository_file", {{"id", other->id}, {"ref", "main"}, {"path", "readme.md"}})
+            .error.code,
+        "unauthorized");
+    EXPECT_EQ(
+        surface.call("repository_tree", {{"id", repository->id}, {"ref", "other"}}).error.code,
+        "unauthorized");
+    EXPECT_EQ(surface.call("repository_refs", {{"id", repository->id}}).error.code, "unauthorized");
+}
+
 TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
     Surface s;
     RepositoryFixtureStore repository_store;

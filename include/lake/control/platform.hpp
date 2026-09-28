@@ -78,6 +78,8 @@ public:
                      std::string since,
                      int limit,
                      std::string direction);
+    liquid::runtime::task<PlatformResult<nlohmann::json>>
+    app_logs(std::string app_id, std::string since, int limit, std::string direction);
     liquid::runtime::task<PlatformResult<void>> set_environment_env(std::string repository_id,
                                                                     std::string environment,
                                                                     std::string key,

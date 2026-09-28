@@ -96,6 +96,16 @@ coroutine HTTP client, selector request, secret bearer, line conversion, and cur
 Postgres suite round-trips the same environment binding and JSON mirror through the production
 store.
 
+`test_web_apps.cpp` proves Ship App policy isolation, validation, desired-state generations,
+app/replica quotas, fake-operator status, Secret references, service binding, Loki namespace
+selection, purpose-scoped operator hashes and lifecycle event delivery with the memory store.
+`test_api.cpp` proves successful private repository tree/file reads with a source token.
+`PostgresWebApps.*` proves the production desired row, hash registration/rotation, customer
+locking, `lake_apps` notification, operator status and physical deletion. Both stores exercise
+cross-app/customer/revision refusal and reject other capabilities.
+Authorization assertions use well-formed input; malformed authenticated calls separately assert
+`invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
+
 Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
 time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts
 loopback HTTP servers, publishes through the HTTP capability, and prints two checkpoints accepted by

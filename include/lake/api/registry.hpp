@@ -37,7 +37,7 @@ class PlatformService;
 class WorkspaceService;
 class AgentCaller;
 class AgentTaskBus;
-}
+} // namespace lake::control
 namespace lake::transparency {
 class Service;
 class CheckpointService;
@@ -104,13 +104,18 @@ struct ApiContext {
     std::string acting_identity; // TAAP id, "admin" for operator, empty otherwise
     std::string acting_user_id;  // database user id for identity operations
     std::string request_id;
-    std::string request_path; // the page route, for web UI navigation; never used to authorize
+    std::string request_path;  // the page route, for web UI navigation; never used to authorize
     std::string request_query; // its query string, for the same; never used to authorize
     std::string authentication_method;
     std::string device;
     std::string credential_device_id;
     std::string credential_session_id;
     std::string credential_kind;
+    std::string credential_workload_id;
+    std::string credential_customer_id;
+    std::string credential_repository_id;
+    std::string credential_revision;
+    std::string credential_token_hash;
     std::optional<std::int64_t> credential_expires_at_unix;
     std::string identity_seed;
     std::string instance_kek;
@@ -133,6 +138,10 @@ struct ApiContext {
     control::AgentCaller* agent_caller = nullptr;
     // Agent traffic over Zetta pub/sub (docs/api/agent-bus.md); null when not configured.
     control::AgentTaskBus* agent_bus = nullptr;
+    // Ship Apps configuration supplied by the Lake operator (docs/control-plane/web-apps.md).
+    std::string apps_wildcard;
+    std::size_t apps_per_customer = 0;
+    std::size_t app_replicas_per_customer = 0;
     // The library agent whose bus credential authenticated the call (LAKE_AGENT_BUS_DIR), or empty.
     std::string agent_service;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS: the instance-wide switch over every customer's opt-in
