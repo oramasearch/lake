@@ -132,6 +132,12 @@ works unchanged when pointed here:
   `drop_topic` and `publish_event` (actions) are allowed; only topics created `exposed` are
   reachable, and a `receive_events` long poll waits at most 10 seconds through lake
   ([agent-bus.md](agent-bus.md)).
+- **What the engine runs (lake#289).**
+  - `list_methodologies` (zetta#1061) lists the 21 portfolio methodologies. Each carries `runnable`, and those that do not run yet name their tracking issue.
+  - `analyze_dataset` and `plan_features` (zetta#1062) describe a table and plan features for a methodology.
+  - All three are reads.
+  - `compile_intent` takes `methodology` (`"M-3"`) or `solution` (`"S-5"`). A methodology the engine cannot run is refused with `not_supported`, naming its issue, never compiled as a skeleton.
+  - An engine that predates the registry answers `unknown_capability` to `list_methodologies`; lake then treats it as running M-1 (churn / GBDT classification) only.
 - **Tools from the filtered OpenAPI.** Agents derive their tool list from this document (the
   `new-agent` rule), so they see exactly what they may call. `sql` is not in it: SQL reaches a
   workspace only through `workspace_sql`, which runs one read-only query.

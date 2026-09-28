@@ -6,6 +6,8 @@ On a project, **Build a Pipeline** turns a sentence into a pipeline. Name the da
 column to predict: *Predict the churned column of accounts from plan, monthly_spend and
 support_tickets.*
 
+Choose a **Methodology** to get that methodology's own pipeline: segmentation, forecasting, anomaly detection, survival, uplift and the rest. Only the methodologies your workspace's engine runs are listed. A pipeline whose methodology does not run yet says *Trains nothing yet* instead of pretending to train.
+
 ## Change it
 
 On the pipeline page:

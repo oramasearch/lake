@@ -1,5 +1,6 @@
 #include "lake/api/web_ui.hpp"
 
+#include "lake/api/capabilities.hpp"
 #include "lake/api/markdown.hpp"
 
 #include <algorithm>
@@ -2443,6 +2444,27 @@ std::string pipeline_content(const WorkspacePage& page) {
                                   : " " + web_ui_escape(graph.approved_at.substr(0, 16)) + " UTC",
         graph.steps.size(),
         graph.edges.size());
+    // What this pipeline trains (lake#289, zetta#1061): an engine with the methodology registry
+    // says which methodology owns its model step, and whether it can run.
+    if (const nlohmann::json read = page.data.value("get_graph", nlohmann::json::object());
+        read.contains("runnable")) {
+        const std::string methodology = json_text(read, "methodology");
+        if (read.value("runnable", false)) {
+            out += "<p class=\"sub\">Trains with <span class=\"badge status-success\">" +
+                   web_ui_escape(methodology.empty() ? std::string("its model step") : methodology) +
+                   "</span></p>";
+        } else {
+            out += "<section class=\"panel notice\" role=\"status\"><h2>This Pipeline Trains "
+                   "Nothing Yet</h2><p>" +
+                   (methodology.empty()
+                        ? std::string("It has no model step the engine can run, so a run only "
+                                      "passes through its steps.")
+                        : "It needs " + web_ui_escape(methodology) +
+                              ", which this workspace's engine does not run yet.") +
+                   " Build a pipeline with a methodology that runs, or ask the Project Agent "
+                   "below to change it.</p></section>";
+        }
+    }
     if (const auto gate = page.data.find("gate"); gate != page.data.end()) {
         out += gate_panel(*gate, "Checks");
     }
@@ -3275,6 +3297,25 @@ std::string discover_content(const WorkspacePage& page) {
             hidden("customer_id", page.customer_id),
             last_scan.empty() ? "Scan my workspace" : "Scan again");
     }
+    // Whether the engine runs what each Opportunity needs (lake#289, zetta#1061). Absent on an
+    // engine that predates the registry: then no badge.
+    const nlohmann::json methodologies = page.data.value("list_methodologies", nlohmann::json());
+    const auto runs_badge = [&](const nlohmann::json& row) -> std::string {
+        const nlohmann::json entry = lake::api::find_methodology(
+            methodologies, json_text(row, "methodology"), json_text(row, "solution"));
+        if (!entry.is_object()) return {};
+        if (entry.value("runnable", false)) {
+            return "<p><span class=\"badge status-success\">Runs today: " +
+                   web_ui_escape(json_text(entry, "name")) + " (" +
+                   web_ui_escape(json_text(entry, "id")) + ")</span></p>";
+        }
+        return "<p><span class=\"badge status-warning\">Needs " +
+               web_ui_escape(json_text(entry, "id")) + ", not supported yet" +
+               (json_text(entry, "issue").empty()
+                    ? std::string()
+                    : " (" + web_ui_escape(json_text(entry, "issue")) + ")") +
+               "</span></p>";
+    };
     std::string fresh, earlier, made, later, dismissed;
     std::size_t earlier_count = 0;
     for (const nlohmann::json& row : rows) {
@@ -3288,7 +3329,7 @@ std::string discover_content(const WorkspacePage& page) {
                 "<article class=\"panel ask-proposal\"><label class=\"opportunity-pick\"><input "
                 "type=\"checkbox\" name=\"pick\" value=\"{}\"> <span>{}</span></label><p "
                 "class=\"sub\">{}{}</p>"
-                "{}{}<p><button type=\"submit\" formaction=\"/design/opportunities/dismiss\" "
+                "{}{}{}<p><button type=\"submit\" formaction=\"/design/opportunities/dismiss\" "
                 "formnovalidate name=\"opportunity_id\" value=\"{}\">Dismiss</button></p></article>",
                 web_ui_escape(id),
                 web_ui_escape(json_text(row, "intent")),
@@ -3296,6 +3337,7 @@ std::string discover_content(const WorkspacePage& page) {
                     ? std::string()
                     : "Catalogue solution " + web_ui_escape(json_text(row, "solution")) + " · ",
                 web_ui_escape(json_text(row, "methodology")),
+                runs_badge(row),
                 // Auto-Suggest writes inline markdown (`table` names); the renderer escapes first.
                 markdown_to_html(json_text(row, "why")),
                 json_text(detail, "business_action").empty()
@@ -3435,21 +3477,37 @@ std::string workspace_content(const WorkspacePage& page) {
             out += "<p>No pipelines yet. Describe what the project should predict or answer, "
                    "and Zetta builds one.</p>";
         } else {
-            out += "<table><thead><tr><th>Pipeline</th><th>Approval</th><th></th></tr></thead>"
-                   "<tbody>";
+            out += "<table><thead><tr><th>Pipeline</th><th>Methodology</th><th>Approval</th>"
+                   "<th></th></tr></thead><tbody>";
             for (const nlohmann::json& graph : graphs) {
                 const std::string id = json_text(graph, "id");
                 // Zetta verifies and runs only an approved plan; a person approves it here first.
                 const bool approved = json_text(graph, "approval") == "approved";
                 const std::string graph_name =
                     json_text(graph, "name").empty() ? id : json_text(graph, "name");
+                // What it trains (lake#289): the engine reports each pipeline's methodology
+                // and whether it can run; one that cannot trains nothing.
+                std::string trains = "—";
+                if (graph.contains("runnable")) {
+                    const std::string methodology = json_text(graph, "methodology");
+                    trains = graph.value("runnable", false)
+                                 ? "<span class=\"badge status-success\">" +
+                                       web_ui_escape(methodology.empty() ? "Runs" : methodology) +
+                                       "</span>"
+                                 : "<span class=\"badge status-warning\">Trains nothing yet" +
+                                       (methodology.empty()
+                                            ? std::string()
+                                            : ": needs " + web_ui_escape(methodology)) +
+                                       "</span>";
+                }
                 out += std::format(
-                    "<tr><td>{}</td><td>{}</td><td><form method=\"post\" action=\"{}\">{}{}{}"
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td><form method=\"post\" action=\"{}\">{}{}{}"
                     "<button type=\"submit\">{}</button></form></td></tr>",
                     row_link("/design/pipeline?" + query +
                                  "&project=" + url_component(page.subject) +
                                  "&graph=" + url_component(graph_name),
                              graph_name),
+                    trains,
                     web_ui_escape(json_text(graph, "approval")),
                     approved ? "/design/project/run" : "/design/project/approve",
                     hidden("customer_id", page.customer_id),
@@ -3466,7 +3524,7 @@ std::string workspace_content(const WorkspacePage& page) {
             "accounts will churn in the next 90 days, with the reasons\"></textarea></label>"
             "<label>From data<select name=\"dataset\"><option value=\"\">Let the builder describe "
             "its sources</option>{}</select><small>Choose a dataset and the pipeline reads it, and "
-            "its runs train on it.</small></label>"
+            "its runs train on it.</small></label>{}"
             "<button class=\"button button-primary\" type=\"submit\">Build pipeline</button>"
             "</form></section>",
             hidden("customer_id", page.customer_id),
@@ -3485,6 +3543,24 @@ std::string workspace_content(const WorkspacePage& page) {
                                            web_ui_escape(json_text(dataset, "name")));
                 }
                 return options;
+            }(),
+            // The methodologies the engine runs (lake#289); absent on an older engine.
+            [&] {
+                const nlohmann::json listed = data.value("list_methodologies", nlohmann::json::object())
+                                                  .value("methodologies", nlohmann::json::array());
+                std::string options;
+                for (const nlohmann::json& entry : listed) {
+                    if (!entry.value("runnable", false)) continue;
+                    options += std::format("<option value=\"{}\">{} ({})</option>",
+                                           web_ui_escape(json_text(entry, "id")),
+                                           web_ui_escape(json_text(entry, "name")),
+                                           web_ui_escape(json_text(entry, "id")));
+                }
+                if (options.empty()) return std::string();
+                return "<label>Methodology<select name=\"methodology\"><option value=\"\">Let Zetta "
+                       "choose from the description</option>" + options +
+                       "</select><small>Only the methodologies this workspace's engine runs are "
+                       "listed.</small></label>";
             }());
         // Other ways to make a pipeline (docs/design/zetta-parity.md).
         out += std::format(

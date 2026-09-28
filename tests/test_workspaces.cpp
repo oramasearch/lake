@@ -2168,6 +2168,59 @@ TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {
                      .ok)
         << "an Opportunity needs an intent";
 
+    // lake#289: with the engine's methodology registry, a project gets its Opportunity's
+    // methodology's own pipeline, or none, with the issue, when the engine cannot run it yet.
+    r.w.caller->answers["list_methodologies"] = {
+        {"methodologies",
+         json::array({{{"id", "M-3"}, {"name", "Segmentation / clustering"},
+                       {"solutions", json::array({"S-3"})}, {"runnable", true}, {"issue", "zetta#1042"}},
+                      {{"id", "M-14"}, {"name", "Speech & audio analytics"},
+                       {"solutions", json::array({"S-14"})}, {"runnable", false},
+                       {"issue", "zetta#1053"}}})}};
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "customer segments"}};
+    r.w.caller->calls.clear();
+    const auto segmented = r.call(
+        "create_projects_from_opportunities",
+        {{"opportunities", json::array({{{"intent", "Group my customers by behaviour"},
+                                         {"methodology", "M-3 Segmentation"}}})}});
+    ASSERT_TRUE(segmented.ok) << segmented.error.message;
+    EXPECT_TRUE(segmented.value["waiting"].empty());
+    const auto made_project = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
+        return call.first == "create_project";
+    });
+    ASSERT_NE(made_project, r.w.caller->calls.end());
+    EXPECT_FALSE(made_project->second.contains("intent"))
+        << "no skeleton compiled from the words: the methodology compiles the pipeline";
+    const auto compiled = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
+        return call.first == "compile_intent";
+    });
+    ASSERT_NE(compiled, r.w.caller->calls.end());
+    EXPECT_EQ(compiled->second["methodology"], "M-3");
+
+    r.w.caller->calls.clear();
+    const auto speech = r.call(
+        "create_projects_from_opportunities",
+        {{"opportunities", json::array({{{"intent", "Find churn signals in call recordings"},
+                                         {"solution", "S-14"}}})}});
+    ASSERT_TRUE(speech.ok) << speech.error.message;
+    ASSERT_EQ(speech.value["waiting"].size(), 1U);
+    EXPECT_EQ(speech.value["waiting"][0]["methodology"], "M-14");
+    EXPECT_EQ(speech.value["waiting"][0]["issue"], "zetta#1053");
+    EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
+        return call.first == "compile_intent";
+    })) << "nothing is compiled in place of a methodology the engine cannot run";
+    r.w.caller->answers.erase("list_methodologies");
+
+    // The registry lookup: an id written in the text, else the solution it serves.
+    const json registry = json::array(
+        {{{"id", "M-3"}, {"solutions", json::array({"S-3"})}},
+         {{"id", "M-8"}, {"solutions", json::array({"S-11"})}}});
+    EXPECT_EQ(lake::api::find_methodology(registry, "portfolio M-3 (k-means)", "")["id"], "M-3");
+    EXPECT_EQ(lake::api::find_methodology(registry, "", "S-11")["id"], "M-8");
+    EXPECT_TRUE(lake::api::find_methodology(registry, "clustering", "S-99").is_null());
+    EXPECT_TRUE(lake::api::find_methodology(json(nullptr), "M-3", "").is_null());
+
     const std::string conversation = lake::control::new_uuid_v4();
     ASSERT_TRUE(r.store.append_ask_message(
         {"", conversation, r.w.customer_id, r.principal.user_id, "user", "hi", nullptr, ""}));

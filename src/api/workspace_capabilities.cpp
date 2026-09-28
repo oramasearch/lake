@@ -28,7 +28,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 29> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 32> workspace_reads = {"server_info",
                                                               "score",
                                                               "explain",
                                                               "list_projects",
@@ -59,7 +59,13 @@ constexpr std::array<std::string_view, 29> workspace_reads = {"server_info",
                                                               // (docs/api/agent-bus.md): only
                                                               // topics created exposed.
                                                               "list_topics",
-                                                              "receive_events"};
+                                                              "receive_events",
+                                                              // What the engine can run
+                                                              // (zetta#1061) and how to
+                                                              // featurize for it (zetta#1062).
+                                                              "list_methodologies",
+                                                              "analyze_dataset",
+                                                              "plan_features"};
 constexpr std::array<std::string_view, 34> workspace_actions = {"create_project",
                                                                 "capture_intent",
                                                                 "compile_intent",
@@ -1629,6 +1635,61 @@ std::string design_text(const std::string& brief, const json& design) {
 
 } // namespace
 
+liquid::runtime::task<json> workspace_methodologies(ApiContext& context,
+                                                    std::string customer_id) {
+    const ApiResult listed = called(co_await call_capability(
+        context,
+        "workspace_query",
+        {{"customer_id", customer_id}, {"capability", "list_methodologies"}, {"input", json::object()}}));
+    if (!listed.ok || !listed.value.contains("methodologies") ||
+        !listed.value["methodologies"].is_array()) {
+        co_return json(nullptr);
+    }
+    co_return listed.value["methodologies"];
+}
+
+json find_methodology(const json& methodologies,
+                      std::string_view methodology,
+                      std::string_view solution) {
+    // An id written anywhere in the text ("M-3", "M-3 Segmentation"), else the catalogue
+    // solution ("S-5") the registry lists the methodology as serving.
+    const auto token = [](std::string_view text, char prefix) {
+        for (std::size_t at = 0; at + 2 < text.size(); ++at) {
+            if (text[at] != prefix || text[at + 1] != '-') continue;
+            std::size_t end = at + 2;
+            while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) ++end;
+            if (end > at + 2) return std::string(text.substr(at, end - at));
+        }
+        return std::string();
+    };
+    if (!methodologies.is_array()) return nullptr;
+    if (const std::string id = token(methodology, 'M'); !id.empty()) {
+        for (const json& entry : methodologies) {
+            if (entry.value("id", std::string()) == id) return entry;
+        }
+    }
+    if (const std::string id = token(solution, 'S'); !id.empty()) {
+        for (const json& entry : methodologies) {
+            const json solutions = entry.value("solutions", json::array());
+            if (solutions.is_array() &&
+                std::ranges::find(solutions, json(id)) != solutions.end()) {
+                return entry;
+            }
+        }
+    }
+    return nullptr;
+}
+
+std::string methodology_waits(const json& entry) {
+    std::string text = entry.value("name", std::string("This methodology")) + " (" +
+                       entry.value("id", std::string()) + ") does not run in this workspace's "
+                       "engine yet";
+    if (const std::string issue = entry.value("issue", std::string()); !issue.empty()) {
+        text += " (" + issue + ")";
+    }
+    return text + ".";
+}
+
 liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,
                                                 std::string customer_id,
                                                 std::string project,
@@ -1691,7 +1752,8 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string project,
                                                   std::string intent,
                                                   std::string dataset,
-                                                  json model) {
+                                                  json model,
+                                                  std::string methodology) {
     const auto act = [&](std::string capability, json input) {
         return call_capability(context,
                                "workspace_act",
@@ -1705,6 +1767,11 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         if (const std::string input_id = result.value.value("input_id", std::string());
             !input_id.empty()) {
             input["input_id"] = input_id;
+        }
+        // The methodology's own pipeline (zetta#1061); an engine that cannot run it refuses
+        // with not_supported, naming the issue, rather than compiling a skeleton.
+        if (!methodology.empty()) {
+            input["methodology"] = methodology;
         }
         result = called(co_await act("compile_intent", std::move(input)));
     }
@@ -1736,6 +1803,30 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     if (const std::string algo = design_text_field(design, "model_kind"); !algo.empty()) {
         model["algo"] = algo;
     }
+    // The methodology the design names, else the one of the Opportunity the build came from
+    // (lake#289). An engine with the registry (zetta#1061) builds that methodology's own
+    // pipeline; one it cannot run yet is refused here, never replaced by a skeleton.
+    std::string methodology;
+    auto listed = co_await workspace_methodologies(context, task.customer_id);
+    if (const json registry = listed ? *listed : json(nullptr); registry.is_array()) {
+        const json context_body = task.body.is_object() ? task.body.value("context", json::object())
+                                                        : json::object();
+        const json opportunity = context_body.is_object()
+                                     ? context_body.value("opportunity", json::object())
+                                     : json::object();
+        json entry = find_methodology(registry, design_text_field(design, "methodology"),
+                                      design_text_field(design, "solution"));
+        if (entry.is_null() && opportunity.is_object()) {
+            entry = find_methodology(registry, design_text_field(opportunity, "methodology"),
+                                     design_text_field(opportunity, "solution"));
+        }
+        if (entry.is_object()) {
+            if (!entry.value("runnable", false)) {
+                co_return ApiResult::failure("not_supported", methodology_waits(entry));
+            }
+            methodology = entry.value("id", std::string());
+        }
+    }
     const ApiResult read = called(co_await call_capability(
         context,
         "workspace_query",
@@ -1752,7 +1843,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
                                                    project,
                                                    design_text(design_text_field(task.body, "message"), design),
                                                    dataset,
-                                                   model));
+                                                   model,
+                                                   methodology));
     }
     // The project's own pipeline (Zetta compiles one from its intent when it is created):
     // the first one not yet approved. Applied once: a connect step that already reads the
@@ -1764,6 +1856,17 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
         co_return ApiResult::success(json::object());
     }
     const std::string graph = design_text_field(*open, "name");
+    // A pipeline of another methodology's shape (the churn skeleton a segmentation project got
+    // before zetta#1061) is not repointed: the design's methodology gets its own pipeline.
+    if (!methodology.empty() && design_text_field(*open, "methodology") != methodology) {
+        co_return called(co_await compile_pipeline(context,
+                                                   task.customer_id,
+                                                   project,
+                                                   design_text(design_text_field(task.body, "message"), design),
+                                                   dataset,
+                                                   model,
+                                                   methodology));
+    }
     const ApiResult current = called(co_await call_capability(
         context,
         "workspace_query",
@@ -1963,7 +2066,10 @@ void register_agent_flow_capabilities(Registry& registry) {
             "answers them): named from its intent, with the Opportunity it came from in its "
             "description. The Project Agent then designs each project's pipeline in the "
             "background (builds: {project, task_id}); the project's page compiles the design "
-            "when it is done. Answers the projects' names and the builds.",
+            "when it is done. A project gets its Opportunity's methodology's own pipeline "
+            "(zetta#1061); one whose methodology the engine cannot run yet gets no pipeline and is "
+            "listed in `waiting` with the issue that tracks it. Answers the projects' names, the "
+            "builds and `waiting`.",
         .input_schema = customer_input_schema(
             {{"opportunities",
               {{"type", "array"}, {"items", {{"type", "object"}}}, {"minItems", 1}}},
@@ -1993,6 +2099,8 @@ void register_agent_flow_capabilities(Registry& registry) {
                     }
                     json item = row->payload.is_object() ? row->payload : json::object();
                     item["intent"] = row->intent;
+                    if (!row->solution.empty()) item["solution"] = row->solution;
+                    if (!row->methodology.empty()) item["methodology"] = row->methodology;
                     items.push_back(std::move(item));
                     ids.push_back(row->id);
                 }
@@ -2003,6 +2111,11 @@ void register_agent_flow_capabilities(Registry& registry) {
             agent_audit(context, "discover.create", customer_id, {{"count", items.size()}});
             json names = json::array();
             json builds = json::array();
+            json waiting = json::array();
+            // What the workspace's engine can run (zetta#1061); nullopt on an engine that predates
+            // the registry, which keeps compiling from the intent alone.
+            auto listed = co_await workspace_methodologies(context, customer_id);
+            const json registry = listed ? *listed : json(nullptr);
             const bool builds_pipelines =
                 context.workspaces && context.agent_bus &&
                 context.workspaces->config().agent_endpoints.contains("agent-project");
@@ -2020,23 +2133,50 @@ void register_agent_flow_capabilities(Registry& registry) {
                     item.value("solution", std::string()) + ", " +
                     item.value("methodology", std::string()) + ". " +
                     item.value("why_this_data_supports_it", std::string());
+                // The methodology the Opportunity needs (lake#289): the project gets that
+                // methodology's own pipeline, or none, with the reason, when it cannot run yet.
+                const json entry =
+                    find_methodology(registry, item.value("methodology", std::string()),
+                                     item.value("solution", std::string()));
+                const bool known = entry.is_object();
+                const bool runnable = known && entry.value("runnable", false);
+                json project_input{{"name", name}, {"description", description}};
+                if (!known) {
+                    project_input["intent"] = intent;  // the engine compiles from the words
+                } else if (!runnable) {
+                    project_input["description"] = description + "\n\n" + methodology_waits(entry);
+                }
                 const ApiResult created = called(co_await call_capability(
                     context,
                     "workspace_act",
                     {{"customer_id", customer_id},
                      {"capability", "create_project"},
-                     {"input", {{"name", name}, {"description", description}, {"intent", intent}}}}));
+                     {"input", std::move(project_input)}}));
                 if (!created.ok) {
                     co_return created;
                 }
                 names.push_back(name);
+                if (known && !runnable) {
+                    waiting.push_back({{"project", name},
+                                       {"methodology", entry.value("id", std::string())},
+                                       {"name", entry.value("name", std::string())},
+                                       {"issue", entry.value("issue", std::string())},
+                                       {"message", methodology_waits(entry)}});
+                } else if (runnable) {
+                    const ApiResult compiled = called(co_await compile_pipeline(
+                        context, customer_id, name, intent, "", nullptr,
+                        entry.value("id", std::string())));
+                    if (!compiled.ok) {
+                        co_return compiled;
+                    }
+                }
                 if (position < ids.size()) {
                     context.store->set_opportunity_status(ids[position], "project", name);
                 }
                 ++position;
                 // The Project Agent designs its pipeline in the background; the project page
                 // compiles that design when it is done (kind "build:<project>").
-                if (builds_pipelines) {
+                if (builds_pipelines && !(known && !runnable)) {
                     std::string brief = "Design the pipeline for the project " + name + ": " +
                                         intent + ".";
                     for (const auto& [field, label] :
@@ -2064,8 +2204,9 @@ void register_agent_flow_capabilities(Registry& registry) {
                     }
                 }
             }
-            co_return ApiResult::success(
-                {{"projects", std::move(names)}, {"builds", std::move(builds)}});
+            co_return ApiResult::success({{"projects", std::move(names)},
+                                          {"builds", std::move(builds)},
+                                          {"waiting", std::move(waiting)}});
         }});
     registry.add(Capability{
         .name = "get_ask_conversation",

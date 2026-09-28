@@ -1,4 +1,6 @@
 #pragma once
+
+#include <string_view>
 #include "lake/api/registry.hpp"
 #include "lake/control/store.hpp"
 
@@ -45,12 +47,27 @@ nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_vie
 // A project's pipeline from a description: capture it as the intent, compile it, and point it at
 // `dataset` ("<database>.<table>") with the `model` step attributes (target, algo). Answers
 // {graph}. Needs context.registry (set by any registry call).
+//
+// `methodology` ("M-3") asks the engine for that methodology's own pipeline (zetta#1061); an
+// engine that cannot run it answers not_supported. Empty = the engine picks from the words.
 liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
                                                   std::string customer_id,
                                                   std::string project,
                                                   std::string intent,
                                                   std::string dataset,
-                                                  nlohmann::json model = nullptr);
+                                                  nlohmann::json model = nullptr,
+                                                  std::string methodology = {});
+// The workspace engine's methodologies (its list_methodologies answer, zetta#1061), or null
+// when the engine predates the registry: then only M-1 (churn / GBDT classification) runs.
+liquid::runtime::task<nlohmann::json> workspace_methodologies(ApiContext& context,
+                                                              std::string customer_id);
+// The registry entry an Opportunity or a design names: an "M-n" id written in `methodology`, else
+// the methodology that serves the catalogue solution ("S-n") in `solution`. Null when neither does.
+nlohmann::json find_methodology(const nlohmann::json& methodologies,
+                                std::string_view methodology,
+                                std::string_view solution);
+// "Segmentation / clustering (M-3) does not run in this workspace's engine yet (zetta#1042)."
+std::string methodology_waits(const nlohmann::json& entry);
 // Points an existing pipeline's first connect step at `dataset` (removing the other connect steps)
 // and sets its model step's attributes.
 liquid::runtime::task<ApiResult> point_pipeline(ApiContext& context,

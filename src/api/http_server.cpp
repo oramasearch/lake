@@ -7634,6 +7634,12 @@ struct ApiServer::Impl {
             if (listed.ok) {
                 page.data["list_opportunities"] = listed.value;
             }
+            // What the engine runs, so each Opportunity says whether it does (lake#289).
+            context.registry = &registry;
+            auto methodologies = co_await lake::api::workspace_methodologies(context, page.customer_id);
+            if (methodologies && methodologies->is_array()) {
+                page.data["list_methodologies"] = *methodologies;
+            }
         }
         if (section == "agents" || section == "discover" || section == "library") {
             // The Agent Library does not need the workspace (docs/api/train-agents.md).
@@ -7680,7 +7686,9 @@ struct ApiServer::Impl {
                 reads = {{"list_projects", nlohmann::json::object()}};
             } else if (section == "project") {
                 reads = {{"get_project", {{"name", page.subject}}},
-                         {"list_datasets", nlohmann::json::object()}};
+                         {"list_datasets", nlohmann::json::object()},
+                         // What the engine runs (lake#289); an older engine has no registry.
+                         {"list_methodologies", nlohmann::json::object()}};
             } else if (section == "data") {
                 if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
                     page.data["loaded"] = {{"table", loaded}, {"rows", query_value(route, "rows")}};
@@ -7822,7 +7830,7 @@ struct ApiServer::Impl {
                         status != "pending") {
                         reads.push_back({"get_run_report", {{"run_id", page.subject}}});
                     }
-                } else if (page.error.empty()) {
+                } else if (page.error.empty() && capability != "list_methodologies") {
                     page.error = result.error.message;
                 }
             }
@@ -8974,7 +8982,8 @@ struct ApiServer::Impl {
             back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
             context.registry = &registry;
             result = unwrap(co_await lake::api::compile_pipeline(
-                context, customer_id, project, form_field(body, "intent"), chosen));
+                context, customer_id, project, form_field(body, "intent"), chosen, nullptr,
+                form_field(body, "methodology")));
             const std::string built_graph = result.ok ? result.value.value("graph", std::string())
                                                       : std::string();
             if (result.ok && !chosen.empty() && !built_graph.empty()) {
