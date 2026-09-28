@@ -1,5 +1,10 @@
 # Control stores
 
+Stream ownership is persisted by both stores and bound to customer/workspace/topic; agent-task
+enumeration is customer scoped. `AgentBus::call` uses the existing Zetta transport for Streams
+reads, while `MemoryAgentBus` provides non-consuming fake browse. Space `write` grants permit
+stream publication/editing without granting deletion. See `docs/control-plane/streams.md`.
+
 Memory and PostgreSQL stores implement the public Store contract together. Token issuance retains
 its parent and caps expiry; authentication checks the complete session/device ancestry. PostgreSQL
 DDL lives in `db/schema.sql` and must be applied before the containing binary.

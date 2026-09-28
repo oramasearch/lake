@@ -4287,6 +4287,47 @@ public:
         return build_from(rows[0]);
     }
 
+    Result<void> create_stream_owner(const StreamOwner& owner) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("INSERT INTO stream_owners (customer_id, workspace_id, topic, created_by) "
+                           "VALUES ($1::uuid, $2, $3, $4)",
+                           owner.customer_id, owner.workspace_id, owner.topic, owner.created_by);
+            return {};
+        });
+    }
+
+    Result<std::string> stream_owner(const StreamOwner& owner) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            const auto rows = tx.exec_params(
+                "SELECT created_by FROM stream_owners WHERE customer_id=$1::uuid "
+                "AND workspace_id=$2 AND topic=$3",
+                owner.customer_id, owner.workspace_id, owner.topic);
+            return rows.empty() ? std::string() : rows[0][0].as<std::string>();
+        });
+    }
+
+    Result<void> delete_stream_owner(const StreamOwner& owner) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("DELETE FROM stream_owners WHERE customer_id=$1::uuid "
+                           "AND workspace_id=$2 AND topic=$3 AND created_by=$4",
+                           owner.customer_id, owner.workspace_id, owner.topic, owner.created_by);
+            return {};
+        });
+    }
+
+    Result<std::vector<std::string>> list_agent_task_ids(const std::string& customer_id) override {
+        return with_tx<std::vector<std::string>>(
+            [&](pqxx::work& tx) -> Result<std::vector<std::string>> {
+                const auto rows = tx.exec_params(
+                    "SELECT id FROM agent_tasks WHERE customer_id=$1::uuid ORDER BY id", customer_id);
+                std::vector<std::string> ids;
+                for (const auto& row : rows) {
+                    ids.push_back(row[0].as<std::string>());
+                }
+                return ids;
+            });
+    }
+
     Result<std::vector<Build>> list_builds(const std::string& customer_id) override {
         return with_tx<std::vector<Build>>([&](pqxx::work& tx) -> Result<std::vector<Build>> {
             const pqxx::result rows =

@@ -909,6 +909,50 @@ Result<void> InMemoryStore::set_web_app_status(const std::string& id,
     return {};
 }
 
+Result<void> InMemoryStore::create_stream_owner(const StreamOwner& owner) {
+    std::lock_guard lock(mutex_);
+    for (const auto& row : stream_owners_) {
+        if (row.customer_id == owner.customer_id && row.workspace_id == owner.workspace_id &&
+            row.topic == owner.topic) {
+            return std::unexpected(StoreError{"conflict", "stream ownership already exists"});
+        }
+    }
+    stream_owners_.push_back(owner);
+    return {};
+}
+
+Result<std::string> InMemoryStore::stream_owner(const StreamOwner& owner) {
+    std::lock_guard lock(mutex_);
+    for (const auto& row : stream_owners_) {
+        if (row.customer_id == owner.customer_id && row.workspace_id == owner.workspace_id &&
+            row.topic == owner.topic) {
+            return row.created_by;
+        }
+    }
+    return std::string();
+}
+
+Result<void> InMemoryStore::delete_stream_owner(const StreamOwner& owner) {
+    std::lock_guard lock(mutex_);
+    std::erase_if(stream_owners_, [&](const auto& row) {
+        return row.customer_id == owner.customer_id && row.workspace_id == owner.workspace_id &&
+               row.topic == owner.topic && row.created_by == owner.created_by;
+    });
+    return {};
+}
+
+Result<std::vector<std::string>>
+InMemoryStore::list_agent_task_ids(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<std::string> ids;
+    for (const auto& task : agent_tasks_) {
+        if (task.customer_id == customer_id) {
+            ids.push_back(task.id);
+        }
+    }
+    return ids;
+}
+
 Result<std::vector<Build>> InMemoryStore::list_builds(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<Build> result;

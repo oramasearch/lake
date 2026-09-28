@@ -1833,3 +1833,16 @@ CREATE TABLE IF NOT EXISTS builds_guard (
 );
 
 INSERT INTO schema_migrations (version) VALUES ('0036_builds') ON CONFLICT DO NOTHING;
+
+-- 0037_streams: creator ownership survives audit retention and workspace replacement (lake#301).
+CREATE TABLE IF NOT EXISTS stream_owners (
+    customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workspace_id text NOT NULL,
+    topic text NOT NULL,
+    created_by text NOT NULL,
+    PRIMARY KEY (customer_id, workspace_id, topic)
+);
+CREATE TABLE IF NOT EXISTS streams_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0037_streams') ON CONFLICT DO NOTHING;

@@ -12,8 +12,12 @@ runtime mode, optional source entrypoint and operator-written token hashes. The 
 credential table. Lake never stores app tokens. See `docs/control-plane/web-apps.md`.
 
 Migration `0036_builds` adds the queued/cancelled image-build row and operator observation fields.
-The latest guard is `builds_guard`; desired writes notify `lake_builds`, and only SHA-256 hashes of
+Its guard is `builds_guard`; desired writes notify `lake_builds`, and only SHA-256 hashes of
 the operator's source, push and event credentials are stored. See `docs/control-plane/builds.md`.
+
+Migration `0037_streams` adds durable topic creator ownership keyed by customer, workspace
+service ID and topic. The latest guard is `streams_guard`. Vendor/apply the schema in the
+operator rollout before exposing Streams; see `docs/control-plane/streams.md`.
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.

@@ -606,6 +606,19 @@ public:
     list_builds(const std::string& customer_id) override {
         return call("list_builds", [&] { return store_->list_builds(customer_id); });
     }
+    control::Result<void> create_stream_owner(const control::StreamOwner& owner) override {
+        return call("create_stream_owner", [&] { return store_->create_stream_owner(owner); });
+    }
+    control::Result<std::string> stream_owner(const control::StreamOwner& owner) override {
+        return call("stream_owner", [&] { return store_->stream_owner(owner); });
+    }
+    control::Result<void> delete_stream_owner(const control::StreamOwner& owner) override {
+        return call("delete_stream_owner", [&] { return store_->delete_stream_owner(owner); });
+    }
+    control::Result<std::vector<std::string>>
+    list_agent_task_ids(const std::string& customer_id) override {
+        return call("list_agent_task_ids", [&] { return store_->list_agent_task_ids(customer_id); });
+    }
     control::Result<control::Build> get_build(const std::string& id) override {
         return call("get_build", [&] { return store_->get_build(id); });
     }

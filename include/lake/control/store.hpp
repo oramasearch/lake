@@ -373,6 +373,10 @@ struct StaleAgentTasks {
     std::vector<AgentTask> unclaimed, overdue;
 };
 
+struct StreamOwner {
+    std::string customer_id, workspace_id, topic, created_by;
+};
+
 // One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans.
 struct Opportunity {
     std::string id, customer_id, task_id;
@@ -898,6 +902,10 @@ public:
     // In-cluster image builds (docs/control-plane/builds.md). Lake inserts desired rows; the
     // operator writes status and the hashes of the three credentials it owns.
     virtual Result<std::vector<Build>> list_builds(const std::string& customer_id) = 0;
+    virtual Result<void> create_stream_owner(const StreamOwner&) = 0;
+    virtual Result<std::string> stream_owner(const StreamOwner&) = 0;
+    virtual Result<void> delete_stream_owner(const StreamOwner&) = 0;
+    virtual Result<std::vector<std::string>> list_agent_task_ids(const std::string& customer_id) = 0;
     virtual Result<Build> get_build(const std::string& id) = 0;
     virtual Result<Build> create_build(const NewBuild&) = 0;
     virtual Result<Build> cancel_build(const std::string& id) = 0;
