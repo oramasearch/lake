@@ -4,6 +4,7 @@ Experiments follows Runs in Train. `navigation_routes` owns `/train/experiments`
 `/train/experiment?study=`, `/train/experiment/run?run=` and
 `/train/experiments/compare?runs=run-a,run-b`. Each selects Experiments with `aria-current="page"`.
 Runs and Run reports link to their metric charts.
+The sidebar reuses the existing chart icon; navigation tests check both its icon and current-page state.
 
 The list displays studies with state, objective, best complete-trial value, trial counts and
 trial/cost budgets, plus tracked runs outside studies. Project and state filters apply to the

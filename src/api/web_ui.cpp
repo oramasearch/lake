@@ -467,7 +467,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
         items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
-        items.push_back({"Train", "/train/experiments", "Experiments", "activity", "experiments"});
+        items.push_back({"Train", "/train/experiments", "Experiments", "metering", "experiments"});
         items.push_back({"Train", "/train/streams", "Streams", "streams", "streams"});
         items.push_back({"Ship", "/ship/models", "Models", "api", "models"});
         items.push_back({"Ship", "/ship/indexes", "Search Indexes", "search", "indexes"});

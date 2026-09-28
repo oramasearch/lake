@@ -265,7 +265,10 @@ TEST_F(Experiments, EveryPageControlUsesACapabilityAndNavigationOwnsAllExperimen
     for (const auto& path : paths) {
         const auto html = request(server.port(), "GET", path + "customer_id=" + customer);
         controls_registered(html, registry);
-        EXPECT_NE(html.find("href=\"/train/experiments\" aria-current=\"page\""), std::string::npos);
+        const auto navigation = html.find("href=\"/train/experiments\" aria-current=\"page\"");
+        ASSERT_NE(navigation, std::string::npos);
+        const auto link = html.substr(navigation, html.find("</a>", navigation) - navigation);
+        EXPECT_NE(link.find("<svg class=\"icon\""), std::string::npos);
         EXPECT_EQ(html.find("href=\"/train/runs\" aria-current=\"page\""), std::string::npos);
         EXPECT_EQ(html.find("experiment-service-secret"), std::string::npos);
         EXPECT_EQ(html.find("data-action=\"delete"), std::string::npos);
