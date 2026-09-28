@@ -209,6 +209,44 @@ authorize_app_token(const Capability& entry, const nlohmann::json& input, ApiCon
     return ApiResult::success(nullptr);
 }
 
+ApiResult
+authorize_build_token(const Capability& entry, const nlohmann::json& input, ApiContext& context) {
+    const auto refused = [] {
+        return ApiResult::failure("unauthorized", "build token does not grant this operation");
+    };
+    if (!context.authorized || context.credential_workload_id.empty() || !context.store) {
+        return refused();
+    }
+    const auto build = context.store->get_build(context.credential_workload_id);
+    if (!build || build_token_purpose(*build, context.credential_token_hash) !=
+                      context.credential_kind.substr(6)) {
+        return refused();
+    }
+    context.audit_customer_id = build->customer_id;
+    context.audit_object = "build/" + build->id;
+    if (context.credential_kind == "build_source") {
+        const std::string repository = input.value("repository", input.value("id", ""));
+        const std::string revision = input.value("revision", input.value("ref", ""));
+        if ((entry.name != "repository_tree" && entry.name != "repository_file") ||
+            repository != build->repository || revision != build->revision) {
+            return refused();
+        }
+        const auto stored_repository = context.store->get_repository(build->repository);
+        if (!stored_repository || stored_repository->customer_id != build->customer_id) {
+            return refused();
+        }
+    } else if (context.credential_kind == "build_events") {
+        if (entry.name != "publish_build_event" || input.value("build_id", "") != build->id ||
+            (input.contains("customer_id") &&
+             input.value("customer_id", "") != build->customer_id)) {
+            return refused();
+        }
+    } else {
+        return refused();
+    }
+    return ApiResult::success(nullptr);
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
@@ -228,6 +266,9 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
         state.result = validation;
         state.proceed = false;
+    } else if (context.credential_kind.starts_with("build_")) {
+        state.result = authorize_build_token(entry, input, context);
+        state.proceed = state.result.ok;
     } else if (context.credential_kind.starts_with("app_")) {
         state.result = authorize_app_token(entry, input, context);
         state.proceed = state.result.ok;

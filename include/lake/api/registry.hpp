@@ -142,6 +142,9 @@ struct ApiContext {
     std::string apps_wildcard;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;
+    // Lake's in-cluster Service URL. Build targets use its authority so pushes bypass the public
+    // Ingress request-body limit.
+    std::string internal_url;
     // The library agent whose bus credential authenticated the call (LAKE_AGENT_BUS_DIR), or empty.
     std::string agent_service;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS: the instance-wide switch over every customer's opt-in

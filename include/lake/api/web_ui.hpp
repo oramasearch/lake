@@ -260,7 +260,12 @@ std::string web_ui_factory(const FactoryPage& page, WebUiViewer viewer = true);
 std::string web_ui_packages(const nlohmann::json& catalog,
                             bool available,
                             std::string_view origin,
-                            WebUiViewer viewer = true);
+                            WebUiViewer viewer = true,
+                            const nlohmann::json& builds = nlohmann::json::array(),
+                            std::string_view customer_id = {});
+std::string web_ui_app_builds(const nlohmann::json& app,
+                              const nlohmann::json& builds,
+                              WebUiViewer viewer = true);
 
 // One environment of one repository, for the cross-repository deployments page.
 struct DeploymentSummary {

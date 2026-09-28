@@ -1033,6 +1033,92 @@ TEST(RegistryProtocols, OciClientPushesAndPullsTwoLayersByteIdentical) {
                                                 "application/octet-stream");
         EXPECT_EQ(response_body(pulled), expected);
     }
+    const std::string cross_repository = http_request(server.port(),
+                                                      "GET",
+                                                      "/v2/public-alias/blobs/" + first_digest,
+                                                      "",
+                                                      "application/octet-stream");
+    EXPECT_NE(cross_repository.find(" 404 "), std::string::npos) << cross_repository;
+    server.stop();
+}
+
+TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
+    TemporarySyncRoot temporary;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user(
+        {"taap:1:ed25519:registry-owner", "registry-owner@example.test", "Registry owner"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto build = store->create_build({.customer_id = customer->id,
+                                            .repository = repository->id,
+                                            .revision = "main",
+                                            .target = "registry/tenant-one/service:v1"});
+    ASSERT_TRUE(build) << build.error().message;
+    ASSERT_TRUE(store->set_build_status(
+        build->id,
+        {.phase = "Running",
+         .token_hashes = {{"push", lake::control::identity_crypto::sha256_hex("scoped-push")}}}));
+    const auto pull = store->create_token(
+        {user->id, "lake", "registry pull", "operator provisioned", {"registry_pull"}, 300, false});
+    ASSERT_TRUE(pull) << pull.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "scoped-oci-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = temporary.path().string();
+    options.store = store;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string basic = "Basic bGFrZTpzY29wZWQtcHVzaA==";
+
+    const std::string allowed = http_request(server.port(),
+                                             "POST",
+                                             "/v2/tenant-one/service/blobs/uploads/",
+                                             "",
+                                             "application/octet-stream",
+                                             {},
+                                             basic);
+    EXPECT_NE(allowed.find(" 202 "), std::string::npos) << allowed;
+    const std::string refused = http_request(server.port(),
+                                             "POST",
+                                             "/v2/tenant-two/service/blobs/uploads/",
+                                             "",
+                                             "application/octet-stream",
+                                             {},
+                                             basic);
+    EXPECT_NE(refused.find(" 403 "), std::string::npos) << refused;
+    const std::string private_anonymous = http_request(
+        server.port(), "GET", "/v2/tenant-one/service/manifests/latest", "", "application/json");
+    EXPECT_NE(private_anonymous.find(" 401 "), std::string::npos) << private_anonymous;
+    const std::string private_authorized = http_request(server.port(),
+                                                        "GET",
+                                                        "/v2/tenant-one/service/manifests/latest",
+                                                        "",
+                                                        "application/json",
+                                                        {},
+                                                        basic);
+    EXPECT_NE(private_authorized.find(" 404 "), std::string::npos) << private_authorized;
+    const std::string customer_pull = http_request(server.port(),
+                                                   "GET",
+                                                   "/v2/tenant-one/service/manifests/latest",
+                                                   "",
+                                                   "application/json",
+                                                   {},
+                                                   "Bearer " + pull->secret);
+    EXPECT_NE(customer_pull.find(" 404 "), std::string::npos) << customer_pull;
+    const std::string foreign_pull = http_request(server.port(),
+                                                  "GET",
+                                                  "/v2/tenant-two/service/manifests/latest",
+                                                  "",
+                                                  "application/json",
+                                                  {},
+                                                  "Bearer " + pull->secret);
+    EXPECT_NE(foreign_pull.find(" 403 "), std::string::npos) << foreign_pull;
     server.stop();
 }
 

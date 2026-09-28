@@ -714,6 +714,8 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     repo.retention_until = "2026-10-03T00:00:00Z";
     EXPECT_NE(lake::api::web_ui_repository(repo, &ada).find("Tombstoned."), std::string::npos);
 
+    repo.deleted_at.clear();
+    repo.retention_until.clear();
     const lake::api::RepositoryHomeData data{
         .refs = {{"main", "blake3:123456789012345678901234567890"}},
         .tree = {{"README.md", "blob", "blob-1", 0644, "node-1", 48, 32},
@@ -737,6 +739,36 @@ TEST(WebUi, RepositoriesListEscapesAndLinks) {
     EXPECT_NE(home.find("C++"), std::string::npos);
     EXPECT_NE(home.find("Markdown"), std::string::npos);
     EXPECT_NE(home.find("Effective Access"), std::string::npos);
+    EXPECT_NE(home.find("action=\"/repository/build\""), std::string::npos);
+    EXPECT_NE(home.find("Build image"), std::string::npos);
+}
+
+TEST(WebUi, BuildPagesRenderLiveHistoryWithoutExposingCredentials) {
+    const nlohmann::json catalog{
+        {"oci", {{{"name", "ada/service"}, {"versions", nlohmann::json::array({"latest"})}}}},
+        {"npm", nlohmann::json::array()},
+        {"python", nlohmann::json::array()}};
+    const nlohmann::json builds = nlohmann::json::array({{{"id", "build-1"},
+                                                          {"repository", "repo-1"},
+                                                          {"target", "registry/ada/service:latest"},
+                                                          {"phase", "Running"},
+                                                          {"digest", ""}}});
+    const std::string packages =
+        lake::api::web_ui_packages(catalog, true, "https://lake.test", true, builds, "customer-1");
+    EXPECT_NE(packages.find("ada/service"), std::string::npos);
+    EXPECT_NE(packages.find("data-build-id=\"build-1\""), std::string::npos);
+    EXPECT_NE(packages.find("receive_build_events"), std::string::npos);
+    EXPECT_EQ(packages.find("token_hashes"), std::string::npos);
+
+    const nlohmann::json app{{"id", "app-1"},
+                             {"customer_id", "customer-1"},
+                             {"name", "reports"},
+                             {"mode", "runtime"},
+                             {"phase", "Running"}};
+    const std::string app_page = lake::api::web_ui_app_builds(app, builds, true);
+    EXPECT_NE(app_page.find("action=\"/ship/app/build\""), std::string::npos);
+    EXPECT_NE(app_page.find("Build history"), std::string::npos);
+    EXPECT_NE(app_page.find("receive_build_events"), std::string::npos);
 }
 
 TEST(WebUi, RepositoryContentAndChangePagesRenderSafely) {

@@ -201,6 +201,11 @@ rows after the operator acknowledges deletion. This App entity is distinct from 
 identity pools. Its contracts are `docs/api/web-apps.md` and
 `docs/control-plane/web-apps.md`.
 
+In-cluster image builds add migration `0036_builds`, customer-scoped REST/MCP capabilities,
+queued/cancelled desired rows, operator status, build-specific source/push/event hashes and retained
+Zetta progress. Build targets use the in-cluster Lake Service and a customer-handle registry
+prefix. The contracts are `docs/api/builds.md` and `docs/control-plane/builds.md`.
+
 Agent-session custody adds migration `0017_agent_sessions` and a maximum 15-minute Ed25519 key
 delegated to a durable agent by a canonical `delegation/1` attestation. The attestation is appended
 to the tiled transparency log before public session metadata is persisted; the private seed is

@@ -201,6 +201,7 @@ add_library(lake-core STATIC
   src/api/agent_capabilities.cpp
   src/api/platform_capabilities.cpp
   src/api/web_app_capabilities.cpp
+  src/api/build_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/offline_recovery_capabilities.cpp
