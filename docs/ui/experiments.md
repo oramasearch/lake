@@ -104,3 +104,44 @@ as agreed for Lake #303. The authorized engine contract has no deletion operatio
 therefore has no delete control, including no disabled placeholder, and Lake implements no
 local-only hiding or deletion substitute. Add the registered REST/MCP operation and its UI control
 together once the engine contract is available.
+
+## Native Verification Record — 2026-09-28
+
+After rebasing onto `origin/main` at `52f0b30`, submodules were updated and both build paths were
+recreated and configured from scratch. The previous build trees were retained under `.cache`,
+outside the active build paths; no compiled objects were reused. The authorized Zetta and Liquid
+source paths remained unchanged. Builds used `cmake --build build -j 6` and
+`cmake --build build-shared -j 6`, with `BUILD_SHARED_LIBS=OFF` and `ON` respectively.
+
+The full suites ran sequentially with fresh local connection databases:
+
+```sh
+LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue303_static_20260928_final \
+  ctest --test-dir build --output-on-failure
+LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue303_shared_20260928_final \
+  ctest --test-dir build-shared --output-on-failure
+tools/ui/test-token-gates.sh
+```
+
+`TMPDIR` selected this worktree's `.cache/tmp`; `LAKE_INSTANCE_KEK` used the documented test
+fixture key. Each PostgreSQL test created its own isolated database and KEK.
+
+```text
+Static: 100% tests passed, 0 tests failed out of 419
+Shared: 100% tests passed, 0 tests failed out of 419
+sync-design-system: ok — 8 files match 38959d9966aa
+build-tokens: ok — src/api/web_ui_tokens.inc matches the vendored tokens
+token-gates: ok — generated output and snapshot changes were rejected
+```
+
+Both suites pass `Repositories.AnonymousCallersOnlySeePublicRepositories`, independent response
+schema validation, all six `Experiments.*` cases and `lake-experiment-charts`. This includes actual
+REST/MCP calls for all eleven operations and the page control/current-navigation/icon checks.
+Each suite retains fourteen existing skips (optional browser/client checks and duplicate
+PostgreSQL UI cases) and one disabled search benchmark; no Experiments case skips.
+
+Native HTTP smoke checks returned `200` for server info, OpenAPI and the Experiments page, and
+the generated OpenAPI listed all eleven operations. Interactive browser verification was not
+available because the browser connection failed before opening a page. Linux proof is deferred:
+the prescribed lane helper is unavailable. No Docker or local image build was used. These native
+results do not claim the live-site training acceptance described above.
