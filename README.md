@@ -25,7 +25,7 @@ ctest --test-dir build --output-on-failure
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages; with `LAKE_CLERK_PUBLISHABLE_KEY` set, `/sign-in` and `/sign-up` are Clerk's forms ([`docs/api/clerk.md`](docs/api/clerk.md)) |
-| `GET /design/projects`, `/design/project`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, Train and Ship over the customer's own Zetta workspace ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
+| `GET /design/projects`, `/design/project`, `/design/solutions`, `/design/solution`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, solution projects, Train and Ship over the customer's own Zetta workspace ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
 | `POST /identity/clerk-session` | exchanges a verified Clerk `lake` template token for a `lake_session`; absent without Clerk |
 | `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |

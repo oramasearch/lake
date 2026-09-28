@@ -3637,16 +3637,46 @@ std::string solutions_content(const WorkspacePage& page) {
                                                                          : json_text(level, "name")) +
                            "</option>";
             }
+            std::string datasets;
+            for (const nlohmann::json& dataset :
+                 page.data.value("list_datasets", nlohmann::json::object())
+                     .value("datasets", nlohmann::json::array())) {
+                const std::string database = json_text(dataset, "database").empty()
+                                                 ? std::string("datasets")
+                                                 : json_text(dataset, "database");
+                const std::string path = database + "." + json_text(dataset, "name");
+                datasets += "<option value=\"" + web_ui_escape(path) + "\">" + web_ui_escape(path) +
+                            "</option>";
+            }
             out += std::format(
                 "<section class=\"panel\"><h2>Start This Solution</h2><form class=\"stack\" "
                 "method=\"post\" action=\"/design/solutions/start\">{}{}<label>Project name<input "
-                "name=\"name\" required value=\"{}\"></label>{}<button class=\"button "
+                "name=\"name\" required value=\"{}\"></label>{}<label>Dataset<select "
+                "name=\"dataset\" required><option value=\"\" selected disabled>Choose a dataset"
+                "</option>{}</select></label><fieldset><legend>Where Actions Go</legend><label>"
+                "Delivery<select name=\"delivery_kind\" required><option value=\"\" selected "
+                "disabled>Choose delivery</option><option value=\"webhook\">Webhook</option>"
+                "<option value=\"salesforce\">Salesforce connector</option><option "
+                "value=\"hubspot\">"
+                "HubSpot connector</option></select></label><label>Webhook URL or connector "
+                "endpoint"
+                "<input name=\"delivery_endpoint\" required></label><label>Owner<input "
+                "name=\"owner\" "
+                "required></label></fieldset><fieldset><legend>Economics</legend><label>Value per "
+                "outcome<input name=\"value_per_outcome\" type=\"number\" step=\"any\" required>"
+                "</label><label>Investment<input name=\"investment\" type=\"number\" step=\"any\" "
+                "min=\"0\" required></label><label>Currency<input name=\"currency\" required "
+                "placeholder=\"USD\"></label><small>These are your inputs. lake does not supply "
+                "defaults.</small></fieldset><button class=\"button "
                 "button-primary\" type=\"submit\">Start</button></form></section>",
                 hidden("customer_id", page.customer_id),
                 hidden("solution", json_text(solution, "id")),
                 web_ui_escape(slug_text(json_text(solution, "name"))),
-                options.empty() ? std::string()
-                                : "<label>Level<select name=\"level\">" + options + "</select></label>");
+                options.empty()
+                    ? std::string("<label>Level<input name=\"level\" type=\"number\" min=\"1\" "
+                                  "max=\"4\" required></label>")
+                    : "<label>Level<select name=\"level\">" + options + "</select></label>",
+                datasets);
         }
         return out;
     }
@@ -3669,6 +3699,255 @@ std::string solutions_content(const WorkspacePage& page) {
     if (!modules.empty()) out += "<section class=\"panel\"><h2>Modules</h2>" + head + modules + "</tbody></table></section>";
     if (!sketches.empty()) out += "<section class=\"panel\"><h2>In Design</h2>" + head + sketches + "</tbody></table></section>";
     return out.empty() ? "<div class=\"panel empty\">No solutions listed.</div>" : out;
+}
+
+nlohmann::json proposed_solution_foundation(const nlohmann::json& task) {
+    const nlohmann::json answer = task.value("answer", nlohmann::json::object());
+    const nlohmann::json result = answer.value("result", nlohmann::json::object());
+    nlohmann::json proposal = result.value("foundation", nlohmann::json::object());
+    if (!proposal.is_object()) {
+        return nlohmann::json::object();
+    }
+    const nlohmann::json context = task.value("context", nlohmann::json::object());
+    if (context.contains("delivery")) {
+        proposal["delivery"] = context["delivery"];
+    }
+    if (context.contains("roi_model")) {
+        proposal["roi_model"] = context["roi_model"];
+    }
+    nlohmann::json sources = proposal.value("sources", nlohmann::json::object());
+    if (!sources.is_object()) {
+        sources = nlohmann::json::object();
+    }
+    const std::string dataset = context.value("dataset", std::string());
+    const std::size_t dot = dataset.find('.');
+    if (!dataset.empty()) {
+        sources["source"] = dot == std::string::npos ? "datasets" : dataset.substr(0, dot);
+        sources["table"] = dot == std::string::npos ? dataset : dataset.substr(dot + 1);
+    }
+    proposal["sources"] = std::move(sources);
+    return proposal;
+}
+
+nlohmann::json missing_solution_predicates(const nlohmann::json& task,
+                                           const nlohmann::json& proposal) {
+    nlohmann::json missing = proposal.value("missing_predicates", nlohmann::json::array());
+    if (!missing.is_array()) {
+        missing = nlohmann::json::array();
+    }
+    if (task.value("context", nlohmann::json::object()).value("solution", std::string()) != "S-1") {
+        return missing;
+    }
+    const nlohmann::json predicates = proposal.value("predicates", nlohmann::json::object());
+    for (const char* name : {"in_collections", "open_complaint", "vulnerable"}) {
+        const bool named = predicates.is_object() && predicates.contains(name) &&
+                           predicates.at(name).is_string() &&
+                           !predicates.at(name).get_ref<const std::string&>().empty();
+        if (!named && std::ranges::find(missing, nlohmann::json(name)) == missing.end()) {
+            missing.push_back(name);
+        }
+    }
+    return missing;
+}
+
+std::string solution_proposal_content(const WorkspacePage& page, const nlohmann::json& task) {
+    const std::string status = json_text(task, "status");
+    if (status == "pending" || status == "running") {
+        return "<section class=\"panel notice\" role=\"status\"><h2>Foundation Proposal</h2>"
+               "<p><strong>The Project Agent is reading the dataset…</strong> It is proposing "
+               "the snapshot boundary, column roles, methodology inputs and policy predicates. "
+               "Nothing is created until you confirm. This page checks again every 3 seconds."
+               "</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
+    }
+    if (status == "failed") {
+        return "<p class=\"error\" role=\"alert\">The Project Agent could not propose the "
+               "foundation: " +
+               web_ui_escape(json_text(task, "message")) + "</p>";
+    }
+    const nlohmann::json proposal = proposed_solution_foundation(task);
+    if (proposal.empty()) {
+        return status == "succeeded"
+                   ? "<p class=\"error\" role=\"alert\">The Project Agent returned no foundation "
+                     "proposal.</p>"
+                   : std::string();
+    }
+    std::string missing;
+    for (const nlohmann::json& name : missing_solution_predicates(task, proposal)) {
+        if (!missing.empty()) {
+            missing += ", ";
+        }
+        missing += name.is_string() ? name.get<std::string>() : name.dump();
+    }
+    std::string notice;
+    if (!missing.empty()) {
+        notice = "<p class=\"error\" role=\"alert\"><strong>Actions will remain blocked.</strong> "
+                 "The dataset is missing these exclusion predicates: " +
+                 web_ui_escape(missing) + ". They are not treated as false.</p>";
+    }
+    return std::format(
+        "<section class=\"panel\"><h2>Foundation Proposal</h2><p>Review and edit the exact "
+        "foundation sent to the engine. Delivery and economics are your inputs from Start.</p>{}"
+        "<form class=\"stack\" method=\"post\" action=\"/design/solution/confirm\">{}{}{}"
+        "<label>Foundation (JSON)<textarea name=\"foundation\" rows=\"28\" required>{}</textarea>"
+        "</label><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> I "
+        "reviewed this snapshot, these roles, predicates, delivery settings and economics.</label>"
+        "<button class=\"button button-primary\" type=\"submit\">Confirm and create solution"
+        "</button></form></section>",
+        notice,
+        hidden("customer_id", page.customer_id),
+        hidden("project", page.subject),
+        hidden("task_id", json_text(task, "task_id")),
+        web_ui_escape(proposal.dump(2)));
+}
+
+std::string solution_decisions_content(const WorkspacePage& page, const nlohmann::json& solution) {
+    const nlohmann::json decisions = solution.value("decisions", nlohmann::json::array());
+    std::string rows;
+    for (const nlohmann::json& decision : decisions) {
+        const std::string status = json_text(decision, "status");
+        std::string approval = "—";
+        if (json_text(decision, "autonomy") == "A1" && status == "pending_approval") {
+            approval = std::format(
+                "<form method=\"post\" action=\"/design/solution/approve\">{}{}{}"
+                "<input type=\"hidden\" name=\"confirm\" value=\"yes\"><button type=\"submit\">"
+                "Approve A1</button></form>",
+                hidden("customer_id", page.customer_id),
+                hidden("project", page.subject),
+                hidden("decision_id", json_text(decision, "id")));
+        }
+        rows += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            web_ui_escape(json_text(decision, "entity_id")),
+                            web_ui_escape(json_text(decision, "tier")),
+                            web_ui_escape(json_text(decision, "action")),
+                            web_ui_escape(json_text(decision, "autonomy") + " · " + status),
+                            approval);
+    }
+    if (rows.empty()) {
+        return "<section class=\"panel\"><h2>Actions and A1 Queue</h2><p>No decisions have been "
+               "produced yet. "
+               "Run the solution to populate delivered, held and approval-pending actions.</p>"
+               "</section>";
+    }
+    return "<section class=\"panel\"><h2>Actions and A1 "
+           "Queue</h2><table><thead><tr><th>Entity</th><th>Tier"
+           "</th><th>Action</th><th>Governance</th><th></th></tr></thead><tbody>" +
+           rows +
+           "</tbody></table><p class=\"sub\">Approvals change the decision state; they do not "
+           "silently deliver an action.</p></section>";
+}
+
+std::string solution_ledger_content(const WorkspacePage& page, const nlohmann::json& solution) {
+    const nlohmann::json entries = solution.value("ledger", nlohmann::json::object())
+                                       .value("entries", nlohmann::json::array());
+    std::set<std::string> decision_ids;
+    for (const nlohmann::json& decision : solution.value("decisions", nlohmann::json::array())) {
+        decision_ids.insert(json_text(decision, "id"));
+    }
+    std::string rows;
+    for (const nlohmann::json& entry : entries) {
+        if (json_text(entry, "kind") != "action" ||
+            !decision_ids.contains(json_text(entry, "decision"))) {
+            continue;
+        }
+        const std::string action = json_text(entry, "action");
+        std::string outcome = "—";
+        if (action != "no_contact") {
+            outcome = std::format(
+                "<details><summary>Record outcome</summary><form class=\"stack\" method=\"post\" "
+                "action=\"/design/solution/outcome\">{}{}{}<label>Outcome<input name=\"outcome\" "
+                "required></label><label>Value<input name=\"value\" type=\"number\" step=\"any\" "
+                "required></label><label>Currency<input name=\"currency\" required value=\"{}\">"
+                "</label><label>Occurred at<input name=\"occurred_at\" required placeholder=\""
+                "2026-09-28T12:00:00Z\"></label><button type=\"submit\">Record</button></form>"
+                "</details>",
+                hidden("customer_id", page.customer_id),
+                hidden("project", page.subject),
+                hidden("action_id", json_text(entry, "id")),
+                web_ui_escape(json_text(entry, "currency")));
+        }
+        rows += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            web_ui_escape(json_text(entry, "subject")),
+                            web_ui_escape(action),
+                            web_ui_escape(json_text(entry, "recorded_at")),
+                            outcome);
+    }
+    return rows.empty()
+               ? std::string()
+               : "<section class=\"panel\"><h2>Delivered and Held Actions</h2><table><thead><tr>"
+                 "<th>Entity</th><th>Action</th><th>Recorded</th><th></th></tr></thead><tbody>" +
+                     rows + "</tbody></table></section>";
+}
+
+std::string active_solution_content(const WorkspacePage& page,
+                                    const nlohmann::json& solution,
+                                    const nlohmann::json& task) {
+    std::string stages;
+    for (const nlohmann::json& stage : solution.value("stages", nlohmann::json::array())) {
+        stages += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                              web_ui_escape(json_text(stage, "stage")),
+                              web_ui_escape(json_text(stage, "name")),
+                              web_ui_escape(json_text(stage, "kind")));
+    }
+    const nlohmann::json proposal = proposed_solution_foundation(task);
+    const nlohmann::json sources = solution.value("sources", nlohmann::json::object());
+    const nlohmann::json missing = sources.contains("missing_policy_predicates")
+                                       ? sources["missing_policy_predicates"]
+                                       : missing_solution_predicates(task, proposal);
+    std::string run;
+    if (missing.empty()) {
+        run = std::format(
+            "<form class=\"stack\" method=\"post\" action=\"/design/solution/run\">{}{}{}"
+            "<label>Delivery token (optional, used for this run only)<input type=\"password\" "
+            "name=\"delivery_token\" autocomplete=\"off\"></label><button class=\"button "
+            "button-primary\" type=\"submit\">Run</button></form>",
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject),
+            hidden("graph", json_text(solution, "graph")));
+    } else {
+        run = "<p class=\"error\" role=\"alert\">Run is blocked because an exclusion predicate "
+              "is missing. Missing evidence is never treated as false.</p>";
+    }
+    std::string out =
+        "<section class=\"panel\"><h2>Solution Stages</h2><table><thead><tr><th>Stage</th><th>Name"
+        "</th><th>Kind</th></tr></thead><tbody>" +
+        stages + "</tbody></table>" + run + "</section>";
+
+    const nlohmann::json policy = solution.value("policy", nlohmann::json::object());
+    nlohmann::json config = policy.value("config", nlohmann::json::object());
+    const nlohmann::json versions = policy.value("versions", nlohmann::json::array());
+    if (versions.is_array() && !versions.empty() && versions.back().is_object()) {
+        config = versions.back().value("config", config);
+    }
+    if (!policy.empty()) {
+        out += std::format(
+            "<section class=\"panel\"><h2>Decision Policy</h2><pre>{}</pre><details><summary>"
+            "Propose a New Policy Version</summary><form class=\"stack\" method=\"post\" action=\""
+            "/design/solution/policy\">{}{}{}<label>Configuration (JSON)<textarea name=\"config\" "
+            "rows=\"16\" required>{}</textarea></label><label>Reason<input name=\"reason\" "
+            "required></label><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" "
+            "required> I approve creating this policy version.</label><button type=\"submit\">"
+            "Create policy version</button></form></details></section>",
+            web_ui_escape(policy.dump(2)),
+            hidden("customer_id", page.customer_id),
+            hidden("project", page.subject),
+            hidden("policy_id", json_text(policy, "id")),
+            web_ui_escape(config.dump(2)));
+    }
+    if (solution.contains("experiment")) {
+        out += "<section class=\"panel\"><h2>Experiment and Holdout</h2><pre>" +
+               web_ui_escape(solution["experiment"].dump(2)) + "</pre></section>";
+    }
+    out += solution_decisions_content(page, solution);
+    out += solution_ledger_content(page, solution);
+    if (solution.contains("monitor")) {
+        out += "<section class=\"panel\"><h2>Monitor</h2><pre>" +
+               web_ui_escape(solution["monitor"].dump(2)) + "</pre></section>";
+    }
+    if (solution.contains("roi")) {
+        out += "<section class=\"panel\"><h2>ROI Readout</h2><pre>" +
+               web_ui_escape(solution["roi"].dump(2)) + "</pre></section>";
+    }
+    return out;
 }
 
 } // namespace
@@ -3735,6 +4014,14 @@ std::string workspace_content(const WorkspacePage& page) {
                                              ? "No description."
                                              : json_text(project, "description")));
         const nlohmann::json graphs = project.value("graphs", nlohmann::json::array());
+        const nlohmann::json solution_task = data.value("solution_task", nlohmann::json::object());
+        const nlohmann::json solution_project =
+            data.value("solution_project", nlohmann::json::object());
+        if (!solution_project.empty()) {
+            out += active_solution_content(page, solution_project, solution_task);
+        } else if (!solution_task.empty()) {
+            out += solution_proposal_content(page, solution_task);
+        }
         // Made from an Opportunity: the Project Agent designs the pipeline in the background.
         const nlohmann::json build = data.value("build", nlohmann::json::object());
         const std::string build_status = json_text(build, "status");

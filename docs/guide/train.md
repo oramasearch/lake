@@ -8,6 +8,25 @@ support_tickets.*
 
 Choose a **Methodology** to get that methodology's own pipeline: segmentation, forecasting, anomaly detection, survival, uplift and the rest. Only the methodologies your workspace's engine runs are listed. A pipeline whose methodology does not run yet says *Trains nothing yet* instead of pretending to train.
 
+## Start from a solution
+
+**Design → Solutions → Start this solution** begins a complete decision project. Choose the
+dataset, where actions should go and who owns them, then enter your value per outcome, investment
+and currency. These are your inputs and have no defaults.
+
+The Project Agent reads the chosen dataset and proposes its snapshot date, entity, label and
+feature columns, methodology roles and exclusion predicates. Review and edit the JSON before you
+confirm it. A missing exclusion flag is called out and blocks Run; it is never assumed to be
+false.
+
+After confirmation, the project shows the solution stages, current decision policy, experiment
+and holdout, actions waiting for A1 approval, delivered and held actions, monitor and ROI readout.
+Policy changes need an explicit approval. A1 approvals change decision state without silently
+delivering the action. Recording an outcome updates the audited ledger and ROI evidence.
+
+REST/MCP use `start_solution` with `{customer_id, project, solution, level, dataset, delivery,
+roi_model}`, followed by `confirm_solution` with `{task_id, edits?}`.
+
 ## Change it
 
 On the pipeline page:
