@@ -9316,16 +9316,50 @@ struct ApiServer::Impl {
         if (!context.authorized) {
             return redirect(route, "/sign-in");
         }
+        nlohmann::json catalog = artifacts.catalog();
+        nlohmann::json builds = nlohmann::json::array();
+        std::set<std::string> visible_spaces;
+        std::string customer_id = query_value(route, "customer_id");
+        const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, context);
+        if (customers.ok) {
+            for (const nlohmann::json& customer : customers.value.at("items")) {
+                visible_spaces.insert(customer.value("name", std::string()));
+                if (customer_id.empty()) {
+                    customer_id = customer.value("id", std::string());
+                }
+            }
+        }
+        nlohmann::json visible_images = nlohmann::json::array();
+        for (const nlohmann::json& image : catalog.value("oci", nlohmann::json::array())) {
+            const std::string name = image.value("name", std::string());
+            const std::size_t slash = name.find('/');
+            const bool cache =
+                slash != std::string::npos && name.substr(slash + 1).starts_with("cache/");
+            if (!cache &&
+                (slash == std::string::npos || visible_spaces.contains(name.substr(0, slash)))) {
+                visible_images.push_back(image);
+            }
+        }
+        catalog["oci"] = std::move(visible_images);
+        if (!customer_id.empty()) {
+            const ApiResult listed =
+                registry.call("list_builds", {{"customer_id", customer_id}}, context);
+            if (listed.ok) {
+                builds = listed.value.value("builds", nlohmann::json::array());
+            }
+        }
         return send_text(
             route,
             boost::http::status::ok,
-            web_ui_packages(artifacts.catalog(),
+            web_ui_packages(catalog,
                             artifacts.available(),
                             options.external_origin.empty()
                                 ? (options.public_host.empty() ? std::string()
                                                                : "https://" + options.public_host)
                                 : options.external_origin,
-                            viewer_for(context)),
+                            viewer_for(context),
+                            builds,
+                            customer_id),
             "text/html; charset=utf-8",
             "no-store");
     }

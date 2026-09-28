@@ -4854,11 +4854,13 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
 std::string web_ui_packages(const nlohmann::json& catalog,
                             bool available,
                             std::string_view origin,
-                            WebUiViewer viewer) {
+                            WebUiViewer viewer,
+                            const nlohmann::json& builds,
+                            std::string_view customer_id) {
     std::string content =
         "<p class=\"eyebrow\">Ship</p><h1>Packages</h1><p class=\"sub\">Container images, npm "
-        "packages and Python distributions published to this lake. Anyone can install them; "
-        "publishing needs the operator credential for now.</p>";
+        "packages and Python distributions published to this lake. Private images are visible "
+        "only to their space.</p>";
     if (!available) {
         content += "<div class=\"panel empty\">This lake has no registry storage configured.</div>";
         return web_ui_shell("lake — packages", "Packages", content, viewer);
@@ -4913,6 +4915,28 @@ std::string web_ui_packages(const nlohmann::json& catalog,
                                                    : "<code>" + web_ui_escape(install) + "</code>");
         }
         content += "</tbody></table></section>";
+    }
+    content += "<section class=\"panel\"><h2>Builds</h2>";
+    if (builds.empty()) {
+        content += "<p class=\"muted\">No image builds in this space.</p></section>";
+    } else {
+        content += "<table><thead><tr><th>Image</th><th>Phase</th><th>Digest</th><th>Log</th>"
+                   "</tr></thead><tbody>";
+        for (const nlohmann::json& build : builds) {
+            const std::string id = build.value("id", std::string());
+            content += std::format(
+                "<tr data-build-id=\"{}\"><td><code>{}</code></td><td class=\"build-phase\">{}"
+                "</td><td><code>{}</code></td><td><details><summary>Live log</summary>"
+                "<pre class=\"build-log\"></pre></details></td></tr>",
+                web_ui_escape(id),
+                web_ui_escape(build.value("target", std::string())),
+                web_ui_escape(build.value("phase", std::string())),
+                web_ui_escape(build.value("digest", std::string())));
+        }
+        content += "</tbody></table></section>";
+        content += std::format(
+            R"(<script>(()=>{{const customer={};for(const row of document.querySelectorAll('[data-build-id]')){{let next=1;const follow=async()=>{{const query=new URLSearchParams({{customer_id:customer,build_id:row.dataset.buildId,from_sequence:String(next),wait_ms:'25000'}});try{{const response=await fetch('/v1/receive_build_events?'+query);const envelope=await response.json();if(envelope.ok){{for(const event of envelope.value.events){{next=Math.max(next,event.sequence+1);if(event.phase)row.querySelector('.build-phase').textContent=event.phase;for(const line of event.lines||[])row.querySelector('.build-log').textContent+=line+'\n';}}next=Math.max(next,envelope.value.next_sequence||next);}}}}catch(error){{}}setTimeout(follow,250);}};follow();}}}})();</script>)",
+            nlohmann::json(std::string(customer_id)).dump());
     }
     return web_ui_shell("lake — packages", "Packages", content, viewer);
 }

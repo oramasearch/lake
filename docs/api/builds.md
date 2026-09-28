@@ -69,9 +69,10 @@ published packages remain anonymous reads.
 
 An authorized repository page posts its **Build image** action through the same `build_image`
 capability and redirects to Ship → Packages. That page lists the selected space's rows beside the
-pushed image names. `/ship/app?customer_id=<id>&app_id=<app-id>` shows an App's build history and
-queues `build_app`. Both pages long-poll `receive_build_events`, advance the retained sequence
-cursor, and append phase and log events without giving the browser bus credentials.
+pushed image names, filters images to spaces the caller can read, and hides internal cache
+namespaces. `/ship/app?customer_id=<id>&app_id=<app-id>` shows an App's build history and queues
+`build_app`. Both pages long-poll `receive_build_events`, advance the retained sequence cursor,
+and append phase and log events without giving the browser bus credentials.
 
 ## Verify and change
 
