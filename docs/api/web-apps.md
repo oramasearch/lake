@@ -16,9 +16,12 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | `deploy_app`, `rollback_app` | `app_id`, source or image | new desired deployment and generation |
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
 | `set_app_env`, `unset_app_env` | `app_id`, key; set takes value or secret_ref | scanned environment update |
+| `set_app_auth` | `app_id`, auth; public also requires `confirm_public` | lake sign-in or public access |
 | `restart_app`, `stop_app`, `start_app` | `app_id` | lifecycle intent |
 | `scale_app` | `app_id`, replicas | desired count within customer quota |
+| `set_app_zetta_binding` | `app_id`, attached | attach or detach read-only workspace access |
 | `bind_service_to_app` | `app_id`, service_id | bind a service from the same customer |
+| `unbind_service_from_app` | `app_id`, service_id | detach an existing service binding |
 | `create_service_and_bind_to_app` | `app_id`, service kind/name and optional size | create and bind in one call |
 | `app_logs` | `app_id`, optional since/limit/direction | Loki log page |
 | `receive_app_events` | `app_id`, optional from_sequence/wait_ms | ordered events with a cursor |
@@ -42,6 +45,11 @@ adds a workspace token or an opaque token Secret reference to bindings, code, or
 `auth` defaults to `lake`; names are DNS labels and hosts must be one label beneath
 `LAKE_APPS_WILDCARD`. `LAKE_APPS_PER_CUSTOMER` and `LAKE_APP_REPLICAS_PER_CUSTOMER` enforce quotas;
 zero means no configured limit.
+
+Changing `auth` to `none` requires `confirm_public: true`. Attaching Zetta grants only its fixed
+read scope. Detaching it clears the operator token hash immediately; service detach removes only
+that service from the normalized binding list. Deploy and rollback events retain their exact
+source or image input so the UI can offer history-bound rollback.
 
 ## Tokens and events
 

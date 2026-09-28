@@ -214,10 +214,13 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
                                      "set_app_env",
                                      "unset_app_env",
                                      "restart_app",
+                                     "set_app_auth",
                                      "scale_app",
                                      "stop_app",
                                      "start_app",
+                                     "set_app_zetta_binding",
                                      "bind_service_to_app",
+                                     "unbind_service_from_app",
                                      "create_service_and_bind_to_app",
                                      "publish_app_event"}) {
         ASSERT_EQ(apps.registry.find(write)->action, "write") << write;
@@ -263,6 +266,21 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     EXPECT_EQ(reference.value["secret_env_refs"]["DATABASE_URL"], "db-url");
     EXPECT_TRUE(apps.call("unset_app_env", {{"app_id", id}, {"key", "DATABASE_URL"}}).ok);
 
+    EXPECT_EQ(apps.call("set_app_auth", {{"app_id", id}, {"auth", "none"}}).error.code,
+              "invalid_input");
+    const auto public_app =
+        apps.call("set_app_auth", {{"app_id", id}, {"auth", "none"}, {"confirm_public", true}});
+    ASSERT_TRUE(public_app.ok) << public_app.error.message;
+    EXPECT_EQ(public_app.value["auth"], "none");
+    EXPECT_TRUE(apps.call("set_app_auth", {{"app_id", id}, {"auth", "lake"}}).ok);
+
+    const auto detached = apps.call("set_app_zetta_binding", {{"app_id", id}, {"attached", false}});
+    ASSERT_TRUE(detached.ok) << detached.error.message;
+    EXPECT_TRUE(detached.value["bindings"]["zetta"].is_null());
+    const auto attached = apps.call("set_app_zetta_binding", {{"app_id", id}, {"attached", true}});
+    ASSERT_TRUE(attached.ok) << attached.error.message;
+    EXPECT_EQ(attached.value["bindings"]["zetta"]["scopes"], json::array({"read"}));
+
     const auto deployed =
         apps.call("deploy_app", {{"app_id", id}, {"image", "registry.example.test/reports:v2"}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
@@ -291,6 +309,14 @@ TEST(WebApps, ServiceBindingsLogsAndLifecycleEventsCarryReferencesAndPrincipal) 
     ASSERT_EQ(bound.value["bindings"]["services"].size(), 1U);
     EXPECT_EQ(bound.value["bindings"]["services"][0], bound.value["service"]["id"]);
     EXPECT_FALSE(bound.value.dump().contains("password"));
+    const std::string service_id = bound.value["service"]["id"];
+    const auto unbound =
+        apps.call("unbind_service_from_app", {{"app_id", id}, {"service_id", service_id}});
+    ASSERT_TRUE(unbound.ok) << unbound.error.message;
+    EXPECT_TRUE(unbound.value["bindings"]["services"].empty());
+    EXPECT_EQ(apps.call("unbind_service_from_app", {{"app_id", id}, {"service_id", service_id}})
+                  .error.code,
+              "not_found");
 
     const auto logs = apps.call("app_logs", {{"app_id", id}});
     ASSERT_TRUE(logs.ok) << logs.error.message;
@@ -305,7 +331,7 @@ TEST(WebApps, ServiceBindingsLogsAndLifecycleEventsCarryReferencesAndPrincipal) 
     ASSERT_GE(received.value["events"].size(), 3U);
     EXPECT_EQ(received.value["events"][0]["type"], "create");
     EXPECT_EQ(received.value["events"].back()["type"], "rollout");
-    EXPECT_EQ(received.value["events"].back()["generation"], 2);
+    EXPECT_EQ(received.value["events"].back()["generation"], 3);
     EXPECT_EQ(received.value["events"].back()["principal"], apps.owner.taap_id);
 }
 
