@@ -1,5 +1,8 @@
 # Design and status
 
+Train → Experiments implementation, local proof and deployment acceptance are tracked separately
+in [status.md](status.md); see its [API](../api/experiments.md) and [UI](../ui/experiments.md) contracts.
+
 [overview.md](overview.md) describes Lake’s place in the product; [status.md](status.md) uses the
 implemented, exercised locally, deployed, and exercised-in-deployment vocabulary. The dated
 [production record](../deployment/production-2026-09-08.md) is the source for current deployment

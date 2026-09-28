@@ -22,6 +22,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
   test_web_apps.cpp
   test_builds.cpp
   test_streams.cpp
+  test_experiments.cpp
   test_pipeline.cpp
   test_sso.cpp
   test_webauthn.cpp
@@ -69,3 +70,7 @@ add_test(
 add_test(
   NAME lake-ui-contrast
   COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/ui/check-contrast.mjs)
+
+add_test(
+  NAME lake-experiment-charts
+  COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/experiment_charts.cjs)

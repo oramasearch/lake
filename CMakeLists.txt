@@ -38,6 +38,21 @@ set(LAKE_BUILD_REVISION "unknown" CACHE STRING "Source revision embedded in the 
 
 include(FetchContent)
 
+set(LAKE_EXPERIMENT_ASSETS
+  assets/experiments/uPlot.iife.js
+  assets/experiments/uPlot.min.css
+  assets/experiments/experiments.js
+  assets/experiments/experiments.css)
+set(LAKE_EMBEDDED_EXPERIMENTS_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/experiment_assets.cpp")
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_EXPERIMENTS_CPP}"
+  COMMAND "${CMAKE_COMMAND}"
+    "-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/assets/experiments"
+    "-DOUTPUT_FILE=${LAKE_EMBEDDED_EXPERIMENTS_CPP}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_experiments.cmake"
+  DEPENDS ${LAKE_EXPERIMENT_ASSETS} cmake/embed_experiments.cmake
+  VERBATIM)
+
 set(LAKE_FONT_FILES
   assets/fonts/ibm-plex-sans-400.woff2
   assets/fonts/ibm-plex-sans-500.woff2
@@ -161,6 +176,7 @@ add_library(lake-core STATIC
   src/control/apps.cpp
   src/control/builds.cpp
   ${LAKE_EMBEDDED_FONTS_CPP}
+  ${LAKE_EMBEDDED_EXPERIMENTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
   src/control/lake_identity.cpp
   src/control/saml.cpp
@@ -182,7 +198,9 @@ add_library(lake-core STATIC
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
   src/api/stream_capabilities.cpp
+  src/api/experiment_capabilities.cpp
   src/api/web_ui_streams.cpp
+  src/api/web_ui_experiments.cpp
   src/api/pipeline.cpp
   src/api/registry.cpp
   src/api/rest.cpp

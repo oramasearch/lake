@@ -173,6 +173,11 @@ std::string_view web_ui_asset_cache_control(std::string_view path) {
             return "public, max-age=31536000, immutable";
         }
     }
+    for (const std::string_view name : web_ui_experiment_asset_names()) {
+        if (path == web_ui_experiment_asset_url(name)) {
+            return "public, max-age=31536000, immutable";
+        }
+    }
     return "no-cache";
 }
 
@@ -266,6 +271,9 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view agents[] = {"/train/agents", "/train/agent"};
     static constexpr std::string_view data[] = {"/train/data", "/train/dataset", "/train/query"};
     static constexpr std::string_view runs[] = {"/train/runs", "/train/run"};
+    static constexpr std::string_view experiments[] = {
+        "/train/experiments", "/train/experiment", "/train/experiment/run",
+        "/train/experiments/compare"};
     static constexpr std::string_view streams[] = {"/train/streams", "/train/stream"};
     static constexpr std::string_view models[] = {"/ship/models"};
     static constexpr std::string_view indexes[] = {"/ship/indexes", "/ship/index"};
@@ -316,6 +324,8 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return data;
     if (key == "runs")
         return runs;
+    if (key == "experiments")
+        return experiments;
     if (key == "streams")
         return streams;
     if (key == "models")
@@ -457,6 +467,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Train", "/train/agents", "Agents", "agent", "agents"});
         items.push_back({"Train", "/train/data", "Data", "metering", "data"});
         items.push_back({"Train", "/train/runs", "Runs", "metering", "runs"});
+        items.push_back({"Train", "/train/experiments", "Experiments", "metering", "experiments"});
         items.push_back({"Train", "/train/streams", "Streams", "streams", "streams"});
         items.push_back({"Ship", "/ship/models", "Models", "api", "models"});
         items.push_back({"Ship", "/ship/indexes", "Search Indexes", "search", "indexes"});
@@ -4533,12 +4544,16 @@ std::string workspace_content(const WorkspacePage& page) {
                     web_ui_escape(status),
                     web_ui_escape(when(json_text(run, "created"))),
                     row_link("/train/run?" + query + "&id=" + url_component(id),
-                             status == "failed" ? "Why it failed" : "Report"));
+                             status == "failed" ? "Why it failed" : "Report") + " · " +
+                    row_link("/train/experiment/run?" + query + "&run=" + url_component(id),
+                             "Charts"));
             }
             out += "</tbody></table>";
         }
     } else if (page.section == "run") {
         const nlohmann::json run = data.value("get_run", nlohmann::json::object());
+        out += "<p>" + row_link("/train/experiment/run?" + query + "&run=" +
+            url_component(json_text(run, "id")), "Training charts") + "</p>";
         out += "<p>" + row_link("/train/streams?" + query, "Workspace streams") + "</p>";
         const std::string status = json_text(run, "status");
         out += std::format("<p>Status: <span class=\"badge\">{}</span></p>",

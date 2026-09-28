@@ -1,5 +1,12 @@
 # Tests
 
+`test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
+workspace alias checks, audit, REST/MCP parity and actual calls, hashed assets, navigation and
+control mappings. `experiment_fixture.hpp` supplies a stateful fake caller against the authorized
+engine contract and an opt-in browser fixture. `experiment_charts.cjs` tests chart transformations
+and cursors without a browser. Independent response validation also uses these fixtures. See
+[API](../docs/api/experiments.md) and [UI](../docs/ui/experiments.md) contracts.
+
 `test_streams.cpp` covers Streams space/system/creator permissions, non-consuming browse,
 retention, revisions, REST/MCP parity with one call per operation, UI control mappings and
 selected navigation. Its 1,000-topic case checks the 50-row default page, cursor and prefix

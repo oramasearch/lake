@@ -1,5 +1,9 @@
 # The `/v1` API and MCP
 
+[experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
+and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions.
+These names are distinct from the solutions holdout `get_experiment` operation.
+
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
 with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.
 Read tools advertise `readOnlyHint`; writes conservatively advertise `destructiveHint`. Streams reads

@@ -239,6 +239,13 @@ TEST_F(Streams, SpaceIsolationSystemProtectionAndSharedAgentFiltering) {
         EXPECT_FALSE(call(name, args).ok) << name;
         args["zetta"] = "workspace";
         EXPECT_FALSE(call(name, args).ok) << name << " on a reserved workspace topic";
+        for (const std::string topic : {"run-metrics.run-one", "study-events.study-one"}) {
+            args["topic"] = topic;
+            if (properties.contains("confirm_name")) {
+                args["confirm_name"] = topic;
+            }
+            EXPECT_FALSE(call(name, args).ok) << name << " on " << topic;
+        }
     }
     EXPECT_FALSE(lake::api::workspace_action_allowed("drop_topic"));
     EXPECT_FALSE(lake::api::workspace_action_allowed("publish_event"));

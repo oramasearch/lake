@@ -1,5 +1,11 @@
 # API implementation
 
+`experiment_capabilities.cpp` registers eleven space-scoped study/run operations using the
+closed contracts in `experiment_schemas.hpp`. `web_ui_experiments.cpp` is their pure page renderer;
+embedded, hashed chart assets call only registered capabilities. Workspace action aliases retain
+the same confirmation, scope and promotion checks. See [API](../../docs/api/experiments.md) and
+[UI](../../docs/ui/experiments.md) contracts.
+
 `stream_capabilities.cpp` registers the nine Streams REST/MCP operations, enforces space and
 creator policy, pages one `list_topics` result per Zetta, filters shared bus topics and proxies
 non-consuming browse through service credentials. The shared agent views use durable space tasks

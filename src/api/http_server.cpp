@@ -4523,6 +4523,11 @@ struct ApiServer::Impl {
         if (web_ui_stylesheet_url().empty()) {
             failure_reason = "could not calculate the stylesheet asset hash";
         }
+        for (const std::string_view asset : web_ui_experiment_asset_names()) {
+            if (web_ui_experiment_asset_url(asset).empty()) {
+                failure_reason = "could not calculate the experiment asset hash for " + std::string(asset);
+            }
+        }
         for (const std::string_view font : web_ui_font_names()) {
             if (web_ui_font_url(font).empty()) {
                 failure_reason = "could not calculate the font asset hash for " + std::string(font);
@@ -9474,6 +9479,78 @@ struct ApiServer::Impl {
             "no-store");
     }
 
+    boost::http::route_task serve_experiments_page(boost::http::route_params& route,
+                                                  const std::string& mode) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        ExperimentsPage page;
+        page.mode = mode;
+        if (!options.store) {
+            page.error = "The control store is unavailable.";
+            co_return co_await send_text(route, boost::http::status::service_unavailable,
+                web_ui_experiments(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
+        }
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        page.customers = std::move(selection.customers);
+        page.customer_id = std::move(selection.customer_id);
+        page.study = query_value(route, "study");
+        page.run = query_value(route, "run");
+        page.project = query_value(route, "project");
+        page.state = query_value(route, "state");
+        const auto object = options.store->find_policy_object("customer", page.customer_id);
+        if (object) {
+            const auto write = control::authorize(*options.store, context.acting_identity,
+                object->id, "write", context.authorization_cache);
+            const auto admin = control::authorize(*options.store, context.acting_identity,
+                object->id, "admin", context.authorization_cache);
+            page.can_write = context.operator_credential || (write && write->allowed);
+            page.can_promote = context.operator_credential || (admin && admin->allowed);
+        }
+        nlohmann::json input{{"customer_id", page.customer_id}};
+        std::string capability = "list_experiments";
+        if (mode == "study") {
+            capability = "get_experiment_study";
+            input["study"] = page.study;
+        } else if (mode == "run") {
+            capability = "get_run_metrics";
+            input["run"] = page.run;
+        } else if (mode == "compare") {
+            capability = "compare_runs";
+            const auto runs = query_value(route, "runs");
+            std::size_t begin = 0;
+            while (begin < runs.size()) {
+                const auto end = runs.find(',', begin);
+                page.runs.push_back(runs.substr(begin, end == std::string::npos ? end : end - begin));
+                if (end == std::string::npos) {
+                    break;
+                }
+                begin = end + 1;
+            }
+            input["runs"] = page.runs;
+        } else {
+            input["project"] = page.project;
+            input["state"] = page.state;
+        }
+        const auto result = unwrap(co_await workspace_call(capability, input, context));
+        if (!result.ok) {
+            page.error = result.error.message;
+        } else {
+            page.data = result.value;
+            if (mode == "study") {
+                const auto analysis = unwrap(co_await workspace_call("get_experiment_analysis", input, context));
+                if (analysis.ok) {
+                    page.analysis = analysis.value;
+                } else {
+                    page.error = analysis.error.message;
+                }
+            }
+        }
+        co_return co_await send_text(route, boost::http::status::ok,
+            web_ui_experiments(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
+    }
+
     boost::http::route_task serve_streams_page(boost::http::route_params& route, bool detail) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
@@ -12656,6 +12733,14 @@ struct ApiServer::Impl {
                          web_ui_asset_cache_control(path));
     }
 
+    boost::http::route_task serve_experiment_asset(boost::http::route_params& route,
+                                                  std::string_view name) {
+        co_return co_await send_text(route, boost::http::status::ok,
+            std::string(web_ui_experiment_asset(name)),
+            name.ends_with(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
+            web_ui_asset_cache_control(std::string(route.url.path())));
+    }
+
     boost::http::route_task serve_openapi(boost::http::route_params& route) {
         return send_text(route,
                          boost::http::status::ok,
@@ -13158,6 +13243,15 @@ bool ApiServer::start() {
                [&impl, stylesheet_path](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route, stylesheet_path, impl.serve_style(route));
                });
+    for (const std::string_view asset : web_ui_experiment_asset_names()) {
+        for (const auto& path : {"/assets/experiments/" + std::string(asset),
+                                 std::string(web_ui_experiment_asset_url(asset))}) {
+            router.add(http::method::get, path,
+                [&impl, asset, path](http::route_params& route) -> http::route_task {
+                    return impl.observe_request(route, path, impl.serve_experiment_asset(route, asset));
+                });
+        }
+    }
     for (const std::string_view font : web_ui_font_names()) {
         const std::string route_path = "/fonts/" + std::string(font);
         router.add(http::method::get,
@@ -14307,6 +14401,14 @@ bool ApiServer::start() {
                                                    "/workspaces/:customer_id/zetta/v1/:capability",
                                                    impl.serve_workspace_zetta(route, false));
                    });
+    }
+    for (const auto& [path, mode] : std::map<std::string, std::string>{
+             {"/train/experiments", "list"}, {"/train/experiment", "study"},
+             {"/train/experiment/run", "run"}, {"/train/experiments/compare", "compare"}}) {
+        router.add(http::method::get, path,
+            [&impl, path, mode](http::route_params& route) -> http::route_task {
+                return impl.observe_request(route, path, impl.serve_experiments_page(route, mode));
+            });
     }
     for (const std::string path : {"/train/streams", "/train/stream"}) {
         router.add(http::method::get, path,
