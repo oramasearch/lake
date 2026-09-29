@@ -27,7 +27,8 @@ bool workspace_page_path(std::string_view path) {
     }
     for (const std::string_view prefix : {"/design", "/train", "/ship", "/ask", "/workspace",
                                            "/workspaces"}) {
-        if (path == prefix || path.starts_with(std::string(prefix) + "/")) {
+        if (path == prefix || (path.starts_with(prefix) && path.size() > prefix.size() &&
+                               path[prefix.size()] == '/')) {
             return path != "/workspace/select";
         }
     }
@@ -56,51 +57,90 @@ std::string workspace_local_path(std::string_view path) {
     return std::string(id.empty() ? path : path.substr(3 + id.size()));
 }
 
+namespace {
+
+std::string workspace_document_links(std::string html, std::string_view prefix) {
+    const std::string_view input(html);
+    std::string output;
+    std::size_t copied = 0;
+    bool in_script = false;
+    // Rewrite URL attributes and inline navigation scripts, never hidden form values.
+    for (std::size_t pos = 0; pos < input.size(); ++pos) {
+        if (input[pos] == '<') {
+            if (input.substr(pos).starts_with("<script")) {
+                in_script = true;
+            } else if (input.substr(pos).starts_with("</script")) {
+                in_script = false;
+            }
+        }
+        if ((input[pos] != '\'' && input[pos] != '"') || pos + 1 == input.size() ||
+            input[pos + 1] != '/') {
+            continue;
+        }
+        const std::string_view leading = input.substr(0, pos);
+        if (!in_script && !leading.ends_with("href=") && !leading.ends_with("action=") &&
+            !leading.ends_with("src=")) {
+            continue;
+        }
+        const auto end = input.find_first_of("?\"'# <", pos + 1);
+        const auto path = input.substr(pos + 1, end == std::string_view::npos
+                                                   ? std::string_view::npos
+                                                   : end - pos - 1);
+        if (workspace_page_path(path)) {
+            if (copied == 0) {
+                output.reserve(input.size());
+            }
+            output.append(input.substr(copied, pos + 1 - copied));
+            output.append(prefix);
+            copied = pos + 1;
+        }
+    }
+    if (copied == 0) {
+        return html;
+    }
+    output.append(input.substr(copied));
+    return output;
+}
+
+std::string workspace_form_fields(std::string html, std::string_view workspace_id) {
+    const std::string_view input(html);
+    const std::string field = "<input type=\"hidden\" name=\"workspace_id\" value=\"" +
+                             std::string(workspace_id) + "\">";
+    std::string output;
+    std::size_t copied = 0;
+    std::size_t pos = 0;
+    while ((pos = input.find("<form", pos)) != std::string_view::npos) {
+        const auto open = input.find('>', pos);
+        const auto close = input.find("</form>", open);
+        if (open == std::string::npos || close == std::string::npos) {
+            break;
+        }
+        const auto body = input.substr(open + 1, close - open - 1);
+        if (!body.contains("name=\"workspace_id\"")) {
+            if (copied == 0) {
+                output.reserve(input.size());
+            }
+            output.append(input.substr(copied, open + 1 - copied));
+            output.append(field);
+            copied = open + 1;
+        }
+        pos = close + 7;
+    }
+    if (copied == 0) {
+        return html;
+    }
+    output.append(input.substr(copied));
+    return output;
+}
+
+} // namespace
+
 std::string web_ui_workspace_document(std::string html, std::string_view workspace_id) {
     if (workspace_path_id("/w/" + std::string(workspace_id) + "/").empty()) {
         return html;
     }
     const std::string prefix = "/w/" + std::string(workspace_id);
-    // Rewrite URL attributes and inline navigation scripts, never hidden form values.
-    for (std::size_t pos = 0; pos < html.size(); ++pos) {
-        if ((html[pos] != '\'' && html[pos] != '"') || pos + 1 == html.size() || html[pos + 1] != '/') {
-            continue;
-        }
-        const std::string_view leading(html.data(), pos);
-        const auto script = leading.rfind("<script");
-        const auto closed = leading.rfind("</script");
-        const bool in_script = script != std::string_view::npos &&
-            (closed == std::string_view::npos || script > closed);
-        if (!in_script && !leading.ends_with("href=") && !leading.ends_with("action=") &&
-            !leading.ends_with("src=")) {
-            continue;
-        }
-        const auto end = html.find_first_of("?\"'# <", pos + 1);
-        const std::string_view path(html.data() + pos + 1,
-            (end == std::string::npos ? html.size() : end) - pos - 1);
-        if (workspace_page_path(path)) {
-            html.insert(pos + 1, prefix);
-            pos += prefix.size();
-        }
-    }
-    const std::string field = "<input type=\"hidden\" name=\"workspace_id\" value=\"" +
-                             std::string(workspace_id) + "\">";
-    std::size_t pos = 0;
-    while ((pos = html.find("<form", pos)) != std::string::npos) {
-        const auto open = html.find('>', pos);
-        const auto close = html.find("</form>", open);
-        if (open == std::string::npos || close == std::string::npos) {
-            break;
-        }
-        const auto body = std::string_view(html).substr(open + 1, close - open - 1);
-        if (!body.contains("name=\"workspace_id\"")) {
-            html.insert(open + 1, field);
-            pos = close + field.size() + 7;
-        } else {
-            pos = close + 7;
-        }
-    }
-    return html;
+    return workspace_form_fields(workspace_document_links(std::move(html), prefix), workspace_id);
 }
 
 std::string web_ui_escape(std::string_view text) {

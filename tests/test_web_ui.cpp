@@ -56,6 +56,63 @@ TEST(WebUi, WorkspacePathOwnsNavigationAndEveryFormCarriesTheSelection) {
     EXPECT_TRUE(lake::api::workspace_path_id("/w/not-an-id/train/data").empty());
 }
 
+TEST(WebUi, WorkspaceRewritePreservesScriptsValuesAndExplicitSelections) {
+    const std::string id = "01234567-89ab-4cde-8fab-0123456789ab";
+    const std::string prefix = "/w/" + id;
+    const std::string other = "/w/abcdef01-2345-4678-9abc-def012345678/train/runs";
+    const std::string input =
+        "<script src=\"/train/client.js\">location='/train/runs?state=all#runs';</script>"
+        "<a href='/ship/models#models'>Models</a>"
+        "<a href=\"" + other + "\">Other workspace</a>"
+        "<a href=\"/workspaces\">Workspaces</a>"
+        "<a href=\"/training\">Unrelated</a>"
+        "<a href=\"https://example.test/train/runs\">External</a>"
+        "<input type=\"hidden\" value=\"/train/runs\">"
+        "<form action='/train/run'><button>Run</button></form>"
+        "<form action=\"/workspace/select\"><select name=\"workspace_id\">"
+        "<option value=\"other\">Other</option></select></form>"
+        "<form action=\"/train/run\"><input name=\"workspace_id\" value=\"other\"></form>"
+        "<script>location=\"/design/projects\";</script>"
+        "<input value='/ship/models'>";
+    const std::string expected =
+        "<script src=\"" + prefix + "/train/client.js\">location='" + prefix +
+        "/train/runs?state=all#runs';</script>"
+        "<a href='" + prefix + "/ship/models#models'>Models</a>"
+        "<a href=\"" + other + "\">Other workspace</a>"
+        "<a href=\"/workspaces\">Workspaces</a>"
+        "<a href=\"/training\">Unrelated</a>"
+        "<a href=\"https://example.test/train/runs\">External</a>"
+        "<input type=\"hidden\" value=\"/train/runs\">"
+        "<form action='" + prefix + "/train/run'>"
+        "<input type=\"hidden\" name=\"workspace_id\" value=\"" + id + "\">"
+        "<button>Run</button></form>"
+        "<form action=\"/workspace/select\"><select name=\"workspace_id\">"
+        "<option value=\"other\">Other</option></select></form>"
+        "<form action=\"" + prefix + "/train/run\">"
+        "<input name=\"workspace_id\" value=\"other\"></form>"
+        "<script>location=\"" + prefix + "/design/projects\";</script>"
+        "<input value='/ship/models'>";
+    EXPECT_EQ(lake::api::web_ui_workspace_document(input, id), expected);
+    EXPECT_EQ(lake::api::web_ui_workspace_document(expected, id), expected);
+    EXPECT_EQ(lake::api::web_ui_workspace_document(input, "invalid"), input);
+    EXPECT_EQ(lake::api::web_ui_workspace_document("<form", id), "<form");
+    EXPECT_EQ(lake::api::web_ui_workspace_document("<form>unfinished", id), "<form>unfinished");
+}
+
+TEST(WebUi, WorkspaceRewriteHandlesLargeListsWithoutDuplicatingFormFields) {
+    const std::string id = "01234567-89ab-4cde-8fab-0123456789ab";
+    std::string input = "<script>const page='/train/runs';</script>";
+    for (int row = 0; row < 2000; ++row) {
+        input += "<a href=\"/train/run?id=" + std::to_string(row) + "\">Run</a>";
+        input += "<form action=\"/train/run/delete\"><button>Delete</button></form>";
+    }
+    const std::string result = lake::api::web_ui_workspace_document(input, id);
+    EXPECT_EQ(occurrences(result, "href=\"/w/" + id + "/train/run?id="), 2000);
+    EXPECT_EQ(occurrences(result, "action=\"/w/" + id + "/train/run/delete\""), 2000);
+    EXPECT_EQ(occurrences(result, "name=\"workspace_id\""), 2000);
+    EXPECT_EQ(lake::api::web_ui_workspace_document(result, id), result);
+}
+
 TEST(WebUi, MarkdownEscapesRawHtmlAndAddsStableHeadingAnchors) {
     const std::string html = lake::api::web_ui_markdown(
         "# Overview\n\nUse `<safe>` here.\n\n## Details\n\n## Details\n\n<script>bad()</script>");
