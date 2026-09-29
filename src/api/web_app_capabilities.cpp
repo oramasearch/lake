@@ -134,7 +134,13 @@ app_host(const json& input, const std::string& name, const ApiContext& context) 
         return std::unexpected(ApiResult::failure(
             "store_unavailable", "LAKE_APPS_WILDCARD is not configured with a valid domain"));
     }
-    const std::string host = input.value("host", name + "." + wildcard);
+    // An absent, null or empty host means "the default": <name>.<wildcard>. Agents send
+    // "host": "" when the person did not ask for a specific address.
+    std::string host = name + "." + wildcard;
+    if (const auto found = input.find("host");
+        found != input.end() && found->is_string() && !found->get<std::string>().empty()) {
+        host = found->get<std::string>();
+    }
     if (!valid_domain(host) || host == wildcard || !host.ends_with("." + wildcard) ||
         host.substr(0, host.size() - wildcard.size() - 1).contains('.')) {
         return std::unexpected(ApiResult::failure(
