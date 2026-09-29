@@ -52,7 +52,7 @@ Its native verification is recorded in [build/workspace-contract-proof.md](build
 The product specification is in `oramasearch/liquid` `docs/features/18-lake-service.md`; the
 cross-repository plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
 
-[`ui/performance.md`](ui/performance.md) documents the 100 ms p95 page rule, the
+[`ui/performance.md`](ui/performance.md) documents the live 100 ms p95 rule, 80 ms regression budget, the
 `Server-Timing` response fields, and the router-derived delayed-workspace regression test.
 cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
 

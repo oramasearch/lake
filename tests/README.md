@@ -1,5 +1,13 @@
 # Tests
 
+`PagePerformance` discovers HTML pages from the production GET router and enforces p95 below
+80 ms over 20 renders at 30 ms of workspace latency, with at most two sequential rounds.
+Its populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering
+case with four repositories and 128 files. `Workspaces.Registry*` and
+`Workspaces.PipelineDefinitionCache*` cover expiry, change invalidation, input isolation,
+readiness/credential changes, errors and stale in-flight replies. Run with PostgreSQL in both
+native builds; [performance.md](../docs/ui/performance.md) explains the evidence rows.
+
 `PagePerformance.EveryRegisteredGetPageStaysUnderTheServerBudget` derives GET routes from the
 production router, renders every discovered HTML page 20 times, and enforces p95 below 100 ms.
 Its workspace fixture adds 20 ms per call and supplies high-cardinality project, run, model,

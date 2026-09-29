@@ -1,7 +1,8 @@
 # The web UI
 
-The 100 ms p95 page budget, `Server-Timing` fields, route-derived coverage, and delayed workspace
-fixture are in [performance.md](performance.md).
+The live 100 ms p95 page rule and stricter 80 ms regression budget, `Server-Timing` fields,
+route-derived coverage, registry invalidation and populated cold-start fixtures are in
+[performance.md](performance.md).
 
 Train → Experiments' ExperimentsAgent proposal, studies, run charts, comparison, local chart
 assets, accessibility and control-to-capability mappings are in
