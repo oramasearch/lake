@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `workspace_data_plane_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `repository_names_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -2058,3 +2058,18 @@ CREATE TABLE IF NOT EXISTS workspaces_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO schema_migrations (version) VALUES ('0039_workspaces') ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0040_active_repository_names: tombstoned repositories retain their historical names without
+-- reserving those names. Apps, services, stores and workspaces already limit their name indexes
+-- to live desired states.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE repositories DROP CONSTRAINT IF EXISTS repository_name_unique;
+CREATE UNIQUE INDEX IF NOT EXISTS repository_name_unique
+    ON repositories (customer_id, name) WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS repository_names_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0040_active_repository_names')
+    ON CONFLICT DO NOTHING;

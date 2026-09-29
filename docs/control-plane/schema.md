@@ -33,7 +33,7 @@ CASCADE`):
 |---|---|
 | `id uuid` | v4 |
 | `customer_id uuid NOT NULL` → `customers` | the owner; `ON DELETE CASCADE`; indexed |
-| `name varchar(256) NOT NULL` | slug in the handle format (`repository_name_format`); `UNIQUE (customer_id, name)` so the address is `<customer>/<name>` |
+| `name varchar(256) NOT NULL` | slug in the handle format (`repository_name_format`); partial-unique per customer while `deleted_at IS NULL`, so the live address is `<customer>/<name>` |
 | `description text` | default empty |
 | `visibility text` | `private` (default) or `public` (`repository_visibility_check`) |
 
@@ -79,6 +79,10 @@ constraint also accepts `organization`, between private and public. `repository_
 current repository heads. Lifecycle operations update
 the repository and its policy-object parent in one store transaction; the registry records each
 attempt in the signed audit stream.
+
+Migration `0040_active_repository_names` replaces the original table uniqueness constraint with
+`repository_name_unique` on `(customer_id, name) WHERE deleted_at IS NULL`. The retained tombstone
+keeps its historical name, but a new live repository may use that name as soon as deletion commits.
 
 ## Identity core (migration `0007_identity_core`)
 
@@ -284,8 +288,8 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`web_apps_operator_contract_guard` in the source tree), so a new migration means a new guard and the next Job re-runs the
-idempotent file, adding only what is missing. The version is a content hash of the SQL
+(`repository_names_guard` in the source tree), so a new migration means a new guard and the next
+Job re-runs the idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
 **Migrations never run in lake pods**, so the replica count cannot duplicate or race them.
@@ -328,8 +332,8 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services', '0025_service_catalog', '0034_web_apps', '0035_web_apps_operator_contract')" \
-  -c "SELECT to_regclass('web_apps_operator_contract_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services', '0025_service_catalog', '0034_web_apps', '0035_web_apps_operator_contract', '0040_active_repository_names')" \
+  -c "SELECT to_regclass('repository_names_guard')"
 ```
 
 ## Token attenuation migration
@@ -498,7 +502,20 @@ space-scoped bus views are specified in [`streams.md`](streams.md).
 IDs; no event payloads are added. Inserts require a live Zetta in the same customer and updates
 cannot change workspace/customer identity. Migration `0039_workspaces` replaces the service
 foreign keys with `workspaces(id)`, records legacy naming remaps, and adds workspace desired
-state with notifications on every change. The newest guard is `workspaces_guard`.
+state with notifications on every change. This migration's guard is `workspaces_guard`.
 See [the workspace contract](workspaces.md) for the operator handoff and migration details.
 See the [workspace data-plane design](../architecture/workspace-data-plane.md) for remediation,
 cutover, retention and the complete storage audit.
+
+## Active repository names migration
+
+`0040_active_repository_names` drops the original `repository_name_unique` table constraint and
+recreates that name as a partial unique index over `(customer_id, name) WHERE deleted_at IS NULL`.
+No backfill is required because the earlier constraint prevented conflicting historical rows.
+The migration is idempotent and records `repository_names_guard` for operator schema application.
+
+The related soft-deletion models already release names: `apps_customer_name_idx` excludes
+`desired = 'deleted'`, `services_customer_name_idx` and `stores_customer_name_idx` include only
+`desired = 'present'`, and `workspaces_name_idx` excludes `desired = 'deleted'`. Secret-version
+soft deletion is version history rather than a reusable name namespace, so its `(entry_id,
+version)` key remains unchanged.

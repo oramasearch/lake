@@ -1,14 +1,47 @@
 #include "lake/api/registry.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <exception>
+#include <print>
 
 #include "lake/audit/audit.hpp"
 #include "lake/control/store.hpp"
 #include "lake/transparency/log.hpp"
 
 namespace lake::api {
+namespace {
+
+bool contains_database_diagnostic(std::string_view message) {
+    std::string uppercase(message);
+    std::ranges::transform(uppercase, uppercase.begin(), [](unsigned char character) {
+        return static_cast<char>(std::toupper(character));
+    });
+    return uppercase.contains("ERROR:") || uppercase.contains("DETAIL:");
+}
+
+std::string product_store_message(std::string_view code) {
+    if (code == "conflict") {
+        return "the requested change conflicts with existing data";
+    }
+    if (code == "invalid_input") {
+        return "the request contains invalid data";
+    }
+    if (code == "store_unavailable") {
+        return "the control-plane store is unavailable";
+    }
+    return "the control-plane store could not complete the request";
+}
+
+void log_database_diagnostic(std::string_view code, std::string_view message) {
+    const nlohmann::json entry = {
+        {"event", "api_store_error"}, {"code", code}, {"detail", message}};
+    std::println(stderr, "{}", entry.dump());
+}
+
+} // namespace
 
 ApiResult ApiResult::success(nlohmann::json output) {
     ApiResult result;
@@ -18,6 +51,10 @@ ApiResult ApiResult::success(nlohmann::json output) {
 }
 
 ApiResult ApiResult::failure(std::string code, std::string message, std::string path) {
+    if (contains_database_diagnostic(message)) {
+        log_database_diagnostic(code, message);
+        message = product_store_message(code);
+    }
     ApiResult result;
     result.ok = false;
     result.error = ApiError{std::move(code), std::move(message), std::move(path)};

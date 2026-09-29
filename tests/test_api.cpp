@@ -2263,8 +2263,11 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
     EXPECT_EQ(repo.value["visibility"], "private");
     EXPECT_EQ(repo.value["customer_id"], cid);
 
-    EXPECT_EQ(s.call("create_repository", {{"customer_id", cid}, {"name", "liquid"}}).error.code,
-              "conflict");
+    const ApiResult duplicate =
+        s.call("create_repository", {{"customer_id", cid}, {"name", "liquid"}});
+    EXPECT_EQ(duplicate.error.code, "conflict");
+    EXPECT_EQ(duplicate.error.message, "a repository named 'liquid' already exists");
+    EXPECT_EQ(duplicate.error.path, "/name");
     EXPECT_EQ(s.call("create_repository", {{"customer_id", cid}, {"name", "Bad Name"}}).error.code,
               "invalid_input");
     EXPECT_EQ(s.call("create_repository", {{"customer_id", "nope"}, {"name", "x"}}).error.code,
@@ -2287,6 +2290,27 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
     EXPECT_EQ(none.value["items"].size(), 0u);
     EXPECT_EQ(s.call("get_repository", {{"id", repo.value["id"]}}).value["name"], "liquid");
     EXPECT_EQ(s.call("get_repository", {{"id", "missing"}}).error.code, "not_found");
+
+    const ApiResult deleted = s.call("delete_repository", {{"id", repo.value["id"]}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    const ApiResult recreated =
+        s.call("create_repository", {{"customer_id", cid}, {"name", "liquid"}});
+    ASSERT_TRUE(recreated.ok) << recreated.error.message;
+    EXPECT_EQ(recreated.value["name"], "liquid");
+    EXPECT_NE(recreated.value["id"], repo.value["id"]);
+}
+
+TEST(ApiErrors, DatabaseDiagnosticsStayOutOfErrorMessages) {
+    testing::internal::CaptureStderr();
+    const ApiResult result = ApiResult::failure(
+        "conflict",
+        "ERROR: duplicate key value violates unique constraint\nDETAIL: Key already exists");
+    const std::string log = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(result.error.message, "the requested change conflicts with existing data");
+    EXPECT_EQ(result.error.message.find("ERROR:"), std::string::npos);
+    EXPECT_EQ(result.error.message.find("DETAIL:"), std::string::npos);
+    EXPECT_NE(log.find("duplicate key value"), std::string::npos);
 }
 
 TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {

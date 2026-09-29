@@ -3217,11 +3217,19 @@ void register_repository_capabilities(Registry& registry) {
         .handler = [](const json& in, ApiContext& ctx) {
             if (!ctx.store)
                 return no_store();
-            return one_result(
-                ctx.store->create_repository(control::NewRepository{in.value("customer_id", ""),
-                                                                    in.value("name", ""),
-                                                                    in.value("description", ""),
-                                                                    in.value("visibility", "")}));
+            const std::string name = in.value("name", "");
+            auto repository = ctx.store->create_repository(
+                control::NewRepository{in.value("customer_id", ""),
+                                       name,
+                                       in.value("description", ""),
+                                       in.value("visibility", "")});
+            if (!repository && repository.error().code == "conflict") {
+                ApiResult result = from_store_error(repository.error());
+                result.error.message = "a repository named '" + name + "' already exists";
+                result.error.path = "/name";
+                return result;
+            }
+            return one_result(std::move(repository));
         }});
     registry.add(Capability{
         .name = "rename_repository",

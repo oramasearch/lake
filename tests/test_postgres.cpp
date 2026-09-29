@@ -291,6 +291,15 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     ASSERT_TRUE(repository.ok) << repository.error.message;
     ASSERT_TRUE(call("list_repositories", {{"customer_id", customer.value.at("id")}}).ok);
     ASSERT_TRUE(call("get_repository", {{"id", repository.value.at("id")}}).ok);
+    const ApiResult duplicate =
+        call("create_repository",
+             {{"customer_id", customer.value.at("id")}, {"name", "repo-" + suffix}});
+    EXPECT_EQ(duplicate.error.code, "conflict");
+    EXPECT_EQ(duplicate.error.message,
+              "a repository named 'repo-" + suffix + "' already exists");
+    EXPECT_EQ(duplicate.error.path, "/name");
+    EXPECT_EQ(duplicate.error.message.find("ERROR:"), std::string::npos);
+    EXPECT_EQ(duplicate.error.message.find("DETAIL:"), std::string::npos);
 
     const ApiResult destination_user =
         call("create_user", {{"display_name", "Repository destination"}});
@@ -315,6 +324,12 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     const std::string deletion_request = context.request_id;
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
     EXPECT_FALSE(deleted.value.at("deleted_at").is_null());
+    const ApiResult recreated =
+        call("create_repository",
+             {{"customer_id", destination.value.at("id")}, {"name", "renamed-" + suffix}});
+    ASSERT_TRUE(recreated.ok) << recreated.error.message;
+    EXPECT_NE(recreated.value.at("id"), repository.value.at("id"));
+    EXPECT_EQ(recreated.value.at("name"), "renamed-" + suffix);
     EXPECT_EQ(
         call("rename_repository", {{"id", repository.value.at("id")}, {"name", "again-" + suffix}})
             .error.code,

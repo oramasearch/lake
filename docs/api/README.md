@@ -41,6 +41,10 @@ also serialized and described by the registry. REST status by error code: `inval
 `conflict` / `unrecoverable` 409, `store_unavailable` 503, anything else 500. MCP capability
 failures are successful JSON-RPC exchanges over HTTP 200 with `isError: true` and the same
 error envelope; the advertised success `outputSchema` applies when `isError: false`.
+Database `ERROR:` and `DETAIL:` diagnostics are logged server-side and replaced before an
+`ApiResult` is constructed. Capability handlers may provide a more specific product message and
+JSON pointer, such as repository-name conflicts at `/name`; REST and MCP therefore expose the
+same actionable error without schema names, SQL text or tenant identifiers from the database.
 
 Registry input validation descends through declared object properties and array `items`, checking
 types, required fields, and `additionalProperties: false` before authorization-object resolution
