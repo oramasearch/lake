@@ -20,8 +20,10 @@ Design, Train, Ship and Ask pages use `/w/<workspace_id>/...`. The global top-ba
 the space's workspaces. Workspace paths in the table are abbreviated: prepend `/w/<workspace_id>`
 to both GET and POST routes. Old unprefixed GET routes redirect to the remembered or sole workspace;
 unprefixed mutations are refused.
-Forms, REST and MCP calls send `workspace_id` explicitly. Task/app/build events live in that
-workspace Zetta; only `agent-tasks.*` remain on the Lake bus. See the
+Forms and person-scoped REST and MCP calls send `workspace_id` explicitly. Library-agent bus and
+task-credential calls may omit it: Lake derives the immutable workspace from `agent_tasks` and
+rejects a supplied mismatch. Task/app/build events live in that workspace Zetta; only
+`agent-tasks.*` remain on the Lake bus. See the
 [workspace data-plane design and audit](docs/architecture/workspace-data-plane.md).
 
 Workspaces are explicit `workspaces` contract rows, not service aliases. `/workspaces` lists

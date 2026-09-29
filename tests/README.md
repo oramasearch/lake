@@ -155,6 +155,11 @@ masking, rollback inputs, and live app/build polling markup.
 compares the `agent_turn` OpenAPI/MCP schemas, calls both transports, then starts, edits and confirms
 the page proposal. `AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations` verifies the
 three kinds, independent topic/credential, workspace URL and confirmation-limited study actions.
+`HttpServer/HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho/*`
+claims and completes `app`, `solution:` and `experiment` tasks through the HTTP bus without a
+workspace field, publishes progress before the result, and exercises task-credential workspace
+inference through both Lake and Zetta-shaped routes. The lower-level `AgentRuns` bus case also
+pins optional filtering and rejects mismatched workspace IDs.
 
 Checkpoint-time tests cover clock rollback after restart, concurrent publication, and replicated
 time rollback. `PostgresTransparency.LiveCheckpointCarriesAuthenticatedMonotonicTime` starts

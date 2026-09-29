@@ -1,7 +1,7 @@
 # Workspaces: Design, Train and Ship on Zetta
 
 Lake's Design, Train and Ship pages delegate to workspace Zettas. A customer can have many
-workspaces; each data-plane call requires an explicit `workspace_id` (`workspaces.id`). It never
+workspaces; each data-plane call resolves an explicit `workspace_id` (`workspaces.id`). It never
 resolves a default implicitly. Zetta has no tenancy within one cluster: its list operations return
 that workspace's data. Provisioning uses workspace desired state; a missing or
 unready workspace prevents the feature, never redirects data to Lake's bus or PostgreSQL.
@@ -12,7 +12,9 @@ Page paths below have the canonical prefix `/w/<workspace_id>`. The global top-b
 lists the space's workspaces, including a sole preselected workspace, and offers New workspace.
 Switching preserves the page and filters. Old GET URLs redirect using the validated remembered
 workspace cookie or the space's only workspace; otherwise they show a selection page. Forms
-carry the ID explicitly and reject a mismatch with the URL. REST and MCP schemas require it too.
+carry the ID explicitly and reject a mismatch with the URL. Person-scoped REST and MCP schemas
+require it too. A library agent's task credential is the exception: Lake derives the workspace
+from the immutable task row when the client omits it and rejects a supplied mismatch.
 
 ## What a person sees
 
@@ -143,6 +145,11 @@ works unchanged when pointed here:
 | `GET /workspaces/<customer_id>/zetta/v1/<capability>?<input>` | An allow-listed **read**. Query values are passed as strings and the workspace coerces them by its own input schema, exactly as a direct call would |
 | `POST /workspaces/<customer_id>/zetta/v1/<capability>` | An allow-listed **action**, the JSON body as its input |
 | `GET /workspaces/<customer_id>/zetta/v1/openapi.json` | Zetta's OpenAPI document reduced to the allow-listed paths and methods, with `servers` pointing at this path. Served bare, as Zetta serves it. Also the `workspace_openapi` capability |
+
+The canonical person-facing form of these routes is prefixed by `/w/<workspace_id>`. A task
+credential may use the unprefixed form shown in the table: Lake resolves the task first, injects
+its workspace into the capability input, and advertises `workspace_id` as optional in that
+credential's OpenAPI document. A supplied path or input workspace must match the task.
 
 - **Same gate as every lake caller.** Each call goes through `workspace_query` / `workspace_act`:
   the same allow-lists (`workspace_read_allowed` / `workspace_action_allowed`), `read` or `write`

@@ -20,7 +20,9 @@ and the telemetry wrapper preserve these filters; see `docs/build/testing.md`.
 `agent_bus.hpp` is the agent bus (`docs/api/agent-bus.md`). `AgentBus` is the pub/sub interface,
 with a Zetta implementation and an in-memory one for tests. `AgentTaskBus` is lake's side of it.
 `Store::claim_agent_task`, `record_agent_task_event`, `fail_agent_task` and `stale_agent_tasks`
-back it in both stores.
+back it in both stores. Dispatch includes the task's immutable workspace for information; agent
+capability inputs may omit it. `WorkspaceService::call` always receives an explicit resolved
+workspace ID.
 
 `agent_library.hpp` registers ApplicationAgent as `agent-application` and ExperimentsAgent as
 `agent-experiments`, chat-capable services used from their Ship/Train pages and Ask Orama. Each bus

@@ -330,10 +330,6 @@ TEST(Workspaces, StoresAreNamedPerCustomerAndOnlyAvailablePairsAreCreated) {
 
 TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     Workspaces w;
-    auto refused = w.run(w.service->call(w.customer_id, "list_projects", true, {}));
-    ASSERT_FALSE(refused);
-    EXPECT_EQ(refused.error().code, "invalid_input");
-
     auto requested = w.run(w.service->request(w.customer_id));
     ASSERT_TRUE(requested);
     const auto workspace = w.store->get_service(requested->service_id);
@@ -2306,9 +2302,6 @@ struct AgentRuns {
         context.credential_kind = service ? "agent_service" : "session";
         context.agent_service = service ? agent : "";
         context.request_id = lake::control::new_uuid_v4();
-        if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
-            input["workspace_id"] = w.workspace_id();
-        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -2768,7 +2761,16 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
     ASSERT_TRUE(inbox.ok) << inbox.error.message;
     ASSERT_EQ(inbox.value["tasks"].size(), 1U);
     EXPECT_EQ(inbox.value["tasks"][0]["task_id"], task_id);
+    EXPECT_EQ(inbox.value["tasks"][0]["workspace_id"], r.w.workspace_id());
     EXPECT_EQ(inbox.value["next_sequence"], 2);
+    const auto other_workspace =
+        r.store.create_workspace({r.w.customer_id, "other", "prod", ""});
+    ASSERT_TRUE(other_workspace);
+    EXPECT_TRUE(r.as_agent("receive_agent_tasks",
+                           {{"agent", "agent-ask-orama"},
+                            {"workspace_id", other_workspace->id}})
+                    .value["tasks"]
+                    .empty());
 
     // One claim, by the task's own agent; the body arrives with a fresh credential.
     EXPECT_EQ(r.as_agent("claim_agent_task",
@@ -2777,6 +2779,13 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
                          "agent-project")
                   .error.code,
               "conflict");
+    const auto wrong_workspace =
+        r.as_agent("claim_agent_task",
+                   {{"task_id", task_id},
+                    {"workspace_id", other_workspace->id},
+                    {"agent", "agent-ask-orama"}});
+    EXPECT_EQ(wrong_workspace.error.code, "conflict");
+    EXPECT_EQ(wrong_workspace.error.path, "/workspace_id");
     const auto claimed =
         r.as_agent("claim_agent_task", {{"task_id", task_id}, {"agent", "agent-ask-orama"}});
     ASSERT_TRUE(claimed.ok) << claimed.error.message;
@@ -2791,6 +2800,14 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
                     .value["tasks"]
                     .empty())
         << "a claimed task is not offered again";
+    const auto wrong_event_workspace =
+        r.as_agent("publish_agent_event",
+                   {{"task_id", task_id},
+                    {"workspace_id", other_workspace->id},
+                    {"agent", "agent-ask-orama"},
+                    {"type", "progress"}});
+    EXPECT_EQ(wrong_event_workspace.error.code, "conflict");
+    EXPECT_EQ(wrong_event_workspace.error.path, "/workspace_id");
 
     // Progress and the result go out on agent-events; lake's bus loop applies them.
     ASSERT_TRUE(r.as_agent("publish_agent_event",

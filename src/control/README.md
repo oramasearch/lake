@@ -3,7 +3,9 @@
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly
 invalidate entries and prevent in-flight stale refills. Ownership, readiness and credentials
-are checked even on hits; mutable datasets, connections, runs and usage remain uncached.
+are checked even on hits; mutable datasets, connections, runs and usage remain uncached. Every
+call takes a workspace ID; agent-task callers derive it in the API registry before reaching this
+service, so omission cannot select a default workspace.
 See [page performance](../../docs/ui/performance.md) for limits and correctness tests.
 
 Stream ownership is persisted by both stores and bound to customer/workspace/topic; agent-task
@@ -33,7 +35,8 @@ Password Argon2 policy remains unchanged. See `docs/api/auth.md` and `docs/contr
 
 Agent tasks (lake#269) are claimed with one insert into `agent_task_status`, so exactly one claim
 wins. A finished task keeps its phase and loses its credential digest. `agent_bus.cpp` publishes
-tasks on Zetta pub/sub and applies what agents publish; `stale_agent_tasks` is what its loop
+tasks with their informational workspace ID on Zetta pub/sub and applies what agents publish;
+`stale_agent_tasks` is what its loop
 re-publishes or fails. See `docs/api/agent-bus.md`.
 
 `web_apps.cpp` defines the Ship App JSON and deterministic namespace contract. Memory and
