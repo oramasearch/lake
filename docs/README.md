@@ -5,6 +5,7 @@ to the detailed contracts and records.
 
 [control-plane/workspaces.md](control-plane/workspaces.md) defines migration 0039, workspace
 desired state, operator notifications, the schema guard and the approved dev-cluster cutover.
+Its native verification is recorded in [build/workspace-contract-proof.md](build/workspace-contract-proof.md).
 
 | Topic | Files |
 |---|---|

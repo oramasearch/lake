@@ -1,5 +1,8 @@
 # Workspace Data-plane Proof
 
+This records the initial events-first implementation. The subsequent explicit workspace-table
+correction has its own [native proof record](workspace-contract-proof.md).
+
 Native macOS verification for [lake#311](https://github.com/oramasearch/lake/issues/311).
 The [design and audit](../architecture/workspace-data-plane.md) records the implementation scope
 and every owning-repository follow-up; [navigation](../ui/workspace-selection.md) records the UI contract.
