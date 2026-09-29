@@ -11,6 +11,7 @@
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "stream_fixture.hpp"
 
 namespace {
 
@@ -35,6 +36,7 @@ struct Builds {
     std::string customer_id;
     std::string customer_name;
     std::string repository_id;
+    std::unique_ptr<lake::test::StreamWorkspace> workspace;
     lake::api::Registry registry;
     std::shared_ptr<lake::control::MemoryAgentBus> raw_bus =
         std::make_shared<lake::control::MemoryAgentBus>();
@@ -52,6 +54,7 @@ struct Builds {
         EXPECT_TRUE(customers);
         customer_id = customers->front().id;
         customer_name = customers->front().name;
+        workspace = std::make_unique<lake::test::StreamWorkspace>(store, customer_id);
         const auto repository = store->create_repository({customer_id, "source", "", "private"});
         EXPECT_TRUE(repository);
         repository_id = repository->id;
@@ -63,6 +66,7 @@ struct Builds {
         lake::api::ApiContext context;
         context.store = store.get();
         context.agent_bus = bus.get();
+        context.workspaces = workspace->service.get();
         context.internal_url = "http://lake-prod.prod.svc:80";
         context.authorized = true;
         context.session_credential = true;
@@ -81,6 +85,10 @@ struct Builds {
         if (registry.find(name)->input_schema["properties"].contains("customer_id") &&
             principal.kind != "build_events" && !input.contains("customer_id")) {
             input["customer_id"] = customer_id;
+        }
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") &&
+            !input.contains("workspace_id")) {
+            input["workspace_id"] = workspace->id;
         }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
@@ -220,6 +228,7 @@ TEST(Builds, AppBuildGeneratesAnAppRuntimeDockerfileAndAllowedDependencies) {
     Builds builds;
     lake::control::NewWebApp app;
     app.customer_id = builds.customer_id;
+    app.workspace_id = builds.workspace->id;
     app.name = "reports";
     app.mode = "runtime";
     app.source_repository = builds.repository_id;

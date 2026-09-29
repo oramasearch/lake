@@ -709,9 +709,12 @@ public:
         return call("get_agent_task", [&] { return store_->get_agent_task(id); });
     }
     control::Result<control::AgentTask> latest_agent_task(const std::string& customer_id,
-                                                          const std::string& kind) override {
+                                                          const std::string& kind,
+                                                          const std::string& workspace_id) override {
         return call("latest_agent_task",
-                    [&] { return store_->latest_agent_task(customer_id, kind); });
+                    [&] {
+                        return store_->latest_agent_task(customer_id, kind, workspace_id);
+                    });
     }
     control::Result<control::AgentTask> claim_agent_task(const std::string& id,
                                                          const std::string& agent,

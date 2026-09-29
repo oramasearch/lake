@@ -128,9 +128,9 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     // A read that hangs must not hold a page for a minute (zetta#1007: get_run_report never
     // answers); actions such as compile_intent may legitimately take longer.
     request.timeout_seconds = read ? 15 : 60;
-    // receive_events long-polls; through lake it waits at most 10 s, inside the read timeout.
-    if (capability == "receive_events" && input.value("wait_ms", 0LL) > 10'000) {
-        input["wait_ms"] = 10'000;
+    if (capability == "receive_events" || capability == "browse_topic") {
+        input["wait_ms"] = std::clamp(input.value("wait_ms", 0LL), 0LL, 30'000LL);
+        request.timeout_seconds = 40;
     }
     if (read) {
         request.method = "GET";
@@ -196,6 +196,18 @@ Result<ManagedService> WorkspaceService::service(const std::string& customer_id,
 Result<ManagedService> WorkspaceService::create_service(NewManagedService service) {
     service.max_per_customer = config_.max_per_customer;
     return store_->create_service(service);
+}
+
+Result<ManagedService> WorkspaceService::workspace(const std::string& customer_id,
+                                                   const std::string& workspace_id) {
+    if (workspace_id.empty() || workspace_slug(workspace_id).empty()) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta"});
+    }
+    auto found = service(customer_id, workspace_id);
+    if (!found || found->kind != "zetta" || found->desired != "present") {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is not a workspace Zetta in this space"});
+    }
+    return found;
 }
 
 Result<ManagedService> WorkspaceService::delete_service(const std::string& customer_id,
@@ -323,6 +335,15 @@ WorkspaceService::state(std::string customer_id) {
 }
 
 liquid::runtime::task<ZettaControlResult<WorkspaceState>>
+WorkspaceService::state(std::string customer_id, std::string workspace_id) {
+    const auto found = workspace(customer_id, workspace_id);
+    if (!found) {
+        co_return from_store<WorkspaceState>(found.error());
+    }
+    co_return state_of(customer_id, *found);
+}
+
+liquid::runtime::task<ZettaControlResult<WorkspaceState>>
 WorkspaceService::request(std::string customer_id, std::string requested_by) {
     if (workspace_slug(customer_id).empty()) {
         co_return workspace_failure<WorkspaceState>("invalid_input", "customer id is not a UUID");
@@ -361,7 +382,13 @@ WorkspaceService::withdraw(std::string customer_id) {
 
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
     std::string customer_id, std::string capability, bool read, nlohmann::json input) {
-    const Result<std::optional<ManagedService>> found = default_service(customer_id);
+    co_return workspace_failure<nlohmann::json>("invalid_input", "workspace_id is required");
+}
+
+liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
+    std::string customer_id, std::string workspace_id, std::string capability,
+    bool read, nlohmann::json input) {
+    const auto found = workspace(customer_id, workspace_id);
     if (!found) {
         co_return from_store<nlohmann::json>(found.error());
     }
@@ -372,7 +399,7 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call
                                                         ? "the workspace is still being prepared"
                                                         : "start the workspace first");
     }
-    const std::string token = connection(**found)->value("token", std::string());
+    const std::string token = connection(*found)->value("token", std::string());
     auto called = co_await caller_->call(
         workspace.endpoint, token, std::move(capability), read, std::move(input));
     if (!called) {

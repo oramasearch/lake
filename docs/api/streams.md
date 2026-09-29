@@ -30,21 +30,21 @@ in `payload`, not as an unspecified schema object.
 | `update_stream_message` | write | `update_event` |
 | `delete_stream_messages` | admin | `delete_events` |
 
-`customer_id` is the space ID. `zetta` is `workspace` or `bus`; it is not a URL or service ID.
+`customer_id` is the space ID. Required `workspace_id` is the immutable workspace service ID;
+missing, unknown or foreign IDs return `invalid_input`. `zetta` is `workspace` or `bus`, not a URL.
 `list_streams` declares candidate authorization and explicitly checks the space's read permission
 inside its handler before either Zetta is called. The other operations use registry authorization.
 `topic` accepts a concrete name with an optional `topic:` prefix. List and read responses return
 the unqualified name used by `browse_topic`; displayed names therefore never include the resource
 prefix returned by some Zetta mutations. Wildcards are refused. A
-workspace request always resolves that customer's ready workspace. Bus requests resolve app,
-build or agent-task rows and check their customer before calling Zetta; guessing another space's
-identifier returns `not_found`.
+workspace request resolves exactly that ready workspace Zetta, never a default. Bus requests
+resolve agent-task dispatch rows and check their customer before calling Zetta.
 
-The list contains only exposed topics. Bus topics are `app-events.<app-id>`,
-`build-events.<build-id>`, one space-filtered `agent-events` view, and one
-`agent-tasks.<agent>` view for each agent used by the space. The list never invents an
-`agent-turn.<task-id>` row. Agent events accept optional `task` and `agent` filters; both are
-validated against durable tasks in the selected space before the shared bus is read. Agent task
+The list contains only exposed topics. `agent-events`, `app-events.<app-id>` and
+`build-events.<build-id>` are topics on the selected workspace Zetta. The bus holds only
+`agent-tasks.<agent>` dispatch topics. The list never invents an `agent-turn.<task-id>` row.
+An optional task filter on workspace `agent-events` is checked against that task's persisted
+workspace ID. Unfiltered workspace browse needs no cross-space task filtering. Agent task
 queues filter their payload's `customer_id`. Shared subscriptions and aggregate held counts are
 hidden. Sequence numbers remain those of the source topic, so gaps are normal. The allocator
 high-water mark is not a count of a filtered view's messages. Up to 32 source pages are scanned
@@ -65,18 +65,18 @@ Raw topic writes are no longer in `workspace_act`'s allowlist.
 opaque `cursor`. The default limit is 50. Prefix filtering and paging happen in Lake, not in the
 browser or MCP client. Each request makes one `list_topics` call to the workspace Zetta and one to
 the bus Zetta, with no per-topic `get_topic` or `browse_topic` calls. Lake filters bus rows against
-the space's durable app, build and agent-task rows in one pass. Each Zetta has its own group and
+the space's durable agent-task routing rows in one pass. Each Zetta has its own group and
 error string, so an unavailable workspace does not hide accessible bus topics. `next_cursor` and
 `previous_cursor` are nullable; pass either back unchanged with the same prefix and limit.
 
 ```json
-{"customer_id":"space-id","prefix":"orders","limit":50}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","prefix":"orders","limit":50}
 ```
 ```json
 {"groups":[{"zetta":"workspace","topics":[{"topic":"orders","display_name":"orders","subscribers":1,"held_events":2,"next_sequence":3,"system":false,"counts_available":true}],"error":""},{"zetta":"bus","topics":[],"error":""}],"next_cursor":null,"previous_cursor":null,"total":1}
 ```
 
-The Agent events and Agent tasks rows set `counts_available:false`; their subscriber and held
+Only shared Agent tasks rows set `counts_available:false`; their subscriber and held
 fields are zero placeholders and the UI renders them as unavailable. This avoids scanning a
 shared topic to manufacture a space-local count.
 
@@ -84,7 +84,7 @@ shared topic to manufacture a space-local count.
 and supplies `max_events:1000` unless explicitly configured. All other defaults belong to Zetta.
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","settings":{"retention_ms":86400000,"max_events":1000,"delivery":{"guarantee":"at_least_once"}}}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","settings":{"retention_ms":86400000,"max_events":1000,"delivery":{"guarantee":"at_least_once"}}}
 ```
 
 The response has `topic`, `exposed` and normalized `settings`, for example:
@@ -97,7 +97,7 @@ The response has `topic`, `exposed` and normalized `settings`, for example:
 settings are shown in reduced form; actual responses include Zetta's normalized settings fields.
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders"}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders"}
 ```
 ```json
 {"topic":"orders","zetta":"workspace","system":false,"can_manage":true,"counts_available":true,"settings":{"retention_ms":86400000,"max_events":1000},"subscriber_count":1,"subscriptions":[{"id":1,"subscriber":"agent:consumer","positions":[1],"next_sequence":1,"lag":2,"in_flight":0,"redeliveries":0,"connected":true,"group":""}],"held_events":2,"earliest_sequence":1,"next_sequence":3}
@@ -109,7 +109,7 @@ count before applying the same patch without `dry_run`. Publication and expirati
 the count between preview and application. The real response's `trimmed` is Zetta's actual count.
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","settings":{"max_events":1},"dry_run":true}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","settings":{"max_events":1},"dry_run":true}
 ```
 ```json
 {"topic":"topic:orders","settings":{"retention_ms":86400000,"max_events":1000},"trimmed":1,"dry_run":true}
@@ -128,7 +128,7 @@ enforces its runtime mutability constraints. Exact ranges/enums are in generated
 It drops all held messages and closes subscriptions.
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","confirm_name":"orders"}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","confirm_name":"orders"}
 ```
 ```json
 {"topic":"topic:orders","exposed":true}
@@ -146,11 +146,11 @@ For a space's shared agent event view, add `task`, `agent`, or both. This is als
 for links from an agent turn:
 
 ```json
-{"customer_id":"space-id","zetta":"bus","topic":"agent-events","task":"task-id","agent":"agent-project","direction":"forward","limit":100}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"bus","topic":"agent-events","task":"task-id","agent":"agent-project","direction":"forward","limit":100}
 ```
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","from_sequence":2,"direction":"forward","limit":100,"wait_ms":10000}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","from_sequence":2,"direction":"forward","limit":100,"wait_ms":10000}
 ```
 ```json
 {"topic":"topic:orders","events":[{"sequence":2,"id":"event-2","from":"service:lake","published_at":1790000000000,"payload":"{\"status\":\"ready\"}","size":18,"encoding":"json","headers":[],"revision":1,"edited_at":null,"edited_by":""}],"earliest_sequence":1,"next_sequence":3,"next_page_sequence":null}
@@ -160,7 +160,7 @@ for links from an agent turn:
 Check `accepted`; an overflow policy may decline a valid publication.
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","payload":"{\"status\":\"ready\"}"}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","payload":"{\"status\":\"ready\"}"}
 ```
 ```json
 {"event_id":"event-2","accepted":true,"clamped":[]}
@@ -172,7 +172,7 @@ the edited payload again for subscribers that already received it, including ack
 deliveries. Pending subscribers see the replacement regardless. Sequence and event ID are stable.
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","sequence":2,"expected_revision":1,"payload":"{\"status\":\"done\"}","redeliver":false}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","sequence":2,"expected_revision":1,"payload":"{\"status\":\"done\"}","redeliver":false}
 ```
 ```json
 {"topic":"topic:orders","sequence":2,"revision":2,"edited_at":1790000001000,"edited_by":"service:lake"}
@@ -185,13 +185,13 @@ subscribers skip the removed messages, then send the returned count as `confirm_
 after that check may still affect the actual removal; the response reports the actual count.
 
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","before_sequence":3,"dry_run":true}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","before_sequence":3,"dry_run":true}
 ```
 ```json
 {"topic":"topic:orders","removed":2,"dry_run":true}
 ```
 ```json
-{"customer_id":"space-id","zetta":"workspace","topic":"orders","before_sequence":3,"confirm_count":2}
+{"customer_id":"space-id","workspace_id":"workspace-service-id","zetta":"workspace","topic":"orders","before_sequence":3,"confirm_count":2}
 ```
 ```json
 {"topic":"topic:orders","removed":2}

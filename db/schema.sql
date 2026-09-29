@@ -2,7 +2,7 @@
 --
 -- SOURCE OF TRUTH: oramasearch/lake, db/schema.sql. The operator vendors a byte-identical copy at
 -- internal/controller/assets/lake-schema.sql and applies it to each Lake's Postgres through a
--- PostgresSchema (one transaction, guarded on the `builds_guard` table, versioned by
+-- PostgresSchema (one transaction, guarded on the `workspace_data_plane_guard` table, versioned by
 -- content hash).
 -- Keep the two files identical; the operator's version string changes exactly when this does.
 --
@@ -1846,3 +1846,82 @@ CREATE TABLE IF NOT EXISTS streams_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO schema_migrations (version) VALUES ('0037_streams') ON CONFLICT DO NOTHING;
+
+-- 0038_workspace_data_plane: immutable routing, never event payloads (lake#311).
+-- Legacy assignments are recorded, including rows requiring explicit remediation.
+CREATE TABLE IF NOT EXISTS workspace_assignments (
+    object_table text NOT NULL,
+    object_id uuid NOT NULL,
+    customer_id uuid NOT NULL,
+    workspace_id uuid,
+    outcome text NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (object_table, object_id)
+);
+
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS workspace_id uuid REFERENCES services(id);
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS workspace_id uuid REFERENCES services(id);
+ALTER TABLE builds ADD COLUMN IF NOT EXISTS workspace_id uuid REFERENCES services(id);
+
+DO $$
+DECLARE
+    target_table text;
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0038_workspace_data_plane') THEN
+        FOREACH target_table IN ARRAY ARRAY['agent_tasks', 'apps', 'builds'] LOOP
+            EXECUTE format(
+                'INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+                 SELECT %L, o.id, o.customer_id, w.id,
+                        CASE WHEN w.id IS NULL THEN ''needs_selection'' ELSE ''sole_default'' END
+                 FROM %I o LEFT JOIN services w ON w.customer_id = o.customer_id
+                      AND w.kind = ''zetta'' AND w.desired = ''present'' AND w.is_default
+                      AND (SELECT count(*) FROM services s WHERE s.customer_id = o.customer_id
+                           AND s.kind = ''zetta'' AND s.desired = ''present'') = 1
+                 WHERE o.workspace_id IS NULL ON CONFLICT DO NOTHING', target_table, target_table);
+            EXECUTE format(
+                'UPDATE %I o SET workspace_id = a.workspace_id FROM workspace_assignments a
+                 WHERE a.object_table = %L AND a.object_id = o.id
+                       AND o.workspace_id IS NULL AND a.workspace_id IS NOT NULL',
+                 target_table, target_table);
+        END LOOP;
+        FOR unresolved IN SELECT * FROM workspace_assignments WHERE workspace_id IS NULL LOOP
+            RAISE WARNING 'workspace_id requires selection: table=%, object=%, customer=%',
+                unresolved.object_table, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION enforce_workspace_routing() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id OR
+           NEW.customer_id IS DISTINCT FROM OLD.customer_id THEN
+            RAISE EXCEPTION 'workspace_id and customer_id are immutable' USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF NEW.workspace_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM services WHERE id = NEW.workspace_id AND customer_id = NEW.customer_id
+            AND kind = 'zetta' AND desired = 'present'
+    ) THEN
+        RAISE EXCEPTION 'workspace_id must name a workspace Zetta in this space'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS agent_task_workspace_routing ON agent_tasks;
+CREATE TRIGGER agent_task_workspace_routing BEFORE INSERT OR UPDATE ON agent_tasks
+    FOR EACH ROW EXECUTE FUNCTION enforce_workspace_routing();
+DROP TRIGGER IF EXISTS app_workspace_routing ON apps;
+CREATE TRIGGER app_workspace_routing BEFORE INSERT OR UPDATE ON apps
+    FOR EACH ROW EXECUTE FUNCTION enforce_workspace_routing();
+DROP TRIGGER IF EXISTS build_workspace_routing ON builds;
+CREATE TRIGGER build_workspace_routing BEFORE INSERT OR UPDATE ON builds
+    FOR EACH ROW EXECUTE FUNCTION enforce_workspace_routing();
+
+CREATE TABLE IF NOT EXISTS workspace_data_plane_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0038_workspace_data_plane') ON CONFLICT DO NOTHING;

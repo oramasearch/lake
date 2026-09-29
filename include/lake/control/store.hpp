@@ -357,6 +357,7 @@ struct NewAgentCronSchedule {
 // it, then Running, and Succeeded or Failed once the agent (or lake's deadline) finishes it.
 struct AgentTask {
     std::string id, customer_id, agent, kind, conversation_id;
+    std::string workspace_id;
     nlohmann::json body = nlohmann::json::object();
     std::vector<std::string> scopes;
     int deadline_seconds = 300;
@@ -369,6 +370,7 @@ struct AgentTask {
 };
 struct AgentTaskStreamScope {
     std::string id, agent, finished_at;
+    std::string workspace_id;
 };
 // What lake's bus loop acts on: tasks nobody claimed since they were last published, and tasks
 // past their deadline (pending or running), which it fails.
@@ -946,7 +948,8 @@ public:
     // A space's newest task of one kind (a project's pipeline build is kind "build:<project>");
     // not_found when there is none.
     virtual Result<AgentTask> latest_agent_task(const std::string& customer_id,
-                                                const std::string& kind) = 0;
+                                                const std::string& kind,
+                                                const std::string& workspace_id) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
     // it and where on agent-events its events will start. Exactly one claim succeeds; another is
     // a conflict, as is a claim by a different agent.

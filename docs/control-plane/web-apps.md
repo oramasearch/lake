@@ -23,11 +23,14 @@ earlier mode and deletion values, normalizes binding JSON, and removes the super
 `app_credentials` table and its retained credentials. Apply it before deploying this binary.
 The old partial unique indexes are removed before conversion, preserving deleted rows that reuse
 a name or host, then recreated with the new deletion value.
-The deployment guard is `web_apps_operator_contract_guard`; the operator must vendor the schema.
+Migration `0038_workspace_data_plane` adds immutable `workspace_id`, required on create.
+The current deployment guard is `workspace_data_plane_guard`; the operator must vendor the schema.
+Workspace assignment and event-client cutover are tracked in
+[orama-operator#216](https://github.com/oramasearch/orama-operator/issues/216).
 
 | Columns | Writer |
 |---|---|
-| `id, customer_id, name, mode` | Lake |
+| `id, customer_id, workspace_id, name, mode` | Lake |
 | `source_repository, source_revision, source_path, source_entrypoint, image` | Lake |
 | `framework, port, replicas, host, auth` | Lake |
 | `bindings_json, env_json, secret_env_refs, desired, generation` | Lake |
@@ -68,15 +71,15 @@ and target for every call, including MCP calls sharing a context. Matching hashe
 | Purpose | Capabilities | Required target |
 |---|---|---|
 | `source` | `repository_tree`, `repository_file` | app repository and exact revision, owned by the app customer |
-| `zetta` | `workspace_query`, `workspace_sql` | app customer with the `read` binding; existing read allow-list and SQL validation apply |
-| `events` | `publish_app_event` | app ID, topic `app-events.<app>` |
+| `zetta` | `workspace_query`, `workspace_sql` | app customer and workspace with the `read` binding; existing read allow-list and SQL validation apply |
+| `events` | `publish_app_event` | app ID and workspace, topic `app-events.<app>` |
 
 All other capabilities, including public registry capabilities, are refused for app credentials.
 Ambiguous hashes are refused. Hash changes invalidate the old token on the next authentication or
 registry call. Clearing hashes revokes access until the operator registers replacement hashes;
 the operator owns generation and delivery of replacements. Unbinding revokes Zetta access even
-before the operator clears its hash. Source and Zetta access stop at deletion intent; events remain
-available during teardown and stop at `phase = Deleted`.
+before the operator clears its hash. Source and Zetta access stop at deletion intent. Deletion also
+drops the workspace event topic; later publication is refused so teardown cannot recreate it.
 
 ## Lifecycle and events
 
@@ -96,10 +99,12 @@ operator also re-lists rows every 60 seconds. Lifecycle events carry the acting 
 generation. The operator's event request is accepted directly:
 
 ```json
-{"app_id":"<app id>","event":{"phase":"Running","ready":true,"message":"available"}}
+{"app_id":"<app id>","workspace_id":"<workspace id>","event":{"phase":"Running","ready":true,"message":"available"}}
 ```
 
 The customer is resolved from the app. Authentication restricts the events bearer to that app.
+The supplied workspace must match the persisted app workspace. Events have 24-hour / 5,000-event
+retention and never use the Lake bus.
 Build Jobs belong to `spec.builds` (orama-operator#195); Lake has no `spec.apps.buildkit` setting.
 
 ## Verification and changes

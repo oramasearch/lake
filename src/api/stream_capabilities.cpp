@@ -181,7 +181,8 @@ Task proxy(ApiContext& context, const json& input, std::string capability, json 
         control::ZettaControlError{"store_unavailable", "the requested Zetta is not configured"});
     if (input.at("zetta") == "workspace" && context.workspaces) {
         result = control::settled(co_await context.workspaces->call(
-            input.at("customer_id"), std::move(capability), false, std::move(args)));
+            input.at("customer_id"), input.at("workspace_id"), std::move(capability), false,
+            std::move(args)));
     } else if (input.at("zetta") == "bus" && context.agent_bus) {
         result = control::settled(
             co_await context.agent_bus->bus().call(std::move(capability), std::move(args)));
@@ -216,48 +217,37 @@ agent_scope(ApiContext& context, const std::string& customer) {
 }
 
 bool shared_agent_topic(const std::string& name) {
-    return name == "agent-events" || name.starts_with("agent-tasks.");
+    return name.starts_with("agent-tasks.");
 }
 
 // Only identifiers resolved from this customer's durable rows may address the shared bus.
 std::expected<std::string, ApiResult> bus_topic(const json& input, ApiContext& context) {
     const std::string name = topic_name(input.at("topic"));
     const std::string customer = input.at("customer_id");
-    if (name.starts_with("app-events.")) {
-        const auto app = context.store->get_web_app(name.substr(11));
-        if (app && app->customer_id == customer) {
-            return name;
-        }
-    } else if (name.starts_with("build-events.")) {
-        const auto build = context.store->get_build(name.substr(13));
-        if (build && build->customer_id == customer) {
-            return name;
-        }
-    } else if (name == "agent-events") {
-        const auto scope = agent_scope(context, customer);
-        if (!scope) {
-            return std::unexpected(scope.error());
-        }
+    if (!name.starts_with("agent-tasks.")) {
+        return std::unexpected(ApiResult::failure("not_found", "only agent task dispatch is on the bus"));
+    }
+    const auto scope = agent_scope(context, customer);
+    if (!scope) {
+        return std::unexpected(scope.error());
+    }
+    if (scope->agents.contains(name.substr(12))) {
         return name;
-    } else if (name.starts_with("agent-tasks.")) {
-        const auto scope = agent_scope(context, customer);
-        if (!scope) {
-            return std::unexpected(scope.error());
-        }
-        if (scope->agents.contains(name.substr(12))) {
-            return name;
-        }
-    } else if (name.starts_with("agent-turn.")) {
-        const auto task = context.store->get_agent_task(name.substr(11));
-        if (task && task->customer_id == customer) {
-            return name;
-        }
     }
     return std::unexpected(ApiResult::failure("not_found", "no such stream in this space"));
 }
 
 Task browse(ApiContext& context, const json& input) {
     const std::string requested = topic_name(input.at("topic"));
+    const std::string selected_task = input.value("task", "");
+    const std::string selected_agent = input.value("agent", "");
+    if (input.at("zetta") == "workspace" && requested == "agent-events" && !selected_task.empty()) {
+        const auto task = context.store->get_agent_task(selected_task);
+        if (!task || task->customer_id != input.at("customer_id").get<std::string>() ||
+            task->workspace_id != input.at("workspace_id").get<std::string>()) {
+            co_return ApiResult::failure("not_found", "no such task in this workspace");
+        }
+    }
     json args = {{"topic", requested},
                  {"direction", input.value("direction", "backward")},
                  {"limit", input.value("limit", 100)}, {"wait_ms", input.value("wait_ms", 0)}};
@@ -309,6 +299,15 @@ Task browse(ApiContext& context, const json& input) {
         }
         if (!shared) {
             value["topic"] = requested;
+            if (requested == "agent-events" && (!selected_task.empty() || !selected_agent.empty())) {
+                auto& rows = value["events"].get_ref<json::array_t&>();
+                std::erase_if(rows, [&](const json& event) {
+                    const auto payload = json::parse(event.at("payload").get<std::string>(), nullptr, false);
+                    return !payload.is_object() ||
+                        (!selected_task.empty() && payload.value("task_id", "") != selected_task) ||
+                        (!selected_agent.empty() && payload.value("agent", "") != selected_agent);
+                });
+            }
             co_return ApiResult::success(std::move(value));
         }
         for (const auto& event : batch) {
@@ -353,7 +352,7 @@ owner_key(ApiContext& context, const json& input) {
             ApiResult::failure("store_unavailable", "workspace unavailable"));
     }
     const auto state = control::settled(
-        co_await context.workspaces->state(input.at("customer_id")));
+        co_await context.workspaces->state(input.at("customer_id"), input.at("workspace_id")));
     if (!state || !state->ready()) {
         co_return std::expected<control::StreamOwner, ApiResult>(std::unexpect,
             ApiResult::failure("store_unavailable", "workspace is not ready"));
@@ -434,27 +433,10 @@ Task list(ApiContext& context, const json& input) {
     }
     const std::string customer = input.at("customer_id");
     const std::string prefix = input.value("prefix", "");
-    const auto apps = context.store->list_web_apps(customer);
-    if (!apps) {
-        co_return ApiResult::failure(apps.error().code, apps.error().message);
-    }
-    const auto builds = context.store->list_builds(customer);
-    if (!builds) {
-        co_return ApiResult::failure(builds.error().code, builds.error().message);
-    }
     const auto agents = agent_scope(context, customer);
     if (!agents) {
         co_return agents.error();
     }
-    std::set<std::string> app_topics;
-    std::set<std::string> build_topics;
-    for (const control::WebApp& app : *apps) {
-        app_topics.insert("app-events." + app.id);
-    }
-    for (const control::Build& build : *builds) {
-        build_topics.insert("build-events." + build.id);
-    }
-
     json unpaged = json::array();
     for (const std::string zetta : {"workspace", "bus"}) {
         json target = input;
@@ -473,17 +455,9 @@ Task list(ApiContext& context, const json& input) {
                 bool allowed = zetta == "workspace";
                 bool counts_available = true;
                 if (zetta == "bus") {
-                    allowed = app_topics.contains(name) || build_topics.contains(name) ||
-                              name == "agent-events";
+                    allowed = false;
                     if (name.starts_with("agent-tasks.")) {
                         allowed = agents->agents.contains(name.substr(12));
-                    } else if (name.starts_with("agent-turn.")) {
-                        const auto task = agents->tasks.find(name.substr(11));
-                        allowed = task != agents->tasks.end();
-                        if (allowed && prefix.empty() && !task->second.finished_at.empty() &&
-                            row.value("held_events", std::uint64_t{0}) == 0) {
-                            allowed = false;
-                        }
                     }
                     counts_available = !shared_agent_topic(name);
                 }
@@ -608,7 +582,7 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
         co_return ApiResult::failure("unauthorized", "only the topic creator may change this stream");
     }
     json args = input;
-    for (const auto* field : {"customer_id", "zetta", "dry_run", "confirm_name", "confirm_count"}) {
+    for (const auto* field : {"customer_id", "workspace_id", "zetta", "dry_run", "confirm_name", "confirm_count"}) {
         args.erase(field);
     }
     args["topic"] = topic;
@@ -696,6 +670,8 @@ void add(Registry& registry, std::string name, json properties, json required, j
          std::string permission) {
     properties["customer_id"] = text();
     required.push_back("customer_id");
+    properties["workspace_id"] = text();
+    required.push_back("workspace_id");
     if (name != "list_streams") {
         properties["zetta"] = choice({"workspace", "bus"});
         properties["topic"] = text();

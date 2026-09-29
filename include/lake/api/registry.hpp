@@ -106,6 +106,9 @@ struct ApiContext {
     std::string request_id;
     std::string request_path;  // the page route, for web UI navigation; never used to authorize
     std::string request_query; // its query string, for the same; never used to authorize
+    std::string workspace_id; // explicitly supplied by the capability or workspace URL
+    std::string path_workspace_id; // immutable selection from /w/<workspace>/...
+    std::string remembered_workspace_id; // UI navigation only; never a capability default
     std::string authentication_method;
     std::string device;
     std::string credential_device_id;

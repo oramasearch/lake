@@ -260,15 +260,16 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         http.call(tool.at("name"), json::object(), false);
     }
     http.call("server_info");
-    for (const auto& [name, input] : lake::test::experiment_calls(customer.id)) {
+    for (const auto& [name, input] : lake::test::experiment_calls(customer.id, experiments.id)) {
         http.call(name, input);
         const auto [status, body] = http.request("POST", "/v1/" + name, input);
         EXPECT_EQ(status, 200U);
         http.document["rest"].push_back({{"name", name}, {"status", status}, {"body", body}});
     }
-    json stream{{"customer_id", customer.id}, {"zetta", "workspace"}, {"topic", "schema-orders"}};
+    json stream{{"customer_id", customer.id}, {"workspace_id", experiments.id},
+                {"zetta", "workspace"}, {"topic", "schema-orders"}};
     http.call("create_stream", stream);
-    http.call("list_streams", {{"customer_id", customer.id}});
+    http.call("list_streams", {{"customer_id", customer.id}, {"workspace_id", experiments.id}});
     http.call("get_stream", stream);
     http.call("browse_stream", stream);
     auto stream_publish = stream;

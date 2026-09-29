@@ -6,6 +6,12 @@ identity pools remain a separate entity in [apps.md](apps.md). The authoritative
 
 ## Customer capabilities
 
+Every app capability requires `workspace_id` (`services.id` of its workspace Zetta), including
+event publication by the operator. Creates persist it immutably; omitted, unknown or foreign
+IDs return `invalid_input`. There is no default-workspace or shared-bus fallback. App events use
+the workspace's `app-events.<id>` with 24-hour/5,000-event retention; deletion drops the topic,
+and scheduled cleanup removes orphaned topics. App tokens cannot address another workspace.
+
 REST and MCP expose the same registry, customer policy and signed audit records. Reads advertise
 `x-lake-action: read`; mutations advertise `x-lake-action: write`.
 

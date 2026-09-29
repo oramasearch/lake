@@ -112,6 +112,9 @@ public:
     // not_found.
     Result<std::vector<ManagedService>> services(const std::string& customer_id);
     Result<ManagedService> service(const std::string& customer_id, const std::string& service_id);
+    // Explicit workspace routing. Missing, foreign, non-Zetta and withdrawn IDs are invalid.
+    Result<ManagedService> workspace(const std::string& customer_id,
+                                     const std::string& workspace_id);
     Result<ManagedService> create_service(NewManagedService service);
     Result<ManagedService> delete_service(const std::string& customer_id,
                                           const std::string& service_id);
@@ -133,6 +136,8 @@ public:
 
     // The workspace: the default Zetta service.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> state(std::string customer_id);
+    liquid::runtime::task<ZettaControlResult<WorkspaceState>>
+    state(std::string customer_id, std::string workspace_id);
     // Creates the default Zetta service; asking again for an existing one is harmless.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>>
     request(std::string customer_id, std::string requested_by = {});
@@ -142,6 +147,9 @@ public:
     // Calls `capability` on the customer's own cluster. Refuses when the workspace is not ready.
     liquid::runtime::task<ZettaControlResult<nlohmann::json>>
     call(std::string customer_id, std::string capability, bool read, nlohmann::json input);
+    liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+    call(std::string customer_id, std::string workspace_id, std::string capability,
+         bool read, nlohmann::json input);
 
 private:
     WorkspaceState state_of(const std::string& customer_id,

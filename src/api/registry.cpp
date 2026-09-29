@@ -192,6 +192,7 @@ authorize_app_token(const Capability& entry, const nlohmann::json& input, ApiCon
         }
     } else if (context.credential_kind == "app_zetta") {
         if (app->desired == "deleted" ||
+            input.value("workspace_id", "") != app->workspace_id ||
             (entry.name != "workspace_query" && entry.name != "workspace_sql") ||
             input.value("customer_id", "") != app->customer_id ||
             app->bindings.value("zetta", nlohmann::json()) !=
@@ -200,6 +201,7 @@ authorize_app_token(const Capability& entry, const nlohmann::json& input, ApiCon
         }
     } else if (context.credential_kind == "app_events") {
         if (entry.name != "publish_app_event" || input.value("app_id", "") != app->id ||
+            input.value("workspace_id", "") != app->workspace_id ||
             (input.contains("customer_id") && input.value("customer_id", "") != app->customer_id)) {
             return refused();
         }
@@ -237,6 +239,7 @@ authorize_build_token(const Capability& entry, const nlohmann::json& input, ApiC
         }
     } else if (context.credential_kind == "build_events") {
         if (entry.name != "publish_build_event" || input.value("build_id", "") != build->id ||
+            input.value("workspace_id", "") != build->workspace_id ||
             (input.contains("customer_id") &&
              input.value("customer_id", "") != build->customer_id)) {
             return refused();
@@ -259,6 +262,10 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     context.audit_details = nlohmann::json::object();
     CallState state{.capability = std::move(capability)};
     const Capability& entry = *state.capability;
+    if (input.contains("workspace_id")) {
+        context.workspace_id = input.at("workspace_id").is_string()
+            ? input.at("workspace_id").get<std::string>() : std::string();
+    }
     if (entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) {
         state.result = ApiResult::failure("unauthorized",
                                           "a valid session or operator credential is required");
@@ -312,6 +319,27 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
                                                           entry.action + " " + entry.object);
                     state.proceed = false;
                 }
+            }
+        }
+    }
+    if (state.proceed && input.contains("workspace_id")) {
+        const auto workspace = context.store
+            ? context.store->get_service(context.workspace_id)
+            : control::Result<control::ManagedService>(std::unexpect,
+                  control::StoreError{"invalid_input", "workspace_id is unknown"});
+        if (!workspace || workspace->kind != "zetta" || workspace->desired != "present" ||
+            (input.contains("customer_id") && input.at("customer_id") != workspace->customer_id) ||
+            (!context.path_workspace_id.empty() && context.workspace_id != context.path_workspace_id)) {
+            state.result = ApiResult::failure("invalid_input",
+                "workspace_id must name a workspace Zetta in this space", "/workspace_id");
+            state.proceed = false;
+        }
+        if (state.proceed && context.credential_kind == "agent_task" &&
+            context.credential_session_id.starts_with("task:")) {
+            const auto task = context.store->get_agent_task(context.credential_session_id.substr(5));
+            if (!task || task->workspace_id != context.workspace_id) {
+                state.result = ApiResult::failure("unauthorized", "task credential belongs to another workspace");
+                state.proceed = false;
             }
         }
     }

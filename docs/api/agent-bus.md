@@ -8,27 +8,29 @@ the Ask Orama, Agent Factory, Discover and pipeline tests in `tests/test_http_se
 **No lake page or capability waits on a library agent inside an HTTP request.** Lake and the
 library agents (Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest,
 AgentCreator) talk over
-[Zetta's pub/sub](https://github.com/oramasearch/zetta/tree/dev/docs/pubsub) on **lake's own Zetta**:
-the Lake's `spec.zetta` cluster, reached as `LAKE_DATA_PLANE_URL` with `LAKE_DATA_PLANE_TOKEN`.
+[Zetta's pub/sub](https://github.com/oramasearch/zetta/tree/dev/docs/pubsub). Dispatch uses Lake's
+`spec.zetta` cluster (`LAKE_DATA_PLANE_URL` and `LAKE_DATA_PLANE_TOKEN`); events use the task's
+explicit workspace Zetta. See the [workspace data-plane design](../architecture/workspace-data-plane.md).
 
 | Topic | Published by | Payload (JSON; the correlation id is the task id) |
 |---|---|---|
-| `topic:agent-tasks.<agent>` | lake, when a turn is asked | `{task_id, customer_id, agent, kind}` |
-| `topic:agent-events` | the agent, through lake | `{task_id, agent, type, message, result}`; `type` is `progress`, `result` or `failed` |
+| Lake bus `topic:agent-tasks.<agent>` | lake, when a turn is asked | `{task_id, customer_id, agent, kind}` |
+| Workspace `topic:agent-events` | the agent, through lake | `{task_id, agent, type, message, result}`; `type` is `progress`, `result` or `failed` |
 
-Lake creates both (exposed) when it starts: one `agent-tasks.<agent>` topic per agent in
-`LAKE_AGENT_ENDPOINTS`.
+Lake creates exposed dispatch topics at startup with one-hour/10,000-event retention. Workspace
+event topics are created lazily with 24-hour/10,000-event retention. Existing managed topics have
+their mutable retention settings reconciled. The bus cleanup logs obsolete exposed topics before
+dropping them; only configured `agent-tasks.*` remain. This is a cutover, not dual publication.
 
-There is no topic per turn. Streams presents one space-filtered Agent events row and one Agent
-tasks row per agent used by that space. Any Lake agent-bus producer which creates a temporary
-turn-specific topic owns its cleanup and must drop it after the task is finished and the topic
-holds no events; finished empty topics must not accumulate on the bus.
+There is no topic per turn. Streams lists the selected workspace's real topics and the space's
+per-agent task rows. Workspace event browsing does not filter other spaces' task IDs: other
+workspaces' events are stored on different Zettas.
 
 ## A turn, end to end
 
 1. `agent_turn` (or a page: Ask Orama, the Agent Factory, Design → Opportunities, the pipeline's
    ask box, Ship → Apps or Train → Experiments) writes the task to `agent_tasks` (migration
-   `0032_agent_tasks`), publishes it on the agent's topic and answers
+   `0032_agent_tasks`, immutable `workspace_id` added by `0038_workspace_data_plane`), publishes it on the agent's topic and answers
    `{task_id, status: pending}` at once.
 2. The agent's service long-polls `receive_agent_tasks`, then calls `claim_agent_task`. **Exactly one
    claim succeeds.** Lake generates the task's credential, `lat.<task id>.<secret>`, stores only its
@@ -37,15 +39,20 @@ holds no events; finished empty topics must not accumulate on the bus.
    with the task's scopes, until the task finishes.
 3. The agent does the work and reports with `publish_agent_event`: `progress` messages while it
    works, then its `result` (its whole answer, `{ok, result, …}`) or `failed`.
-4. Lake's bus loop (a thread in every lake replica) long-polls `agent-events` and applies each event
-   to `agent_task_status`. Applying one twice changes nothing, and a finished task stays finished.
+4. Lake publishes directly to that workspace and applies accepted progress to `agent_task_status`.
+   A finished task stays finished. Moving remaining task bodies/results out of the control store
+   is tracked in the architecture audit; no new PostgreSQL event storage is introduced here.
    `get_agent_task` and the pages read the task from there.
 
+The dispatch recovery loop runs separately from HTTP requests. It republishes unclaimed tasks
+and expires overdue tasks; it never polls a Lake-bus event topic. Task credentials cannot select
+another workspace, even when the same customer owns both workspaces.
+
 Anyone who may read a task can follow it live with `receive_agent_events`. Ask Orama uses it to
-wait on a subagent it delegated to. Following a task reads `agent-events` from where the task's own
-events start, never from the topic's beginning: when an agent claims a task, lake records the
-sequence its bus loop has reached (`agent_task_status.events_from`, migration 0033), and every event
-the task publishes comes after it (lake#275).
+wait on a subagent it delegated to. Following a task reads retained events in its workspace and
+selects its correlation ID. Cursors belong to that workspace topic. Task creates require
+`workspace_id`; missing, unknown or foreign IDs return `invalid_input`. Claim replies include the
+persisted ID in the envelope and body. Event reads/publication must supply the same ID.
 
 **Nothing secret is on the bus.** Topics carry task ids only. The body travels in the answer to a
 claim, and the credential is handed over once and never stored.
@@ -56,8 +63,8 @@ claim, and the credential is handed over once and never stored.
 |---|---|---|---|
 | `receive_agent_tasks {agent, from_sequence?, wait_ms?}` | read | that library agent | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; `next_sequence` continues |
 | `claim_agent_task {task_id, agent}` | action | that library agent | take the task; the body with its credential. A second claim, or a claim by another agent, is a `conflict` |
-| `publish_agent_event {task_id, agent, type, message?, result?}` | action | that library agent | publish on `agent-events`, only for a task that agent claimed and that has not finished |
-| `receive_agent_events {customer_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | the task's events from `from_sequence` (never before the task's own start), and the task as it stands |
+| `publish_agent_event {workspace_id, task_id, agent, type, message?, result?}` | action | that library agent | publish on the task workspace's `agent-events`, only for a claimed, unfinished task |
+| `receive_agent_events {customer_id, workspace_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | retained task events and current task state |
 
 **Each library agent has its own bus credential.** The operator keeps one Secret,
 `lake-<name>-agent-bus`, with a random token per library agent. It mounts the whole Secret into
@@ -79,7 +86,10 @@ workspace `create_study` and its backing `start_study` capability in addition to
 
 The service token (`LAKE_AGENT_SERVICE_TOKEN`) is never a bus credential: user-created agents on
 agent-runtime hold it too, and customer code must not be able to take another person's task. Long
-polls wait at most 10 seconds (`wait_ms`).
+polls accept up to 60 seconds (`wait_ms`), but the authorized upstream currently caps each receive
+at 30 seconds; Lake clamps accordingly and allows a 40-second transport timeout. Runtime idle
+backoff is required until [Zetta's longer poll](https://github.com/oramasearch/zetta/issues/1174)
+lands. The at-most-one-receive-per-minute deployment acceptance is not claimed by this PR.
 
 ## What the bus loses, the store recovers
 
@@ -95,11 +105,9 @@ So the truth is the store, and every 15 seconds lake's bus loop:
 
 A customer's workspace Zetta has pub/sub too, and it is reachable through lake like the rest of
 the workspace: `list_topics` and `receive_events` through `workspace_query` (or
-`GET /workspaces/<customer>/zetta/v1/…`). Only exposed topics are reachable; a `receive_events`
-long poll waits at most 10 seconds. Topic/message writes use the dedicated [Streams](streams.md)
-capabilities, not `workspace_act`. Streams browses without consuming and adds space-scoped
-app/build topics and space-filtered views of the shared agent topics; the raw global topics remain
-private.
+`GET /w/<workspace_id>/workspaces/<customer>/zetta/v1/…`). Only exposed topics are reachable;
+topic/message writes use the dedicated [Streams](streams.md) capabilities, not `workspace_act`.
+Streams browses without consuming. App/build events are workspace topics, not bus topics.
 
 ## Configuration
 

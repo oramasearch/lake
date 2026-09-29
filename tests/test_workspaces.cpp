@@ -25,6 +25,7 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "experiment_fixture.hpp"
 #include "temporary_directory.hpp"
+#include "stream_fixture.hpp"
 
 namespace {
 
@@ -41,6 +42,7 @@ public:
     json value = json::object();
     std::map<std::string, json> answers; // per capability, when set; else `value`
     std::vector<std::pair<std::string, json>> calls;
+    lake::test::StreamCaller topics;
 
     liquid::runtime::task<ZettaControlResult<json>> call(std::string called_url,
                                                          std::string called_token,
@@ -53,6 +55,10 @@ public:
         read = called_read;
         input = std::move(called_input);
         calls.emplace_back(capability, input);
+        if (capability == "create_topic" || capability == "update_topic" ||
+            capability == "publish_event" || capability == "receive_events") {
+            co_return lake::control::settled(co_await topics.call(url, token, capability, read, input));
+        }
         const auto answer = answers.find(capability);
         co_return ZettaControlResult<json>(answer == answers.end() ? value : answer->second);
     }
@@ -78,6 +84,16 @@ struct Workspaces {
     std::shared_ptr<FakeCaller> caller = std::make_shared<FakeCaller>();
     std::shared_ptr<lake::control::WorkspaceService> service;
     std::string customer_id, secret;
+
+    std::string workspace_id() const {
+        const auto services = store->list_services(customer_id);
+        for (const auto& workspace : *services) {
+            if (workspace.kind == "zetta" && workspace.desired == "present" && workspace.is_default) {
+                return workspace.id;
+            }
+        }
+        return {};
+    }
 
     explicit Workspaces(std::size_t limit = 5) {
         std::filesystem::create_directories(dir);
@@ -259,7 +275,7 @@ TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     Workspaces w;
     auto refused = w.run(w.service->call(w.customer_id, "list_projects", true, {}));
     ASSERT_FALSE(refused);
-    EXPECT_EQ(refused.error().code, "workspace_not_ready");
+    EXPECT_EQ(refused.error().code, "invalid_input");
 
     auto requested = w.run(w.service->request(w.customer_id));
     ASSERT_TRUE(requested);
@@ -269,7 +285,7 @@ TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     w.deliver(*workspace, {{"kind", "zetta"}, {"token", "workspace-admin-token"}});
     w.caller->value = {{"projects", json::array({"retention"})}};
     auto called =
-        w.run(w.service->call(w.customer_id, "get_project", true, {{"name", "retention"}}));
+        w.run(w.service->call(w.customer_id, workspace->id, "get_project", true, {{"name", "retention"}}));
     ASSERT_TRUE(called);
     EXPECT_EQ((*called)["projects"][0], "retention");
     EXPECT_EQ(w.caller->url, "http://prod-ws-own-zetta-client.lake.svc.cluster.local:4800");
@@ -301,6 +317,9 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
             context.acting_user_id = principal.user_id;
             context.acting_identity = principal.taap_id;
             context.request_id = lake::control::new_uuid_v4();
+            if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
+                input["workspace_id"] = w.workspace_id();
+            }
             auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
             EXPECT_TRUE(completed);
             return std::move(*completed);
@@ -485,6 +504,9 @@ TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
             context.acting_user_id = principal.user_id;
             context.acting_identity = principal.taap_id;
             context.request_id = lake::control::new_uuid_v4();
+            if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
+                input["workspace_id"] = w.workspace_id();
+            }
             auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
             EXPECT_TRUE(completed);
             return std::move(*completed);
@@ -671,7 +693,8 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
     std::string html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("Start Your Workspace"), std::string::npos);
     EXPECT_NE(html.find("action=\"/workspace/start\""), std::string::npos);
-    EXPECT_NE(html.find("grand-lantern-42 (your personal space)"), std::string::npos);
+    EXPECT_EQ(html.find("<select name=\"customer_id\">"), std::string::npos)
+        << "workspace pages use the global top-bar selector";
     EXPECT_NE(html.find("<p class=\"eyebrow\">Design</p>"), std::string::npos);
 
     page.state = {{"requested", true}, {"phase", "Provisioning"}, {"ready", false}};
@@ -967,6 +990,7 @@ TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {
         context.request_id = lake::control::new_uuid_v4();
         input["customer_id"] = w.customer_id;
         input["project"] = "retention";
+        input["workspace_id"] = w.workspace_id();
         input["graph"] = "churn";
         auto completed =
             liquid::runtime::block_on(registry.call_async("edit_pipeline", input, context));
@@ -1156,6 +1180,7 @@ TEST(Workspaces, SearchIndexAnswersOnlyForAPublishedIndex) {
         context.acting_identity = principal->taap_id;
         context.request_id = lake::control::new_uuid_v4();
         json input{{"customer_id", w.customer_id}, {"index", "i-1"}, {"query", "renewal"}};
+        input["workspace_id"] = w.workspace_id();
         input.update(extra);
         auto completed =
             liquid::runtime::block_on(registry.call_async("search_index", input, context));
@@ -1201,6 +1226,7 @@ TEST(Workspaces, PredictAnswersOnlyThroughAPublishedModel) {
         context.acting_identity = principal->taap_id;
         context.request_id = lake::control::new_uuid_v4();
         json input{{"customer_id", w.customer_id},
+                   {"workspace_id", w.workspace_id()},
                    {"model", "m-1"},
                    {"rows", json::array({{{"support_tickets", 11}}})}};
         auto completed = liquid::runtime::block_on(registry.call_async("predict", input, context));
@@ -1371,7 +1397,8 @@ TEST(Workspaces, ConnectServiceFillsTheConnectionFromTheServiceItself) {
         context.request_id = lake::control::new_uuid_v4();
         auto completed = liquid::runtime::block_on(
             registry.call_async("connect_service",
-                                {{"customer_id", customer_id}, {"service_id", service_id}},
+                                {{"customer_id", customer_id}, {"workspace_id", w.workspace_id()},
+                                 {"service_id", service_id}},
                                 context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -1522,6 +1549,9 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
         if (name != "list_service_kinds") {
             arguments["customer_id"] = w.customer_id;
         }
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id")) {
+            arguments["workspace_id"] = w.workspace_id();
+        }
         const auto response = liquid::runtime::block_on(
             lake::api::mcp_dispatch_async(registry,
                                           {{"jsonrpc", "2.0"},
@@ -1582,7 +1612,8 @@ TEST(Workspaces, WorkspaceSqlRunsOnlyOneReadOnlyQuery) {
         context.acting_identity = principal->taap_id;
         context.request_id = lake::control::new_uuid_v4();
         auto completed = liquid::runtime::block_on(registry.call_async(
-            "workspace_sql", {{"customer_id", w.customer_id}, {"statement", statement}}, context));
+            "workspace_sql", {{"customer_id", w.customer_id}, {"workspace_id", w.workspace_id()},
+                              {"statement", statement}}, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
     };
@@ -1631,6 +1662,9 @@ TEST(Workspaces, ApplicationAgentDatasetToolsUseWorkspaceDatasetIds) {
         context.scopes = principal->scopes;
         context.request_id = lake::control::new_uuid_v4();
         input["customer_id"] = w.customer_id;
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
+            input["workspace_id"] = w.workspace_id();
+        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -1764,6 +1798,9 @@ TEST(Workspaces, AgentCallsAreAllowListedAndChatIsAWriteZettaTakesWithGet) {
         context.acting_user_id = principal->user_id;
         context.acting_identity = principal->taap_id;
         context.request_id = lake::control::new_uuid_v4();
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
+            input["workspace_id"] = w.workspace_id();
+        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -2002,6 +2039,9 @@ struct AgentRuns {
             capability->input_schema.value("properties", json::object()).contains("customer_id")) {
             input["customer_id"] = w.customer_id;
         }
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
+            input["workspace_id"] = w.workspace_id();
+        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -2036,6 +2076,9 @@ struct AgentRuns {
             !input.contains("customer_id")) {
             input["customer_id"] = w.customer_id;
         }
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
+            input["workspace_id"] = w.workspace_id();
+        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -2054,6 +2097,9 @@ struct AgentRuns {
         context.credential_kind = service ? "agent_service" : "session";
         context.agent_service = service ? agent : "";
         context.request_id = lake::control::new_uuid_v4();
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") && !input.contains("workspace_id")) {
+            input["workspace_id"] = w.workspace_id();
+        }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
@@ -2542,7 +2588,7 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
                             {"type", "progress"},
                             {"message", "Reading your datasets"}})
                     .ok);
-    EXPECT_EQ(r.pump(), 1U);
+    EXPECT_EQ(r.pump(), 0U);
     const auto live = r.call("receive_agent_events", {{"task_id", task_id}});
     ASSERT_TRUE(live.ok) << live.error.message;
     ASSERT_EQ(live.value["events"].size(), 1U);
@@ -2562,7 +2608,7 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
                             {"type", "result"},
                             {"result", {{"ok", true}, {"reply", "hello"}}}})
                     .ok);
-    EXPECT_EQ(r.pump(), 1U);
+    EXPECT_EQ(r.pump(), 0U);
     const auto done = r.call("get_agent_task", {{"task_id", task_id}});
     EXPECT_EQ(done.value["status"], "succeeded");
     EXPECT_EQ(done.value["answer"]["reply"], "hello");
@@ -2583,7 +2629,7 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
     const std::string second_id = second.value["task_id"];
     ASSERT_TRUE(r.as_agent("claim_agent_task", {{"task_id", second_id}, {"agent", "agent-ask-orama"}})
                     .ok);
-    EXPECT_EQ(r.store.get_agent_task(second_id)->events_from, 3U)
+    EXPECT_EQ(r.store.get_agent_task(second_id)->events_from, 1U)
         << "two events of the first task were read";
     ASSERT_TRUE(r.as_agent("publish_agent_event", {{"task_id", second_id},
                                                    {"agent", "agent-ask-orama"},
@@ -2691,7 +2737,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     const auto project_task = r.store.get_agent_task(built.value["task_id"]);
     ASSERT_TRUE(project_task);
     EXPECT_EQ(project_task->body["zetta_base_url"],
-              "http://lake.internal:4900/workspaces/" + r.w.customer_id + "/zetta");
+              "http://lake.internal:4900/w/" + r.w.workspace_id() + "/workspaces/" + r.w.customer_id + "/zetta");
     EXPECT_NE(std::ranges::find(project_task->scopes, "agent_turn"),
               project_task->scopes.end());
     const std::string project_credential =
@@ -2880,7 +2926,7 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
     EXPECT_EQ(first->body["kind"], "experiment");
     EXPECT_EQ(first->body["context"], json::object());
     EXPECT_EQ(first->body["lake_url"],
-              "http://lake.internal:4900/workspaces/" + r.w.customer_id + "/zetta");
+              "http://lake.internal:4900/w/" + r.w.workspace_id() + "/workspaces/" + r.w.customer_id + "/zetta");
     EXPECT_NE(std::ranges::find(first->scopes, "analyze_dataset"), first->scopes.end());
     EXPECT_EQ(std::ranges::find(first->scopes, "workspace_act"), first->scopes.end());
     EXPECT_EQ(std::ranges::find(first->scopes, "create_study"), first->scopes.end());

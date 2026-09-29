@@ -22,6 +22,8 @@ using nlohmann::json;
 
 json input_schema(json properties, json required = json::array()) {
     properties["customer_id"] = {{"type", "string"}};
+    properties["workspace_id"] = {{"type", "string"}};
+    required.push_back("workspace_id");
     if (std::ranges::find(required, "customer_id") == required.end()) {
         required.insert(required.begin(), "customer_id");
     }
@@ -59,7 +61,8 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
 
 std::expected<control::WebApp, ApiResult> owned_app(const json& input, ApiContext& context) {
     auto app = context.store->get_web_app(input.at("app_id"));
-    if (!app || app->customer_id != input.at("customer_id").get<std::string>()) {
+    if (!app || app->customer_id != input.at("customer_id").get<std::string>() ||
+        app->workspace_id != input.at("workspace_id").get<std::string>()) {
         return std::unexpected(ApiResult::failure("not_found", "no such app in this space"));
     }
     return *app;
@@ -260,12 +263,20 @@ liquid::runtime::task<ApiResult> publish_event(ApiContext& context,
                                                const control::WebApp& app,
                                                std::string type,
                                                json details = json::object()) {
-    if (context.agent_bus == nullptr) {
+    if (context.workspaces == nullptr) {
         co_return ApiResult::failure("store_unavailable",
                                      "the app event bus is not configured on this lake");
     }
     const std::string topic = app_events_topic(app.id);
-    auto created = control::settled(co_await context.agent_bus->bus().create_topic(topic));
+    control::WorkspaceAgentBus bus(context.workspaces, app.customer_id, app.workspace_id);
+    if (app.desired == "deleted" || app.phase == "Deleted") {
+        const auto dropped = control::settled(co_await bus.call("drop_topic", {{"topic", topic}}));
+        if (!dropped && dropped.error().code != "not_found") {
+            co_return ApiResult::failure("store_unavailable", dropped.error().message);
+        }
+        co_return ApiResult::success(control::web_app_json(app));
+    }
+    auto created = control::settled(co_await bus.create_topic(topic));
     if (!created) {
         co_return ApiResult::failure("store_unavailable", created.error().message);
     }
@@ -276,7 +287,7 @@ liquid::runtime::task<ApiResult> publish_event(ApiContext& context,
                {"principal", context.acting_identity},
                {"details", std::move(details)}};
     auto published = control::settled(
-        co_await context.agent_bus->bus().publish(topic, std::move(event), app.id));
+        co_await bus.publish(topic, std::move(event), app.id));
     if (!published) {
         co_return ApiResult::failure("store_unavailable", published.error().message);
     }
@@ -344,7 +355,7 @@ json event_input_schema() {
                                     {"message", {{"type", "string"}}},
                                     {"status", {{"type", "object"}}},
                                     {"event", {{"type", "object"}}}});
-    schema["required"] = json::array({"app_id"});
+    schema["required"] = json::array({"app_id", "workspace_id"});
     return schema;
 }
 
@@ -429,6 +440,9 @@ void register_web_app_capabilities(Registry& registry) {
             }
             json items = json::array();
             for (const control::WebApp& app : *apps) {
+                if (app.workspace_id != input.at("workspace_id").get<std::string>()) {
+                    continue;
+                }
                 items.push_back(control::web_app_json(app));
             }
             context.audit_kind = "app.list";
@@ -478,7 +492,7 @@ void register_web_app_capabilities(Registry& registry) {
         .resolve_object = customer_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            if (context.store == nullptr || context.agent_bus == nullptr) {
+            if (context.store == nullptr || context.workspaces == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
                                              "the app store and event bus must be configured");
             }
@@ -491,6 +505,10 @@ void register_web_app_capabilities(Registry& registry) {
                     "/name");
             }
             json deployment = input;
+            const auto workspace = co_await context.workspaces->state(input.at("customer_id"), input.at("workspace_id"));
+            if (!workspace || !*workspace || !(**workspace).ready()) {
+                co_return ApiResult::failure("workspace_not_ready", "workspace_id needs a ready workspace Zetta");
+            }
             const std::string mode = input.at("mode");
             if ((mode == "runtime") != input.contains("source") ||
                 (mode == "image") != input.contains("image")) {
@@ -527,6 +545,7 @@ void register_web_app_capabilities(Registry& registry) {
             }
             control::NewWebApp app;
             app.customer_id = input.at("customer_id");
+            app.workspace_id = input.at("workspace_id");
             app.name = name;
             app.mode = mode;
             app.framework = input.at("framework");
@@ -931,6 +950,7 @@ void register_web_app_capabilities(Registry& registry) {
                 co_return *created;
             }
             json bind{{"customer_id", input.at("customer_id")},
+                      {"workspace_id", input.at("workspace_id")},
                       {"app_id", input.at("app_id")},
                       {"service_id", created->value.at("id")}};
             auto bound = co_await registry.call_async("bind_service_to_app", bind, context);
@@ -994,18 +1014,23 @@ void register_web_app_capabilities(Registry& registry) {
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             auto app = context.store->get_web_app(input.at("app_id"));
             if (!app ||
+                app->workspace_id != input.at("workspace_id").get<std::string>() ||
                 (input.contains("customer_id") && input.at("customer_id") != app->customer_id)) {
                 co_return ApiResult::failure("not_found", "no such app in this space");
             }
             if (!input.contains("event") && !input.contains("type")) {
                 co_return ApiResult::failure("invalid_input", "event or type is required");
             }
-            if (context.agent_bus == nullptr) {
+            if (context.workspaces == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
                                              "the app event bus is not configured");
             }
             const std::string topic = app_events_topic(app->id);
-            auto created = control::settled(co_await context.agent_bus->bus().create_topic(topic));
+            control::WorkspaceAgentBus bus(context.workspaces, app->customer_id, app->workspace_id);
+            if (app->desired == "deleted" || app->phase == "Deleted") {
+                co_return ApiResult::failure("not_found", "app events have been deleted");
+            }
+            auto created = control::settled(co_await bus.create_topic(topic));
             if (!created) {
                 co_return ApiResult::failure("store_unavailable", created.error().message);
             }
@@ -1017,7 +1042,7 @@ void register_web_app_capabilities(Registry& registry) {
                        {"status", input.value("event", input.value("status", json::object()))},
                        {"principal", context.acting_identity}};
             auto published = control::settled(
-                co_await context.agent_bus->bus().publish(topic, std::move(event), app->id));
+                co_await bus.publish(topic, std::move(event), app->id));
             if (!published) {
                 co_return ApiResult::failure("store_unavailable", published.error().message);
             }
@@ -1043,11 +1068,12 @@ void register_web_app_capabilities(Registry& registry) {
                        if (!app) {
                            co_return app.error();
                        }
-                       if (context.agent_bus == nullptr) {
+                       if (context.workspaces == nullptr) {
                            co_return ApiResult::failure("store_unavailable",
                                                         "the app event bus is not configured");
                        }
-                       auto batch = control::settled(co_await context.agent_bus->bus().receive(
+                       control::WorkspaceAgentBus bus(context.workspaces, app->customer_id, app->workspace_id);
+                       auto batch = control::settled(co_await bus.receive(
                            app_events_topic(app->id),
                            input.value("from_sequence", std::uint64_t{1}),
                            1000,

@@ -45,6 +45,7 @@ nlohmann::json build_json(const Build& build) {
     return {
         {"id", build.id},
         {"customer_id", build.customer_id},
+        {"workspace_id", build.workspace_id},
         {"repository", build.repository},
         {"revision", build.revision},
         {"context", build.context},

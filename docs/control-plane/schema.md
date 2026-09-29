@@ -487,6 +487,15 @@ source, push and event credentials. Desired changes notify `lake_builds`. Idempo
 ## Streams migration
 
 `0037_streams` records topic creators in `stream_owners`, keyed by customer, workspace service
-incarnation and concrete topic name. Idempotent; the newest guard is `streams_guard`. Apply it
+incarnation and concrete topic name. Idempotent; its guard is `streams_guard`. Apply it
 before the Streams binary and vendor it in the operator rollout. Ownership failure behavior and
 space-scoped bus views are specified in [`streams.md`](streams.md).
+
+## Workspace routing migration
+
+`0038_workspace_data_plane` adds immutable workspace service IDs to tasks, apps and builds.
+`workspace_assignments` records sole-default legacy assignments and unresolved object/customer
+IDs; no event payloads are added. Inserts require a live Zetta in the same customer and updates
+cannot change workspace/customer identity. The newest guard is `workspace_data_plane_guard`.
+See the [workspace data-plane design](../architecture/workspace-data-plane.md) for remediation,
+cutover, retention and the complete storage audit.

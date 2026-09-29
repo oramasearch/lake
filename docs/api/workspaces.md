@@ -1,11 +1,18 @@
 # Workspaces: Design, Train and Ship on Zetta
 
-**Status: implemented 2026-09-25.** lake's Design, Train and Ship pages delegate to the Zetta
-engine. Each customer that uses them gets its own Zetta cluster, a **workspace**, because Zetta has
-no tenancy: a cluster's `list_projects`, `list_models` and the rest return everything on it
-(liquid-bridge decision 45). Since decision 46 the workspace is the customer's **default Zetta
-service** ([`services.md`](services.md)), requested through lake's control Postgres; the contract
-with the operator is [`../control-plane/services.md`](../control-plane/services.md).
+Lake's Design, Train and Ship pages delegate to workspace Zettas. A customer can have many
+workspaces; each data-plane call requires an explicit `workspace_id` (`services.id`). It never
+resolves a default implicitly. Zetta has no tenancy within one cluster: its list operations return
+that workspace's data. Provisioning uses the existing [services path](services.md); a missing or
+unready workspace prevents the feature, never redirects data to Lake's bus or PostgreSQL.
+The operator contract is [services](../control-plane/services.md), and the cutover/audit is in the
+[workspace data-plane design](../architecture/workspace-data-plane.md).
+
+Page paths below have the canonical prefix `/w/<workspace_id>`. The global top-bar selector
+lists the space's workspaces, including a sole preselected workspace, and offers New workspace.
+Switching preserves the page and filters. Old GET URLs redirect using the validated remembered
+workspace cookie or the space's only workspace; otherwise they show a selection page. Forms
+carry the ID explicitly and reject a mismatch with the URL. REST and MCP schemas require it too.
 
 ## What a person sees
 
