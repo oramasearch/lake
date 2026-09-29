@@ -1,5 +1,9 @@
 # Train → Experiments
 
+The list page loads `list_studies` and `list_runs` concurrently. Both list responses carry every
+summary field the page renders, so the page never calls `get_run_metrics` once per run. Study and
+trial detail capabilities remain detail-page reads.
+
 Experiments follows Runs in Train. `navigation_routes` owns `/train/experiments`,
 `/train/experiment?study=`, `/train/experiment/run?run=` and
 `/train/experiments/compare?runs=run-a,run-b`. Each selects Experiments with `aria-current="page"`.

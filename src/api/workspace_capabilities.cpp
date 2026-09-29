@@ -21,6 +21,30 @@
 #include "lake/control/zetta_workspace.hpp"
 
 namespace lake::api {
+
+liquid::runtime::task<control::ZettaControlResult<nlohmann::json>>
+call_workspace(ApiContext& context,
+               std::string customer_id,
+               std::string capability,
+               bool read,
+               nlohmann::json input) {
+    const auto started = std::chrono::steady_clock::now();
+    auto completed = co_await context.workspaces->call(
+        std::move(customer_id), context.workspace_id, std::move(capability), read, std::move(input));
+    if (context.workspace_call_timing) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now() - started)
+                                 .count();
+        context.workspace_call_timing->count.fetch_add(1, std::memory_order_relaxed);
+        context.workspace_call_timing->nanoseconds.fetch_add(elapsed,
+                                                             std::memory_order_relaxed);
+    }
+    if (!completed) {
+        co_return std::unexpected(completed.error());
+    }
+    co_return std::move(*completed);
+}
+
 namespace {
 
 using nlohmann::json;
@@ -243,11 +267,11 @@ void register_workspace_call(Registry& registry, bool read) {
                     study_actions.at(capability), arguments, context);
                 co_return result ? *result : ApiResult::failure("store_error", result.error().message);
             }
-            auto called = co_await context.workspaces->call(input.at("customer_id"),
-                                                            input.at("workspace_id"),
-                                                            capability,
-                                                            workspace_uses_get(capability),
-                                                            input.value("input", json::object()));
+            auto called = co_await call_workspace(context,
+                                                  input.at("customer_id"),
+                                                  capability,
+                                                  workspace_uses_get(capability),
+                                                  input.value("input", json::object()));
             if (!called) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }
@@ -746,7 +770,7 @@ void register_store_capabilities(Registry& registry) {
 liquid::runtime::task<ApiResult>
 zetta(ApiContext& context, std::string customer, std::string capability, bool read, json input) {
     auto called =
-        co_await context.workspaces->call(customer, context.workspace_id, std::move(capability), read, std::move(input));
+        co_await call_workspace(context, customer, std::move(capability), read, std::move(input));
     if (!called) {
         co_return ApiResult::failure("store_unavailable", called.error().message);
     }
@@ -816,8 +840,9 @@ void register_pipeline_capabilities(Registry& registry) {
             const std::string project = input.at("project");
             const std::string graph = input.at("graph");
             set_audit(context, "pipeline.edit", input, "save_graph");
-            auto read = co_await context.workspaces->call(
-                customer, context.workspace_id, "get_graph", true, {{"project", project}, {"graph", graph}});
+            auto read = co_await call_workspace(
+                context,
+                customer, "get_graph", true, {{"project", project}, {"graph", graph}});
             if (!read) {
                 co_return ApiResult::failure("store_unavailable", read.error().message);
             }
@@ -846,7 +871,8 @@ void register_pipeline_capabilities(Registry& registry) {
             if (edited->name != current->name) {
                 save["new_name"] = edited->name;
             }
-            auto saved = co_await context.workspaces->call(customer, context.workspace_id, "save_graph", false, save);
+            auto saved =
+                co_await call_workspace(context, customer, "save_graph", false, std::move(save));
             if (!saved) {
                 co_return ApiResult::failure("store_unavailable", saved.error().message);
             }
@@ -892,8 +918,8 @@ void register_search_capabilities(Registry& registry) {
             const std::string customer = input.at("customer_id");
             const std::string index = input.at("index");
             set_audit(context, "index.search", input, "search");
-            auto described = co_await context.workspaces->call(
-                customer, context.workspace_id, "get_index", true, {{"index_id", index}});
+            auto described = co_await call_workspace(
+                context, customer, "get_index", true, {{"index_id", index}});
             if (!described) {
                 co_return ApiResult::failure("store_unavailable", described.error().message);
             }
@@ -911,7 +937,8 @@ void register_search_capabilities(Registry& registry) {
             if (const std::string field = input.value("field", std::string()); !field.empty()) {
                 search["field"] = field;
             }
-            auto found = co_await context.workspaces->call(customer, context.workspace_id, "search", true, search);
+            auto found =
+                co_await call_workspace(context, customer, "search", true, std::move(search));
             if (!found) {
                 co_return ApiResult::failure("store_unavailable", found.error().message);
             }
@@ -954,8 +981,8 @@ void register_predict_capability(Registry& registry) {
             const std::string customer = input.at("customer_id");
             const std::string model = input.at("model");
             set_audit(context, "model.predict", input, "score");
-            auto described = co_await context.workspaces->call(
-                customer, context.workspace_id, "get_model", true, {{"model_id", model}});
+            auto described = co_await call_workspace(
+                context, customer, "get_model", true, {{"model_id", model}});
             if (!described) {
                 co_return ApiResult::failure("store_unavailable", described.error().message);
             }
@@ -971,7 +998,8 @@ void register_predict_capability(Registry& registry) {
             if (input.contains("top_k")) {
                 score["top_k"] = input["top_k"];
             }
-            auto scored = co_await context.workspaces->call(customer, context.workspace_id, "score", true, score);
+            auto scored =
+                co_await call_workspace(context, customer, "score", true, std::move(score));
             if (!scored) {
                 co_return ApiResult::failure("store_unavailable", scored.error().message);
             }
@@ -1047,8 +1075,11 @@ void register_connect_capabilities(Registry& registry) {
                                              "/service_id");
             }
             const std::string name = input.value("name", found->name);
-            auto created = co_await context.workspaces->call(
-                customer, context.workspace_id, "create_connection", false, {{"name", name}, {"connector", *connector}});
+            auto created = co_await call_workspace(context,
+                                                   customer,
+                                                   "create_connection",
+                                                   false,
+                                                   {{"name", name}, {"connector", *connector}});
             if (!created) {
                 co_return ApiResult::failure("store_unavailable", created.error().message);
             }
@@ -1379,8 +1410,9 @@ void register_dataset_catalog_capability(Registry& registry) {
             if (!context.workspaces) {
                 co_return unavailable();
             }
-            auto called = co_await context.workspaces->call(
-                input.at("customer_id"), context.workspace_id, "list_datasets", true, json::object());
+            auto called = co_await call_workspace(
+                context,
+                input.at("customer_id"), "list_datasets", true, json::object());
             if (!called) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }
@@ -1427,8 +1459,9 @@ struct ZettaAnswer {
 
 liquid::runtime::task<ZettaAnswer>
 zetta_call(ApiContext& context, std::string customer_id, std::string capability, json input) {
-    auto called = co_await context.workspaces->call(
-        customer_id, context.workspace_id, capability, workspace_uses_get(capability), std::move(input));
+    auto called = co_await call_workspace(
+        context,
+        customer_id, capability, workspace_uses_get(capability), std::move(input));
     if (!called) {
         co_return ZettaAnswer{json(),
                               ApiResult::failure("store_unavailable", called.error().message)};
@@ -3948,8 +3981,9 @@ void register_workspace_capabilities(Registry& registry) {
                 co_return unavailable();
             }
             const std::string customer_id = input.at("customer_id");
-            auto called = co_await context.workspaces->call(
-                customer_id, context.workspace_id, "openapi.json", true, json::object());
+            auto called = co_await call_workspace(
+                context,
+                customer_id, "openapi.json", true, json::object());
             if (!called) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }

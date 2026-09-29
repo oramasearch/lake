@@ -2547,8 +2547,7 @@ std::string gate_panel(const nlohmann::json& gate, std::string_view heading) {
 
 // The pipeline page (docs/design/zetta-parity.md): see, inspect, change, govern and follow one
 // Zetta execution graph.
-// What a run or model's ids are called (lake#255): the page loads `names` (projects and their
-// pipelines by id); an id that is not there belongs to a deleted project.
+// Compatibility for records created before names were denormalized onto runs and models.
 std::string project_called(const nlohmann::json& data, const std::string& id) {
     const nlohmann::json projects =
         data.value("names", nlohmann::json::object()).value("projects", nlohmann::json::object());
@@ -2561,8 +2560,11 @@ nlohmann::json graph_called(const nlohmann::json& data, const std::string& id) {
 }
 // A pipeline and its project as links, or "a deleted project" when lake no longer has it.
 std::string run_subject(const std::string& query, const nlohmann::json& data,
-                        const std::string& graph_id, const std::string& project_id) {
-    nlohmann::json graph = graph_called(data, graph_id);
+                        const std::string& graph_id, const std::string& project_id,
+                        const std::string& pipeline_name, const std::string& project_name) {
+    nlohmann::json graph = pipeline_name.empty()
+                               ? graph_called(data, graph_id)
+                               : nlohmann::json{{"name", pipeline_name}, {"project", project_name}};
     if (graph.empty() && !data.contains("names")) {
         // Names were not loaded: show what the run carries.
         graph = {{"name", graph_id}, {"project", project_id}};
@@ -4637,7 +4639,12 @@ std::string workspace_content(const WorkspacePage& page) {
                 out += std::format(
                     "<tr><td>{}</td><td><span class=\"badge{}\">{}</span></td><td>{}</td><td>{}"
                     "</td></tr>",
-                    run_subject(query, data, json_text(run, "graph"), json_text(run, "project")),
+                    run_subject(query,
+                                data,
+                                json_text(run, "graph"),
+                                json_text(run, "project"),
+                                json_text(run, "pipeline_name"),
+                                json_text(run, "project_name")),
                     status == "succeeded" ? " status-success"
                     : status == "failed"  ? " status-danger"
                                           : "",
@@ -4660,7 +4667,12 @@ std::string workspace_content(const WorkspacePage& page) {
                            web_ui_escape(status.empty() ? "unknown" : status));
         if (!json_text(run, "graph").empty()) {
             out += "<p class=\"sub\">" +
-                   run_subject(query, data, json_text(run, "graph"), json_text(run, "project")) +
+                   run_subject(query,
+                               data,
+                               json_text(run, "graph"),
+                               json_text(run, "project"),
+                               json_text(run, "pipeline_name"),
+                               json_text(run, "project_name")) +
                    (json_text(run, "created").empty()
                         ? std::string()
                         : " · started " + web_ui_escape(when(json_text(run, "created")))) +
@@ -4708,7 +4720,7 @@ std::string workspace_content(const WorkspacePage& page) {
             std::string calls;
             for (const nlohmann::json& model : models) {
                 const std::string id = json_text(model, "id");
-                const nlohmann::json detail = details.value(id, nlohmann::json::object());
+                const nlohmann::json detail = details.value(id, model);
                 const bool published = detail.value("exposed", false);
                 const nlohmann::json metrics = detail.value("metrics", nlohmann::json::object());
                 // A held-out score when the run measured one; otherwise say it is in-sample.
@@ -4726,7 +4738,10 @@ std::string workspace_content(const WorkspacePage& page) {
                                         "out</small>",
                                         metrics["in_sample_auc"].get<double>());
                 }
-                const std::string project = project_called(data, json_text(model, "project"));
+                const std::string project =
+                    json_text(model, "project_name").empty()
+                        ? project_called(data, json_text(model, "project"))
+                        : json_text(model, "project_name");
                 out += std::format(
                     "<tr><td><strong>{}</strong><br><small class=\"muted\"><code>{}</code></small>"
                     "</td><td>{}</td><td>{}</td><td>{}</td><td><span class=\"badge{}\">{}</span></td>"

@@ -319,6 +319,64 @@ void stamp_response_headers(boost::http::route_params& route, std::string_view b
     route.res.set_payload_size(body.size());
 }
 
+struct RequestTiming {
+    std::chrono::steady_clock::time_point started;
+    std::shared_ptr<WorkspaceCallTiming> workspace_calls =
+        std::make_shared<WorkspaceCallTiming>();
+};
+
+std::mutex request_timings_mutex;
+std::map<const boost::http::route_params*, std::shared_ptr<RequestTiming>> request_timings;
+
+std::shared_ptr<RequestTiming> request_timing(const boost::http::route_params& route) {
+    std::lock_guard lock(request_timings_mutex);
+    const auto found = request_timings.find(&route);
+    return found == request_timings.end() ? nullptr : found->second;
+}
+
+class RequestTimingScope {
+public:
+    RequestTimingScope(const boost::http::route_params& route,
+                       std::chrono::steady_clock::time_point started)
+        : route_(&route) {
+        std::lock_guard lock(request_timings_mutex);
+        request_timings.emplace(route_, std::make_shared<RequestTiming>(started));
+    }
+
+    ~RequestTimingScope() {
+        std::lock_guard lock(request_timings_mutex);
+        request_timings.erase(route_);
+    }
+
+private:
+    const boost::http::route_params* route_;
+};
+
+class CatalogRouter {
+public:
+    explicit CatalogRouter(std::vector<std::string>& get_routes) : get_routes_(&get_routes) {}
+
+    template <class Handler>
+    void add(boost::http::method method, std::string_view pattern, Handler&& handler) {
+        if (method == boost::http::method::get) {
+            get_routes_->emplace_back(pattern);
+        }
+        router_.add(method, pattern, std::forward<Handler>(handler));
+    }
+
+    template <class Handler> void use(Handler&& handler) {
+        router_.use(std::forward<Handler>(handler));
+    }
+
+    boost::http::router<boost::http::route_params> release() {
+        return std::move(router_);
+    }
+
+private:
+    std::vector<std::string>* get_routes_;
+    boost::http::router<boost::http::route_params> router_;
+};
+
 boost::http::route_task send_text(boost::http::route_params& route,
                                   boost::http::status status,
                                   std::string body,
@@ -332,6 +390,22 @@ boost::http::route_task send_text(boost::http::route_params& route,
         body = web_ui_workspace_document(std::move(body), workspace_path_id(std::string(route.url.path())));
         // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
         route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
+        const auto timing = request_timing(route);
+        const auto now = std::chrono::steady_clock::now();
+        const double total_ms =
+            timing ? std::chrono::duration<double, std::milli>(now - timing->started).count() : 0.0;
+        const double workspace_ms =
+            timing ? static_cast<double>(
+                         timing->workspace_calls->nanoseconds.load(std::memory_order_relaxed)) /
+                         1'000'000.0
+                   : 0.0;
+        const std::size_t workspace_count =
+            timing ? timing->workspace_calls->count.load(std::memory_order_relaxed) : 0;
+        route.res.set("Server-Timing",
+                      std::format("total;dur={:.3f}, workspace;dur={:.3f};desc=\"{} calls\"",
+                                  total_ms,
+                                  workspace_ms,
+                                  workspace_count));
     }
     stamp_response_headers(route, body);
     auto [send_error] = co_await route.send(body);
@@ -4528,6 +4602,7 @@ struct ApiServer::Impl {
     std::atomic<bool> is_running{false};
     unsigned short bound_port = 0;
     std::string failure_reason;
+    std::vector<std::string> get_routes;
     std::mutex work_mutex;
     std::condition_variable work_cv;
     std::chrono::steady_clock::time_point next_timestamp_renewal_check =
@@ -4750,6 +4825,7 @@ struct ApiServer::Impl {
                                             std::string route_pattern,
                                             boost::http::route_task task) {
         const auto start = std::chrono::steady_clock::now();
+        const RequestTimingScope timing_scope(route, start);
         auto result = co_await std::move(task);
         record_request(route, route_pattern, start);
         co_return result;
@@ -4970,6 +5046,9 @@ struct ApiServer::Impl {
         ctx.agents = &agents;
         ctx.platform = options.platform.get();
         ctx.workspaces = options.workspaces.get();
+        if (const auto timing = request_timing(route)) {
+            ctx.workspace_call_timing = timing->workspace_calls;
+        }
         ctx.non_expiring_credentials_allowed = options.allow_non_expiring_credentials;
         ctx.agent_caller = options.agent_caller.get();
         ctx.agent_bus = options.agent_bus.get();
@@ -7697,6 +7776,56 @@ struct ApiServer::Impl {
         co_return unwrap(co_await registry.call_async(capability, input, context));
     }
 
+    using WorkspaceRead = std::pair<std::string, nlohmann::json>;
+
+    struct WorkspaceReadCompletion {
+        liquid::result<ApiResult> value;
+    };
+
+    boost::capy::io_task<WorkspaceReadCompletion>
+    complete_workspace_read(liquid::runtime::task<ApiResult> task) {
+        auto result = co_await std::move(task);
+        co_return boost::capy::io_result<WorkspaceReadCompletion>{{}, {std::move(result)}};
+    }
+
+    liquid::runtime::task<std::vector<ApiResult>>
+    workspace_reads(ApiContext context,
+                    const std::string& customer_id,
+                    std::vector<WorkspaceRead> reads) {
+        if (reads.empty()) {
+            co_return std::vector<ApiResult>{};
+        }
+        std::vector<ApiContext> contexts;
+        contexts.reserve(reads.size());
+        for (std::size_t index = 0; index < reads.size(); ++index) {
+            contexts.push_back(context);
+        }
+        std::vector<boost::capy::io_task<WorkspaceReadCompletion>> pending;
+        pending.reserve(reads.size());
+        for (std::size_t index = 0; index < reads.size(); ++index) {
+            auto& [capability, input] = reads[index];
+            pending.push_back(complete_workspace_read(workspace_call(
+                "workspace_query",
+                {{"customer_id", customer_id},
+                 {"capability", capability},
+                 {"input", std::move(input)}},
+                contexts[index])));
+        }
+        auto [wait_error, completed] =
+            co_await liquid::runtime::when_all(std::move(pending));
+        if (wait_error) {
+            co_return std::unexpected(liquid::error{liquid::errc::internal,
+                                                    wait_error.message(),
+                                                    "workspace page reads"});
+        }
+        std::vector<ApiResult> results;
+        results.reserve(completed.size());
+        for (auto& result : completed) {
+            results.push_back(unwrap(std::move(result.value)));
+        }
+        co_return results;
+    }
+
     // The pipeline page's data (docs/design/zetta-parity.md): the graph, this workspace's runs and
     // datasets, and the latest run of this pipeline for step status. `extra` carries a gate or
     // deploy answer to show on the page.
@@ -7728,41 +7857,40 @@ struct ApiServer::Impl {
         if (!page.state.value("ready", false)) {
             co_return page;
         }
-        const auto read = [&](std::string capability, nlohmann::json input) {
-            return workspace_call("workspace_query",
-                                  {{"customer_id", page.customer_id},
-                                   {"capability", std::move(capability)},
-                                   {"input", std::move(input)}},
-                                  context);
+        const std::vector<WorkspaceRead> reads{
+            {"get_graph", {{"project", page.project}, {"graph", page.subject}}},
+            {"list_runs", nlohmann::json::object()},
+            {"list_datasets", nlohmann::json::object()},
         };
-        const ApiResult got = unwrap(
-            co_await read("get_graph", {{"project", page.project}, {"graph", page.subject}}));
+        auto completed_reads = co_await workspace_reads(context, page.customer_id, reads);
+        if (!completed_reads) {
+            page.error = completed_reads.error().message;
+            co_return page;
+        }
+        const ApiResult& got = completed_reads->at(0);
         if (!got.ok) {
             page.error = got.error.message;
             co_return page;
         }
         page.data["get_graph"] = got.value;
-        const ApiResult runs = unwrap(co_await read("list_runs", nlohmann::json::object()));
+        const ApiResult& runs = completed_reads->at(1);
         if (runs.ok) {
             page.data["list_runs"] = runs.value;
-            std::string latest, latest_created;
+            nlohmann::json latest;
             for (const nlohmann::json& run : runs.value.value("runs", nlohmann::json::array())) {
                 const std::string of = run.value("graph", std::string());
                 const std::string created = run.value("created", std::string());
                 if ((of == page.subject || of == got.value.value("graph_id", std::string())) &&
-                    created >= latest_created) {
-                    latest = run.value("id", std::string());
-                    latest_created = created;
+                    (!latest.is_object() ||
+                     created >= latest.value("created", std::string()))) {
+                    latest = run;
                 }
             }
-            if (!latest.empty()) {
-                const ApiResult run = unwrap(co_await read("get_run", {{"run_id", latest}}));
-                if (run.ok) {
-                    page.data["latest_run"] = run.value;
-                }
+            if (latest.is_object()) {
+                page.data["latest_run"] = std::move(latest);
             }
         }
-        const ApiResult datasets = unwrap(co_await read("list_datasets", nlohmann::json::object()));
+        const ApiResult& datasets = completed_reads->at(2);
         if (datasets.ok) {
             page.data["list_datasets"] = datasets.value;
         }
@@ -7912,24 +8040,15 @@ struct ApiServer::Impl {
                                                 {"capability", "list_projects"},
                                                 {"input", nlohmann::json::object()}},
                                                context));
-            std::size_t read = 0;
             for (const nlohmann::json& entry :
                  projects.ok ? projects.value.value("projects", nlohmann::json::array())
                              : nlohmann::json::array()) {
-                if (++read > 20) {
-                    break;
+                if (!entry.is_object()) {
+                    continue;
                 }
-                const std::string project = entry.is_string() ? entry.get<std::string>()
-                                                              : entry.value("name", std::string());
-                const ApiResult got =
-                    unwrap(co_await workspace_call("workspace_query",
-                                                   {{"customer_id", page.customer_id},
-                                                    {"capability", "get_project"},
-                                                    {"input", {{"name", project}}}},
-                                                   context));
+                const std::string project = entry.value("name", std::string());
                 for (const nlohmann::json& graph :
-                     got.ok ? got.value.value("graphs", nlohmann::json::array())
-                            : nlohmann::json::array()) {
+                     entry.value("graphs", nlohmann::json::array())) {
                     if (graph.value("approval", std::string()) == "approved") {
                         approved.push_back(
                             {{"project", project}, {"graph", graph.value("name", std::string())}});
@@ -8144,60 +8263,39 @@ struct ApiServer::Impl {
                     reads.push_back({"search", std::move(search)});
                 }
             }
-            // Runs and models name their project and pipeline by id; lake shows names (lake#255).
-            if (section == "runs" || section == "run" || section == "models") {
-                nlohmann::json names{{"projects", nlohmann::json::object()},
-                                     {"graphs", nlohmann::json::object()}};
-                const ApiResult listed =
-                    unwrap(co_await workspace_call("workspace_query",
-                                                   {{"customer_id", page.customer_id},
-                                                    {"capability", "list_projects"},
-                                                    {"input", nlohmann::json::object()}},
-                                                   context));
-                for (const nlohmann::json& project :
-                     listed.ok ? listed.value.value("projects", nlohmann::json::array())
-                               : nlohmann::json::array()) {
-                    if (!project.is_string()) {
-                        continue;
-                    }
-                    const ApiResult got =
-                        unwrap(co_await workspace_call("workspace_query",
-                                                       {{"customer_id", page.customer_id},
-                                                        {"capability", "get_project"},
-                                                        {"input", {{"name", project}}}},
-                                                       context));
-                    if (!got.ok) {
-                        continue;
-                    }
-                    names["projects"][got.value.value("id", std::string())] = project;
-                    for (const nlohmann::json& graph :
-                         got.value.value("graphs", nlohmann::json::array())) {
-                        names["graphs"][graph.value("id", std::string())] = {
-                            {"name", graph.value("name", std::string())}, {"project", project}};
+            bool needs_run_report = false;
+            auto completed_reads = co_await workspace_reads(context, page.customer_id, reads);
+            if (!completed_reads) {
+                page.error = completed_reads.error().message;
+            } else {
+                for (std::size_t index = 0; index < completed_reads->size(); ++index) {
+                    const std::string& capability = reads[index].first;
+                    const ApiResult& result = completed_reads->at(index);
+                    if (result.ok) {
+                        page.data[capability] = result.value;
+                        const std::string status = result.value.value("status", std::string());
+                        needs_run_report = needs_run_report ||
+                                           (capability == "get_run" && status != "running" &&
+                                            status != "queued" && status != "pending");
+                    } else if (page.error.empty() && capability != "list_methodologies" &&
+                               capability != "list_solutions" &&
+                               !(capability == "get_solution" &&
+                                 result.error.code == "unknown_capability")) {
+                        page.error = result.error.message;
                     }
                 }
-                page.data["names"] = std::move(names);
             }
-            for (std::size_t index = 0; index < reads.size(); ++index) {
-                auto& [capability, input] = reads[index];
-                const ApiResult result =
-                    unwrap(co_await workspace_call("workspace_query",
-                                                   {{"customer_id", page.customer_id},
-                                                    {"capability", capability},
-                                                    {"input", std::move(input)}},
-                                                   context));
-                if (result.ok) {
-                    page.data[capability] = result.value;
-                    const std::string status = result.value.value("status", std::string());
-                    if (capability == "get_run" && status != "running" && status != "queued" &&
-                        status != "pending") {
-                        reads.push_back({"get_run_report", {{"run_id", page.subject}}});
-                    }
-                } else if (page.error.empty() && capability != "list_methodologies" &&
-                           capability != "list_solutions" &&
-                           !(capability == "get_solution" &&
-                             result.error.code == "unknown_capability")) {
-                    page.error = result.error.message;
+            if (needs_run_report) {
+                const ApiResult report = unwrap(co_await workspace_call(
+                    "workspace_query",
+                    {{"customer_id", page.customer_id},
+                     {"capability", "get_run_report"},
+                     {"input", {{"run_id", page.subject}}}},
+                    context));
+                if (report.ok) {
+                    page.data["get_run_report"] = report.value;
+                } else if (page.error.empty()) {
+                    page.error = report.error.message;
                 }
             }
             if (section == "project" && page.data.contains("get_project")) {
@@ -8206,14 +8304,21 @@ struct ApiServer::Impl {
                 // page needs no duplicate lake-side solution state (lake#292).
                 const nlohmann::json graphs =
                     page.data["get_project"].value("graphs", nlohmann::json::array());
+                std::vector<WorkspaceRead> graph_reads;
                 for (const nlohmann::json& summary : graphs) {
+                    graph_reads.push_back(
+                        {"get_graph",
+                         {{"project", page.subject},
+                          {"graph", summary.value("name", std::string())}}});
+                }
+                auto graph_details =
+                    co_await workspace_reads(context, page.customer_id, graph_reads);
+                for (std::size_t graph_index = 0;
+                     graph_details && graph_index < graph_details->size();
+                     ++graph_index) {
+                    const nlohmann::json& summary = graphs.at(graph_index);
                     const std::string graph = summary.value("name", std::string());
-                    const ApiResult detail = unwrap(co_await workspace_call(
-                        "workspace_query",
-                        {{"customer_id", page.customer_id},
-                         {"capability", "get_graph"},
-                         {"input", {{"project", page.subject}, {"graph", graph}}}},
-                        context));
+                    const ApiResult& detail = graph_details->at(graph_index);
                     if (!detail.ok) {
                         continue;
                     }
@@ -8247,40 +8352,36 @@ struct ApiServer::Impl {
                         {"foundation", foundation},
                         {"sources", source_roles},
                         {"stages", std::move(stages)}};
-                    const auto read_state =
-                        [&](std::string capability,
-                            nlohmann::json input) -> liquid::runtime::task<ApiResult> {
-                        co_return unwrap(
-                            co_await workspace_call("workspace_query",
-                                                    {{"customer_id", page.customer_id},
-                                                     {"capability", std::move(capability)},
-                                                     {"input", std::move(input)}},
-                                                    context));
+                    const std::array<const char*, 6> state_keys{
+                        "policy", "experiment", "ledger", "monitor", "roi", "list_runs"};
+                    const std::vector<WorkspaceRead> state_reads{
+                        {"get_policy",
+                         {{"policy_id", foundation.value("policy_id", std::string())}}},
+                        {"get_experiment",
+                         {{"experiment", foundation.value("experiment_id", std::string())}}},
+                        {"list_ledger", nlohmann::json::object()},
+                        {"get_monitor",
+                         {{"solution", foundation.value("monitor_id", std::string())}}},
+                        {"get_roi_readout",
+                         {{"solution",
+                           foundation.value("readout_id",
+                                            foundation.value("scope", std::string()))}}},
+                        {"list_runs", nlohmann::json::object()},
                     };
-                    for (const auto& [key, capability, input] :
-                         std::array<std::tuple<const char*, const char*, nlohmann::json>, 5>{
-                             {{"policy",
-                               "get_policy",
-                               {{"policy_id", foundation.value("policy_id", std::string())}}},
-                              {"experiment",
-                               "get_experiment",
-                               {{"experiment", foundation.value("experiment_id", std::string())}}},
-                              {"ledger", "list_ledger", nlohmann::json::object()},
-                              {"monitor",
-                               "get_monitor",
-                               {{"solution", foundation.value("monitor_id", std::string())}}},
-                              {"roi",
-                               "get_roi_readout",
-                               {{"solution",
-                                 foundation.value("readout_id",
-                                                  foundation.value("scope", std::string()))}}}}}) {
-                        const ApiResult state = unwrap(co_await read_state(capability, input));
-                        if (state.ok) {
-                            solution_project[key] = state.value;
+                    auto states = co_await workspace_reads(context, page.customer_id, state_reads);
+                    if (!states) {
+                        if (page.error.empty()) {
+                            page.error = states.error().message;
+                        }
+                        continue;
+                    }
+                    for (std::size_t state_index = 0; state_index < 5; ++state_index) {
+                        if (states->at(state_index).ok) {
+                            solution_project[state_keys[state_index]] =
+                                states->at(state_index).value;
                         }
                     }
-                    const ApiResult listed_runs =
-                        unwrap(co_await read_state("list_runs", nlohmann::json::object()));
+                    const ApiResult& listed_runs = states->at(5);
                     nlohmann::json latest;
                     if (listed_runs.ok) {
                         for (const nlohmann::json& run :
@@ -8297,35 +8398,31 @@ struct ApiServer::Impl {
                         }
                     }
                     if (latest.is_object()) {
-                        const ApiResult run = unwrap(co_await read_state(
-                            "get_run", {{"run_id", latest.value("id", std::string())}}));
-                        if (run.ok) {
-                            solution_project["run"] = run.value;
-                            std::string decisions;
-                            for (const nlohmann::json& output :
-                                 run.value.value("outputs", nlohmann::json::array())) {
-                                if (output.value("name", std::string()) == "solution decisions") {
-                                    decisions = output.value("ref", std::string());
-                                }
+                        solution_project["run"] = latest;
+                        std::string decisions;
+                        for (const nlohmann::json& output :
+                             latest.value("outputs", nlohmann::json::array())) {
+                            if (output.value("name", std::string()) == "solution decisions") {
+                                decisions = output.value("ref", std::string());
                             }
-                            const bool safe = !decisions.empty() &&
-                                              std::ranges::all_of(decisions, [](unsigned char c) {
-                                                  return std::isalnum(c) || c == '_' || c == '.';
-                                              });
-                            if (safe) {
-                                const ApiResult rows = unwrap(co_await workspace_call(
-                                    "workspace_sql",
-                                    {{"customer_id", page.customer_id},
-                                     {"statement", "SELECT * FROM " + decisions}},
-                                    context));
-                                if (rows.ok) {
-                                    nlohmann::json values =
-                                        rows.value.value("rows", nlohmann::json::array());
-                                    if (values.is_array() && values.size() > 100) {
-                                        values.erase(values.begin() + 100, values.end());
-                                    }
-                                    solution_project["decisions"] = std::move(values);
+                        }
+                        const bool safe = !decisions.empty() &&
+                                          std::ranges::all_of(decisions, [](unsigned char c) {
+                                              return std::isalnum(c) || c == '_' || c == '.';
+                                          });
+                        if (safe) {
+                            const ApiResult rows = unwrap(co_await workspace_call(
+                                "workspace_sql",
+                                {{"customer_id", page.customer_id},
+                                 {"statement", "SELECT * FROM " + decisions}},
+                                context));
+                            if (rows.ok) {
+                                nlohmann::json values =
+                                    rows.value.value("rows", nlohmann::json::array());
+                                if (values.is_array() && values.size() > 100) {
+                                    values.erase(values.begin() + 100, values.end());
                                 }
+                                solution_project["decisions"] = std::move(values);
                             }
                         }
                     }
@@ -8334,26 +8431,7 @@ struct ApiServer::Impl {
                 }
             }
         }
-        // Each model's measures and whether it is published (lake#250, lake#255).
         if (section == "models") {
-            std::size_t read = 0;
-            for (const nlohmann::json& model :
-                 page.data.value("list_models", nlohmann::json::object())
-                     .value("models", nlohmann::json::array())) {
-                if (++read > 50) {
-                    break;
-                }
-                const std::string id = model.value("id", std::string());
-                const ApiResult got =
-                    unwrap(co_await workspace_call("workspace_query",
-                                                   {{"customer_id", page.customer_id},
-                                                    {"capability", "get_model"},
-                                                    {"input", {{"model_id", id}}}},
-                                                   context));
-                if (got.ok) {
-                    page.data["model_details"][id] = got.value;
-                }
-            }
             page.data["origin"] = public_origin(route);
         }
         for (auto& [key, value] : extra.items()) {
@@ -13629,7 +13707,7 @@ bool ApiServer::start() {
         }
     }
 
-    http::router<http::route_params> router;
+    CatalogRouter router(impl.get_routes);
     const auto add_route = [&router](auto method, auto path, auto handler) {
         const std::string original(path);
         if (workspace_page_path(original)) {
@@ -14997,7 +15075,7 @@ bool ApiServer::start() {
     impl.server = std::make_unique<beast2::http_server>(
         impl.io_context,
         static_cast<std::size_t>(impl.options.worker_coroutines),
-        std::move(router),
+        router.release(),
         http::make_parser_config(parser_options),
         http::make_serializer_config(http::serializer_config()));
 
@@ -15036,6 +15114,14 @@ unsigned short ApiServer::port() const {
 }
 const std::string& ApiServer::reason() const {
     return impl_->failure_reason;
+}
+
+std::vector<std::string> ApiServer::get_route_patterns() const {
+    std::vector<std::string> routes = impl_->get_routes;
+    std::ranges::sort(routes);
+    const auto unique = std::ranges::unique(routes);
+    routes.erase(unique.begin(), unique.end());
+    return routes;
 }
 
 void ApiServer::drain() {

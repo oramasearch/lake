@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "lake/api/registry.hpp"
 #include "lake/transparency/checkpoint.hpp"
@@ -136,6 +137,9 @@ public:
     // The actual bound port (differs from options when port was 0).
     [[nodiscard]] unsigned short port() const;
     [[nodiscard]] const std::string& reason() const;
+    // The GET patterns installed in the live router. Performance coverage derives its page set
+    // from this list, then classifies HTML responses by their Server-Timing header.
+    [[nodiscard]] std::vector<std::string> get_route_patterns() const;
 
     void drain();
     void wait_for_work(std::chrono::milliseconds max_idle);
