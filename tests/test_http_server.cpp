@@ -1283,6 +1283,8 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
            nlohmann::json::array({{{"level", 1}, {"name", "CL-1"}, {"description", "Propensity core"}}})}}}};
     workspace_caller_->answers["list_datasets"] = {
         {"datasets", nlohmann::json::array({{{"database", "datasets"}, {"name", "customers"}}})}};
+    // The scripted engine has gained its solution registry, as after a deployment.
+    workspaces_->invalidate_registry(customer_id, service->workspace_id);
     const std::string catalogue = connection->request(
         "GET", "/design/solutions?customer_id=" + customer_id, "", cookie);
     EXPECT_NE(catalogue.find("S-1 Churn &amp; Retention"), std::string::npos);
@@ -2653,7 +2655,6 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
         {"/w/:workspace_id/train/runs", 1},
         {"/w/:workspace_id/train/agent", 3},
         {"/w/:workspace_id/train/dataset", 2},
-        {"/w/:workspace_id/design/project", 4},
         {"/w/:workspace_id/train/experiment", 2},
         {"/w/:workspace_id/train/stream", 2},
         {"/workspaces", 0}};

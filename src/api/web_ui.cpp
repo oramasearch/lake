@@ -4517,21 +4517,20 @@ std::string workspace_content(const WorkspacePage& page) {
         if (datasets.empty()) {
             out += "<p>No datasets yet.</p>";
         } else {
-            out += "<table><thead><tr><th>Name</th><th>Rows</th><th>Bytes</th><th>Format</th></tr>"
+            out += "<table><thead><tr><th>Name</th><th>Database</th></tr>"
                    "</thead><tbody>";
             for (const nlohmann::json& dataset : datasets) {
                 const std::string name = json_text(dataset, "name");
-                out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                out += std::format("<tr><td>{}</td><td>{}</td></tr>",
                                    row_link("/train/dataset?" + query + "&database=" +
                                                 url_component(json_text(dataset, "database")) +
                                                 "&name=" + url_component(name),
                                             name),
-                                   web_ui_escape(json_text(dataset, "rows")),
-                                   web_ui_escape(json_text(dataset, "size_bytes")),
-                                   web_ui_escape(json_text(dataset, "format")));
+                                   web_ui_escape(json_text(dataset, "database")));
             }
             out += "</tbody></table>";
         }
+        out += "<p class=\"muted\">Open a dataset for its row count, size, format and sample.</p>";
         out +=
             std::format("<p>{}</p>", row_link("/train/query?" + query, "Query your data with SQL"));
         load += std::format(
@@ -4608,7 +4607,8 @@ std::string workspace_content(const WorkspacePage& page) {
                                          : json_text(dataset, "database");
         out += std::format(
             "<section class=\"panel\"><dl><dt>Database</dt><dd>{}</dd><dt>Format</dt><dd>{}</dd>"
-            "<dt>Rows</dt><dd>{}</dd><dt>Columns</dt><dd>{}</dd><dt>Partitions</dt><dd>{}</dd>{}</"
+            "<dt>Rows</dt><dd>{}</dd><dt>Bytes</dt><dd>{}</dd><dt>Columns</dt><dd>{}</dd>"
+            "<dt>Partitions</dt><dd>{}</dd>{}</"
             "dl>"
             "<form class=\"inline\" method=\"post\" "
             "action=\"/train/dataset/promote\">{}{}{}<button "
@@ -4617,7 +4617,9 @@ std::string workspace_content(const WorkspacePage& page) {
             "{}</section>",
             web_ui_escape(database),
             web_ui_escape(json_text(dataset, "format")),
-            web_ui_escape(cell_text(dataset.value("expected_rows", nlohmann::json("")))),
+            web_ui_escape(cell_text(dataset.value("rows",
+                dataset.value("expected_rows", nlohmann::json(""))))),
+            web_ui_escape(json_text(dataset, "size_bytes")),
             web_ui_escape(columns),
             partitions.size(),
             dataset.value("degraded", false)

@@ -6,12 +6,14 @@ live router identifies as an HTML page.
 
 ## Reading `Server-Timing`
 
-The browser's Network panel shows two entries for a lake page:
+The browser's Network panel shows three entries for a lake page:
 
 - `total` is lake's server time from the first request middleware until the HTML response is
   ready, including workspace selection, authentication, and synchronous rendering.
 - `workspace` is the accumulated duration of calls to the customer's workspace. Its description
   gives the number of calls, for example `3 calls`.
+- `workspace_rounds` counts sequential outbound rounds. Concurrent reads started before any
+  earlier read completes belong to the same round; a follow-up after completion starts another.
 
 Workspace event-bus reads for apps, builds, and agent tasks use the same timing path as ordinary
 workspace capabilities, including the app-detail page's event section.
@@ -19,7 +21,7 @@ workspace capabilities, including the app-detail page's event section.
 An example header is:
 
 ```text
-Server-Timing: total;dur=27.418, workspace;dur=20.731;desc="1 calls"
+Server-Timing: total;dur=47.418, workspace;dur=30.731;desc="1 calls", workspace_rounds;desc="1 rounds"
 ```
 
 Concurrent workspace calls contribute their individual durations to `workspace`, so that value

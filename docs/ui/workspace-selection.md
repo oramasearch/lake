@@ -33,6 +33,11 @@ The selection form submits to `/workspace/select`. Switching keeps the page and 
 removing old customer/workspace query values. Lake records `lake_workspace`, an HttpOnly,
 SameSite=Lax navigation cookie. It is never an API default or an authorization credential.
 Every remembered selection is checked against the caller's accessible spaces and workspace rows.
+Within one GET request, middleware, the handler and navigation share the resolved credential
+context and the authorized customer-list result. A subsequent request resolves both again;
+session revocation, new spaces and workspace selection changes are not cached across requests.
+POST handlers do not reuse a pre-mutation page context. Capability authorization and auditing
+still run for each distinct capability call.
 Old GET routes redirect to the remembered workspace or the space's sole workspace. With several
 workspaces and no valid selection, Lake asks the person to choose. Old mutation URLs are refused.
 

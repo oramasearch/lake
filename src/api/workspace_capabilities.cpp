@@ -29,17 +29,21 @@ call_workspace(ApiContext& context,
                std::string capability,
                bool read,
                nlohmann::json input) {
-    const auto started = std::chrono::steady_clock::now();
+    const auto timing = context.workspace_call_timing;
+    const std::size_t round = timing
+        ? timing->completed_rounds.load(std::memory_order_relaxed) + 1 : 0;
     auto completed = co_await context.workspaces->call(
-        std::move(customer_id), context.workspace_id, std::move(capability), read, std::move(input));
-    if (context.workspace_call_timing) {
-        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                 std::chrono::steady_clock::now() - started)
-                                 .count();
-        context.workspace_call_timing->count.fetch_add(1, std::memory_order_relaxed);
-        context.workspace_call_timing->nanoseconds.fetch_add(elapsed,
-                                                             std::memory_order_relaxed);
-    }
+        std::move(customer_id), context.workspace_id, std::move(capability), read, std::move(input),
+        [timing, round](std::chrono::nanoseconds elapsed) {
+            if (timing) {
+                timing->count.fetch_add(1, std::memory_order_relaxed);
+                timing->nanoseconds.fetch_add(elapsed.count(), std::memory_order_relaxed);
+                auto completed = timing->completed_rounds.load(std::memory_order_relaxed);
+                while (completed < round && !timing->completed_rounds.compare_exchange_weak(
+                    completed, round, std::memory_order_relaxed)) {
+                }
+            }
+        }, context.cache_workspace_definitions);
     if (!completed) {
         co_return std::unexpected(completed.error());
     }

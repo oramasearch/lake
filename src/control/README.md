@@ -1,5 +1,11 @@
 # Control stores
 
+`WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
+five seconds, scoped to the workspace and connection generation. Successful writes explicitly
+invalidate entries and prevent in-flight stale refills. Ownership, readiness and credentials
+are checked even on hits; mutable datasets, connections, runs and usage remain uncached.
+See [page performance](../../docs/ui/performance.md) for limits and correctness tests.
+
 Stream ownership is persisted by both stores and bound to customer/workspace/topic; agent-task
 enumeration is customer scoped and returns the task and agent data needed by shared Streams views
 in one query. `AgentBus::call` uses the existing Zetta transport for Streams reads, while

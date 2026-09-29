@@ -426,6 +426,15 @@ WorkspaceService::withdraw(std::string customer_id) {
     co_return state;
 }
 
+void WorkspaceService::invalidate_registry(const std::string& customer_id,
+                                           const std::string& workspace_id) {
+    std::lock_guard lock(registry_mutex_);
+    ++registry_epoch_;
+    std::erase_if(registry_cache_, [&](const auto& row) {
+        return row.second.customer_id == customer_id && row.second.workspace_id == workspace_id;
+    });
+}
+
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
     std::string customer_id, std::string capability, bool read, nlohmann::json input) {
     co_return workspace_failure<nlohmann::json>("invalid_input", "workspace_id is required");
@@ -433,7 +442,9 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call
 
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
     std::string customer_id, std::string workspace_id, std::string capability,
-    bool read, nlohmann::json input) {
+    bool read, nlohmann::json input,
+    std::function<void(std::chrono::nanoseconds)> observe, bool cache_definitions) {
+    const auto started = std::chrono::steady_clock::now();
     const auto found = workspace(customer_id, workspace_id);
     if (!found) {
         co_return from_store<nlohmann::json>(found.error());
@@ -445,11 +456,56 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call
                                                         ? "the workspace is still being prepared"
                                                         : "start the workspace first");
     }
-    const std::string token = connection(*found)->value("token", std::string());
+    const auto credential = connection(*found);
+    const std::string token = credential ? credential->value("token", std::string()) : std::string();
+    if (token.empty()) {
+        co_return workspace_failure<nlohmann::json>("workspace_not_ready",
+                                                    "the workspace credential is not available");
+    }
+    // Deployment catalogues and project/pipeline definitions change on writes, not every
+    // render. Data, connections and execution state are never cached. Recheck access and
+    // readiness before every hit; successful actions invalidate definitions below.
+    const bool catalogue = read &&
+        ((input.empty() && (capability == "list_methodologies" || capability == "list_solutions" ||
+                            capability == "list_dataset_generators")) ||
+         (cache_definitions && (capability == "get_project" || capability == "get_graph")));
+    std::string cache_key;
+    std::uint64_t cache_epoch = 0;
+    if (catalogue) {
+        cache_key = nlohmann::json::array({customer_id, workspace_id, found->id,
+            found->generation, workspace.endpoint, token, capability, input}).dump();
+        std::lock_guard lock(registry_mutex_);
+        cache_epoch = registry_epoch_;
+        const auto cached = registry_cache_.find(cache_key);
+        if (cached != registry_cache_.end() &&
+            cached->second.expires > std::chrono::steady_clock::now()) {
+            co_return ZettaControlResult<nlohmann::json>(cached->second.value);
+        }
+    }
     auto called = co_await caller_->call(
         workspace.endpoint, token, std::move(capability), read, std::move(input));
+    if (observe) {
+        observe(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started));
+    }
     if (!called) {
         co_return workspace_failure<nlohmann::json>("store_unavailable", called.error().message);
+    }
+    if (!read && *called) {
+        invalidate_registry(customer_id, workspace_id);
+    }
+    if (catalogue && *called) {
+        std::lock_guard lock(registry_mutex_);
+        // Bound retained credentials and catalogue memory. Expiry also detects an engine
+        // deployment that keeps the same service address and credentials.
+        if (registry_cache_.size() >= 128) {
+            registry_cache_.clear();
+        }
+        if (cache_epoch == registry_epoch_) {
+            registry_cache_.insert_or_assign(cache_key, RegistryEntry{
+                **called, std::chrono::steady_clock::now() + std::chrono::seconds(5),
+                customer_id, workspace_id});
+        }
     }
     co_return std::move(*called);
 }

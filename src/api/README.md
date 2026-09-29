@@ -1,5 +1,12 @@
 # API implementation
 
+Page reads share authentication and customer selection within each GET, and batch independent
+workspace and local reads with `when_all`. Data uses a projected name/database list; dataset
+details own metadata and the bounded sample. `Server-Timing` reports actual outbound calls and
+their sequential rounds. Startup warms existing repository indexes for Metering without
+caching usage. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
+and [metering](../../docs/api/metering.md).
+
 `experiment_capabilities.cpp` registers eleven space-scoped study/run operations using the
 closed contracts in `experiment_schemas.hpp`. `web_ui_experiments.cpp` is their pure page renderer;
 embedded, hashed chart assets call only registered capabilities. The page's ExperimentsAgent box

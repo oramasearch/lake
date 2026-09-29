@@ -1,10 +1,12 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -42,6 +44,8 @@ public:
     json value = json::object();
     std::map<std::string, json> answers; // per capability, when set; else `value`
     std::vector<std::pair<std::string, json>> calls;
+    std::optional<lake::control::ZettaControlError> failure;
+    std::function<void()> before_reply;
     lake::test::StreamCaller topics;
 
     liquid::runtime::task<ZettaControlResult<json>> call(std::string called_url,
@@ -55,6 +59,12 @@ public:
         read = called_read;
         input = std::move(called_input);
         calls.emplace_back(capability, input);
+        if (before_reply) {
+            before_reply();
+        }
+        if (failure) {
+            co_return ZettaControlResult<json>(std::unexpected(*failure));
+        }
         if (capability == "create_topic" || capability == "update_topic" ||
             capability == "publish_event" || capability == "receive_events") {
             co_return lake::control::settled(co_await topics.call(url, token, capability, read, input));
@@ -340,6 +350,146 @@ TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     EXPECT_EQ(w.caller->capability, "get_project");
     EXPECT_TRUE(w.caller->read);
     EXPECT_EQ(w.caller->input["name"], "retention");
+}
+
+TEST(Workspaces, RegistryCacheExpiresAndInvalidatesOnChangesWithoutCachingFailures) {
+    Workspaces w;
+    const auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto service = w.store->get_service(requested->service_id);
+    ASSERT_TRUE(service);
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Ready", "", "http://registry.test"));
+    w.deliver(*service, {{"token", "first-token"}});
+    std::size_t observed = 0;
+    const auto read = [&] {
+        return w.run(w.service->call(w.customer_id, service->workspace_id,
+            "list_methodologies", true, json::object(),
+            [&](std::chrono::nanoseconds) {
+                ++observed;
+            }));
+    };
+    w.caller->value = {{"version", 1}};
+    ASSERT_TRUE(read());
+    w.caller->value = {{"version", 2}};
+    EXPECT_EQ(read()->at("version"), 1);
+    EXPECT_EQ(observed, 1U);
+    w.service->invalidate_registry(w.customer_id, service->workspace_id);
+    EXPECT_EQ(read()->at("version"), 2);
+    EXPECT_EQ(observed, 2U);
+
+    w.caller->value = {{"version", 3}};
+    ASSERT_TRUE(w.run(w.service->call(w.customer_id, service->workspace_id,
+        "save_graph", false, json::object())));
+    EXPECT_EQ(read()->at("version"), 3);
+    w.caller->value = {{"version", 4}};
+    w.deliver(*service, {{"token", "rotated-token"}});
+    EXPECT_EQ(read()->at("version"), 4);
+    EXPECT_EQ(w.caller->token, "rotated-token");
+
+    w.caller->value = {{"version", 5}};
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Ready", "", "http://replacement.test"));
+    EXPECT_EQ(read()->at("version"), 5);
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Pending", "", "http://replacement.test"));
+    EXPECT_FALSE(read());
+    EXPECT_FALSE(w.run(w.service->call(std::string(customer), service->workspace_id,
+        "list_methodologies", true, json::object())));
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Ready", "", "http://replacement.test"));
+
+    w.caller->value = {{"version", 6}};
+    std::this_thread::sleep_for(std::chrono::milliseconds(5100));
+    EXPECT_EQ(read()->at("version"), 6);
+    w.service->invalidate_registry(w.customer_id, service->workspace_id);
+    w.caller->failure = lake::control::ZettaControlError{"store_error", "registry unavailable"};
+    EXPECT_FALSE(read());
+    w.caller->failure.reset();
+    w.caller->value = {{"version", 7}};
+    EXPECT_EQ(read()->at("version"), 7);
+}
+
+TEST(Workspaces, RegistryInvalidationRejectsInflightRefillsAndLeavesMutableReadsUncached) {
+    Workspaces w;
+    const auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto service = w.store->get_service(requested->service_id);
+    ASSERT_TRUE(service);
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Ready", "", "http://registry.test"));
+    w.deliver(*service, {{"token", "token"}});
+    w.caller->value = {{"version", 1}};
+    w.caller->before_reply = [&] {
+        w.service->invalidate_registry(w.customer_id, service->workspace_id);
+    };
+    ASSERT_TRUE(w.run(w.service->call(w.customer_id, service->workspace_id,
+        "list_methodologies", true, json::object())));
+    w.caller->before_reply = {};
+    w.caller->value = {{"version", 2}};
+    EXPECT_EQ(w.run(w.service->call(w.customer_id, service->workspace_id,
+        "list_methodologies", true, json::object()))->at("version"), 2);
+    for (const std::string capability : {"list_datasets", "list_connections", "list_runs"}) {
+        w.caller->value = {{"version", 3}};
+        ASSERT_TRUE(w.run(w.service->call(w.customer_id, service->workspace_id,
+            capability, true, json::object())));
+        w.caller->value = {{"version", 4}};
+        EXPECT_EQ(w.run(w.service->call(w.customer_id, service->workspace_id,
+            capability, true, json::object()))->at("version"), 4);
+    }
+}
+
+TEST(Workspaces, RegistryInvalidationIsScopedAcrossWorkspacesAndCatalogues) {
+    Workspaces w;
+    const auto first = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(first);
+    const auto second = w.store->create_workspace({w.customer_id, "second", "prod", ""});
+    ASSERT_TRUE(second);
+    for (const auto& id : {first->service_id, second->zetta_service_id}) {
+        const auto service = w.store->get_service(id);
+        ASSERT_TRUE(service);
+        ASSERT_TRUE(w.store->set_service_status(id, "Ready", "", "http://registry.test"));
+        w.deliver(*service, {{"token", "token"}});
+    }
+    for (const std::string capability :
+         {"list_methodologies", "list_solutions", "list_dataset_generators"}) {
+        const auto read = [&](const std::string& workspace) {
+            return w.run(w.service->call(w.customer_id, workspace, capability, true,
+                json::object()));
+        };
+        w.caller->value = {{"version", 1}};
+        ASSERT_TRUE(read(first->workspace_id));
+        w.caller->value = {{"version", 2}};
+        const auto other = read(second->id);
+        ASSERT_TRUE(other);
+        EXPECT_EQ(other->at("version"), 2);
+        EXPECT_EQ(read(first->workspace_id)->at("version"), 1);
+        w.service->invalidate_registry(w.customer_id, first->workspace_id);
+        w.caller->value = {{"version", 3}};
+        EXPECT_EQ(read(first->workspace_id)->at("version"), 3);
+        EXPECT_EQ(read(second->id)->at("version"), 2);
+    }
+}
+
+TEST(Workspaces, PipelineDefinitionCacheSeparatesInputsAndRefreshesAfterSave) {
+    Workspaces w;
+    const auto requested = w.run(w.service->request(w.customer_id));
+    ASSERT_TRUE(requested);
+    const auto service = w.store->get_service(requested->service_id);
+    ASSERT_TRUE(service);
+    ASSERT_TRUE(w.store->set_service_status(service->id, "Ready", "", "http://registry.test"));
+    w.deliver(*service, {{"token", "token"}});
+    const auto graph = [&](const std::string& name) {
+        return w.run(w.service->call(w.customer_id, service->workspace_id, "get_graph", true,
+            {{"project", "project"}, {"graph", name}}, {}, true));
+    };
+    w.caller->value = {{"nodes", json::array({"first"})}};
+    ASSERT_TRUE(graph("a"));
+    w.caller->value = {{"nodes", json::array({"second"})}};
+    EXPECT_EQ(graph("a")->at("nodes")[0], "first");
+    EXPECT_EQ(graph("b")->at("nodes")[0], "second");
+    const auto current = w.run(w.service->call(w.customer_id, service->workspace_id,
+        "get_graph", true, {{"project", "project"}, {"graph", "a"}}));
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->at("nodes")[0], "second") << "edits bypass the page cache";
+    ASSERT_TRUE(w.run(w.service->call(w.customer_id, service->workspace_id, "save_graph", false,
+        {{"project", "project"}, {"graph", "a"}})));
+    EXPECT_EQ(graph("a")->at("nodes")[0], "second");
 }
 
 TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
@@ -1754,11 +1904,19 @@ TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
     EXPECT_NE(html.find("/train/dataset?customer_id="), std::string::npos);
     EXPECT_NE(html.find("action=\"/train/data/generate\""), std::string::npos);
     EXPECT_EQ(html.find("name=\"path\""), std::string::npos) << "no writing files on the node";
+    EXPECT_EQ(html.find("<th>Rows</th>"), std::string::npos);
+    EXPECT_EQ(html.find("<th>Bytes</th>"), std::string::npos);
+    EXPECT_NE(html.find("Open a dataset for its row count, size, format and sample"),
+              std::string::npos);
 
     page.section = "dataset";
     page.subject = "accounts";
     page.data = {{"get_dataset",
                   {{"database", "datasets"},
+                   {"rows", 1234},
+                   {"expected_rows", 2000},
+                   {"size_bytes", 5678},
+                   {"format", "parquet"},
                    {"columns", json::array({"id", "plan"})},
                    {"partitions", json::array({{{"partition_id", "p1"}}})}}},
                  {"sample", {{"rows", json::array({{{"id", 1}, {"plan", "pro"}}})}}}};
@@ -1766,6 +1924,9 @@ TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
     EXPECT_NE(html.find("First Rows"), std::string::npos);
     EXPECT_NE(html.find(">pro<"), std::string::npos);
     EXPECT_NE(html.find("action=\"/train/dataset/promote\""), std::string::npos);
+    EXPECT_NE(html.find("<dt>Rows</dt><dd>1234</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Bytes</dt><dd>5678</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Format</dt><dd>parquet</dd>"), std::string::npos);
 
     page.section = "query";
     page.data = {{"statement", "SELECT 1"},
@@ -2386,6 +2547,8 @@ TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {
                        {"issue", "zetta#1053"}}})}};
     r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
     r.w.caller->answers["compile_intent"] = {{"name", "customer segments"}};
+    // The fixture replaces the engine's deployment catalogue: deliver its change notification.
+    r.w.service->invalidate_registry(r.w.customer_id, r.w.workspace_id());
     r.w.caller->calls.clear();
     const auto segmented = r.call(
         "create_projects_from_opportunities",

@@ -99,6 +99,7 @@ class Registry;
 struct WorkspaceCallTiming {
     std::atomic<std::size_t> count{0};
     std::atomic<std::int64_t> nanoseconds{0};
+    std::atomic<std::size_t> completed_rounds{0};
 };
 
 struct ApiContext {
@@ -144,6 +145,10 @@ struct ApiContext {
     control::PlatformService* platform = nullptr;
     control::WorkspaceService* workspaces = nullptr;
     std::shared_ptr<WorkspaceCallTiming> workspace_call_timing;
+    // GET-page navigation resolves the same authorized customer list once per request.
+    std::shared_ptr<std::optional<ApiResult>> page_customers;
+    // Only renderer definition reads opt in; edits must read the current graph.
+    bool cache_workspace_definitions = false;
     // Sends a turn to an agent's service (docs/api/agent-launches.md); null without agents.
     control::AgentCaller* agent_caller = nullptr;
     // Agent traffic over Zetta pub/sub (docs/api/agent-bus.md); null when not configured.

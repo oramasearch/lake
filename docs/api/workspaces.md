@@ -22,12 +22,12 @@ carry the ID explicitly and reject a mismatch with the URL. REST and MCP schemas
 | Design | `/design/solutions`, `/design/solution?id=`, `/design/project?name=` | The solution catalogue and a solution project. **Start this solution** collects a project name, capability level, dataset, delivery destination and owner, and the customer's value per outcome, investment and currency. A `solution:<project>` Project Agent turn proposes the snapshot, dataset and methodology roles, and policy predicate evidence. The editable proposal is shown before `confirm_solution` calls `create_solution`. The project then shows solution stages, policy and its approval-gated change form, experiment and holdout, produced decisions and A1 approvals, delivered and held ledger actions, monitor and ROI readout. `run_solution`, `update_policy`, `approve_decision` and `record_outcome` are all workspace actions through lake's authorization and audit path |
 | Design | `/design/pipeline?project=&graph=&step=` | **The pipeline page** (docs/design/zetta-parity.md): `get_graph` drawn as SVG in stage lanes with each step coloured by the latest run; a step inspector; every edit through `edit_pipeline`; **Ask the Project Agent** (a change request answered with a proposal: the edits in words, the graph after, run settings, and *Apply* as one `edit_pipeline` save, or *Discard*; lake#249); `approve_plan`; *Check* (`gate`, every check with its reason); *Check and run* (`gate` then `run` with a chosen dataset, a hold-out of 0.2 by default and a model name defaulting to `<project>_<pipeline>`); *Deploy* (`deploy`, with its gate); the pipeline's runs. The project page adds an empty pipeline (`save_graph`), *Import from n8n* (`import_n8n` → `compile_n8n`) and *Build from Python* (`compile_python`) |
 | Train | `/train/agents`, `/train/agent?id=` | **Agents** ([`train-agents.md`](train-agents.md)): `list_agents`, `get_agent`, `agent_training_status`, `create_agent` (Studio's boxes), `delete_agent` (typed confirmation), `update_agent`, `set_training_schedule`, `agent_run`, `chat` (a `write` in lake, `GET` to Zetta); plus lake's own Agent Library (`list_agent_library`) |
-| Train | `/train/data` | `list_connections`, `list_datasets`; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB, posted as `multipart/form-data` to `/train/data/upload`), **Connect one of your services** (`connect_service`: the space's own Ready Postgres services in one click, no password typed or shown; other kinds say *not supported yet*), and each connection's *From service* |
+| Train | `/train/data` | `list_connections`, a projected `workspace_sql` dataset list; **Add a connection** (`create_connection`, Postgres or Snowflake), **Remove** (`delete_connection`), **Pull a dataset** (`create_dataset_from_query` from a saved connection with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB, posted as `multipart/form-data` to `/train/data/upload`), **Connect one of your services** (`connect_service`: the space's own Ready Postgres services in one click, no password typed or shown; other kinds say *not supported yet*), and each connection's *From service* |
 | Train | `/train/data?browse=<connection>` | *Browse tables* on a connection: `list_source_tables` with columns, without pulling anything |
 | Train | `/train/dataset?database=&name=` | `get_dataset` (columns, partitions, health), its first 20 rows (`workspace_sql`), *Keep durable* (`promote_dataset`), *Query it* |
 | Train | `/train/query?statement=&database=` | Read-only SQL over the workspace's data (`workspace_sql`) |
 | Train | `/train/data`, *Generate a dataset* | `list_dataset_generators`, `generate_dataset` (never its `path`, which writes a file on the node) |
-| Train | `/train/data` (layout) | **Load Data** first and open (upload a file, pull a table from a connection, generate one); after an upload, *Loaded N rows into <dataset>* with a link. Then connections, datasets and storage (only what can be created today; the rest one *coming later* line). A dataset page shows its columns, its first 20 rows (lake trims them: the workspace SQL has no LIMIT yet, zetta#1021) and *Storage details* under a disclosure; the Query page shows at most 500 rows (lake#256, lake#257) |
+| Train | `/train/data` (layout) | **Load Data** first and open (upload a file, pull a table from a connection, generate one); after an upload, *Loaded N rows into <dataset>* with a link. Then connections, datasets and storage (only what can be created today; the rest one *coming later* line). A dataset page shows its columns, its first 20 rows (`LIMIT 20`, also bounded by Lake) and *Storage details* under a disclosure; the Query page shows at most 500 rows (lake#256, lake#257) |
 | Design | `/design/project` → Build a Pipeline | *From data* (optional): after `compile_intent`, lake points the first connect step at the chosen dataset (`set_attribute` source/table), removes the other connect steps and opens the pipeline with that dataset preselected for the run (lake#251) |
 | Train | `/train/runs`, `/train/run?id=` | A run page leads with what the run says about itself: *Nothing was trained* for a structural run, and each connect step that was not read (lake#251, lake#253, zetta#1022); the report's *What It Learned From* shows *trained on* and *columns not used*. `list_runs` carries the pipeline and project names shown by the list, plus status and start time, without project lookups. The detail page uses `get_run`, `get_run_report` rendered as tables (what it learned from, what it leans on, most at risk, caveats, what it cannot tell), and `list_traces` as a waterfall |
 | Ship | `/ship/models` | One `list_models` record per model carries name and short id, project and pipeline names, run id, score, feature schema, creation time, and published state. The list issues no per-model `get_model` calls. Its action remains `expose_model` / `unexpose_model` by id, and each published model shows a `curl` for `POST /v1/predict` (lake#250, lake#255) |
@@ -101,13 +101,28 @@ MCP client does exactly what the page does (lake#189, `Workspaces.EveryNewFeatur
 
 ## How lake finds and calls a workspace
 
+The Data list requests only `database` and `name` through
+`SELECT database, name FROM system.datasets`. Row counts, byte totals, format, columns,
+partitions and samples belong to the dataset detail page, whose sample uses `LIMIT 20`.
+Connections, the projected dataset list, generators, Lake services and storage are independent
+reads in one concurrent batch. Zetta currently materializes dataset summaries before SQL
+projection, so [zetta#1195](https://github.com/oramasearch/zetta/issues/1195) still needs to remove
+its row/file scans; this change reduces response and rendering work, not that upstream scan.
+
+Methodologies lists no longer fetch the solutions catalogue; methodology details still do.
+Deployment catalogues and project/pipeline definitions use a bounded five-second memory cache.
+Successful workspace writes explicitly invalidate it, and expired entries, changed service
+generations, endpoints or credentials cannot be reused. Mutable lists and execution state are
+not cached. See [performance](../ui/performance.md) for the invalidation and proof contract.
+
 - **The workspace.** `workspaces.id` resolves `zetta_service_id`, which resolves the Zetta service.
   The primary service slug uses the workspace UUID. Migration 0039 records the legacy naming
   remap; new workspace and service IDs differ. No default is consulted for data-plane calls.
 - **Status.** The operator's `service_status` row: phase, message and `endpoint`, the in-cluster
   address lake calls.
 - **Credential.** The operator mounts `$LAKE_SERVICE_DIR/<slug>.json`, whose `token` is the
-  cluster's admin token. lake reads it per call and never stores it.
+  cluster's admin token. Lake rereads it per call. The bounded in-memory registry cache includes
+  it in the key so token rotation cannot reuse an earlier entry; it is never persisted by Lake.
 - **Ready** means the operator reported `Ready` with an address *and* the token is present. Calls
   before that fail with `workspace_not_ready`.
 - **Delete workspace** writes desired `deleted` and withdraws its services. The Workspaces page
