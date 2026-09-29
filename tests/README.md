@@ -69,6 +69,11 @@ the process stderr file descriptor through a test-owned pipe, completes a keep-a
 closes that connection while it is idle. A request on a second connection proves the worker
 processed the close before the test stops the server and asserts that the pipe stayed empty.
 
+`HttpServer.WorkspacePrefixServesRestOpenApiMcpAndAppSourceReads` covers the workspace API base
+URL used by apps, event publishers, builds, and agents. It proves REST parity and path-derived
+`workspace_id`, mismatch and unknown-workspace errors, identical OpenAPI, an app-source token
+reading a real repository tree, MCP reading the same tree, and refusal on a different workspace.
+
 The four `HttpServer/HttpResponseIsolation` cases sign in a user and check anonymous `/`,
 `/sign-up`, `/sign-in`, `/v1/server_info`, and `/v1/openapi.json` responses for stale cookies and
 redirects. Independent client cookies

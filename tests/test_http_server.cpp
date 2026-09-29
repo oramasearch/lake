@@ -361,6 +361,133 @@ TEST(WorkspaceNavigationHttp, SelectorRedirectsRememberedWorkspaceAndValidatesFo
     EXPECT_EQ(store->get_workspace(third.id)->desired, "deleted");
 }
 
+TEST(HttpServer, WorkspacePrefixServesRestOpenApiMcpAndAppSourceReads) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user({"taap:workspace-api", "", "Workspace API"});
+    ASSERT_TRUE(user);
+    const auto customer =
+        store->create_customer({"individual", user->id, "", "workspace-api"});
+    ASSERT_TRUE(customer);
+    const auto workspace = store->create_workspace({customer->id, "apps", "dev", user->taap_id});
+    const auto other_workspace =
+        store->create_workspace({customer->id, "other", "dev", user->taap_id});
+    ASSERT_TRUE(workspace);
+    ASSERT_TRUE(other_workspace);
+    const auto repository =
+        store->create_repository({customer->id, "app-source", "", "private"});
+    ASSERT_TRUE(repository);
+
+    const std::filesystem::path root =
+        lake::test::fixture_path("workspace-api-" + lake::control::new_uuid_v4());
+    auto objects = liquid::runtime::block_on(liquid::store::open(root / customer->id / "store"));
+    ASSERT_TRUE(objects) << objects.error().message;
+    liquid::repository_options repository_options;
+    repository_options.store = &*objects;
+    auto source = liquid::runtime::block_on(liquid::repository::create(
+        root / customer->id / "repositories" / repository->id, repository_options));
+    ASSERT_TRUE(source) << source.error().message;
+    const std::string source_text = "workspace app source\n";
+    const auto* source_bytes = reinterpret_cast<const std::byte*>(source_text.data());
+    const std::vector<std::byte> source_contents{
+        source_bytes, source_bytes + source_text.size()};
+    ASSERT_TRUE(liquid::runtime::block_on(source->write(
+        "README.md", source_contents)));
+    const auto change = liquid::runtime::block_on(source->cut("Add workspace app source"));
+    ASSERT_TRUE(change) << change.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("main", *change)));
+
+    lake::control::NewWebApp app_input;
+    app_input.customer_id = customer->id;
+    app_input.workspace_id = workspace->id;
+    app_input.name = "source-reader";
+    app_input.mode = "runtime";
+    app_input.source_repository = repository->id;
+    app_input.source_revision = "main";
+    app_input.source_path = ".";
+    app_input.port = 8080;
+    app_input.host = "source-reader.apps.example.test";
+    const auto app = store->create_web_app(app_input);
+    ASSERT_TRUE(app);
+    ASSERT_TRUE(store->set_web_app_token_hashes(
+        app->id,
+        {{"source", lake::control::identity_crypto::sha256_hex("workspace-source-token")}}));
+
+    lake::api::ApiServer server({.port = 0,
+                                 .store = store,
+                                 .admin_token = "workspace-api-operator",
+                                 .instance_kek = "workspace-api-instance-kek",
+                                 .store_root = root.string()});
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    const auto request = [&](std::string_view method,
+                             const std::string& path,
+                             std::string body = {},
+                             std::string_view bearer = "workspace-api-operator") {
+        return connection.request(
+            method, path, body, "", "HTTP/1.1", bearer, "application/json");
+    };
+    const auto body_json = [](const std::string& response) {
+        return nlohmann::json::parse(response_body(response));
+    };
+    const std::string prefix = "/w/" + workspace->id;
+
+    const auto unscoped_info = request("GET", "/v1/server_info");
+    const auto scoped_info = request("GET", prefix + "/v1/server_info");
+    ASSERT_TRUE(scoped_info.starts_with("HTTP/1.1 200")) << scoped_info;
+    EXPECT_EQ(body_json(scoped_info)["value"], body_json(unscoped_info)["value"]);
+
+    const std::string list_query = "?customer_id=" + customer->id;
+    const auto unscoped_apps = request(
+        "GET", "/v1/list_apps" + list_query + "&workspace_id=" + workspace->id);
+    const auto scoped_apps = request("GET", prefix + "/v1/list_apps" + list_query);
+    ASSERT_TRUE(scoped_apps.starts_with("HTTP/1.1 200")) << scoped_apps;
+    EXPECT_EQ(body_json(scoped_apps)["value"], body_json(unscoped_apps)["value"]);
+    const auto mismatch = request("GET",
+                                  prefix + "/v1/list_apps" + list_query +
+                                      "&workspace_id=" + other_workspace->id);
+    EXPECT_TRUE(mismatch.starts_with("HTTP/1.1 400")) << mismatch;
+    EXPECT_EQ(body_json(mismatch)["error"]["code"], "invalid_input");
+
+    const auto unscoped_openapi = request("GET", "/v1/openapi.json");
+    const auto scoped_openapi = request("GET", prefix + "/v1/openapi.json");
+    ASSERT_TRUE(scoped_openapi.starts_with("HTTP/1.1 200")) << scoped_openapi;
+    EXPECT_EQ(response_body(scoped_openapi), response_body(unscoped_openapi));
+
+    const std::string tree_query =
+        "?id=" + repository->id + "&ref=main";
+    const auto tree = request(
+        "GET", prefix + "/v1/repository_tree" + tree_query, "", "workspace-source-token");
+    ASSERT_TRUE(tree.starts_with("HTTP/1.1 200")) << tree;
+    ASSERT_TRUE(body_json(tree)["ok"].get<bool>()) << body_json(tree);
+    EXPECT_EQ(body_json(tree)["value"]["items"][0]["path"], "README.md");
+    const auto wrong_workspace = request("GET",
+                                         "/w/" + other_workspace->id +
+                                             "/v1/repository_tree" + tree_query,
+                                         "",
+                                         "workspace-source-token");
+    EXPECT_TRUE(wrong_workspace.starts_with("HTTP/1.1 403")) << wrong_workspace;
+
+    const nlohmann::json mcp_request = {
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "repository_tree"},
+          {"arguments", {{"id", repository->id}, {"ref", "main"}}}}},
+    };
+    const auto mcp = request(
+        "POST", prefix + "/mcp", mcp_request.dump(), "workspace-source-token");
+    ASSERT_TRUE(mcp.starts_with("HTTP/1.1 200")) << mcp;
+    EXPECT_EQ(body_json(mcp)["result"]["structuredContent"]["ok"], true);
+    EXPECT_EQ(body_json(mcp)["result"]["structuredContent"]["value"]["items"][0]["path"],
+              "README.md");
+
+    const auto unknown = request(
+        "GET", "/w/" + lake::control::new_uuid_v4() + "/v1/server_info");
+    EXPECT_TRUE(unknown.starts_with("HTTP/1.1 404")) << unknown;
+    EXPECT_EQ(body_json(unknown)["error"]["code"], "not_found");
+}
+
 // A workspace cluster that answers from a table, recording what reached it.
 class RecordingWorkspace final : public lake::control::WorkspaceCaller {
 public:
@@ -2974,8 +3101,12 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
     ASSERT_FALSE(routes.empty());
     for (const std::string& pattern : routes) {
         const std::string path = concrete_route(pattern, workspace_id) + query;
-        const bool workspace_page = pattern.starts_with("/w/:workspace_id/") &&
-                                    !pattern.starts_with("/w/:workspace_id/workspaces/");
+        constexpr std::string_view workspace_prefix = "/w/:workspace_id";
+        const bool workspace_page = pattern.starts_with(workspace_prefix) &&
+                                    !pattern.starts_with(
+                                        "/w/:workspace_id/workspaces/") &&
+                                    lake::api::workspace_page_path(
+                                        pattern.substr(workspace_prefix.size()));
         std::string page_cookie = cookie;
         HttpConnection connection(server.port());
         std::size_t calls_before = caller->call_count();

@@ -44,16 +44,41 @@ out) and are the unit-tested surface.
 | `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, explained conflict comparison, effective access, and scoped links; create, upload, rename, move, delete, restore, conflict resolution, and sharing mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`../api/models.md`](../api/models.md) |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
+| `GET /v1/<read>`, `POST /v1/<action>`; the same below `/w/<workspace_id>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `POST /v1/repositories/<repository-id>/sync/{find-missing,push,pull,chunks}` | streaming liquid push, pull, missing-object negotiation, and chunk upload with bounded streaming request and response bodies, through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results; see [`../api/sync.md`](../api/sync.md) |
 | `GET /v1/repositories/<repository-id>/sync/chunks/<digest>` | ranged liquid chunk reads with `offset` and `length` query parameters |
-| `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
+| `GET /v1/openapi.json`, `/w/<workspace_id>/v1/openapi.json` | the same OpenAPI 3.1 document, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
 | `/scim/v2/Users`, `/scim/v2/Groups` and `/:id` | provider-bearer SCIM 2.0 filtered list, get, create, PATCH and delete resources |
 | `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
-| `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call`; the same registry as tools |
+| `POST /mcp`, `/w/<workspace_id>/mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call`; the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
+
+## Workspace API prefix
+
+Workspace clients receive a Lake base URL ending in `/w/<workspace_id>`. REST capability calls,
+OpenAPI, and MCP therefore accept that prefix without changing their unprefixed forms. For a
+capability whose schema includes `workspace_id`, the path supplies the field when it is absent.
+A query, JSON body, or MCP tool argument that also supplies the field must match the path or the
+call returns `invalid_input`.
+
+The router resolves the workspace before dispatch. A malformed, absent, or deleted workspace
+returns HTTP 404 with `not_found`. App-source, app-event, build, and task credentials retain their
+existing capability restrictions and must belong to the selected workspace. Other credentials
+continue through the same registry policy authorization used by `/v1` and `/mcp`. The prefixed
+OpenAPI response is byte-for-byte the same registry document as `/v1/openapi.json`; page routes
+under `/w/<workspace_id>/...` retain their existing handling.
+
+`HttpServer.WorkspacePrefixServesRestOpenApiMcpAndAppSourceReads` compares prefixed and
+unprefixed REST results, rejects a conflicting field, compares both OpenAPI documents, reads an
+actual libliquid repository tree with an app-source token over REST and MCP, refuses that token on
+another workspace, and checks the unknown-workspace 404. Run it with:
+
+```sh
+./build/tests/lake-tests \
+  --gtest_filter=HttpServer.WorkspacePrefixServesRestOpenApiMcpAndAppSourceReads
+```
 
 **Rules that keep it correct.**
 

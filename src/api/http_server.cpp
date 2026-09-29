@@ -1475,6 +1475,18 @@ std::string route_value(const boost::http::route_params& route, std::string_view
     return {};
 }
 
+std::string workspace_prefixed_local_path(std::string_view path) {
+    if (!path.starts_with("/w/")) {
+        return {};
+    }
+    const std::size_t end = path.find('/', 3);
+    return end == std::string_view::npos ? std::string() : std::string(path.substr(end));
+}
+
+bool workspace_api_path(std::string_view path) {
+    return path == "/mcp" || path == "/v1/openapi.json" || path.starts_with("/v1/");
+}
+
 std::expected<std::string, std::string> decode_base64url(std::string value) {
     for (char& character : value) {
         if (character == '-') {
@@ -5085,6 +5097,18 @@ struct ApiServer::Impl {
             "/mcp",
         };
         const std::string path(route.url.path());
+        const std::string workspace_local = workspace_prefixed_local_path(path);
+        if (!workspace_local.empty() && !workspace_path_id(path).empty()) {
+            if (workspace_local == "/v1/openapi.json" || workspace_local == "/mcp") {
+                return "/w/:workspace_id" + workspace_local;
+            }
+            for (const auto& capability : registry.list()) {
+                const std::string pattern = rest_path(*capability);
+                if (workspace_local == pattern) {
+                    return "/w/:workspace_id" + pattern;
+                }
+            }
+        }
         if (path == web_ui_stylesheet_url()) {
             return path;
         }
@@ -7786,6 +7810,25 @@ struct ApiServer::Impl {
         namespace http = boost::http;
         const std::string path(route.url.path());
         const std::string selected = workspace_path_id(path);
+        const std::string prefixed_local = workspace_prefixed_local_path(path);
+        if (workspace_api_path(prefixed_local)) {
+            if (selected.empty() || !options.store) {
+                co_return co_await send_text(route,
+                                             http::status::not_found,
+                                             error_body("not_found", "no such workspace"),
+                                             "application/json; charset=utf-8",
+                                             "no-store");
+            }
+            const auto workspace = options.store->get_workspace(selected);
+            if (!workspace || workspace->desired == "deleted") {
+                co_return co_await send_text(route,
+                                             http::status::not_found,
+                                             error_body("not_found", "no such workspace"),
+                                             "application/json; charset=utf-8",
+                                             "no-store");
+            }
+            co_return http::route_next;
+        }
         const bool switching = path == "/workspace/select";
         const std::string local = workspace_local_path(path);
         if (!workspace_page_path(local) && !switching) {
@@ -13990,8 +14033,11 @@ struct ApiServer::Impl {
         // A tool called with the wrong method is named, with the method to use (lake#256).
         // url.path() is a decoded copy: keep it, never a view of it (a view dangled on Linux).
         const std::string path(route.url.path());
-        if (path.starts_with("/v1/")) {
-            const std::string name(path.substr(4));
+        const std::string workspace_local = workspace_prefixed_local_path(path);
+        const std::string capability_path =
+            workspace_api_path(workspace_local) ? workspace_local : path;
+        if (capability_path.starts_with("/v1/")) {
+            const std::string name(capability_path.substr(4));
             if (const auto capability = registry.find(name); capability != nullptr) {
                 const bool read = capability->kind == CapabilityKind::Read;
                 return send_text(
@@ -14077,6 +14123,11 @@ bool ApiServer::start() {
         if (workspace_page_path(original)) {
             router.add(method, "/w/:workspace_id" + original, decltype(handler)(handler));
         }
+        router.add(method, original, std::move(handler));
+    };
+    const auto add_workspace_api_route = [&router](auto method, auto path, auto handler) {
+        const std::string original(path);
+        router.add(method, "/w/:workspace_id" + original, decltype(handler)(handler));
         router.add(method, original, std::move(handler));
     };
     router.use([&impl, cors = http::cors()](http::route_params& route) -> http::route_task {
@@ -15206,12 +15257,12 @@ bool ApiServer::start() {
                    return impl.observe_request(
                        route, "/scim/v2/Groups/:id", impl.serve_scim_resource(route, "Groups"));
                });
-    add_route(http::method::get,
-               "/v1/openapi.json",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/v1/openapi.json", impl.serve_openapi(route));
-               });
+    add_workspace_api_route(http::method::get,
+                            "/v1/openapi.json",
+                            [&impl](http::route_params& route) -> http::route_task {
+                                return impl.observe_request(
+                                    route, "/v1/openapi.json", impl.serve_openapi(route));
+                            });
     add_route(http::method::get,
                "/acme/:customer_id/directory",
                [&impl](http::route_params& route) -> http::route_task {
@@ -15312,20 +15363,27 @@ bool ApiServer::start() {
             rest_method(*capability) == "GET" ? http::method::get : http::method::post;
         const std::string path = rest_path(*capability);
         if (capability->kind == CapabilityKind::Read && capability->post_alias) {
-            add_route(http::method::post, path,
-                       [&impl, capability, path](http::route_params& route) -> http::route_task {
-                           return impl.observe_request(
-                               route, path, impl.serve_capability(route, capability));
-                       });
+            add_workspace_api_route(
+                http::method::post,
+                path,
+                [&impl, capability, path](http::route_params& route) -> http::route_task {
+                    return impl.observe_request(
+                        route, path, impl.serve_capability(route, capability));
+                });
         }
-        add_route(
-            method, path, [&impl, capability, path](http::route_params& route) -> http::route_task {
+        add_workspace_api_route(
+            method,
+            path,
+            [&impl, capability, path](http::route_params& route) -> http::route_task {
                 return impl.observe_request(route, path, impl.serve_capability(route, capability));
             });
     }
-    add_route(http::method::post, "/mcp", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/mcp", impl.serve_mcp(route));
-    });
+    add_workspace_api_route(
+        http::method::post,
+        "/mcp",
+        [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/mcp", impl.serve_mcp(route));
+        });
     add_route(http::method::get, "/v2/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/v2/", impl.serve_oci_ping(route));
     });
