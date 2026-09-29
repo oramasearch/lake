@@ -14,6 +14,15 @@ namespace {
 using namespace experiments;
 using Task = liquid::runtime::task<ApiResult>;
 
+struct ApiCompletion {
+    liquid::result<ApiResult> value;
+};
+
+boost::capy::io_task<ApiCompletion> complete_api(Task task) {
+    auto result = co_await std::move(task);
+    co_return boost::capy::io_result<ApiCompletion>{{}, {std::move(result)}};
+}
+
 ApiResult completed(std::expected<ApiResult, liquid::error> result) {
     return result ? std::move(*result) : ApiResult::failure("store_error", result.error().message);
 }
@@ -104,8 +113,8 @@ Task proxy(ApiContext& context, const json& input, std::string name, json args) 
     if (!context.workspaces) {
         co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
     }
-    const auto result = control::settled(co_await context.workspaces->call(
-        input.at("customer_id"), context.workspace_id, name, workspace_uses_get(name), std::move(args)));
+    const auto result = control::settled(co_await call_workspace(
+        context, input.at("customer_id"), name, workspace_uses_get(name), std::move(args)));
     if (!result) {
         co_return ApiResult::failure(result.error().code, result.error().message);
     }
@@ -118,11 +127,19 @@ bool selected(const json& input, const std::string& project, const std::string& 
 }
 
 Task list(ApiContext& context, const json& input) {
-    const auto studies = completed(co_await proxy(context, input, "list_studies", json::object()));
+    ApiContext studies_context = context;
+    ApiContext runs_context = context;
+    auto [wait_error, studies_completed, runs_completed] = co_await liquid::runtime::when_all(
+        liquid::runtime::as_io(proxy(studies_context, input, "list_studies", json::object())),
+        liquid::runtime::as_io(proxy(runs_context, input, "list_runs", json::object())));
+    if (wait_error) {
+        co_return ApiResult::failure("store_error", wait_error.message());
+    }
+    const auto studies = completed(std::move(studies_completed));
     if (!studies.ok) {
         co_return studies;
     }
-    const auto runs = completed(co_await proxy(context, input, "list_runs", json::object()));
+    const auto runs = completed(std::move(runs_completed));
     if (!runs.ok) {
         co_return runs;
     }
@@ -137,26 +154,13 @@ Task list(ApiContext& context, const json& input) {
         }
     }
     for (auto item : runs.value.at("runs")) {
+        const std::string project = item.value("project_name", item.value("project", ""));
         if (trial_runs.contains(item.at("id")) ||
-            !selected(input, item.at("project"), item.at("status"))) {
+            !item.value("study_id", std::string()).empty() ||
+            !selected(input, project, item.at("status"))) {
             continue;
         }
-        const auto tracked = completed(co_await proxy(context, input, "get_run_metrics",
-            {{"run", item.at("id")}, {"max_points", 4}}));
-        if (!tracked.ok) {
-            co_return tracked;
-        }
-        const auto& data = tracked.value;
-        if (data.at("params").contains("study.id")) {
-            continue;
-        }
-        if (data.contains("metrics_suppressed")) {
-            item["metrics_suppressed"] = data.at("metrics_suppressed");
-        }
-        if (!data.at("params").empty() || !data.at("series").empty() ||
-            !data.at("artifacts").empty() || data.contains("metrics_suppressed")) {
-            answer["runs"].push_back(std::move(item));
-        }
+        answer["runs"].push_back(std::move(item));
     }
     co_return ApiResult::success(std::move(answer));
 }
@@ -165,12 +169,27 @@ Task compare(ApiContext& context, const json& input) {
     json details = json::array();
     std::set<std::string> names;
     std::set<std::string> suppressed;
+    std::vector<ApiContext> contexts;
+    contexts.reserve(input.at("runs").size());
+    std::vector<boost::capy::io_task<ApiCompletion>> pending;
+    pending.reserve(input.at("runs").size());
     for (const auto& run : input.at("runs")) {
         json args = {{"run", run}};
         if (input.contains("names")) {
             args["names"] = input.at("names");
         }
-        const auto result = completed(co_await proxy(context, input, "get_run_metrics", args));
+        contexts.push_back(context);
+        pending.push_back(
+            complete_api(proxy(contexts.back(), input, "get_run_metrics", std::move(args))));
+    }
+    auto [wait_error, completed_metrics] =
+        co_await liquid::runtime::when_all(std::move(pending));
+    if (wait_error) {
+        co_return ApiResult::failure("store_error", wait_error.message());
+    }
+    for (std::size_t index = 0; index < completed_metrics.size(); ++index) {
+        const std::string run = input.at("runs").at(index);
+        const auto result = completed(std::move(completed_metrics[index].value));
         if (!result.ok) {
             co_return result;
         }

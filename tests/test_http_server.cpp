@@ -6,16 +6,20 @@
 #include "lake/control/identity_crypto.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
+#include <print>
 #include <ranges>
 #include <set>
 #include <string>
@@ -37,10 +41,12 @@
 
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
+#include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/web_apps.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "temporary_directory.hpp"
 #include "stream_fixture.hpp"
@@ -1420,13 +1426,11 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
          nlohmann::json::array({{{"id", "run-1"},
                                  {"graph", "S-1 CL-1"},
                                  {"status", "succeeded"},
+                                 {"outputs",
+                                  nlohmann::json::array(
+                                      {{{"name", "solution decisions"},
+                                        {"ref", "solution_results.decisions_run_1"}}})},
                                  {"created", "2026-09-28T12:00:00Z"}}})}};
-    workspace_caller_->answers["get_run"] = {
-        {"id", "run-1"},
-        {"status", "succeeded"},
-        {"outputs",
-         nlohmann::json::array(
-             {{{"name", "solution decisions"}, {"ref", "solution_results.decisions_run_1"}}})}};
     workspace_caller_->answers["sql"] = {
         {"rows",
          nlohmann::json::array({{{"id", "decision-1"},
@@ -2291,4 +2295,439 @@ TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {
 
     server.stop();
     EXPECT_EQ(captured_stderr.finish(), "");
+}
+
+namespace {
+
+using json = nlohmann::json;
+
+class DelayedPageWorkspace final : public lake::control::WorkspaceCaller {
+public:
+    liquid::runtime::task<lake::control::ZettaControlResult<json>>
+    call(std::string, std::string, std::string capability, bool, json input) override {
+        calls_.fetch_add(1, std::memory_order_relaxed);
+        auto [delay_error] =
+            co_await liquid::runtime::delay(std::chrono::milliseconds(20));
+        if (delay_error) {
+            co_return lake::control::ZettaControlResult<json>(std::unexpected(
+                lake::control::ZettaControlError{"store_error", delay_error.message()}));
+        }
+        co_return answer(capability, input);
+    }
+
+    std::size_t call_count() const {
+        return calls_.load(std::memory_order_relaxed);
+    }
+
+private:
+    std::atomic<std::size_t> calls_{0};
+
+    static json study(std::size_t index) {
+        return {{"id", "study-" + std::to_string(index)},
+                {"status", "complete"},
+                {"created", "2026-09-28T18:20:00.000Z"},
+                {"updated", "2026-09-28T18:20:03.000Z"},
+                {"spec",
+                 {{"name", "Study " + std::to_string(index)},
+                  {"project", "project-0"},
+                  {"pipeline", "pipeline-0"},
+                  {"dataset", "dataset-0"},
+                  {"methodology", "random"},
+                  {"objective",
+                   {{"metric", "validation.auc"},
+                    {"direction", "maximize"},
+                    {"validation_split", "validation"}}},
+                  {"budgets",
+                   {{"max_trials", 20},
+                    {"max_parallel_trials", 2},
+                    {"max_wall_time_ms", 60000},
+                    {"cost_cap", 10}}}}},
+                {"spent_cost", 1.0},
+                {"stop_reason", ""},
+                {"promoted_model", ""},
+                {"trials", json::array()}};
+    }
+
+    static json run(std::size_t index) {
+        return {{"id", "run-" + std::to_string(index)},
+                {"project", "project-id-" + std::to_string(index % 50)},
+                {"graph", "graph-id-" + std::to_string(index % 50)},
+                {"project_name", "project-" + std::to_string(index % 50)},
+                {"pipeline_name", "pipeline-" + std::to_string(index % 50)},
+                {"status", "succeeded"},
+                {"created", "2026-09-28T18:20:00.000Z"},
+                {"updated", "2026-09-28T18:20:03.000Z"},
+                {"outputs", json::array()},
+                {"log_count", 0},
+                {"output_count", 0}};
+    }
+
+    static json model(std::size_t index) {
+        return {{"id", "model-" + std::to_string(index)},
+                {"name", "model-" + std::to_string(index)},
+                {"project", "project-id-" + std::to_string(index)},
+                {"pipeline", "graph-id-" + std::to_string(index)},
+                {"project_name", "project-" + std::to_string(index)},
+                {"pipeline_name", "pipeline-" + std::to_string(index)},
+                {"run_id", "run-" + std::to_string(index)},
+                {"created", "2026-09-28T18:20:03.000Z"},
+                {"exposed", index % 2 == 0},
+                {"metrics", {{"held_out_auc", 0.91}}},
+                {"feature_schema", {{"features", json::array()}}}};
+    }
+
+    static json projects() {
+        json rows = json::array();
+        for (std::size_t index = 0; index < 50; ++index) {
+            rows.push_back(
+                {{"id", "project-id-" + std::to_string(index)},
+                 {"name", "project-" + std::to_string(index)},
+                 {"graphs",
+                  json::array({{{"id", "graph-id-" + std::to_string(index)},
+                                {"name", "pipeline-" + std::to_string(index)},
+                                {"approval", "approved"}}})}});
+        }
+        return {{"projects", std::move(rows)}};
+    }
+
+    static json runs() {
+        json rows = json::array();
+        for (std::size_t index = 0; index < 200; ++index) {
+            rows.push_back(run(index));
+        }
+        return {{"runs", std::move(rows)}};
+    }
+
+    static json models() {
+        json rows = json::array();
+        for (std::size_t index = 0; index < 50; ++index) {
+            rows.push_back(model(index));
+        }
+        return {{"models", std::move(rows)}};
+    }
+
+    static json studies() {
+        json rows = json::array();
+        for (std::size_t index = 0; index < 20; ++index) {
+            rows.push_back(study(index));
+        }
+        return {{"studies", std::move(rows)}};
+    }
+
+    static json topics() {
+        json rows = json::array();
+        for (std::size_t index = 0; index < 50; ++index) {
+            rows.push_back({{"topic", "topic:topic-" + std::to_string(index)},
+                            {"subscribers", 1},
+                            {"held_events", 0},
+                            {"next_sequence", 1}});
+        }
+        return {{"topics", std::move(rows)}};
+    }
+
+    static json answer(const std::string& capability, const json& input) {
+        if (capability == "list_projects") {
+            return projects();
+        }
+        if (capability == "list_runs") {
+            return runs();
+        }
+        if (capability == "list_models") {
+            return models();
+        }
+        if (capability == "list_studies") {
+            return studies();
+        }
+        if (capability == "list_topics") {
+            return topics();
+        }
+        if (capability == "get_project") {
+            return {{"id", "project-id-0"},
+                    {"name", input.value("name", "project-0")},
+                    {"graphs",
+                     json::array({{{"id", "graph-id-0"},
+                                   {"name", "pipeline-0"},
+                                   {"approval", "approved"}}})}};
+        }
+        if (capability == "get_graph") {
+            return {{"graph_id", "graph-id-0"},
+                    {"name", input.value("graph", "pipeline-0")},
+                    {"approval", "approved"},
+                    {"nodes", json::array()},
+                    {"edges", json::array()}};
+        }
+        if (capability == "get_run") {
+            json value = run(0);
+            value["status"] = "running";
+            return value;
+        }
+        if (capability == "get_study") {
+            return study(0);
+        }
+        if (capability == "get_study_analysis") {
+            return {{"best_trial", nullptr},
+                    {"optimization_history", json::array()},
+                    {"parameter_importances", json::array()},
+                    {"parallel_coordinates", json::array()},
+                    {"leaderboard", json::array()}};
+        }
+        if (capability == "get_run_metrics") {
+            return {{"run", input.value("run", "run-0")},
+                    {"params", json::object()},
+                    {"series", json::array()},
+                    {"artifacts", json::array()}};
+        }
+        if (capability == "get_topic") {
+            return {{"topic", "topic:topic-0"},
+                    {"settings", {{"exposed", true}}},
+                    {"subscriber_count", 1},
+                    {"held_events", 0},
+                    {"earliest_sequence", 1},
+                    {"next_sequence", 1},
+                    {"subscriptions", json::array()}};
+        }
+        if (capability == "browse_topic") {
+            return {{"topic", "topic:topic-0"},
+                    {"events", json::array()},
+                    {"earliest_sequence", 1},
+                    {"next_sequence", 1}};
+        }
+        if (capability == "get_dataset") {
+            return {{"name", input.value("dataset", "dataset-0")},
+                    {"columns", json::array()},
+                    {"partitions", json::array()}};
+        }
+        if (capability == "get_index") {
+            return {{"id", input.value("index_id", "index-0")},
+                    {"name", "index-0"},
+                    {"exposed", false},
+                    {"fields", json::array()}};
+        }
+        if (capability == "get_agent") {
+            return {{"id", input.value("id", "agent-0")}, {"name", "agent-0"}};
+        }
+        if (capability == "agent_training_status") {
+            return {{"status", "ready"}};
+        }
+        if (capability == "search") {
+            return {{"hits", json::array()}};
+        }
+        if (capability == "sql") {
+            return {{"rows", json::array()}};
+        }
+        if (capability.starts_with("list_")) {
+            return json::object();
+        }
+        return json::object();
+    }
+};
+
+std::string concrete_route(std::string pattern, const std::string& workspace_id) {
+    std::size_t begin = 0;
+    while (begin < pattern.size()) {
+        const std::size_t slash = pattern.find('/', begin + 1);
+        const std::size_t end = slash == std::string::npos ? pattern.size() : slash;
+        if (begin + 1 < pattern.size() &&
+            (pattern[begin + 1] == ':' || pattern[begin + 1] == '*')) {
+            const std::string parameter = pattern.substr(begin + 1, end - begin - 1);
+            pattern.replace(begin + 1, end - begin - 1,
+                            parameter == ":workspace_id" ? workspace_id : "fixture");
+        }
+        if (slash == std::string::npos) {
+            break;
+        }
+        begin = pattern.find('/', begin + 1);
+    }
+    return pattern;
+}
+
+double total_server_milliseconds(const std::string& response) {
+    const std::string timing = response_header(response, "server-timing");
+    constexpr std::string_view prefix = "total;dur=";
+    const std::size_t start = timing.find(prefix);
+    if (start == std::string::npos) {
+        return -1.0;
+    }
+    const std::size_t value_start = start + prefix.size();
+    const std::size_t end = timing.find(',', value_start);
+    return std::stod(timing.substr(value_start, end - value_start));
+}
+
+std::size_t workspace_call_count(const std::string& response) {
+    const std::string timing = response_header(response, "server-timing");
+    constexpr std::string_view prefix = "workspace;dur=";
+    const std::size_t workspace = timing.find(prefix);
+    const std::size_t description = timing.find(";desc=\"", workspace);
+    if (workspace == std::string::npos || description == std::string::npos) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    const std::size_t value_start = description + std::string_view(";desc=\"").size();
+    const std::size_t end = timing.find(' ', value_start);
+    return static_cast<std::size_t>(std::stoull(timing.substr(value_start, end - value_start)));
+}
+
+} // namespace
+
+TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is required for authenticated page performance";
+    }
+    const std::string instance_kek = std::getenv("LAKE_INSTANCE_KEK");
+    std::shared_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, instance_kek);
+    const auto identity = lake::audit::mint_custodial_identity(instance_kek);
+    ASSERT_TRUE(identity);
+    const auto session = store->sign_in_clerk(
+        {"page-performance", "page-performance@example.test", "Page performance", "fixture",
+         identity->taap_id, identity->public_key, identity->wrapped_seed});
+    ASSERT_TRUE(session);
+    const auto principal = store->context_for(session->secret);
+    ASSERT_TRUE(principal);
+    const auto customers = store->list_customers(2, principal->user_id);
+    ASSERT_TRUE(customers);
+    ASSERT_EQ(customers->size(), 1U);
+    const std::string customer_id = customers->front().id;
+
+    const std::filesystem::path workspace_directory =
+        lake::test::fixture_path("page-performance-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(workspace_directory);
+    auto caller = std::make_shared<DelayedPageWorkspace>();
+    auto workspaces = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{workspace_directory.string(), 1}, store, caller);
+    const auto requested = liquid::runtime::block_on(workspaces->request(customer_id));
+    ASSERT_TRUE(requested);
+    ASSERT_TRUE(*requested);
+    {
+        pqxx::connection database(uri);
+        pqxx::work tx(database);
+        tx.exec("INSERT INTO service_status (service_id, phase, endpoint) "
+                "VALUES ($1::uuid, 'Ready', 'http://workspace.example.test')",
+                pqxx::params{(*requested)->service_id});
+        tx.commit();
+    }
+    std::ofstream(workspace_directory / ((*requested)->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", "page-performance-token"}}.dump();
+    const std::string workspace_id = (*requested)->workspace_id;
+    ASSERT_FALSE(workspace_id.empty());
+    std::string app_id;
+    for (std::size_t index = 0; index < 20; ++index) {
+        lake::control::NewWebApp app;
+        app.customer_id = customer_id;
+        app.workspace_id = workspace_id;
+        app.name = "app-" + std::to_string(index);
+        app.mode = "image";
+        app.image = "registry.example.test/app:latest";
+        app.port = 8080;
+        app.host = app.name + ".apps.example.test";
+        app.max_apps = 20;
+        app.max_replicas = 20;
+        const auto created = store->create_web_app(app);
+        ASSERT_TRUE(created);
+        app_id = created->id;
+    }
+
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 4;
+    options.store = store;
+    options.workspaces = workspaces;
+    options.admin_token = "page-performance-operator";
+    options.instance_kek = instance_kek;
+    options.apps_per_customer = 20;
+    options.app_replicas_per_customer = 20;
+    lake::api::ApiServer server(std::move(options));
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    const std::string query =
+        "?customer_id=" + customer_id +
+        "&id=fixture&name=project-0&project=project-0&graph=pipeline-0"
+        "&study=study-0&run=run-0&runs=run-0,run-1&app_id=" + app_id +
+        "&topic=topic-0&zetta=workspace";
+    const std::string cookie = "lake_session=" + session->secret;
+    std::vector<std::tuple<std::string, std::string, std::string>> pages;
+    const std::map<std::string, std::size_t> expected_workspace_calls{
+        {"/w/:workspace_id/ship/models", 1},
+        {"/w/:workspace_id/ship/app", 1},
+        {"/w/:workspace_id/train/experiments", 2},
+        {"/w/:workspace_id/train/runs", 1},
+        {"/w/:workspace_id/train/agent", 3},
+        {"/w/:workspace_id/train/dataset", 2},
+        {"/w/:workspace_id/design/project", 4},
+        {"/w/:workspace_id/train/experiment", 2},
+        {"/w/:workspace_id/train/stream", 2},
+        {"/workspaces", 0}};
+    std::set<std::string> observed_workspace_pages;
+    const auto routes = server.get_route_patterns();
+    ASSERT_FALSE(routes.empty());
+    for (const std::string& pattern : routes) {
+        const std::string path = concrete_route(pattern, workspace_id) + query;
+        const bool workspace_page = pattern.starts_with("/w/:workspace_id/") &&
+                                    !pattern.starts_with("/w/:workspace_id/workspaces/");
+        std::string page_cookie = cookie;
+        HttpConnection connection(server.port());
+        std::size_t calls_before = caller->call_count();
+        std::string response = connection.request("GET", path, {}, page_cookie);
+        std::string content_type = response_header(response, "content-type");
+        if (!workspace_page && pattern != "/workspaces") {
+            for (const std::string alternate : {"lake_session=page-performance-operator", ""}) {
+                if (content_type.starts_with("text/html")) {
+                    break;
+                }
+                HttpConnection alternate_connection(server.port());
+                page_cookie = alternate;
+                calls_before = caller->call_count();
+                response = alternate_connection.request("GET", path, {}, page_cookie);
+                content_type = response_header(response, "content-type");
+            }
+        }
+        if (workspace_page || pattern == "/workspaces") {
+            ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << pattern << '\n' << response;
+            ASSERT_TRUE(content_type.starts_with("text/html")) << pattern;
+            EXPECT_NE(response.find("<select name=\"workspace_id\""), std::string::npos)
+                << pattern;
+            EXPECT_NE(response.find(workspace_id), std::string::npos) << pattern;
+        }
+        if (content_type.starts_with("text/html")) {
+            EXPECT_GE(total_server_milliseconds(response), 0.0) << pattern;
+            EXPECT_EQ(workspace_call_count(response), caller->call_count() - calls_before)
+                << pattern;
+            const auto expected = expected_workspace_calls.find(pattern);
+            if (expected != expected_workspace_calls.end()) {
+                EXPECT_EQ(workspace_call_count(response), expected->second) << pattern;
+                observed_workspace_pages.insert(pattern);
+            }
+            pages.emplace_back(pattern, path, page_cookie);
+        }
+    }
+
+    ASSERT_FALSE(pages.empty());
+    EXPECT_EQ(observed_workspace_pages.size(), expected_workspace_calls.size());
+    for (const auto& [pattern, path, page_cookie] : pages) {
+        std::vector<double> samples;
+        samples.reserve(20);
+        for (int sample = 0; sample < 20; ++sample) {
+            HttpConnection connection(server.port());
+            const std::size_t calls_before = caller->call_count();
+            const std::string response = connection.request("GET", path, {}, page_cookie);
+            if (pattern.starts_with("/w/:workspace_id/") || pattern == "/workspaces") {
+                ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << pattern << '\n' << response;
+            }
+            ASSERT_TRUE(response_header(response, "content-type").starts_with("text/html"))
+                << pattern;
+            const double elapsed = total_server_milliseconds(response);
+            ASSERT_GE(elapsed, 0.0) << pattern;
+            EXPECT_EQ(workspace_call_count(response), caller->call_count() - calls_before)
+                << pattern;
+            const auto expected = expected_workspace_calls.find(pattern);
+            if (expected != expected_workspace_calls.end()) {
+                EXPECT_EQ(workspace_call_count(response), expected->second) << pattern;
+            }
+            samples.push_back(elapsed);
+        }
+        std::ranges::sort(samples);
+        const double p95 = samples.at(18);
+        std::println("PAGE_PERF {} p95_ms={:.3f}", pattern, p95);
+        EXPECT_LT(p95, 100.0) << pattern;
+    }
 }

@@ -180,9 +180,11 @@ Task proxy(ApiContext& context, const json& input, std::string capability, json 
     control::ZettaControlResult<json> result = std::unexpected(
         control::ZettaControlError{"store_unavailable", "the requested Zetta is not configured"});
     if (input.at("zetta") == "workspace" && context.workspaces) {
-        result = control::settled(co_await context.workspaces->call(
-            input.at("customer_id"), input.at("workspace_id"), std::move(capability), false,
-            std::move(args)));
+        result = control::settled(co_await call_workspace(context,
+                                                          input.at("customer_id"),
+                                                          std::move(capability),
+                                                          false,
+                                                          std::move(args)));
     } else if (input.at("zetta") == "bus" && context.agent_bus) {
         result = control::settled(
             co_await context.agent_bus->bus().call(std::move(capability), std::move(args)));

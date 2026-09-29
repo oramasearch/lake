@@ -474,9 +474,11 @@ Capability dataset_capability() {
                 co_return ApiResult::failure(
                     "invalid_input", "id is <database>/<dataset>", "/id");
             }
-            auto called = co_await context.workspaces->call(
-                *customer_id, input.at("workspace_id"), "get_dataset", true,
-                {{"database", database}, {"dataset", dataset}});
+            auto called = co_await call_workspace(context,
+                                                  *customer_id,
+                                                  "get_dataset",
+                                                  true,
+                                                  {{"database", database}, {"dataset", dataset}});
             if (!called) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }

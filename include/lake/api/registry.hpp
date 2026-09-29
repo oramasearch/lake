@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <expected>
 #include <functional>
@@ -95,6 +96,11 @@ struct MeteringConfig {
 
 class Registry;
 
+struct WorkspaceCallTiming {
+    std::atomic<std::size_t> count{0};
+    std::atomic<std::int64_t> nanoseconds{0};
+};
+
 struct ApiContext {
     control::Store* store = nullptr; // null = no control-plane store configured
     // The registry running this call, set by Registry::call / call_async: a capability that is
@@ -137,6 +143,7 @@ struct ApiContext {
     control::agents::Service* agents = nullptr;
     control::PlatformService* platform = nullptr;
     control::WorkspaceService* workspaces = nullptr;
+    std::shared_ptr<WorkspaceCallTiming> workspace_call_timing;
     // Sends a turn to an agent's service (docs/api/agent-launches.md); null without agents.
     control::AgentCaller* agent_caller = nullptr;
     // Agent traffic over Zetta pub/sub (docs/api/agent-bus.md); null when not configured.

@@ -17,6 +17,18 @@ links retain the workspace prefix. Shared rendering carries the ID into URL attr
 navigation scripts, and hidden form fields. It does not rewrite ordinary hidden field values.
 Live app/build, Streams and Experiments requests send the same ID to REST explicitly.
 
+URL rewriting uses one forward scan with tracked script state and append-only output. Hidden
+workspace fields use a separate forward pass over forms. Both are linear in document size:
+large run lists do not repeatedly search earlier HTML or shift the remaining document for each
+link. Already-prefixed URLs and forms with an existing workspace selector or hidden field remain
+unchanged, so applying the rewrite again is safe. Global links, external links and ordinary
+hidden values retain their original targets.
+
+When changing URL generation, run `ctest --test-dir build -R '^WebUi.Workspace'` and the
+`PagePerformance` test with PostgreSQL configured. The rewrite tests cover mixed script and
+attribute URLs, query strings and fragments, explicit other-workspace targets, incomplete forms,
+and 2,000-row documents. The [page budget](performance.md) includes this rendering work.
+
 The selection form submits to `/workspace/select`. Switching keeps the page and query filters,
 removing old customer/workspace query values. Lake records `lake_workspace`, an HttpOnly,
 SameSite=Lax navigation cookie. It is never an API default or an authorization credential.

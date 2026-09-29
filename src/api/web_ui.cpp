@@ -27,7 +27,8 @@ bool workspace_page_path(std::string_view path) {
     }
     for (const std::string_view prefix : {"/design", "/train", "/ship", "/ask", "/workspace",
                                            "/workspaces"}) {
-        if (path == prefix || path.starts_with(std::string(prefix) + "/")) {
+        if (path == prefix || (path.starts_with(prefix) && path.size() > prefix.size() &&
+                               path[prefix.size()] == '/')) {
             return path != "/workspace/select";
         }
     }
@@ -56,51 +57,90 @@ std::string workspace_local_path(std::string_view path) {
     return std::string(id.empty() ? path : path.substr(3 + id.size()));
 }
 
+namespace {
+
+std::string workspace_document_links(std::string html, std::string_view prefix) {
+    const std::string_view input(html);
+    std::string output;
+    std::size_t copied = 0;
+    bool in_script = false;
+    // Rewrite URL attributes and inline navigation scripts, never hidden form values.
+    for (std::size_t pos = 0; pos < input.size(); ++pos) {
+        if (input[pos] == '<') {
+            if (input.substr(pos).starts_with("<script")) {
+                in_script = true;
+            } else if (input.substr(pos).starts_with("</script")) {
+                in_script = false;
+            }
+        }
+        if ((input[pos] != '\'' && input[pos] != '"') || pos + 1 == input.size() ||
+            input[pos + 1] != '/') {
+            continue;
+        }
+        const std::string_view leading = input.substr(0, pos);
+        if (!in_script && !leading.ends_with("href=") && !leading.ends_with("action=") &&
+            !leading.ends_with("src=")) {
+            continue;
+        }
+        const auto end = input.find_first_of("?\"'# <", pos + 1);
+        const auto path = input.substr(pos + 1, end == std::string_view::npos
+                                                   ? std::string_view::npos
+                                                   : end - pos - 1);
+        if (workspace_page_path(path)) {
+            if (copied == 0) {
+                output.reserve(input.size());
+            }
+            output.append(input.substr(copied, pos + 1 - copied));
+            output.append(prefix);
+            copied = pos + 1;
+        }
+    }
+    if (copied == 0) {
+        return html;
+    }
+    output.append(input.substr(copied));
+    return output;
+}
+
+std::string workspace_form_fields(std::string html, std::string_view workspace_id) {
+    const std::string_view input(html);
+    const std::string field = "<input type=\"hidden\" name=\"workspace_id\" value=\"" +
+                             std::string(workspace_id) + "\">";
+    std::string output;
+    std::size_t copied = 0;
+    std::size_t pos = 0;
+    while ((pos = input.find("<form", pos)) != std::string_view::npos) {
+        const auto open = input.find('>', pos);
+        const auto close = input.find("</form>", open);
+        if (open == std::string::npos || close == std::string::npos) {
+            break;
+        }
+        const auto body = input.substr(open + 1, close - open - 1);
+        if (!body.contains("name=\"workspace_id\"")) {
+            if (copied == 0) {
+                output.reserve(input.size());
+            }
+            output.append(input.substr(copied, open + 1 - copied));
+            output.append(field);
+            copied = open + 1;
+        }
+        pos = close + 7;
+    }
+    if (copied == 0) {
+        return html;
+    }
+    output.append(input.substr(copied));
+    return output;
+}
+
+} // namespace
+
 std::string web_ui_workspace_document(std::string html, std::string_view workspace_id) {
     if (workspace_path_id("/w/" + std::string(workspace_id) + "/").empty()) {
         return html;
     }
     const std::string prefix = "/w/" + std::string(workspace_id);
-    // Rewrite URL attributes and inline navigation scripts, never hidden form values.
-    for (std::size_t pos = 0; pos < html.size(); ++pos) {
-        if ((html[pos] != '\'' && html[pos] != '"') || pos + 1 == html.size() || html[pos + 1] != '/') {
-            continue;
-        }
-        const std::string_view leading(html.data(), pos);
-        const auto script = leading.rfind("<script");
-        const auto closed = leading.rfind("</script");
-        const bool in_script = script != std::string_view::npos &&
-            (closed == std::string_view::npos || script > closed);
-        if (!in_script && !leading.ends_with("href=") && !leading.ends_with("action=") &&
-            !leading.ends_with("src=")) {
-            continue;
-        }
-        const auto end = html.find_first_of("?\"'# <", pos + 1);
-        const std::string_view path(html.data() + pos + 1,
-            (end == std::string::npos ? html.size() : end) - pos - 1);
-        if (workspace_page_path(path)) {
-            html.insert(pos + 1, prefix);
-            pos += prefix.size();
-        }
-    }
-    const std::string field = "<input type=\"hidden\" name=\"workspace_id\" value=\"" +
-                             std::string(workspace_id) + "\">";
-    std::size_t pos = 0;
-    while ((pos = html.find("<form", pos)) != std::string::npos) {
-        const auto open = html.find('>', pos);
-        const auto close = html.find("</form>", open);
-        if (open == std::string::npos || close == std::string::npos) {
-            break;
-        }
-        const auto body = std::string_view(html).substr(open + 1, close - open - 1);
-        if (!body.contains("name=\"workspace_id\"")) {
-            html.insert(open + 1, field);
-            pos = close + field.size() + 7;
-        } else {
-            pos = close + 7;
-        }
-    }
-    return html;
+    return workspace_form_fields(workspace_document_links(std::move(html), prefix), workspace_id);
 }
 
 std::string web_ui_escape(std::string_view text) {
@@ -2547,8 +2587,7 @@ std::string gate_panel(const nlohmann::json& gate, std::string_view heading) {
 
 // The pipeline page (docs/design/zetta-parity.md): see, inspect, change, govern and follow one
 // Zetta execution graph.
-// What a run or model's ids are called (lake#255): the page loads `names` (projects and their
-// pipelines by id); an id that is not there belongs to a deleted project.
+// Compatibility for records created before names were denormalized onto runs and models.
 std::string project_called(const nlohmann::json& data, const std::string& id) {
     const nlohmann::json projects =
         data.value("names", nlohmann::json::object()).value("projects", nlohmann::json::object());
@@ -2561,8 +2600,11 @@ nlohmann::json graph_called(const nlohmann::json& data, const std::string& id) {
 }
 // A pipeline and its project as links, or "a deleted project" when lake no longer has it.
 std::string run_subject(const std::string& query, const nlohmann::json& data,
-                        const std::string& graph_id, const std::string& project_id) {
-    nlohmann::json graph = graph_called(data, graph_id);
+                        const std::string& graph_id, const std::string& project_id,
+                        const std::string& pipeline_name, const std::string& project_name) {
+    nlohmann::json graph = pipeline_name.empty()
+                               ? graph_called(data, graph_id)
+                               : nlohmann::json{{"name", pipeline_name}, {"project", project_name}};
     if (graph.empty() && !data.contains("names")) {
         // Names were not loaded: show what the run carries.
         graph = {{"name", graph_id}, {"project", project_id}};
@@ -4637,7 +4679,12 @@ std::string workspace_content(const WorkspacePage& page) {
                 out += std::format(
                     "<tr><td>{}</td><td><span class=\"badge{}\">{}</span></td><td>{}</td><td>{}"
                     "</td></tr>",
-                    run_subject(query, data, json_text(run, "graph"), json_text(run, "project")),
+                    run_subject(query,
+                                data,
+                                json_text(run, "graph"),
+                                json_text(run, "project"),
+                                json_text(run, "pipeline_name"),
+                                json_text(run, "project_name")),
                     status == "succeeded" ? " status-success"
                     : status == "failed"  ? " status-danger"
                                           : "",
@@ -4660,7 +4707,12 @@ std::string workspace_content(const WorkspacePage& page) {
                            web_ui_escape(status.empty() ? "unknown" : status));
         if (!json_text(run, "graph").empty()) {
             out += "<p class=\"sub\">" +
-                   run_subject(query, data, json_text(run, "graph"), json_text(run, "project")) +
+                   run_subject(query,
+                               data,
+                               json_text(run, "graph"),
+                               json_text(run, "project"),
+                               json_text(run, "pipeline_name"),
+                               json_text(run, "project_name")) +
                    (json_text(run, "created").empty()
                         ? std::string()
                         : " · started " + web_ui_escape(when(json_text(run, "created")))) +
@@ -4708,7 +4760,7 @@ std::string workspace_content(const WorkspacePage& page) {
             std::string calls;
             for (const nlohmann::json& model : models) {
                 const std::string id = json_text(model, "id");
-                const nlohmann::json detail = details.value(id, nlohmann::json::object());
+                const nlohmann::json detail = details.value(id, model);
                 const bool published = detail.value("exposed", false);
                 const nlohmann::json metrics = detail.value("metrics", nlohmann::json::object());
                 // A held-out score when the run measured one; otherwise say it is in-sample.
@@ -4726,7 +4778,10 @@ std::string workspace_content(const WorkspacePage& page) {
                                         "out</small>",
                                         metrics["in_sample_auc"].get<double>());
                 }
-                const std::string project = project_called(data, json_text(model, "project"));
+                const std::string project =
+                    json_text(model, "project_name").empty()
+                        ? project_called(data, json_text(model, "project"))
+                        : json_text(model, "project_name");
                 out += std::format(
                     "<tr><td><strong>{}</strong><br><small class=\"muted\"><code>{}</code></small>"
                     "</td><td>{}</td><td>{}</td><td>{}</td><td><span class=\"badge{}\">{}</span></td>"
