@@ -25,6 +25,9 @@ task-credential calls may omit it: Lake derives the immutable workspace from `ag
 rejects a supplied mismatch. Task/app/build events live in that workspace Zetta; only
 `agent-tasks.*` remain on the Lake bus. See the
 [workspace data-plane design and audit](docs/architecture/workspace-data-plane.md).
+Workspace-scoped clients may use `/w/<workspace_id>/v1/<capability>`,
+`/w/<workspace_id>/v1/openapi.json`, and `/w/<workspace_id>/mcp`. The path supplies
+`workspace_id`; an explicit value must match it.
 
 Workspaces are explicit `workspaces` contract rows, not service aliases. `/workspaces` lists
 their environment and operator status, creates desired state, and deletes with typed-name
@@ -61,14 +64,14 @@ confirmation. Routing resolves `workspaces.zetta_service_id`; migration 0039 and
 | `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*` | OCI Distribution, npm publication/install, and Python publication/install protocols; see [`docs/api/registry.md`](docs/api/registry.md) |
 | `/buildid/*`, `PUT /_lake/debug/*` | public debuginfod reads and protected executable, debug-information, and source publication |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
-| `GET /v1/<read>`, `POST /v1/<action>` | the capability registry as REST: identity and application authentication, Ship app desired state/logs/events, asynchronous image builds/status/cancellation/logs, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
+| `GET /v1/<read>`, `POST /v1/<action>`; the same below `/w/<workspace_id>` | the capability registry as REST: identity and application authentication, Ship app desired state/logs/events, asynchronous image builds/status/cancellation/logs, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `/v1/repositories/<repository-id>/sync/*` | streaming liquid push, pull, missing-object negotiation, chunk upload, and ranged chunk reads through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results |
-| `GET /v1/openapi.json` | OpenAPI 3.1, generated from the registry |
+| `GET /v1/openapi.json`, `/w/<workspace_id>/v1/openapi.json` | the same OpenAPI 3.1 document, generated from the registry |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
 | `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
 | `/scim/v2/Users`, `/scim/v2/Groups` and `/:id` | provider-bearer SCIM 2.0 filtered list, get, create, PATCH and delete resources |
 | `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
-| `POST /mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
+| `POST /mcp`, `/w/<workspace_id>/mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call` — the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
 
 `lake version` prints the version. The default port is 4900 (`--listen HOST:PORT`);

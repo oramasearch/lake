@@ -211,7 +211,8 @@ authorize_app_token(const Capability& entry, const nlohmann::json& input, ApiCon
     }
     const auto app = context.store->get_web_app(context.credential_workload_id);
     if (!app || web_app_token_purpose(*app, context.credential_token_hash) !=
-                    context.credential_kind.substr(4)) {
+                    context.credential_kind.substr(4) ||
+        (!context.path_workspace_id.empty() && app->workspace_id != context.path_workspace_id)) {
         return refused();
     }
     context.audit_customer_id = app->customer_id;
@@ -258,7 +259,8 @@ authorize_build_token(const Capability& entry, const nlohmann::json& input, ApiC
     }
     const auto build = context.store->get_build(context.credential_workload_id);
     if (!build || build_token_purpose(*build, context.credential_token_hash) !=
-                      context.credential_kind.substr(6)) {
+                      context.credential_kind.substr(6) ||
+        (!context.path_workspace_id.empty() && build->workspace_id != context.path_workspace_id)) {
         return refused();
     }
     context.audit_customer_id = build->customer_id;
@@ -312,6 +314,22 @@ const nlohmann::json& agent_task_input(const Capability& capability,
     return resolved;
 }
 
+const nlohmann::json& workspace_path_input(const Capability& capability,
+                                           const nlohmann::json& input,
+                                           const ApiContext& context,
+                                           nlohmann::json& resolved) {
+    if (context.path_workspace_id.empty() || !input.is_object() || input.contains("workspace_id")) {
+        return input;
+    }
+    const auto properties = capability.input_schema.find("properties");
+    if (properties == capability.input_schema.end() || !properties->contains("workspace_id")) {
+        return input;
+    }
+    resolved = input;
+    resolved["workspace_id"] = context.path_workspace_id;
+    return resolved;
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
@@ -334,6 +352,11 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
         state.result = validation;
+        state.proceed = false;
+    } else if (!context.path_workspace_id.empty() && input.contains("workspace_id") &&
+               context.workspace_id != context.path_workspace_id) {
+        state.result = ApiResult::failure(
+            "invalid_input", "workspace_id must match the workspace URL", "/workspace_id");
         state.proceed = false;
     } else if (context.credential_kind.starts_with("build_")) {
         state.result = authorize_build_token(entry, input, context);
@@ -403,6 +426,16 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
                 state.result = ApiResult::failure("unauthorized", "task credential belongs to another workspace");
                 state.proceed = false;
             }
+        }
+    }
+    if (state.proceed && !context.path_workspace_id.empty() &&
+        context.credential_kind == "agent_task" &&
+        context.credential_session_id.starts_with("task:")) {
+        const auto task = context.store->get_agent_task(context.credential_session_id.substr(5));
+        if (!task || task->workspace_id != context.path_workspace_id) {
+            state.result =
+                ApiResult::failure("unauthorized", "task credential belongs to another workspace");
+            state.proceed = false;
         }
     }
     return state;
@@ -483,9 +516,12 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     const auto capability = find(name);
     if (!capability)
         return ApiResult::failure("unknown_capability", "no capability named " + name);
-    nlohmann::json resolved_input;
+    nlohmann::json workspace_resolved_input;
+    const nlohmann::json& workspace_input =
+        workspace_path_input(*capability, input, context, workspace_resolved_input);
+    nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
-        agent_task_input(*capability, input, context, resolved_input);
+        agent_task_input(*capability, workspace_input, context, task_resolved_input);
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
@@ -514,9 +550,12 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     if (!capability) {
         co_return ApiResult::failure("unknown_capability", "no capability named " + name);
     }
-    nlohmann::json resolved_input;
+    nlohmann::json workspace_resolved_input;
+    const nlohmann::json& workspace_input =
+        workspace_path_input(*capability, input, context, workspace_resolved_input);
+    nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
-        agent_task_input(*capability, input, context, resolved_input);
+        agent_task_input(*capability, workspace_input, context, task_resolved_input);
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
