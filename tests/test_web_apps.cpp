@@ -238,6 +238,16 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
                                           {"port", 8080},
                                           {"host", "bad-.apps.example.test"}});
     EXPECT_EQ(invalid_label.error.code, "invalid_input");
+    // Agents send "host": "" when the person did not ask for an address: that means the default.
+    const auto empty_host = apps.call("create_app",
+                                      {{"name", "empty-host"},
+                                       {"mode", "image"},
+                                       {"image", "registry.example.test/app:v1"},
+                                       {"framework", "container"},
+                                       {"port", 8080},
+                                       {"host", ""}});
+    ASSERT_TRUE(empty_host.ok) << empty_host.error.message;
+    EXPECT_EQ(empty_host.value["host"], "empty-host.apps.example.test");
 
     const auto created = apps.create();
     ASSERT_TRUE(created.ok) << created.error.message;
