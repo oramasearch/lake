@@ -1,17 +1,16 @@
 # Tests
 
-`PagePerformance` discovers HTML pages from the production GET router and enforces p95 below
-80 ms over 20 renders at 30 ms of workspace latency, with at most two sequential rounds.
-Its populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering
-case with four repositories and 128 files. `Workspaces.Registry*` and
+`PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` discovers HTML pages from the
+production GET router, resets the workspace definition cache before each render, and checks every
+route's exact `Server-Timing` call and sequential-round budget. Unlisted routes must make zero
+workspace calls; Project's four calls may use two rounds, and every other listed route uses one.
+The loose wall guard is p95 below 500 ms over 20 renders at 30 ms of workspace latency. Its
+populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering case
+with four repositories and 128 files. The first Metering request checks populated-byte correctness;
+the measured Metering route receives the same p95 guard as every other page. `Workspaces.Registry*` and
 `Workspaces.PipelineDefinitionCache*` cover expiry, change invalidation, input isolation,
 readiness/credential changes, errors and stale in-flight replies. Run with PostgreSQL in both
 native builds; [performance.md](../docs/ui/performance.md) explains the evidence rows.
-
-`PagePerformance.EveryRegisteredGetPageStaysUnderTheServerBudget` derives GET routes from the
-production router, renders every discovered HTML page 20 times, and enforces p95 below 100 ms.
-Its workspace fixture adds 20 ms per call and supplies high-cardinality project, run, model,
-study, topic, and app lists. Passing output includes one `PAGE_PERF` row per page.
 It requires `LAKE_TEST_DB_URI`, uses a regular authenticated user, and rejects redirects or errors
 for canonical `/w/:workspace_id/...` pages and `/workspaces`.
 Non-workspace discovery also tries operator and signed-out profiles to include protected operator

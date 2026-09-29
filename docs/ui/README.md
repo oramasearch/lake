@@ -1,7 +1,8 @@
 # The web UI
 
-The live 100 ms p95 page rule and stricter 80 ms regression budget, `Server-Timing` fields,
-route-derived coverage, registry invalidation and populated cold-start fixtures are in
+The live 100 ms p95 page rule, deterministic per-route workspace call budgets, loose 500 ms
+regression guard, `Server-Timing` fields, route-derived coverage, registry invalidation and
+populated cold-start fixtures are in
 [performance.md](performance.md).
 
 Train → Experiments' ExperimentsAgent questions, conversation replies, proposals, studies, run
