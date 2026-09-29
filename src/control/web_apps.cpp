@@ -71,6 +71,7 @@ nlohmann::json web_app_json(const WebApp& app) {
     }
     return {{"id", app.id},
             {"customer_id", app.customer_id},
+            {"workspace_id", app.workspace_id},
             {"name", app.name},
             {"mode", app.mode},
             {"source", std::move(source)},

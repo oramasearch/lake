@@ -1052,7 +1052,10 @@ TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository = store->create_repository({customer->id, "source", "", "private"});
     ASSERT_TRUE(repository) << repository.error().message;
+    const auto build_workspace = store->create_workspace({customer->id, "builds", "dev", ""});
+    ASSERT_TRUE(build_workspace);
     const auto build = store->create_build({.customer_id = customer->id,
+                                            .workspace_id = build_workspace->id,
                                             .repository = repository->id,
                                             .revision = "main",
                                             .target = "registry/tenant-one/service:v1"});
@@ -2613,6 +2616,9 @@ TEST(WebApps, SourceTokenReadsOnlyItsPrivateRepositoryRevision) {
     ASSERT_TRUE(other);
     lake::control::NewWebApp input;
     input.customer_id = customer->id;
+    const auto app_workspace = surface.store.create_workspace({customer->id, "apps", "dev", ""});
+    ASSERT_TRUE(app_workspace);
+    input.workspace_id = app_workspace->id;
     input.name = "reader";
     input.mode = "runtime";
     input.source_repository = repository->id;

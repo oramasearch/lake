@@ -117,7 +117,8 @@
     const response = await fetch('/v1/' + capability, {
       method: 'POST', credentials: 'same-origin',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({customer_id: state.customer_id, ...input})
+      body: JSON.stringify({customer_id: state.customer_id, ...input,
+        workspace_id: location.pathname.split('/')[2]})
     });
     const result = await response.json();
     if (!response.ok || !result.ok) {
@@ -131,7 +132,8 @@
   }
 
   function url(path, input) {
-    return path + '?' + new URLSearchParams({customer_id: state.customer_id, ...input});
+    const workspace = location.pathname.split('/')[2];
+    return '/w/' + workspace + path + '?' + new URLSearchParams({customer_id: state.customer_id, ...input});
   }
 
   function confirmation(capability, input, message) {

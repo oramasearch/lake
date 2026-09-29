@@ -79,9 +79,12 @@ struct Streams : testing::Test {
         context.acting_identity = "admin";
     }
     json input(std::string topic = "orders", std::string zetta = "workspace") {
-        return {{"customer_id", customer}, {"zetta", zetta}, {"topic", topic}};
+        return {{"customer_id", customer}, {"workspace_id", workspace->id}, {"zetta", zetta}, {"topic", topic}};
     }
     lake::api::ApiResult call(const std::string& name, json args) {
+        if (!args.contains("workspace_id")) {
+            args["workspace_id"] = workspace->id;
+        }
         context.request_id = lake::control::new_uuid_v4();
         const auto result = liquid::runtime::block_on(registry.call_async(name, args, context));
         EXPECT_TRUE(result);
@@ -137,125 +140,150 @@ TEST_F(Streams, NonConsumingPagingRevisionsRetentionAndAudit) {
     }
 }
 
-TEST_F(Streams, SpaceIsolationSystemProtectionAndSharedAgentFiltering) {
-    const auto app = store->create_web_app({.customer_id = customer, .name = "mine",
-        .mode = "image", .image = "example:v1", .host = "mine.test"});
-    const auto foreign = store->create_web_app({.customer_id = other, .name = "foreign",
-        .mode = "image", .image = "example:v1", .host = "foreign.test"});
-    ASSERT_TRUE(app);
-    ASSERT_TRUE(foreign);
-    const auto own_topic = "app-events." + app->id;
-    const auto foreign_topic = "app-events." + foreign->id;
-    for (const auto& topic : {own_topic, foreign_topic, std::string("agent-events"),
-                              std::string("agent-tasks.agent-project"),
-                              std::string("agent-tasks.agent-private")}) {
+TEST_F(Streams, WorkspaceIdentityIsRequiredAndTopicRetentionIsExplicit) {
+    auto args = input();
+    args.erase("workspace_id");
+    const auto missing = liquid::runtime::block_on(registry.call_async("create_stream", args, context));
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->error.code, "invalid_input");
+    EXPECT_EQ(missing->error.path, "/workspace_id");
+    args["workspace_id"] = lake::control::new_uuid_v4();
+    EXPECT_EQ(call("create_stream", args).error.code, "invalid_input");
+    args["workspace_id"] = 123;
+    EXPECT_EQ(call("create_stream", args).error.code, "invalid_input");
+    lake::control::WorkspaceAgentBus events(workspace->service.get(), customer, workspace->id);
+    ASSERT_TRUE(liquid::runtime::block_on(events.create_topic("agent-events")).value());
+    ASSERT_TRUE(liquid::runtime::block_on(events.create_topic("app-events.one")).value());
+    EXPECT_EQ(workspace->caller->topics.at("agent-events").settings.at("retention_ms"), 86'400'000);
+    EXPECT_EQ(workspace->caller->topics.at("agent-events").settings.at("max_events"), 10'000);
+    EXPECT_EQ(workspace->caller->topics.at("app-events.one").settings.at("max_events"), 5'000);
+}
+
+TEST_F(Streams, SyntheticWeekKeepsDispatchBoundedAndCutoverRemovesOldTopics) {
+    for (const std::string topic : {"agent-events", "app-events.old", "build-events.old", "agent-turn.old"}) {
         ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic(topic)).value());
     }
-    const auto task = store->create_agent_task({.customer_id = customer, .agent = "agent-project",
-        .kind = "test", .scopes = {"list_streams"}});
-    const auto foreign_task = store->create_agent_task({.customer_id = other, .agent = "agent-private",
-        .kind = "test", .scopes = {"list_streams"}});
+    lake::control::AgentTaskBus dispatch(store, raw_bus, {"agent-project"});
+    ASSERT_TRUE(liquid::runtime::block_on(dispatch.start()).value());
+    const auto topics = liquid::runtime::block_on(raw_bus->call("list_topics", json::object()));
+    ASSERT_TRUE(topics && *topics);
+    ASSERT_EQ((**topics).at("topics").size(), 1);
+    const std::string topic = "agent-tasks.agent-project";
+    for (int hour = 0; hour < 7 * 24; ++hour) {
+        for (int turn = 0; turn < 101; ++turn) {
+            ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish(topic,
+                {{"task_id", std::to_string(turn)}, {"customer_id", customer},
+                 {"agent", "agent-project"}, {"kind", "test"}}, std::to_string(turn))).value());
+        }
+        EXPECT_LE(raw_bus->events(topic).size(), 10'000);
+        raw_bus->advance_time(std::chrono::hours(1));
+        EXPECT_TRUE(raw_bus->events(topic).empty());
+    }
+    for (int turn = 0; turn < 10'100; ++turn) {
+        ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish(topic, {{"task_id", turn}}, "turn")).value());
+    }
+    EXPECT_EQ(raw_bus->events(topic).size(), 10'000);
+    const auto tail = liquid::runtime::block_on(raw_bus->receive(topic, 1, 1000, std::chrono::milliseconds(0)));
+    ASSERT_TRUE(tail && *tail);
+    EXPECT_GT((**tail).events.front().sequence, 10'100);
+}
+
+TEST_F(Streams, TaskCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
+    const auto second = workspace->add(store, customer, "second");
+    const auto task = store->create_agent_task({
+        .customer_id = customer, .agent = "agent-project", .kind = "test",
+        .workspace_id = workspace->id, .scopes = {"list_streams"}});
     ASSERT_TRUE(task);
-    ASSERT_TRUE(foreign_task);
-    ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-events", {{"task_id", foreign_task->id},
-        {"message", "private"}}, foreign_task->id)).value());
-    ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-events", {{"task_id", task->id},
-        {"message", "own progress"}}, task->id)).value());
+    context.session_credential = true;
+    context.operator_credential = false;
+    context.credential_kind = "agent_task";
+    context.credential_session_id = "task:" + task->id;
+    context.scopes = {"list_streams"};
+    EXPECT_TRUE(call("list_streams", {{"customer_id", customer}}).ok);
+    const auto refused = call("list_streams", {{"customer_id", customer}, {"workspace_id", second}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    EXPECT_NE(refused.error.message.find("workspace"), std::string::npos);
+}
+
+TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {
+    const auto app = store->create_web_app({.customer_id = customer, .workspace_id = workspace->id,
+        .name = "deleted-app", .mode = "image", .image = "app:v1", .host = "deleted.test"});
+    ASSERT_TRUE(app);
+    lake::control::WebAppPatch patch;
+    patch.desired = "deleted";
+    ASSERT_TRUE(store->update_web_app(app->id, patch));
+    const auto repository = store->create_repository({customer, "source", "", "private"});
+    ASSERT_TRUE(repository);
+    const auto build = store->create_build({.customer_id = customer, .workspace_id = workspace->id,
+        .repository = repository->id, .revision = "main", .target = "app:v1"});
+    ASSERT_TRUE(build);
+    ASSERT_TRUE(store->set_build_status(build->id, {.phase = "Succeeded"}));
+    lake::control::WorkspaceAgentBus events(workspace->service.get(), customer, workspace->id);
+    for (const auto& topic : {"app-events." + app->id, "build-events." + build->id,
+                              "build-events." + lake::control::new_uuid_v4(), std::string("agent-events")}) {
+        ASSERT_TRUE(liquid::runtime::block_on(events.create_topic(topic)).value());
+    }
+    const auto first = liquid::runtime::block_on(lake::control::reap_workspace_topics(*store, *workspace->service));
+    ASSERT_TRUE(first && *first);
+    EXPECT_EQ(**first, 2);
+    EXPECT_TRUE(workspace->caller->topics.contains("build-events." + build->id));
+    const auto later = liquid::runtime::block_on(lake::control::reap_workspace_topics(*store, *workspace->service,
+        std::chrono::system_clock::now() + std::chrono::hours(25)));
+    ASSERT_TRUE(later && *later);
+    EXPECT_EQ(**later, 1);
+    EXPECT_EQ(workspace->caller->topics.size(), 1);
+    EXPECT_TRUE(workspace->caller->topics.contains("agent-events"));
+}
+
+TEST_F(Streams, WorkspaceIsolationAndDispatchOnlyBus) {
+    const auto second = workspace->add(store, customer, "second");
+    const auto foreign = workspace->add(store, other, "foreign");
+    lake::control::WorkspaceAgentBus first_bus(workspace->service.get(), customer, workspace->id);
+    lake::control::WorkspaceAgentBus second_bus(workspace->service.get(), customer, second);
+    lake::control::WorkspaceAgentBus foreign_bus(workspace->service.get(), other, foreign);
+    for (auto* target : {&first_bus, &second_bus, &foreign_bus}) {
+        ASSERT_TRUE(liquid::runtime::block_on(target->create_topic("agent-events")).value());
+    }
+    ASSERT_TRUE(liquid::runtime::block_on(first_bus.publish("agent-events", {{"message", "first"}}, "first")).value());
+    ASSERT_TRUE(liquid::runtime::block_on(second_bus.publish("agent-events", {{"message", "second"}}, "second")).value());
+    ASSERT_TRUE(liquid::runtime::block_on(foreign_bus.publish("agent-events", {{"message", "foreign"}}, "foreign")).value());
+    const auto task = store->create_agent_task({.customer_id = customer, .agent = "agent-project",
+        .kind = "test", .workspace_id = workspace->id, .scopes = {"list_streams"}});
+    ASSERT_TRUE(task);
+    for (const std::string topic : {"agent-events", "app-events.old", "agent-tasks.agent-project"}) {
+        ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic(topic)).value());
+    }
     ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-tasks.agent-project",
-        {{"task_id", task->id}, {"customer_id", customer}, {"agent", "agent-project"}},
-        task->id)).value());
+        {{"task_id", task->id}, {"customer_id", customer}, {"agent", "agent-project"}}, task->id)).value());
     ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-tasks.agent-project",
-        {{"task_id", foreign_task->id}, {"customer_id", other}, {"agent", "agent-project"}},
-        foreign_task->id)).value());
-    ASSERT_TRUE(
-        liquid::runtime::block_on(raw_bus->create_topic("agent-turn." + task->id)).value());
-    ASSERT_TRUE(store->fail_agent_task(task->id, "finished"));
+        {{"task_id", "foreign"}, {"customer_id", other}, {"agent", "agent-project"}}, "foreign")).value());
     const auto listing = call("list_streams", {{"customer_id", customer}});
     ASSERT_TRUE(listing.ok) << listing.error.message;
-    EXPECT_NE(listing.value.dump().find(own_topic), std::string::npos);
-    EXPECT_EQ(listing.value.dump().find(foreign_topic), std::string::npos);
-    EXPECT_NE(listing.value.dump().find("Agent events"), std::string::npos);
-    EXPECT_NE(listing.value.dump().find("Agent tasks · agent-project"), std::string::npos);
-    EXPECT_EQ(listing.value.dump().find("agent-private"), std::string::npos);
-    EXPECT_EQ(listing.value.dump().find("agent-turn."), std::string::npos);
-    EXPECT_EQ(listing.value.dump().find("topic:"), std::string::npos);
-    const auto legacy = call("list_streams",
-                             {{"customer_id", customer}, {"prefix", "agent-turn."}});
-    ASSERT_TRUE(legacy.ok);
-    EXPECT_NE(legacy.value.dump().find("agent-turn." + task->id), std::string::npos);
-    EXPECT_FALSE(call("browse_stream", input(foreign_topic, "bus")).ok);
-    auto turn_input = input("agent-events", "bus");
-    turn_input["task"] = task->id;
-    const auto turn = call("browse_stream", turn_input);
-    ASSERT_TRUE(turn.ok) << turn.error.message;
-    ASSERT_EQ(turn.value["events"].size(), 1);
-    EXPECT_EQ(turn.value.dump().find("private"), std::string::npos);
-    const auto scoped = call("browse_stream", input("agent-events", "bus"));
-    ASSERT_TRUE(scoped.ok);
-    ASSERT_EQ(scoped.value["events"].size(), 1);
-    auto agent_input = input("agent-events", "bus");
-    agent_input["agent"] = "agent-project";
-    const auto by_agent = call("browse_stream", agent_input);
-    ASSERT_TRUE(by_agent.ok);
-    EXPECT_EQ(by_agent.value["events"].size(), 1);
-    const auto queue = call("browse_stream", input("agent-tasks.agent-project", "bus"));
-    ASSERT_TRUE(queue.ok);
-    ASSERT_EQ(queue.value["events"].size(), 1);
-    EXPECT_EQ(queue.value["events"][0].at("id"), "event-3");
-    turn_input["task"] = foreign_task->id;
-    EXPECT_FALSE(call("browse_stream", turn_input).ok);
-    const auto events = call("get_stream", input("agent-events", "bus"));
-    ASSERT_TRUE(events.ok);
-    EXPECT_FALSE(events.value.at("counts_available"));
-    EXPECT_TRUE(events.value.at("subscriptions").empty());
-    EXPECT_TRUE(call("get_stream", input("agent-tasks.agent-project", "bus")).ok);
-    EXPECT_FALSE(call("get_stream", input("agent-tasks.agent-private", "bus")).ok);
-    const auto legacy_detail = call("get_stream", input("agent-turn." + task->id, "bus"));
-    ASSERT_TRUE(legacy_detail.ok);
-    EXPECT_EQ(legacy_detail.value.at("topic"), "agent-turn." + task->id);
-    EXPECT_FALSE(call("get_stream", input("agent-turn." + foreign_task->id, "bus")).ok);
-    for (const std::string name : {"create_stream", "update_stream", "delete_stream",
-                                  "publish_stream_message", "update_stream_message", "delete_stream_messages"}) {
-        json args = input(own_topic, "bus");
-        const auto properties = registry.find(name)->input_schema["properties"];
-        if (properties.contains("settings")) {
-            args["settings"] = json::object();
-        }
-        if (properties.contains("confirm_name")) {
-            args["confirm_name"] = own_topic;
-        }
-        if (properties.contains("payload")) {
-            args["payload"] = "{}";
-        }
-        if (properties.contains("sequence")) {
-            args["sequence"] = 1;
-        }
-        if (properties.contains("expected_revision")) {
-            args["expected_revision"] = 1;
-        }
-        if (properties.contains("before_sequence")) {
-            args["before_sequence"] = 2;
-        }
-        EXPECT_FALSE(call(name, args).ok) << name;
-        args["zetta"] = "workspace";
-        EXPECT_FALSE(call(name, args).ok) << name << " on a reserved workspace topic";
-        for (const std::string topic : {"run-metrics.run-one", "study-events.study-one"}) {
-            args["topic"] = topic;
-            if (properties.contains("confirm_name")) {
-                args["confirm_name"] = topic;
-            }
-            EXPECT_FALSE(call(name, args).ok) << name << " on " << topic;
-        }
+    ASSERT_EQ(listing.value.at("groups")[1].at("topics").size(), 1);
+    EXPECT_EQ(listing.value.at("groups")[1].at("topics")[0].at("topic"), "agent-tasks.agent-project");
+    const auto first = call("browse_stream", input("agent-events"));
+    ASSERT_TRUE(first.ok) << first.error.message;
+    ASSERT_EQ(first.value.at("events").size(), 1);
+    EXPECT_EQ(json::parse(first.value.at("events")[0].at("payload").get<std::string>()).at("message"), "first");
+    auto selected = input("agent-events");
+    selected["workspace_id"] = second;
+    const auto next = call("browse_stream", selected);
+    ASSERT_TRUE(next.ok);
+    EXPECT_EQ(json::parse(next.value.at("events")[0].at("payload").get<std::string>()).at("message"), "second");
+    selected["workspace_id"] = foreign;
+    EXPECT_EQ(call("browse_stream", selected).error.code, "invalid_input");
+    EXPECT_FALSE(call("browse_stream", input("agent-events", "bus")).ok);
+    EXPECT_FALSE(call("browse_stream", input("app-events.old", "bus")).ok);
+    const auto dispatch = call("browse_stream", input("agent-tasks.agent-project", "bus"));
+    ASSERT_TRUE(dispatch.ok);
+    ASSERT_EQ(dispatch.value.at("events").size(), 1);
+    EXPECT_EQ(dispatch.value.dump().find("foreign"), std::string::npos);
+    for (const std::string name : {"agent-events", "app-events.one", "build-events.one",
+                                  "run-metrics.one", "study-events.one"}) {
+        EXPECT_FALSE(call("create_stream", input(name)).ok);
     }
     EXPECT_FALSE(lake::api::workspace_action_allowed("drop_topic"));
     EXPECT_FALSE(lake::api::workspace_action_allowed("publish_event"));
-    for (int event = 0; event < 3; ++event) {
-        ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish(own_topic, {{"phase", event}}, app->id)).value());
-        ASSERT_TRUE(call("browse_stream", input(own_topic, "bus")).ok);
-    }
-    const auto consumer = liquid::runtime::block_on(raw_bus->receive(own_topic, 1, 100, std::chrono::milliseconds(0)));
-    ASSERT_TRUE(consumer && *consumer);
-    EXPECT_EQ((**consumer).events.size(), 3);
 }
 
 TEST_F(Streams, ThousandTopicListIsPagedAndUsesOneCallPerZetta) {
@@ -267,7 +295,7 @@ TEST_F(Streams, ThousandTopicListIsPagedAndUsesOneCallPerZetta) {
     ASSERT_TRUE(
         liquid::runtime::block_on(raw_bus->create_topic("agent-tasks.agent-project")).value());
     ASSERT_TRUE(store->create_agent_task({.customer_id = customer, .agent = "agent-project",
-        .kind = "test", .scopes = {"list_streams"}}));
+        .kind = "test", .workspace_id = workspace->id, .scopes = {"list_streams"}}));
     const auto workspace_calls = workspace->caller->calls.size();
     const auto bus_lists = raw_bus->call_count("list_topics");
     const auto bus_gets = raw_bus->call_count("get_topic");
@@ -279,7 +307,7 @@ TEST_F(Streams, ThousandTopicListIsPagedAndUsesOneCallPerZetta) {
         std::chrono::steady_clock::now() - started);
     ASSERT_TRUE(first.ok) << first.error.message;
     EXPECT_LT(elapsed, std::chrono::milliseconds(500));
-    EXPECT_EQ(first.value.at("total"), 1002);
+    EXPECT_EQ(first.value.at("total"), 1001);
     EXPECT_EQ(first.value.at("next_cursor"), "50");
     EXPECT_TRUE(first.value.at("previous_cursor").is_null());
     std::size_t shown = 0;
@@ -390,7 +418,7 @@ TEST_F(Streams, ValidationPurgeConfirmationAndExistingTopicsFailClosed) {
     removal.erase("sequences");
     EXPECT_EQ(call("delete_stream_messages", removal).value.at("removed"), 3);
     EXPECT_TRUE(call("browse_stream", input()).value.at("events").empty());
-    const auto unknown = liquid::runtime::block_on(workspace->caller->call("", "", "create_topic",
+    const auto unknown = liquid::runtime::block_on(workspace->caller->call("http://workspace.test", "", "create_topic",
         false, {{"topic", "external"}, {"settings", json::object()}}));
     ASSERT_TRUE(unknown && *unknown);
     EXPECT_FALSE(call("create_stream", input("external")).ok);
@@ -412,17 +440,17 @@ TEST_F(Streams, ExistingOwnershipCannotBeReassignedAfterAnExternalDrop) {
     EXPECT_FALSE(workspace->caller->topics.contains("orders"));
 }
 
-TEST_F(Streams, AgentEventsPagingCanContinueAcrossEmptyFilteredPages) {
-    ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic("agent-events")).value());
+TEST_F(Streams, DispatchPagingCanContinueAcrossEmptyFilteredPages) {
+    ASSERT_TRUE(liquid::runtime::block_on(raw_bus->create_topic("agent-tasks.agent-project")).value());
     const auto task = store->create_agent_task({.customer_id = customer, .agent = "agent-project",
-        .kind = "test", .scopes = {"list_streams"}});
+        .kind = "test", .workspace_id = workspace->id, .scopes = {"list_streams"}});
     ASSERT_TRUE(task);
     for (int index = 0; index < 35; ++index) {
         const auto id = index == 34 ? task->id : "another-space-task";
-        ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-events",
-            {{"task_id", id}, {"index", index}}, id)).value());
+        ASSERT_TRUE(liquid::runtime::block_on(raw_bus->publish("agent-tasks.agent-project",
+            {{"task_id", id}, {"customer_id", index == 34 ? customer : other}, {"index", index}}, id)).value());
     }
-    auto query = input("agent-events", "bus");
+    auto query = input("agent-tasks.agent-project", "bus");
     query["task"] = task->id;
     query["direction"] = "forward";
     query["limit"] = 1;
@@ -435,7 +463,7 @@ TEST_F(Streams, AgentEventsPagingCanContinueAcrossEmptyFilteredPages) {
     ASSERT_TRUE(page.ok);
     ASSERT_EQ(page.value.at("events").size(), 1);
     EXPECT_EQ(page.value.at("events")[0].at("sequence"), 35);
-    const auto detail = call("get_stream", input("agent-events", "bus"));
+    const auto detail = call("get_stream", input("agent-tasks.agent-project", "bus"));
     ASSERT_TRUE(detail.ok);
     EXPECT_FALSE(detail.value.at("counts_available"));
     EXPECT_EQ(detail.value.at("held_events"), 0);
@@ -488,7 +516,7 @@ TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
         };
         auto args = input(mcp ? "mcp-orders" : "rest-orders");
         invoke("create_stream", args);
-        invoke("list_streams", {{"customer_id", customer}});
+        invoke("list_streams", {{"customer_id", customer}, {"workspace_id", workspace->id}});
         invoke("get_stream", args);
         auto publish = args;
         publish["payload"] = R"({"text":"hello <script>"})";
@@ -505,11 +533,11 @@ TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
         auto update = args;
         update["settings"] = {{"retention_ms", 60000}};
         invoke("update_stream", update);
-        const auto list_html = request("GET", "/train/streams?customer_id=" + customer);
-        const auto detail_html = request("GET", "/train/stream?customer_id=" + customer +
+        const auto list_html = request("GET", "/w/" + workspace->id + "/train/streams?customer_id=" + customer);
+        const auto detail_html = request("GET", "/w/" + workspace->id + "/train/stream?customer_id=" + customer +
             "&zetta=workspace&topic=" + args.at("topic").get<std::string>());
-        EXPECT_NE(detail_html.find("href=\"/train/streams\" aria-current=\"page\""), std::string::npos);
-        EXPECT_NE(list_html.find("href=\"/train/streams\" aria-current=\"page\""), std::string::npos);
+        EXPECT_NE(detail_html.find("href=\"/w/" + workspace->id + "/train/streams\" aria-current=\"page\""), std::string::npos);
+        EXPECT_NE(list_html.find("href=\"/w/" + workspace->id + "/train/streams\" aria-current=\"page\""), std::string::npos);
         EXPECT_EQ(detail_html.find("test-workspace-service-token"), std::string::npos);
         EXPECT_NE(detail_html.find("&lt;script&gt;"), std::string::npos);
         const std::string html = list_html + detail_html;

@@ -29,6 +29,33 @@ TEST(WebUi, EscapesHtml) {
               "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
 }
 
+TEST(WebUi, WorkspacePathOwnsNavigationAndEveryFormCarriesTheSelection) {
+    const std::string id = "01234567-89ab-4cde-8fab-0123456789ab";
+    lake::api::WebUiViewer viewer = true;
+    viewer.path = "/w/" + id + "/train/stream";
+    viewer.query = "topic=orders&zetta=workspace";
+    viewer.customer_id = "space-one";
+    viewer.workspace_id = id;
+    viewer.spaces = {{"space-one", "My space"}};
+    viewer.workspaces = {{id, "Primary"}};
+    const auto html = lake::api::web_ui_shell("Workspace navigation", "",
+        "<a href=\"/ship/apps?customer_id=space-one\">Apps</a>"
+        "<form method=\"post\" action=\"/train/dataset/delete\"><button>Delete</button></form>", viewer);
+    EXPECT_NE(html.find("href=\"/w/" + id + "/train/streams\" aria-current=\"page\""), std::string::npos);
+    EXPECT_NE(html.find("href=\"/w/" + id + "/ship/apps?customer_id=space-one\""), std::string::npos);
+    EXPECT_NE(html.find("action=\"/w/" + id + "/train/dataset/delete\""), std::string::npos);
+    EXPECT_NE(html.find("type=\"hidden\" name=\"workspace_id\" value=\"" + id + "\""), std::string::npos);
+    EXPECT_NE(html.find("name=\"page\" value=\"/train/stream\""), std::string::npos);
+    EXPECT_NE(html.find("name=\"page_query\" value=\"topic=orders&amp;zetta=workspace\""), std::string::npos);
+    EXPECT_NE(html.find("value=\"" + id + "\" selected>Primary"), std::string::npos);
+    EXPECT_EQ(occurrences(html, "<select name=\"workspace_id\""), 1);
+    EXPECT_NE(html.find("New workspace</a>"), std::string::npos);
+    EXPECT_EQ(lake::api::web_ui_workspace_document(html, id), html);
+    EXPECT_EQ(lake::api::workspace_local_path(viewer.path), "/train/stream");
+    EXPECT_EQ(lake::api::workspace_path_id(viewer.path), id);
+    EXPECT_TRUE(lake::api::workspace_path_id("/w/not-an-id/train/data").empty());
+}
+
 TEST(WebUi, MarkdownEscapesRawHtmlAndAddsStableHeadingAnchors) {
     const std::string html = lake::api::web_ui_markdown(
         "# Overview\n\nUse `<safe>` here.\n\n## Details\n\n## Details\n\n<script>bad()</script>");

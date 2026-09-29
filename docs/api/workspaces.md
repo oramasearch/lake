@@ -1,11 +1,18 @@
 # Workspaces: Design, Train and Ship on Zetta
 
-**Status: implemented 2026-09-25.** lake's Design, Train and Ship pages delegate to the Zetta
-engine. Each customer that uses them gets its own Zetta cluster, a **workspace**, because Zetta has
-no tenancy: a cluster's `list_projects`, `list_models` and the rest return everything on it
-(liquid-bridge decision 45). Since decision 46 the workspace is the customer's **default Zetta
-service** ([`services.md`](services.md)), requested through lake's control Postgres; the contract
-with the operator is [`../control-plane/services.md`](../control-plane/services.md).
+Lake's Design, Train and Ship pages delegate to workspace Zettas. A customer can have many
+workspaces; each data-plane call requires an explicit `workspace_id` (`workspaces.id`). It never
+resolves a default implicitly. Zetta has no tenancy within one cluster: its list operations return
+that workspace's data. Provisioning uses workspace desired state; a missing or
+unready workspace prevents the feature, never redirects data to Lake's bus or PostgreSQL.
+The operator contract is [workspaces](../control-plane/workspaces.md), and the cutover/audit is in the
+[workspace data-plane design](../architecture/workspace-data-plane.md).
+
+Page paths below have the canonical prefix `/w/<workspace_id>`. The global top-bar selector
+lists the space's workspaces, including a sole preselected workspace, and offers New workspace.
+Switching preserves the page and filters. Old GET URLs redirect using the validated remembered
+workspace cookie or the space's only workspace; otherwise they show a selection page. Forms
+carry the ID explicitly and reject a mismatch with the URL. REST and MCP schemas require it too.
 
 ## What a person sees
 
@@ -34,24 +41,25 @@ customers the viewer may act for, with their own marked *your personal space*. U
 customer's workspace is ready, the page offers **Start your workspace** instead, then shows it being
 prepared and refreshes every 15 seconds.
 
-**Delete workspace** sits at the foot of Design → Projects once the workspace is ready. It needs a
-ticked confirmation that names the workspace, because the operator then deletes the cluster, its
-data volume and its token: every project, dataset, run and model in it is gone and cannot be
-recovered. lake's own repositories, packages and deployments are untouched, and the customer can
-start a new, empty workspace afterwards. If the operator refuses a workspace because the Lake is
-at its `spec.workspaces.maxWorkspaces` limit, the page says so and offers **Cancel workspace**,
-which withdraws the request the same way.
+The Workspaces page (`/workspaces`) shows name, environment, phase, namespace and created time.
+New workspace accepts a name and DNS-label-safe environment. Delete requires typing the exact
+name, then sets desired state to `deleted`; the operator deletes the namespace and its contents.
+Pending and stopped rows are selectable. A sole workspace is still shown in the top bar.
 
 ## Capabilities
 
-All fifteen are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
+All capabilities are in lake's registry, so REST, OpenAPI and MCP have them too. Each resolves the
 customer's policy object and is authorized by lake before anything reaches Zetta.
 
 | Capability | Kind | lake action on the customer | What it does |
 |---|---|---|---|
 | `workspace_status` | read | `read` | `{workspace, requested, phase, message, ready}` |
-| `start_workspace` | action | `write` | Appends a `desired` event; repeating it appends nothing |
-| `delete_workspace` | action | `admin` | Needs `confirm` equal to the workspace id; marks the default service absent. Refused with `not_found` when no workspace is requested |
+| `list_workspaces` | read | `read` | Requires `customer_id`; lists contract rows, excluding completed deletions |
+| `get_workspace` | read | `read` | Requires `customer_id`, `workspace_id`; returns desired state and operator observations |
+| `create_workspace` | action | `write` | Requires `customer_id`, `name`, `environment`; atomically creates workspace and primary service desired state |
+| `update_workspace` | action | `write` | Requires `customer_id`, `workspace_id`; optional name, environment, desired (`running` or `stopped`); changes increment generation, status fields are refused |
+| `delete_workspace` | action | `admin` | Requires `customer_id`, `workspace_id`, `confirm` equal to the workspace name; sets desired `deleted` |
+| `start_workspace` | action | `write` | Legacy idempotent creation of the named `workspace` in `prod`; uses the same contract table, never implicit data-plane routing |
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{model, rows, top_k?}`; checks the model is published (`get_model`), then Zetta's `score`; answers rows ranked by risk with their drivers. Ship → Models shows each published model's `curl` |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value; null clears), rename), or `edits`: a list applied in order as one save, all or nothing (how a Project Agent proposal is applied). Every step keeps its `attributes` (source, table, target, algo) through every edit. It reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
 | `workspace_sql` | read | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`) through Zetta's `sql`; DDL, writes, users and several statements are refused before anything reaches the workspace. The workspace speaks Zetta's SQL subset — one `WHERE` comparison, `GROUP BY` one key with `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, `ORDER BY`, `LIMIT`, `OFFSET` (zetta#1039), no joins or expressions — and the description says so, because agents write their queries from it. Audit kind `workspace.sql` |
@@ -93,20 +101,17 @@ MCP client does exactly what the page does (lake#189, `Workspaces.EveryNewFeatur
 
 ## How lake finds and calls a workspace
 
-- **The service.** The workspace is the customer's live `services` row with `is_default` and kind
-  `zetta` (migration `0024_services`). **Start your workspace** creates it; asking again returns
-  it. The first one takes the slug `ws-` followed by the first 12 hexadecimal digits of the
-  customer id (`control::workspace_slug`), which is the name decision 45 gave its cluster, so the
-  operator adopts that cluster with its data. A slug is never reused: a workspace started again
-  after a deletion gets a `svc-` slug and a new, empty cluster.
+- **The workspace.** `workspaces.id` resolves `zetta_service_id`, which resolves the Zetta service.
+  The primary service slug uses the workspace UUID. Migration 0039 records the legacy naming
+  remap; new workspace and service IDs differ. No default is consulted for data-plane calls.
 - **Status.** The operator's `service_status` row: phase, message and `endpoint`, the in-cluster
   address lake calls.
 - **Credential.** The operator mounts `$LAKE_SERVICE_DIR/<slug>.json`, whose `token` is the
   cluster's admin token. lake reads it per call and never stores it.
 - **Ready** means the operator reported `Ready` with an address *and* the token is present. Calls
   before that fail with `workspace_not_ready`.
-- **Delete workspace** marks the service absent. It then shows *Deleting* on `/services`, and
-  Design, Train and Ship offer **Start your workspace** again at once.
+- **Delete workspace** writes desired `deleted` and withdraws its services. The Workspaces page
+  shows the operator's observations until it reports `Deleted`.
 
 Reads are `GET /v1/<capability>` with the input as query parameters; actions are
 `POST /v1/<capability>` with a JSON body. lake unwraps Zetta's `{ok, value}` envelope and passes

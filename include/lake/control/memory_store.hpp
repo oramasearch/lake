@@ -170,6 +170,10 @@ public:
                                                            const std::string& to_hour,
                                                            int limit) override;
     Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) override;
+    Result<std::vector<Workspace>> list_workspaces(const std::string& customer_id) override;
+    Result<Workspace> get_workspace(const std::string& id) override;
+    Result<Workspace> create_workspace(const NewWorkspace&) override;
+    Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch&) override;
     Result<std::vector<ManagedService>> list_services(const std::string& customer_id) override;
     Result<ManagedService> get_service(const std::string& id) override;
     Result<ManagedService> create_service(const NewManagedService&) override;
@@ -251,7 +255,8 @@ public:
     Result<AgentTask> create_agent_task(const AgentTask&) override;
     Result<AgentTask> get_agent_task(const std::string& id) override;
     Result<AgentTask> latest_agent_task(const std::string& customer_id,
-                                        const std::string& kind) override;
+                                        const std::string& kind,
+                                        const std::string& workspace_id) override;
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,
@@ -509,6 +514,7 @@ private:
     std::vector<MeteringUsage> metering_usage_;
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
+    std::vector<Workspace> workspaces_;
     std::vector<WebApp> web_apps_;
     std::vector<Build> builds_;
     std::vector<StreamOwner> stream_owners_;

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -80,6 +81,156 @@ std::string create_search_change(const std::filesystem::path& path, const std::s
     const auto change = liquid::runtime::block_on(repository.cut("search fixture"));
     EXPECT_TRUE(change) << change.error().message;
     return change ? liquid::to_string(change->value) : "";
+}
+
+TEST(PostgresWorkspaces, MigrationRecordsAmbiguityAndMakesRoutingImmutable) {
+    const char* uri = lake::test::postgres_uri();
+    if (!uri) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is absent";
+    }
+    auto store = lake::control::make_postgres_store(uri, "workspace-migration-test");
+    std::vector<std::string> customers;
+    std::vector<std::string> workspaces;
+    std::vector<std::string> tasks;
+    for (int index = 0; index < 3; ++index) {
+        const auto user = store->create_user({"taap:migration-" + std::to_string(index), "", "Migration"});
+        ASSERT_TRUE(user);
+        const auto customer = store->create_customer({"individual", user->id, "", "migration-" + std::to_string(index)});
+        ASSERT_TRUE(customer);
+        const auto workspace = store->create_workspace({customer->id, "workspace", "dev", ""});
+        ASSERT_TRUE(workspace);
+        customers.push_back(customer->id);
+        workspaces.push_back(workspace->zetta_service_id);
+        const auto task = store->create_agent_task({.customer_id = customer->id, .agent = "agent-project",
+            .kind = "test", .workspace_id = workspace->id, .scopes = {"workspace_query"},
+            .requested_by_user_id = user->id, .requested_by_taap_id = "taap:migration-" + std::to_string(index)});
+        ASSERT_TRUE(task) << task.error().message;
+        tasks.push_back(task->id);
+    }
+    ASSERT_TRUE(store->create_service({customers[1], "zetta", "second", ""}));
+    ASSERT_TRUE(store->withdraw_service(workspaces[2]));
+    const auto repository = store->create_repository({customers[0], "source", "", "private"});
+    ASSERT_TRUE(repository);
+    const auto original_workspace = store->list_workspaces(customers[0])->front().id;
+    const auto app = store->create_web_app({.customer_id = customers[0], .workspace_id = original_workspace,
+        .name = "app", .mode = "image", .image = "app:v1", .port = 3000, .host = "migration.test"});
+    ASSERT_TRUE(app) << app.error().message;
+    const auto build = store->create_build({.customer_id = customers[0], .workspace_id = original_workspace,
+        .repository = repository->id, .revision = "main", .target = "app:v1"});
+    ASSERT_TRUE(build) << build.error().message;
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        tx.exec("DROP TRIGGER agent_task_workspace_routing ON agent_tasks");
+        tx.exec("DROP TRIGGER app_workspace_routing ON apps");
+        tx.exec("DROP TRIGGER build_workspace_routing ON builds");
+        tx.exec("UPDATE agent_tasks SET workspace_id = NULL");
+        tx.exec("UPDATE apps SET workspace_id = NULL");
+        tx.exec("UPDATE builds SET workspace_id = NULL");
+        tx.exec("UPDATE services SET workspace_id = NULL");
+        tx.exec("UPDATE services SET slug='ws-' || left(replace(customer_id::text,'-',''),12) WHERE is_default");
+        tx.exec("DELETE FROM workspaces");
+        for (const std::string table : {"agent_tasks", "apps", "builds"}) {
+            tx.exec("ALTER TABLE " + table + " DROP CONSTRAINT " + table + "_workspace_id_fkey");
+            tx.exec("ALTER TABLE " + table + " ADD CONSTRAINT " + table +
+                    "_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES services(id)");
+        }
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0039_workspaces'");
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0038_workspace_data_plane'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0038_workspace_data_plane:");
+    ASSERT_NE(start, std::string::npos);
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec(schema.substr(start));
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM workspace_assignments WHERE outcome = 'sole_default'")[0][0].as<int>(), 3);
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM workspace_assignments WHERE outcome = 'needs_selection'")[0][0].as<int>(), 2);
+        tx.commit();
+    }
+    EXPECT_EQ(store->get_agent_task(tasks[0])->workspace_id, customers[0]);
+    EXPECT_EQ(store->get_web_app(app->id)->workspace_id, customers[0]);
+    EXPECT_EQ(store->get_build(build->id)->workspace_id, customers[0]);
+    EXPECT_TRUE(store->get_agent_task(tasks[1])->workspace_id.empty());
+    EXPECT_TRUE(store->get_agent_task(tasks[2])->workspace_id.empty());
+    for (std::size_t index = 0; index < workspaces.size(); ++index) {
+        const auto& id = workspaces[index];
+        const auto migrated = store->get_workspace(customers[index]);
+        ASSERT_TRUE(migrated);
+        EXPECT_EQ(migrated->environment, "prod");
+        EXPECT_EQ(migrated->zetta_service_id, id);
+        EXPECT_EQ(store->get_service(id)->workspace_id, migrated->id);
+        EXPECT_EQ(store->get_service(id)->slug, lake::control::managed_service_slug("ws", migrated->id));
+    }
+    EXPECT_EQ(store->create_agent_task({.customer_id = customers[0], .agent = "agent-project", .kind = "test"}).error().code,
+              "invalid_input");
+    EXPECT_THROW(([&] {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE agent_tasks SET workspace_id = $1::uuid WHERE id = $2::uuid", workspaces[1], tasks[0]);
+        tx.commit();
+    })(), pqxx::check_violation);
+}
+
+TEST(PostgresWorkspaces, ContractNotifiesEveryChangeAndKeepsObservedStateOperatorOwned) {
+    const char* uri = lake::test::postgres_uri();
+    if (!uri) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is absent";
+    }
+    auto store = lake::control::make_postgres_store(uri, "workspace-contract-test");
+    const auto user = store->create_user({"taap:workspace-contract", "", "Workspace"});
+    ASSERT_TRUE(user);
+    const auto customer = store->create_customer({"individual", user->id, "", "contract"});
+    ASSERT_TRUE(customer);
+    pqxx::connection listener(uri);
+    std::vector<std::string> notifications;
+    listener.listen("lake_workspaces", [&](pqxx::notification note) {
+        notifications.emplace_back(note.payload);
+    });
+    const auto created = store->create_workspace({customer->id, "Research", "dev", "owner"});
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_NE(created->id, created->zetta_service_id);
+    EXPECT_EQ(store->get_service(created->zetta_service_id)->workspace_id, created->id);
+    listener.await_notification(5, 0);
+    ASSERT_EQ(notifications.size(), 1);
+    EXPECT_EQ(notifications.back(), created->id);
+    const auto changed = store->update_workspace(created->id, {.name = "Renamed"});
+    ASSERT_TRUE(changed);
+    EXPECT_EQ(changed->generation, 2);
+    EXPECT_EQ(changed->observed_generation, 0);
+    EXPECT_EQ(changed->phase, "Pending");
+    listener.await_notification(5, 0);
+    EXPECT_EQ(notifications.size(), 2);
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspaces SET phase='Ready', observed_generation=2, namespace=$2 "
+                       "WHERE id=$1::uuid", created->id, "dev-ws-test");
+        tx.commit();
+    }
+    listener.await_notification(5, 0);
+    EXPECT_EQ(notifications.size(), 3);
+    EXPECT_EQ(store->get_workspace(created->id)->namespace_name, "dev-ws-test");
+    EXPECT_EQ(store->get_workspace(created->id)->observed_generation, 2);
+    const auto deleted = store->update_workspace(created->id, {.desired = "deleted"});
+    ASSERT_TRUE(deleted);
+    EXPECT_EQ(deleted->phase, "Ready");
+    EXPECT_EQ(deleted->generation, 3);
+    EXPECT_EQ(store->get_service(created->zetta_service_id)->desired, "absent");
+    listener.await_notification(5, 0);
+    EXPECT_EQ(notifications.size(), 4);
+    {
+        pqxx::work tx(connection);
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM pg_constraint WHERE confrelid='workspaces'::regclass "
+                         "AND conrelid IN ('agent_tasks'::regclass,'apps'::regclass,'builds'::regclass)")[0][0].as<int>(), 3);
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('workspaces_guard')")[0][0].is_null());
+        tx.exec_params("UPDATE services SET workspace_id=NULL WHERE id=$1::uuid", created->zetta_service_id);
+        tx.exec_params("DELETE FROM workspaces WHERE id=$1::uuid", created->id);
+        tx.commit();
+    }
+    listener.await_notification(5, 0);
+    EXPECT_EQ(notifications.size(), 5);
 }
 
 TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
@@ -673,6 +824,9 @@ TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract)
 
     lake::control::NewWebApp app;
     app.customer_id = customer->id;
+    const auto app_workspace = store->create_workspace({customer->id, "apps", "dev", ""});
+    ASSERT_TRUE(app_workspace);
+    app.workspace_id = app_workspace->id;
     app.name = "reports";
     app.mode = "runtime";
     const auto repository = store->create_repository({customer->id, "source", "", "private"});
@@ -713,7 +867,7 @@ TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract)
     lake::api::register_core_capabilities(registry, "test");
     const auto call = [&](const lake::control::Principal& principal,
                           const std::string& name,
-                          const json& input) {
+                          json input) {
         ApiContext context;
         context.store = store.get();
         context.authorized = true;
@@ -727,6 +881,9 @@ TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract)
         context.credential_token_hash = principal.workload_token_hash;
         context.scopes = principal.scopes;
         context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        if (input.is_object() && registry.find(name)->input_schema["properties"].contains("workspace_id")) {
+            input["workspace_id"] = app.workspace_id;
+        }
         auto result = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(result);
         return *result;
@@ -912,6 +1069,9 @@ TEST(PostgresBuilds, DesiredRowStatusTokensAndCancellationFollowTheContract) {
 
     lake::control::NewBuild requested;
     requested.customer_id = customer->id;
+    const auto build_workspace = store->create_workspace({customer->id, "builds", "dev", ""});
+    ASSERT_TRUE(build_workspace);
+    requested.workspace_id = build_workspace->id;
     requested.repository = repository->id;
     requested.revision = "main";
     requested.context = "services/api";

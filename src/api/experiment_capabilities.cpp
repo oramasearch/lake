@@ -105,7 +105,7 @@ Task proxy(ApiContext& context, const json& input, std::string name, json args) 
         co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
     }
     const auto result = control::settled(co_await context.workspaces->call(
-        input.at("customer_id"), name, workspace_uses_get(name), std::move(args)));
+        input.at("customer_id"), context.workspace_id, name, workspace_uses_get(name), std::move(args)));
     if (!result) {
         co_return ApiResult::failure(result.error().code, result.error().message);
     }
@@ -245,6 +245,7 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     }
     auto args = input;
     args.erase("customer_id");
+    args.erase("workspace_id");
     args.erase("confirm");
     if (name == "start_study" && args.at("objective").at("validation_split") == "test") {
         co_return ApiResult::failure("invalid_input", "model selection requires a validation split",
@@ -261,6 +262,8 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
          json required, json output, std::string permission = "read") {
     properties["customer_id"] = identifier();
     required.push_back("customer_id");
+    properties["workspace_id"] = identifier();
+    required.push_back("workspace_id");
     const bool read = permission == "read";
     if (!read) {
         properties["confirm"] = {{"type", "boolean"}, {"const", true}};

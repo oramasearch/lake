@@ -363,8 +363,8 @@ int main(int argc, char** argv) {
             {"api", "/v1/openapi.json"},
             {"mcp", "POST /mcp"}}
             .dump());
-    // Applies what agents publish and recovers what the bus lost; on its own thread because
-    // each pass long-polls the bus.
+    // Recover lost dispatch and expire overdue tasks. Workspace event publication applies
+    // progress directly; this loop does not read an event topic on the bus.
     std::jthread bus_loop;
     if (opts.agent_bus) {
         bus_loop = std::jthread([bus = opts.agent_bus](std::stop_token stop) {
@@ -389,8 +389,7 @@ int main(int argc, char** argv) {
                 if (!pumped || !pumped->has_value()) {
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                 } else if (**pumped == 0) {
-                    // Nothing arrived within the long poll (or the bus does not wait).
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    std::this_thread::sleep_for(std::chrono::seconds(5));
                 }
             }
         });

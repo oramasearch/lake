@@ -24,6 +24,8 @@ public:
         std::uint64_t position = 1;
     };
     std::map<std::string, Topic> topics;
+    std::map<std::string, std::map<std::string, Topic>> routed_topics;
+    std::string first_url;
     std::vector<std::pair<std::string, json>> calls;
     std::string last_url, last_token;
     std::mutex mutex;
@@ -32,6 +34,10 @@ public:
     call(std::string url, std::string token, std::string capability, bool read, json input) override {
         std::lock_guard lock(mutex);
         last_url = std::move(url);
+        if (first_url.empty()) {
+            first_url = last_url;
+        }
+        auto& topics = last_url == first_url ? this->topics : routed_topics[last_url];
         last_token = std::move(token);
         calls.emplace_back(capability, input);
         static_cast<void>(read);
@@ -45,6 +51,9 @@ public:
                     {"held_events", topic.events.size()}, {"next_sequence", topic.next}});
             }
             co_return json{{"topics", rows}};
+        }
+        if (!input.contains("topic")) {
+            co_return json::object();
         }
         std::string name = input.at("topic");
         if (name.starts_with("topic:")) {
@@ -80,6 +89,7 @@ public:
                 std::chrono::system_clock::now().time_since_epoch()).count();
             topic.events.push_back({{"sequence", sequence}, {"id", "event-" + std::to_string(sequence)},
                 {"from", "service:lake"}, {"published_at", now}, {"payload", payload},
+                {"correlation_id", input.value("correlation_id", "")},
                 {"size", payload.size()}, {"encoding", "json"}, {"headers", json::array()},
                 {"revision", 1}, {"edited_at", nullptr}, {"edited_by", ""}});
             co_return json{{"event_id", "event-" + std::to_string(sequence)},
@@ -97,11 +107,13 @@ public:
             if (backward) {
                 std::reverse(events.begin(), events.end());
             }
-            while (events.size() > input.value("limit", std::size_t{100})) {
+            while (events.size() > input.value(capability == "receive_events" ? "max" : "limit", std::size_t{100})) {
                 events.erase(events.end() - 1);
             }
             if (capability == "receive_events") {
-                topic.position = topic.next;
+                topic.position = events.empty() ? topic.next : events.back().at("sequence").get<std::uint64_t>() + 1;
+                co_return json{{"topic", "topic:" + name}, {"events", events},
+                               {"earliest_sequence", earliest}, {"next_sequence", topic.position}};
             }
             co_return json{{"topic", "topic:" + name}, {"events", events},
                            {"earliest_sequence", earliest}, {"next_sequence", topic.next}};
@@ -159,11 +171,13 @@ public:
 };
 
 struct StreamWorkspace {
+    std::string id;
+    std::filesystem::path directory;
     std::shared_ptr<StreamCaller> caller = std::make_shared<StreamCaller>();
     std::shared_ptr<control::WorkspaceService> service;
 
     StreamWorkspace(const std::shared_ptr<control::InMemoryStore>& store, const std::string& customer) {
-        const auto directory = fixture_path("stream-credentials-" + control::new_uuid_v4());
+        directory = fixture_path("stream-credentials-" + control::new_uuid_v4());
         std::filesystem::create_directories(directory);
         service = std::make_shared<control::WorkspaceService>(
             control::WorkspaceConfig{directory.string(), 0}, store, caller);
@@ -172,12 +186,29 @@ struct StreamWorkspace {
             throw std::runtime_error("could not request test workspace");
         }
         const auto& workspace = **state;
+        id = workspace.workspace_id;
         const auto ready = store->set_service_status(workspace.service_id, "Ready", "", "http://workspace.test");
         if (!ready) {
             throw std::runtime_error(ready.error().message);
         }
         std::ofstream(directory / (workspace.slug + ".json")) <<
             nlohmann::json{{"kind", "zetta"}, {"token", "test-workspace-service-token"}}.dump();
+    }
+
+    std::string add(const std::shared_ptr<control::InMemoryStore>& store,
+                    const std::string& customer, const std::string& name) {
+        const auto row = store->create_workspace({customer, name, "prod", ""});
+        if (!row) {
+            throw std::runtime_error(row.error().message);
+        }
+        const auto workspace = store->get_service(row->zetta_service_id);
+        const auto ready = store->set_service_status(workspace->id, "Ready", "", "http://" + name + ".test");
+        if (!ready) {
+            throw std::runtime_error(ready.error().message);
+        }
+        std::ofstream(directory / (workspace->slug + ".json")) <<
+            nlohmann::json{{"kind", "zetta"}, {"token", "token-" + name}}.dump();
+        return row->id;
     }
 };
 } // namespace lake::test

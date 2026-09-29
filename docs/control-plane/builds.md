@@ -8,12 +8,17 @@ for the Job inside the request.
 
 The row is the exact contract consumed by orama-operator#195:
 
-> `id, customer_id, repository, revision, context, dockerfile, target, build_args_json, desired,
+> `id, customer_id, workspace_id, repository, revision, context, dockerfile, target, build_args_json, desired,
 > phase, digest, size, message, token_hashes_json, created_at, updated_at`.
 
 Lake writes the source, target, arguments and `desired`. The operator writes `phase`, result fields
 and `token_hashes_json`. A desired insert or cancellation sends `NOTIFY lake_builds, '<build id>'`;
 the operator's ordered poll remains the recovery path when a notification is lost.
+
+Migration `0038_workspace_data_plane` adds immutable `workspace_id`, required on create. Event
+publishers pass that ID explicitly; `build-events.<id>` lives in that workspace, with 24-hour /
+5,000-event retention and cleanup after the terminal replay window. Operator adoption is tracked
+in [orama-operator#216](https://github.com/oramasearch/orama-operator/issues/216).
 
 `desired` is `queued` or `cancelled`. Observed `phase` is `Queued`, `Running`, `Succeeded`,
 `Failed` or `Cancelled`. Cancellation retains the row and asks the operator to remove only the Job
@@ -51,7 +56,7 @@ row deliberately does not change App desired state before the image exists.
 
 ## Schema rollout
 
-`builds_guard` is the newest guard. The operator must vendor `db/schema.sql` byte-for-byte and
+`workspaces_guard` is the newest guard. The operator must vendor `db/schema.sql` byte-for-byte and
 apply it before builds are enabled. The migration is idempotent and adds customer/time and
 purpose-hash indexes. Lake pods do not run migrations.
 

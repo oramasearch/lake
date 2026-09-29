@@ -1,6 +1,11 @@
 #include "lake/control/agent_bus.hpp"
 
 #include <algorithm>
+#include <ctime>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <sstream>
 
 #include "lake/control/zetta_workspace.hpp"
 
@@ -45,31 +50,51 @@ AgentBus::call(std::string, nlohmann::json) {
 liquid::runtime::task<ZettaControlResult<nlohmann::json>>
 ZettaAgentBus::call(std::string capability, nlohmann::json input) {
     ZettaWorkspaceCaller caller;
-    co_return settled(co_await caller.call(url_, token_, std::move(capability), false,
+    const bool read = capability == "receive_events";
+    co_return settled(co_await caller.call(url_, token_, std::move(capability), read,
                                           std::move(input)));
 }
 
-liquid::runtime::task<ZettaControlResult<void>> ZettaAgentBus::create_topic(std::string topic) {
-    ZettaWorkspaceCaller caller;
-    auto created = settled(co_await caller.call(
-        url_,
-        token_,
-        "create_topic",
-        false,
-        {{"topic", topic}, {"exposed", true}, {"guarantee", "at_least_once"}}));
-    if (!created && created.error().message.find("already exists") == std::string::npos) {
+WorkspaceAgentBus::WorkspaceAgentBus(WorkspaceService* workspaces, std::string customer_id,
+                                   std::string workspace_id)
+    : workspaces_(workspaces), customer_id_(std::move(customer_id)),
+      workspace_id_(std::move(workspace_id)) {}
+
+liquid::runtime::task<ZettaControlResult<nlohmann::json>>
+WorkspaceAgentBus::call(std::string capability, nlohmann::json input) {
+    if (!workspaces_) {
+        co_return bus_failure<nlohmann::json>("workspace_not_ready", "a workspace Zetta is required");
+    }
+    const bool read = capability == "receive_events";
+    co_return settled(co_await workspaces_->call(customer_id_, workspace_id_,
+                                                std::move(capability), read, std::move(input)));
+}
+
+liquid::runtime::task<ZettaControlResult<void>> AgentBus::create_topic(std::string topic) {
+    const bool dispatch = topic.starts_with("agent-tasks.");
+    nlohmann::json retention{{"retention_ms", dispatch ? 3'600'000 : 86'400'000},
+                             {"max_events", dispatch || topic == "agent-events" ? 10'000 : 5'000}};
+    auto settings = retention;
+    settings["exposed"] = true;
+    settings["delivery"] = {{"guarantee", "at_least_once"}};
+    auto created = settled(co_await call("create_topic", {{"topic", topic}, {"settings", settings}}));
+    if (!created && created.error().code != "conflict" &&
+        created.error().message.find("already exists") == std::string::npos) {
         co_return bus_failure<void>(created.error().code, created.error().message);
+    }
+    if (!created) {
+        auto updated = settled(co_await call("update_topic", {{"topic", topic}, {"settings", retention}}));
+        if (!updated) {
+            co_return bus_failure<void>(updated.error().code, updated.error().message);
+        }
     }
     co_return ZettaControlResult<void>{};
 }
 
 liquid::runtime::task<ZettaControlResult<std::string>>
-ZettaAgentBus::publish(std::string topic, nlohmann::json payload, std::string correlation_id) {
-    ZettaWorkspaceCaller caller;
-    auto published = settled(co_await caller.call(url_,
-                                          token_,
+AgentBus::publish(std::string topic, nlohmann::json payload, std::string correlation_id) {
+    auto published = settled(co_await call(
                                           "publish_event",
-                                          false,
                                           {{"topic", topic},
                                            {"payload", payload.dump()},
                                            {"encoding", "json"},
@@ -81,15 +106,11 @@ ZettaAgentBus::publish(std::string topic, nlohmann::json payload, std::string co
     co_return published->value("event_id", std::string());
 }
 
-liquid::runtime::task<ZettaControlResult<BusBatch>> ZettaAgentBus::receive(
+liquid::runtime::task<ZettaControlResult<BusBatch>> AgentBus::receive(
     std::string topic, std::uint64_t from, int max, std::chrono::milliseconds wait) {
-    ZettaWorkspaceCaller caller;
-    // A read's HTTP timeout is 15 s; the long poll stays well inside it.
-    const auto waited = std::min<long long>(wait.count(), 10'000);
-    auto received = settled(co_await caller.call(url_,
-                                         token_,
+    const auto waited = std::clamp<long long>(wait.count(), 0, 30'000);
+    auto received = settled(co_await call(
                                          "receive_events",
-                                         true,
                                          {{"topic", topic},
                                           {"from_sequence", std::max<std::uint64_t>(from, 1)},
                                           {"max", std::clamp(max, 1, 1000)},
@@ -109,7 +130,7 @@ MemoryAgentBus::call(std::string capability, nlohmann::json input) {
         json topics = json::array();
         for (const auto& [name, events] : topics_) {
             topics.push_back({{"topic", "topic:" + name}, {"subscribers", 0},
-                              {"held_events", events.size()}, {"next_sequence", events.size() + 1}});
+                              {"held_events", events.size()}, {"next_sequence", sequences_[name]}});
         }
         co_return json{{"topics", std::move(topics)}};
     }
@@ -121,12 +142,18 @@ MemoryAgentBus::call(std::string capability, nlohmann::json input) {
     if (found == topics_.end()) {
         co_return bus_failure<json>("not_found", "topic does not exist");
     }
+    if (capability == "drop_topic") {
+        topics_.erase(found);
+        sequences_.erase(topic);
+        co_return json{{"topic", "topic:" + topic}, {"exposed", true}};
+    }
     const auto& held = found->second;
-    const auto next = held.size() + 1;
+    const auto next = sequences_[topic];
+    const auto earliest = held.empty() ? next : held.front().sequence;
     if (capability == "get_topic") {
         co_return json{{"topic", "topic:" + topic}, {"settings", {{"exposed", true}}},
                        {"subscriber_count", 0}, {"subscriptions", json::array()},
-                       {"held_events", held.size()}, {"earliest_sequence", held.empty() ? next : 1},
+                       {"held_events", held.size()}, {"earliest_sequence", earliest},
                        {"next_sequence", next}};
     }
     if (capability != "browse_topic") {
@@ -153,12 +180,13 @@ MemoryAgentBus::call(std::string capability, nlohmann::json input) {
         events.erase(events.end() - 1);
     }
     co_return json{{"topic", "topic:" + topic}, {"events", std::move(events)},
-                   {"earliest_sequence", held.empty() ? next : 1}, {"next_sequence", next}};
+                   {"earliest_sequence", earliest}, {"next_sequence", next}};
 }
 
 liquid::runtime::task<ZettaControlResult<void>> MemoryAgentBus::create_topic(std::string topic) {
     std::lock_guard lock(mutex_);
     topics_.try_emplace(topic);
+    sequences_.try_emplace(topic, 1);
     co_return ZettaControlResult<void>{};
 }
 
@@ -173,10 +201,11 @@ MemoryAgentBus::publish(std::string topic, nlohmann::json payload, std::string c
                 "not_found", "topic:" + topic + " does not exist or is not exposed");
         }
         id = "event-" + std::to_string(next_id_++);
-        found->second.push_back(BusEvent{found->second.size() + 1,
+        found->second.push_back(BusEvent{sequences_[topic]++,
                                          id,
                                          std::move(correlation_id),
-                                         std::move(payload)});
+                                         std::move(payload), now_});
+        trim(topic);
     }
     co_return id;
 }
@@ -194,10 +223,14 @@ liquid::runtime::task<ZettaControlResult<BusBatch>> MemoryAgentBus::receive(
     BusBatch batch;
     batch.next_sequence = from;
     const std::vector<BusEvent>& held = topics_[topic];
-    for (std::size_t i = from - 1; i < held.size() && batch.events.size() < std::size_t(max);
-         ++i) {
-        batch.events.push_back(held[i]);
-        batch.next_sequence = held[i].sequence + 1;
+    for (const auto& event : held) {
+        if (event.sequence >= from && batch.events.size() < static_cast<std::size_t>(max)) {
+            batch.events.push_back(event);
+            batch.next_sequence = event.sequence + 1;
+        }
+    }
+    if (batch.events.empty()) {
+        batch.next_sequence = std::max(from, sequences_[topic]);
     }
     co_return batch;
 }
@@ -214,6 +247,90 @@ std::size_t MemoryAgentBus::call_count(std::string_view capability) const {
     return found == call_counts_.end() ? 0 : found->second;
 }
 
+void MemoryAgentBus::trim(const std::string& topic) {
+    auto& events = topics_.at(topic);
+    const bool dispatch = topic.starts_with("agent-tasks.");
+    const auto age = std::chrono::hours(dispatch ? 1 : 24);
+    const std::size_t count = dispatch || topic == "agent-events" ? 10'000 : 5'000;
+    std::erase_if(events, [&](const BusEvent& event) {
+        return now_ - event.published_at >= age;
+    });
+    if (events.size() > count) {
+        events.erase(events.begin(), events.begin() + (events.size() - count));
+    }
+}
+
+void MemoryAgentBus::advance_time(std::chrono::milliseconds elapsed) {
+    std::lock_guard lock(mutex_);
+    now_ += elapsed;
+    for (const auto& [topic, events] : topics_) {
+        trim(topic);
+    }
+}
+
+bool build_topic_expired(const Build& build, std::chrono::system_clock::time_point now) {
+    if (build.phase != "Succeeded" && build.phase != "Failed" && build.phase != "Cancelled") {
+        return false;
+    }
+    std::istringstream input(build.updated_at);
+    std::tm timestamp{};
+    input >> std::get_time(&timestamp, "%Y-%m-%dT%H:%M:%S");
+    const auto terminal = std::chrono::system_clock::from_time_t(timegm(&timestamp));
+    return !input.fail() && now - terminal >= std::chrono::hours(24);
+}
+
+liquid::runtime::task<ZettaControlResult<std::size_t>>
+reap_workspace_topics(Store& store, WorkspaceService& workspaces,
+                      std::chrono::system_clock::time_point now) {
+    const auto customers = store.list_customers(std::numeric_limits<int>::max());
+    if (!customers) {
+        co_return bus_failure<std::size_t>(customers.error().code, customers.error().message);
+    }
+    std::size_t reaped = 0;
+    for (const auto& customer : *customers) {
+        const auto rows = store.list_workspaces(customer.id);
+        if (!rows) {
+            co_return bus_failure<std::size_t>(rows.error().code, rows.error().message);
+        }
+        for (const auto& workspace : *rows) {
+            if (workspace.desired != "running") {
+                continue;
+            }
+            WorkspaceAgentBus bus(&workspaces, customer.id, workspace.id);
+            const auto topics = settled(co_await bus.call("list_topics", nlohmann::json::object()));
+            if (!topics) {
+                continue;
+            }
+            for (const auto& row : topics->at("topics")) {
+                std::string topic = row.at("topic");
+                if (topic.starts_with("topic:")) {
+                    topic.erase(0, 6);
+                }
+                bool remove = false;
+                if (topic.starts_with("app-events.")) {
+                    const auto app = store.get_web_app(topic.substr(11));
+                    remove = !app ? app.error().code == "not_found"
+                        : app->customer_id == customer.id && app->workspace_id == workspace.id &&
+                          (app->desired == "deleted" || app->phase == "Deleted");
+                } else if (topic.starts_with("build-events.")) {
+                    const auto build = store.get_build(topic.substr(13));
+                    remove = !build && build.error().code == "not_found";
+                    if (build && build->customer_id == customer.id && build->workspace_id == workspace.id) {
+                        remove = build_topic_expired(*build, now);
+                    }
+                }
+                if (remove) {
+                    const auto dropped = settled(co_await bus.call("drop_topic", {{"topic", topic}}));
+                    if (dropped) {
+                        ++reaped;
+                    }
+                }
+            }
+        }
+    }
+    co_return reaped;
+}
+
 AgentTaskBus::AgentTaskBus(std::shared_ptr<Store> store,
                            std::shared_ptr<AgentBus> bus,
                            std::vector<std::string> agents,
@@ -222,12 +339,38 @@ AgentTaskBus::AgentTaskBus(std::shared_ptr<Store> store,
       sweep_every_(sweep_every) {}
 
 liquid::runtime::task<ZettaControlResult<void>> AgentTaskBus::start() {
-    if (auto created = settled(co_await bus_->create_topic(std::string(agent_events_topic))); !created) {
-        co_return created;
-    }
     for (const std::string& agent : agents_) {
         if (auto created = settled(co_await bus_->create_topic(agent_tasks_topic(agent))); !created) {
             co_return created;
+        }
+    }
+    co_return settled(co_await reap());
+}
+
+liquid::runtime::task<ZettaControlResult<void>> AgentTaskBus::reap() {
+    auto listed = settled(co_await bus_->call("list_topics", nlohmann::json::object()));
+    if (!listed) {
+        co_return bus_failure<void>(listed.error().code, listed.error().message);
+    }
+    for (const auto& row : listed->at("topics")) {
+        std::string topic = row.at("topic");
+        if (topic.starts_with("topic:")) {
+            topic.erase(0, 6);
+        }
+        const bool wanted = std::ranges::any_of(agents_, [&](const std::string& agent) {
+            return topic == agent_tasks_topic(agent);
+        });
+        if (wanted) {
+            continue;
+        }
+        std::clog << nlohmann::json{{"event", "bus_topic_reap"}, {"dry_run", true},
+                                    {"topic", topic}}.dump() << '\n';
+        auto dropped = settled(co_await bus_->call("drop_topic", {{"topic", topic}}));
+        if (dropped) {
+            ++reaped_topics_;
+        }
+        if (!dropped) {
+            co_return bus_failure<void>(dropped.error().code, dropped.error().message);
         }
     }
     co_return ZettaControlResult<void>{};
@@ -278,18 +421,7 @@ Result<AgentTask> AgentTaskBus::apply(Store& store, const nlohmann::json& event)
 liquid::runtime::task<ZettaControlResult<std::size_t>>
 AgentTaskBus::pump(std::chrono::milliseconds wait) {
     std::size_t applied = 0;
-    auto batch = settled(co_await bus_->receive(
-        std::string(agent_events_topic), cursor_.load(), 100, wait));
-    if (!batch) {
-        co_return bus_failure<std::size_t>(batch.error().code, batch.error().message);
-    }
-    for (const BusEvent& event : batch->events) {
-        // A refused event (a task that finished, or another agent's) changes nothing.
-        if (apply(*store_, event.payload)) {
-            ++applied;
-        }
-    }
-    cursor_.store(std::max(cursor_.load(), batch->next_sequence));
+    static_cast<void>(wait);
 
     const auto now = std::chrono::steady_clock::now();
     if (now - last_sweep_ >= sweep_every_) {

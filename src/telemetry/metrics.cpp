@@ -571,6 +571,21 @@ public:
     storage_quota(const std::string& customer_id) override {
         return call("storage_quota", [&] { return store_->storage_quota(customer_id); });
     }
+    control::Result<std::vector<control::Workspace>>
+    list_workspaces(const std::string& customer_id) override {
+        return call("list_workspaces", [&] { return store_->list_workspaces(customer_id); });
+    }
+    control::Result<control::Workspace> get_workspace(const std::string& id) override {
+        return call("get_workspace", [&] { return store_->get_workspace(id); });
+    }
+    control::Result<control::Workspace>
+    create_workspace(const control::NewWorkspace& value) override {
+        return call("create_workspace", [&] { return store_->create_workspace(value); });
+    }
+    control::Result<control::Workspace>
+    update_workspace(const std::string& id, const control::WorkspacePatch& patch) override {
+        return call("update_workspace", [&] { return store_->update_workspace(id, patch); });
+    }
     control::Result<std::vector<control::ManagedService>>
     list_services(const std::string& customer_id) override {
         return call("list_services", [&] { return store_->list_services(customer_id); });
@@ -709,9 +724,12 @@ public:
         return call("get_agent_task", [&] { return store_->get_agent_task(id); });
     }
     control::Result<control::AgentTask> latest_agent_task(const std::string& customer_id,
-                                                          const std::string& kind) override {
+                                                          const std::string& kind,
+                                                          const std::string& workspace_id) override {
         return call("latest_agent_task",
-                    [&] { return store_->latest_agent_task(customer_id, kind); });
+                    [&] {
+                        return store_->latest_agent_task(customer_id, kind, workspace_id);
+                    });
     }
     control::Result<control::AgentTask> claim_agent_task(const std::string& id,
                                                          const std::string& agent,

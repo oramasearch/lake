@@ -429,7 +429,8 @@ Capability dataset_capability() {
              {"properties",
               {{"id", {{"type", "string"}}},
                {"revision", {{"type", "string"}}},
-               {"customer_id", {{"type", "string"}}}}},
+               {"customer_id", {{"type", "string"}}},
+               {"workspace_id", {{"type", "string"}}}}},
              {"required", json::array({"id"})},
              {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
@@ -449,6 +450,9 @@ Capability dataset_capability() {
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (input.contains("revision")) {
                 co_return repository_info(input, context, "dataset");
+            }
+            if (!input.contains("workspace_id")) {
+                co_return ApiResult::failure("invalid_input", "workspace_id is required", "/workspace_id");
             }
             if (!context.workspaces) {
                 co_return ApiResult::failure("store_unavailable",
@@ -471,7 +475,8 @@ Capability dataset_capability() {
                     "invalid_input", "id is <database>/<dataset>", "/id");
             }
             auto called = co_await context.workspaces->call(
-                *customer_id, "get_dataset", true, {{"database", database}, {"dataset", dataset}});
+                *customer_id, input.at("workspace_id"), "get_dataset", true,
+                {{"database", database}, {"dataset", dataset}});
             if (!called) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }

@@ -1,5 +1,12 @@
 # Services: a customer's managed Zetta, Postgres, Kafka, ClickHouse, TiDB, Cassandra, Valkey and SQLite
 
+`create_service` requires `workspace_id` (`workspaces.id`) as well as `customer_id`. The row
+stores ownership for the operator's workspace-namespace join. Creating a Zetta service is not
+creating a workspace: use `create_workspace` or the Workspaces page for that lifecycle. See
+[the workspace contract](../control-plane/workspaces.md).
+The primary workspace Zetta cannot be deleted through `delete_service`; use the typed-name
+workspace deletion so desired state remains consistent between the two controllers.
+
 **Status: implemented 2026-09-25 (liquid-bridge decision 46).** A customer runs any number of
 managed services on the Lake's cluster: **Zetta** clusters (the engine behind Design, Train and
 Ship), **Postgres**, **Kafka**, **ClickHouse**, **TiDB**, **Cassandra**, **Valkey** as a

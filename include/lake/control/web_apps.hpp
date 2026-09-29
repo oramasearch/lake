@@ -16,6 +16,7 @@ namespace lake::control {
 struct WebApp {
     std::string id;
     std::string customer_id;
+    std::string workspace_id;
     std::string name;
     std::string mode;
     std::string source_repository;
@@ -44,6 +45,7 @@ struct WebApp {
 
 struct NewWebApp {
     std::string customer_id;
+    std::string workspace_id;
     std::string name;
     std::string mode;
     std::string source_repository;

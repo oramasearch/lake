@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -198,7 +199,7 @@ struct ClerkIdentity {
     std::string custodial_taap_id, custodial_public_key, custodial_wrapped_seed;
 };
 // A service a customer runs on the Lake's cluster (docs/control-plane/services.md): lake writes
-// the desired fields, the operator the status fields. The workspace is the default Zetta service.
+// the desired fields, the operator the status fields.
 struct ManagedService {
     std::string id, customer_id, kind, name, slug;
     bool is_default = false;
@@ -208,7 +209,32 @@ struct ManagedService {
     std::string created_by_taap_id, created_at, updated_at;
     std::string phase, message, endpoint; // empty until the operator reports
     std::int64_t observed_generation = 0;
+    std::string workspace_id;
 };
+struct Workspace {
+    std::string id, customer_id, name, environment;
+    std::string desired = "running";
+    std::int64_t generation = 1;
+    std::string phase;
+    std::int64_t observed_generation = 0;
+    std::string message, namespace_name, zetta_service_id, created_at, updated_at;
+};
+struct NewWorkspace {
+    std::string customer_id, name, environment, created_by_taap_id;
+};
+struct WorkspacePatch {
+    std::optional<std::string> name, environment, desired;
+};
+// Reserve room for `-ws-` and twelve UUID digits in a DNS label.
+inline bool valid_workspace_environment(std::string_view value) {
+    if (value.empty() || value.size() > 47 || value.front() == '-' || value.back() == '-') {
+        return false;
+    }
+    return std::ranges::all_of(value, [](char character) {
+        return (character >= 'a' && character <= 'z') ||
+               (character >= '0' && character <= '9') || character == '-';
+    });
+}
 // `<prefix>-` and the first 12 hexadecimal digits of a UUID, the Kubernetes suffix of a service:
 // `svc-` for most, `ws-` plus the customer id for a customer's first default workspace. Empty when
 // `uuid` is not one.
@@ -260,6 +286,7 @@ struct NewManagedService {
     bool is_default = false;
     int instances = 1, storage_gi = 10;
     std::size_t max_per_customer = 0; // live services per customer; 0 (the default) means no limit
+    std::string workspace_id;
 };
 // A customer's store (docs/control-plane/storage.md, lake#196): a bucket, filesystem, network
 // filesystem or volume. Two axes: the type (what a client gets) and the provider (what runs it).
@@ -357,6 +384,7 @@ struct NewAgentCronSchedule {
 // it, then Running, and Succeeded or Failed once the agent (or lake's deadline) finishes it.
 struct AgentTask {
     std::string id, customer_id, agent, kind, conversation_id;
+    std::string workspace_id;
     nlohmann::json body = nlohmann::json::object();
     std::vector<std::string> scopes;
     int deadline_seconds = 300;
@@ -369,6 +397,7 @@ struct AgentTask {
 };
 struct AgentTaskStreamScope {
     std::string id, agent, finished_at;
+    std::string workspace_id;
 };
 // What lake's bus loop acts on: tasks nobody claimed since they were last published, and tasks
 // past their deadline (pending or running), which it fails.
@@ -886,6 +915,10 @@ public:
                                                                    const std::string& to_hour,
                                                                    int limit) = 0;
     virtual Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) = 0;
+    virtual Result<std::vector<Workspace>> list_workspaces(const std::string& customer_id) = 0;
+    virtual Result<Workspace> get_workspace(const std::string& id) = 0;
+    virtual Result<Workspace> create_workspace(const NewWorkspace&) = 0;
+    virtual Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch&) = 0;
     // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
     // first, leaving out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;
@@ -946,7 +979,8 @@ public:
     // A space's newest task of one kind (a project's pipeline build is kind "build:<project>");
     // not_found when there is none.
     virtual Result<AgentTask> latest_agent_task(const std::string& customer_id,
-                                                const std::string& kind) = 0;
+                                                const std::string& kind,
+                                                const std::string& workspace_id) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
     // it and where on agent-events its events will start. Exactly one claim succeeds; another is
     // a conflict, as is a claim by a different agent.

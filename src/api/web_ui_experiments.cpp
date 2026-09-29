@@ -189,13 +189,8 @@ std::string study_listing(const ExperimentsPage& page) {
 std::string list_page(const ExperimentsPage& page) {
     std::string html = "<form method=\"get\" action=\"/train/experiments\" "
         "data-capability=\"list_experiments\" class=\"experiment-fields\">"
-        "<label>Space<select name=\"customer_id\">";
-    for (const auto& customer : page.customers) {
-        html += "<option value=\"" + web_ui_escape(customer.id) + "\"" +
-            (customer.id == page.customer_id ? " selected" : "") + ">" +
-            web_ui_escape(customer.handle) + "</option>";
-    }
-    html += "</select></label>" + input("Project", "project", page.project) +
+        "<input type=\"hidden\" name=\"customer_id\" value=\"" + web_ui_escape(page.customer_id) + "\">";
+    html += input("Project", "project", page.project) +
         "<label>State<select name=\"state\">";
     for (const std::string state : {"", "pending", "running", "succeeded", "failed", "stopped", "complete"}) {
         html += "<option value=\"" + state + "\"" + (state == page.state ? " selected" : "") +

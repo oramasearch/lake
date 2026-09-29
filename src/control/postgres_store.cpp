@@ -3895,7 +3895,7 @@ public:
         "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
-        "COALESCE(st.observed_generation, 0)";
+        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, '')";
 
     static ManagedService service_from(const pqxx::row& row) {
         ManagedService service;
@@ -3916,6 +3916,7 @@ public:
         service.message = row[14].as<std::string>();
         service.endpoint = row[15].as<std::string>();
         service.observed_generation = row[16].as<std::int64_t>();
+        service.workspace_id = row[17].as<std::string>();
         return service;
     }
 
@@ -3929,6 +3930,127 @@ public:
             return std::unexpected(StoreError{"not_found", "no service " + id});
         }
         return service_from(rows[0]);
+    }
+
+    static constexpr const char* workspace_columns =
+        "id::text, customer_id::text, name, environment, desired, generation, COALESCE(phase,''), "
+        "COALESCE(observed_generation,0), COALESCE(message,''), COALESCE(namespace,''), "
+        "COALESCE(zetta_service_id::text,''), created_at::text, updated_at::text";
+
+    static Workspace workspace_from(const pqxx::row& row) {
+        Workspace value;
+        value.id = row[0].as<std::string>();
+        value.customer_id = row[1].as<std::string>();
+        value.name = row[2].as<std::string>();
+        value.environment = row[3].as<std::string>();
+        value.desired = row[4].as<std::string>();
+        value.generation = row[5].as<std::int64_t>();
+        value.phase = row[6].as<std::string>();
+        value.observed_generation = row[7].as<std::int64_t>();
+        value.message = row[8].as<std::string>();
+        value.namespace_name = row[9].as<std::string>();
+        value.zetta_service_id = row[10].as<std::string>();
+        value.created_at = row[11].as<std::string>();
+        value.updated_at = row[12].as<std::string>();
+        return value;
+    }
+
+    static Result<Workspace> one_workspace(pqxx::work& tx, const std::string& id) {
+        const auto rows = tx.exec_params(std::string("SELECT ") + workspace_columns +
+                                        " FROM workspaces WHERE id = $1::uuid", id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+        }
+        return workspace_from(rows[0]);
+    }
+
+    Result<std::vector<Workspace>> list_workspaces(const std::string& customer_id) override {
+        return with_tx<std::vector<Workspace>>([&](pqxx::work& tx) -> Result<std::vector<Workspace>> {
+            const auto rows = tx.exec_params(std::string("SELECT ") + workspace_columns +
+                " FROM workspaces WHERE customer_id = $1::uuid AND NOT "
+                "(desired = 'deleted' AND COALESCE(phase,'') = 'Deleted') ORDER BY created_at, id", customer_id);
+            std::vector<Workspace> values;
+            for (const auto& row : rows) {
+                values.push_back(workspace_from(row));
+            }
+            return values;
+        });
+    }
+
+    Result<Workspace> get_workspace(const std::string& id) override {
+        if (managed_service_slug("ws", id).empty()) {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must be a UUID"});
+        }
+        return with_tx<Workspace>([&](pqxx::work& tx) -> Result<Workspace> {
+            return one_workspace(tx, id);
+        });
+    }
+
+    Result<Workspace> create_workspace(const NewWorkspace& input) override {
+        if (input.name.empty() || input.name.size() > 128 || !valid_workspace_environment(input.environment)) {
+            return std::unexpected(StoreError{"invalid_input", "name and DNS-label safe environment are required"});
+        }
+        return with_tx<Workspace>([&](pqxx::work& tx) -> Result<Workspace> {
+            const auto customers = tx.exec_params(
+                "SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", input.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+            }
+            const auto existing = tx.exec_params(
+                "SELECT 1 FROM workspaces WHERE customer_id = $1::uuid AND name = $2 AND desired <> 'deleted'",
+                input.customer_id, input.name);
+            if (!existing.empty()) {
+                return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
+            }
+            const std::string id = new_uuid_v4();
+            const std::string service_id = new_uuid_v4();
+            tx.exec_params("INSERT INTO workspaces (id, customer_id, name, environment) "
+                           "VALUES ($1::uuid, $2::uuid, $3, $4)", id, input.customer_id, input.name, input.environment);
+            tx.exec_params("INSERT INTO services (id, customer_id, workspace_id, kind, name, slug, "
+                           "is_default, created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3::uuid, "
+                           "'zetta', $4, $5, NOT EXISTS (SELECT 1 FROM services WHERE customer_id = $2::uuid "
+                           "AND is_default), $6)",
+                           service_id, input.customer_id, id, managed_service_slug("ws", id),
+                           managed_service_slug("ws", id), input.created_by_taap_id);
+            tx.exec_params("UPDATE workspaces SET zetta_service_id = $2::uuid WHERE id = $1::uuid", id, service_id);
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", service_id);
+            return one_workspace(tx, id);
+        });
+    }
+
+    Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch& patch) override {
+        if (managed_service_slug("ws", id).empty() ||
+            (patch.name && (patch.name->empty() || patch.name->size() > 128)) ||
+            (patch.environment && !valid_workspace_environment(*patch.environment)) ||
+            (patch.desired && *patch.desired != "running" && *patch.desired != "stopped" && *patch.desired != "deleted")) {
+            return std::unexpected(StoreError{"invalid_input", "invalid workspace_id, name, environment or desired"});
+        }
+        return with_tx<Workspace>([&](pqxx::work& tx) -> Result<Workspace> {
+            tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid FOR UPDATE", id);
+            const auto row = one_workspace(tx, id);
+            if (!row) {
+                return row;
+            }
+            if (row->desired == "deleted") {
+                return std::unexpected(StoreError{"conflict", "the workspace is deleted"});
+            }
+            const std::string name = patch.name.value_or(row->name);
+            const std::string environment = patch.environment.value_or(row->environment);
+            const std::string desired = patch.desired.value_or(row->desired);
+            if (name == row->name && environment == row->environment && desired == row->desired) {
+                return row;
+            }
+            tx.exec_params("UPDATE workspaces SET name = $2, environment = $3, desired = $4, "
+                           "generation = generation + 1, updated_at = now() WHERE id = $1::uuid",
+                           id, name, environment, desired);
+            // Prevent the services controller from recreating a stopped or deleted workspace.
+            tx.exec_params("UPDATE services SET desired = $2, generation = generation + 1, "
+                           "updated_at = now() WHERE workspace_id = $1::uuid AND desired <> $2 "
+                           "AND ($4 = 'deleted' OR id = $3::uuid)",
+                           id, desired == "running" ? "present" : "absent", row->zetta_service_id, desired);
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_workspace(tx, id);
+        });
     }
 
     Result<std::vector<ManagedService>> list_services(const std::string& customer_id) override {
@@ -4003,8 +4125,8 @@ public:
             }
             const nlohmann::json spec{{"instances", in.instances}, {"storage_gi", in.storage_gi}};
             tx.exec_params("INSERT INTO services (id, customer_id, kind, name, slug, is_default, "
-                           "spec, created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, "
-                           "$6, $7::jsonb, $8)",
+                           "spec, created_by_taap_id, workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, "
+                           "$6, $7::jsonb, $8, NULLIF($9,'')::uuid)",
                            id,
                            in.customer_id,
                            in.kind,
@@ -4012,7 +4134,8 @@ public:
                            slug,
                            in.is_default,
                            spec.dump(),
-                           in.created_by_taap_id);
+                           in.created_by_taap_id,
+                           in.workspace_id);
             // The operator LISTENs and reconciles at once instead of on its next poll (lake#197);
             // delivered on commit.
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
@@ -4044,7 +4167,7 @@ public:
         "a.auth, a.bindings_json::text, a.env_json::text, a.secret_env_refs::text, a.desired, "
         "a.generation, a.phase, a.url, a.ready, a.message, a.observed_generation, "
         "to_char(a.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-        "a.source_entrypoint, a.token_hashes_json::text";
+        "a.source_entrypoint, a.token_hashes_json::text, COALESCE(a.workspace_id::text, '')";
 
     static WebApp web_app_from(const pqxx::row& row) {
         WebApp app;
@@ -4074,6 +4197,7 @@ public:
         app.updated_at = row[23].as<std::string>();
         app.source_entrypoint = row[24].as<std::string>();
         app.token_hashes = nlohmann::json::parse(row[25].as<std::string>());
+        app.workspace_id = row[26].as<std::string>();
         return app;
     }
 
@@ -4108,6 +4232,11 @@ public:
     }
 
     Result<WebApp> create_web_app(const NewWebApp& input) override {
+        const auto workspace = get_workspace(input.workspace_id);
+        if (!workspace || workspace->customer_id != input.customer_id ||
+            workspace->desired == "deleted") {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        }
         return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
             const pqxx::result customers = tx.exec_params(
                 "SELECT 1 FROM customers WHERE id = $1::uuid FOR UPDATE", input.customer_id);
@@ -4145,9 +4274,9 @@ public:
             tx.exec_params(
                 "INSERT INTO apps (id, customer_id, name, mode, source_repository, "
                 "source_revision, source_path, image, framework, port, replicas, host, auth, "
-                "bindings_json, env_json, secret_env_refs, source_entrypoint) VALUES ($1::uuid, "
+                "bindings_json, env_json, secret_env_refs, source_entrypoint, workspace_id) VALUES ($1::uuid, "
                 "$2::uuid, $3, $4, "
-                "$5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, $17)",
+                "$5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, $17, $18::uuid)",
                 id,
                 input.customer_id,
                 input.name,
@@ -4164,7 +4293,8 @@ public:
                 bindings.dump(),
                 input.env.dump(),
                 input.secret_env_refs.dump(),
-                input.source_entrypoint);
+                input.source_entrypoint,
+                input.workspace_id);
             tx.exec_params("SELECT pg_notify('lake_apps', $1)", id);
             return one_web_app(tx, id);
         });
@@ -4255,7 +4385,8 @@ public:
         "b.target, b.build_args_json::text, b.desired, b.phase, b.digest, b.size, b.message, "
         "b.token_hashes_json::text, "
         "to_char(b.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-        "to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+        "to_char(b.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(b.workspace_id::text, '')";
 
     static Build build_from(const pqxx::row& row) {
         Build build;
@@ -4275,6 +4406,7 @@ public:
         build.token_hashes = nlohmann::json::parse(row[13].as<std::string>());
         build.created_at = row[14].as<std::string>();
         build.updated_at = row[15].as<std::string>();
+        build.workspace_id = row[16].as<std::string>();
         return build;
     }
 
@@ -4335,6 +4467,11 @@ public:
     }
 
     Result<Build> create_build(const NewBuild& input) override {
+        const auto workspace = get_workspace(input.workspace_id);
+        if (!workspace || workspace->customer_id != input.customer_id ||
+            workspace->desired == "deleted") {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        }
         return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> {
             const pqxx::result repositories = tx.exec_params(
                 "SELECT 1 FROM repositories WHERE id = $1::uuid AND customer_id = $2::uuid "
@@ -4348,8 +4485,8 @@ public:
             const std::string id = new_uuid_v4();
             tx.exec_params(
                 "INSERT INTO builds (id, customer_id, repository, revision, context, dockerfile, "
-                "target, build_args_json) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, "
-                "$8::jsonb)",
+                "target, build_args_json, workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, "
+                "$8::jsonb, $9::uuid)",
                 id,
                 input.customer_id,
                 input.repository,
@@ -4357,7 +4494,8 @@ public:
                 input.context,
                 input.dockerfile,
                 input.target,
-                input.build_args.dump());
+                input.build_args.dump(),
+                input.workspace_id);
             tx.exec_params("SELECT pg_notify('lake_builds', $1)", id);
             return one_build(tx, id);
         });
@@ -4883,7 +5021,7 @@ public:
         "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "''), "
         "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text, "
-        "COALESCE(ts.events_from, 0)";
+        "COALESCE(ts.events_from, 0), COALESCE(t.workspace_id::text, '')";
 
     static Result<AgentTask> one_task(pqxx::work& tx, const std::string& id) {
         const pqxx::result rows = tx.exec_params(
@@ -4919,6 +5057,7 @@ public:
         task.credential_sha256 = row[16].as<std::string>();
         task.result = nlohmann::json::parse(row[17].as<std::string>(), nullptr, false);
         task.events_from = row[18].as<std::uint64_t>();
+        task.workspace_id = row[19].as<std::string>();
         return task;
     }
 
@@ -4929,7 +5068,7 @@ public:
                 const pqxx::result rows = tx.exec_params(
                     "SELECT t.id::text, t.agent, "
                     "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', "
-                    "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '') "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), COALESCE(t.workspace_id::text, '') "
                     "FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
                     "WHERE t.customer_id = $1::uuid ORDER BY t.created_at, t.id",
                     customer_id);
@@ -4937,13 +5076,18 @@ public:
                 tasks.reserve(rows.size());
                 for (const pqxx::row& row : rows) {
                     tasks.push_back({row[0].as<std::string>(), row[1].as<std::string>(),
-                                     row[2].as<std::string>()});
+                                     row[2].as<std::string>(), row[3].as<std::string>()});
                 }
                 return tasks;
             });
     }
 
     Result<AgentTask> create_agent_task(const AgentTask& in) override {
+        const auto workspace = get_workspace(in.workspace_id);
+        if (!workspace || workspace->customer_id != in.customer_id ||
+            workspace->desired == "deleted") {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+        }
         if (in.agent.empty() || in.scopes.empty()) {
             return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
         }
@@ -4951,10 +5095,10 @@ public:
             const std::string id = new_uuid_v4();
             tx.exec_params(
                 "INSERT INTO agent_tasks (id, customer_id, agent, kind, conversation_id, body, "
-                "scopes, deadline_seconds, requested_by_user_id, requested_by_taap_id) VALUES "
+                "scopes, deadline_seconds, requested_by_user_id, requested_by_taap_id, workspace_id) VALUES "
                 "($1::uuid, $2::uuid, $3, $4, NULLIF($5, '')::uuid, $6::jsonb, "
                 "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, NULLIF($9, '')::uuid, "
-                "$10)",
+                "$10, $11::uuid)",
                 id,
                 in.customer_id,
                 in.agent,
@@ -4964,21 +5108,24 @@ public:
                 nlohmann::json(in.scopes).dump(),
                 in.deadline_seconds,
                 in.requested_by_user_id,
-                in.requested_by_taap_id);
+                in.requested_by_taap_id,
+                in.workspace_id);
             return one_task(tx, id);
         });
     }
 
     Result<AgentTask> latest_agent_task(const std::string& customer_id,
-                                        const std::string& kind) override {
+                                        const std::string& kind,
+                                        const std::string& workspace_id) override {
         return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
             const pqxx::result rows = tx.exec_params(
                 std::string("SELECT ") + task_columns +
                     " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
-                    "WHERE t.customer_id = $1::uuid AND t.kind = $2 ORDER BY t.created_at DESC "
+                    "WHERE t.customer_id = $1::uuid AND t.kind = $2 AND t.workspace_id = $3::uuid "
+                    "ORDER BY t.created_at DESC "
                     "LIMIT 1",
                 customer_id,
-                kind);
+                kind, workspace_id);
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "no " + kind + " task"});
             }

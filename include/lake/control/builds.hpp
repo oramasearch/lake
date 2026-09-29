@@ -13,6 +13,7 @@ namespace lake::control {
 struct Build {
     std::string id;
     std::string customer_id;
+    std::string workspace_id;
     std::string repository;
     std::string revision;
     std::string context = ".";
@@ -31,6 +32,7 @@ struct Build {
 
 struct NewBuild {
     std::string customer_id;
+    std::string workspace_id;
     std::string repository;
     std::string revision;
     std::string context = ".";

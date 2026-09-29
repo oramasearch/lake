@@ -7,10 +7,10 @@ resource per service (an `OramaZettaCluster`, or a CloudNativePG `Cluster` that 
 operator then runs), and writes back what it observed. lake never talks to Kubernetes, and the
 operator never decides what a customer may have.
 
-The customer's **workspace** — the Zetta cluster behind Design, Train and Ship
-([`../api/workspaces.md`](../api/workspaces.md)) — is the customer's **default Zetta service**.
-This supersedes decision 45's request stream in `orama_control.workspaces` on the data-plane
-Zetta.
+A customer's workspace is now an explicit [workspace contract row](workspaces.md), with a
+primary Zetta service referenced by `zetta_service_id`. `is_default` remains compatibility
+metadata, not a data-plane routing choice. Migration 0039 replaces the earlier default-service
+workspace model and decision 45's request stream.
 
 ## Tables (migration `0024_services`, `db/schema.sql`)
 
@@ -20,10 +20,11 @@ Zetta.
 |---|---|
 | `id` | uuid, the service's identity everywhere (label `orama.cloud/service-id`) |
 | `customer_id` | the owning customer |
+| `workspace_id` | owning `workspaces.id`; added by migration 0039 for namespace routing |
 | `kind` | `zetta`, `postgres`, `kafka`, `clickhouse`, `tidb`, `cassandra`, `valkey` (migration `0025_service_catalog`) `sqlite` (migration `0026_sqlite_services`), `duckdb` or `polars` (migration `0027_analytics_services`) |
 | `name` | the customer's name for it, `^[a-z][a-z0-9-]{0,30}$`, unique per customer among live services |
-| `slug` | Kubernetes suffix, `svc-<12 hex of id>`, or `ws-<12 hex of customer id>` for a default workspace; never reused |
-| `is_default` | the customer's workspace (Zetta only; at most one live per customer) |
+| `slug` | Kubernetes suffix, `svc-<12 hex of id>`, or `ws-<12 hex of workspace id>` for a primary workspace Zetta |
+| `is_default` | legacy compatibility flag (Zetta only; at most one live per customer), not workspace identity |
 | `spec` | JSON object: `instances` (1–3, default 1), `storage_gi` (1–100, default 10) |
 | `desired` | `present` or `absent` (deletion requested) |
 | `generation` | incremented by lake on every change to `spec` or `desired` |
@@ -46,8 +47,8 @@ skips it.
 For each `Lake` with `spec.services.enabled` (or the deprecated `spec.workspaces.enabled`):
 
 1. **Connect** with pgx using the CloudNativePG application Secret `lake-<lake>-controldb-app`, key
-   `uri`, and read every service joined to its status.
-2. **Present** services: create or update `<lake>-<slug>` in the Lake's namespace, controlled by
+   `uri`, and read every service joined to its workspace namespace and status.
+2. **Present** services: create or update `<lake>-<slug>` in the workspace namespace, controlled by
    the Lake, labelled `orama.cloud/lake`, `orama.cloud/service-id`, `orama.cloud/service-kind`,
    annotated with the customer id.
    - `zetta`: an `OramaZettaCluster` built as the workspace reconciler builds it today, image
@@ -55,10 +56,9 @@ For each `Lake` with `spec.services.enabled` (or the deprecated `spec.workspaces
      `storage_gi` volume.
    - `postgres`: a CloudNativePG `Cluster` with `instances`, `storage_gi`, and `initdb` database
      `app` owned by `app`.
-   - **Adoption:** a `<lake>-ws-…` `OramaZettaCluster` created under decision 45 (controlled by the
-     Lake, `orama.cloud/workspace-id` equal to the slug, no service-id label) is adopted by the
-     default service with that slug, so an existing workspace keeps its data. Anything else already
-     holding the name fails the service with `… exists and is not this Lake's service`.
+   - **Legacy cutover:** operator#217 deletes the old `ws-*` cluster, volumes and credentials
+     in the Lake namespace before isolated recreation. This is explicitly approved for the dev
+     cluster; see [the workspace migration](workspaces.md). Ownership checks still apply.
 3. **Credentials:** copy each Ready service's connection into the Secret `lake-<lake>-services`
    (controlled by the Lake), key `<slug>.json`:
    - zetta: `{"kind":"zetta","endpoint":…,"token":<admin token>}`

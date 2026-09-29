@@ -18,6 +18,7 @@
 #include "lake/control/platform.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "temporary_directory.hpp"
+#include "stream_fixture.hpp"
 
 namespace {
 
@@ -33,14 +34,6 @@ lake::control::ClerkIdentity minted(std::string subject) {
                                         identity->public_key,
                                         identity->wrapped_seed};
 }
-
-class UnusedWorkspaceCaller final : public lake::control::WorkspaceCaller {
-public:
-    liquid::runtime::task<lake::control::ZettaControlResult<json>>
-    call(std::string, std::string, std::string, bool, json) override {
-        co_return lake::control::ZettaControlResult<json>(json::object());
-    }
-};
 
 class FakeLoki final : public lake::control::LokiSource {
 public:
@@ -68,8 +61,7 @@ struct WebApps {
         std::make_shared<lake::control::AgentTaskBus>(store, raw_bus, std::vector<std::string>{});
     std::filesystem::path service_dir =
         lake::test::fixture_path("web-app-services-" + lake::control::new_uuid_v4());
-    std::shared_ptr<UnusedWorkspaceCaller> workspace_caller =
-        std::make_shared<UnusedWorkspaceCaller>();
+    std::unique_ptr<lake::test::StreamWorkspace> workspace;
     std::shared_ptr<lake::control::WorkspaceService> workspaces;
     std::shared_ptr<FakeLoki> loki = std::make_shared<FakeLoki>();
     std::shared_ptr<lake::control::PlatformService> platform;
@@ -89,8 +81,8 @@ struct WebApps {
             store->create_repository({customer_id, "app-source", "", "private"});
         EXPECT_TRUE(repository);
         repository_id = repository->id;
-        workspaces = std::make_shared<lake::control::WorkspaceService>(
-            lake::control::WorkspaceConfig{service_dir.string(), 5}, store, workspace_caller);
+        workspace = std::make_unique<lake::test::StreamWorkspace>(store, customer_id);
+        workspaces = workspace->service;
         platform = std::make_shared<lake::control::PlatformService>(
             store,
             nullptr,
@@ -129,6 +121,10 @@ struct WebApps {
         if (registry.find(name)->input_schema["properties"].contains("customer_id") &&
             principal.kind != "app_events" && !input.contains("customer_id")) {
             input["customer_id"] = customer_id;
+        }
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") &&
+            !input.contains("workspace_id")) {
+            input["workspace_id"] = workspace->id;
         }
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);

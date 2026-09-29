@@ -8,6 +8,7 @@
 #include "lake/api/server.hpp"
 
 #include "lake/control/agents.hpp"
+#include "lake/control/agent_bus.hpp"
 
 #include <algorithm>
 #include <array>
@@ -328,6 +329,7 @@ boost::http::route_task send_text(boost::http::route_params& route,
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, cache_control);
     if (content_type.starts_with("text/html")) {
+        body = web_ui_workspace_document(std::move(body), workspace_path_id(std::string(route.url.path())));
         // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
         route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
     }
@@ -639,6 +641,18 @@ std::vector<std::string> form_fields(std::string_view body, std::string_view nam
         pos = amp + 1;
     }
     return values;
+}
+
+std::string workspace_form_error(const boost::http::route_params& route, std::string_view body) {
+    const auto workspace = workspace_path_id(std::string(route.url.path()));
+    if (workspace.empty()) {
+        return {};
+    }
+    const auto values = form_fields(body, "workspace_id");
+    if (values.size() != 1 || values.front() != workspace) {
+        return "workspace_id must be supplied once and match the URL path";
+    }
+    return {};
 }
 
 struct MultipartFile {
@@ -4487,6 +4501,8 @@ private:
 struct ApiServer::Impl {
     ServerOptions options;
     telemetry::Metrics metrics;
+    std::chrono::steady_clock::time_point next_topic_reap{};
+    std::size_t reported_bus_reaps = 0;
     mutable LiquidCustomerStores sync_store;
     ArtifactRegistry artifacts;
     Registry registry;
@@ -4945,6 +4961,9 @@ struct ApiServer::Impl {
         ApiContext ctx;
         ctx.request_path = std::string(route.url.path());
         ctx.request_query = std::string(route.url.encoded_query());
+        ctx.path_workspace_id = workspace_path_id(ctx.request_path);
+        ctx.remembered_workspace_id = cookie_value(route, "lake_workspace");
+        ctx.workspace_id = ctx.path_workspace_id;
         ctx.store = options.store.get();
         ctx.search = options.search.get();
         ctx.pki = &pki;
@@ -5058,6 +5077,57 @@ struct ApiServer::Impl {
         viewer.query = context.request_query;
         viewer.user_id = context.acting_user_id;
         viewer.clerk = clerk.has_value();
+        viewer.workspace_id = context.path_workspace_id;
+        if (viewer.workspace_id.empty()) {
+            viewer.workspace_id = context.remembered_workspace_id;
+        }
+        if (context.authorized && options.store && options.workspaces) {
+            auto read_context = context;
+            const auto customers = registry.call("list_customers", {{"limit", 200}}, read_context);
+            if (customers.ok) {
+                for (const auto& row : customers.value.at("items")) {
+                    const auto customer = customer_from_json(row);
+                    viewer.spaces.emplace_back(customer.id, customer.name);
+                }
+            }
+            const auto query = boost::urls::parse_query(context.request_query);
+            if (query && context.path_workspace_id.empty()) {
+                for (const auto& parameter : *query) {
+                    if (parameter.key == "customer_id" &&
+                        std::ranges::any_of(viewer.spaces, [&](const auto& space) {
+                            return space.first == parameter.value;
+                        })) {
+                        viewer.customer_id = parameter.value;
+                    }
+                }
+            }
+            if (!viewer.workspace_id.empty()) {
+                const auto workspace = options.store->get_workspace(viewer.workspace_id);
+                if (workspace && workspace->desired != "deleted" &&
+                    (viewer.customer_id.empty() || viewer.customer_id == workspace->customer_id) &&
+                    std::ranges::any_of(viewer.spaces, [&](const auto& space) {
+                        return space.first == workspace->customer_id;
+                    })) {
+                    viewer.customer_id = workspace->customer_id;
+                } else {
+                    viewer.workspace_id.clear();
+                }
+            }
+            if (viewer.customer_id.empty() && !viewer.spaces.empty()) {
+                viewer.customer_id = viewer.spaces.front().first;
+            }
+            const auto services = options.store->list_workspaces(viewer.customer_id);
+            if (services) {
+                for (const auto& service : *services) {
+                    if (service.desired != "deleted") {
+                        viewer.workspaces.emplace_back(service.id, service.name + " (" + service.environment + ")");
+                    }
+                }
+            }
+            if (viewer.workspace_id.empty() && viewer.workspaces.size() == 1) {
+                viewer.workspace_id = viewer.workspaces.front().first;
+            }
+        }
         return viewer;
     }
 
@@ -5245,6 +5315,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         const std::string customer_id = route_value(route, "customer_id");
         const std::string expected_url = request_origin(route) + std::string(route.url.path());
         const bool new_account = capability_name == "acme_new_account";
@@ -5370,8 +5444,14 @@ struct ApiServer::Impl {
                                      std::string_view location,
                                      std::string_view set_cookie = {}) {
         namespace http = boost::http;
+        const auto workspace = workspace_path_id(std::string(route.url.path()));
+        std::string destination(location);
+        const auto query = destination.find('?');
+        if (!workspace.empty() && workspace_page_path(destination.substr(0, query))) {
+            destination = "/w/" + workspace + destination;
+        }
         route.status(http::status::found);
-        route.res.set(http::field::location, location);
+        route.res.set(http::field::location, destination);
         if (!set_cookie.empty())
             route.res.set(http::field::set_cookie, set_cookie);
         route.res.set(http::field::cache_control, "no-store");
@@ -7379,6 +7459,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         ApiContext context = context_for(route);
         const ApiResult result = registry.call("create_repository",
                                                {{"customer_id", form_field(body, "customer_id")},
@@ -7398,9 +7482,14 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         ApiContext context = context_for(route);
         const ApiResult result = registry.call("build_image",
                                                {{"customer_id", form_field(body, "customer_id")},
+                                                {"workspace_id", form_field(body, "workspace_id")},
                                                 {"repository", form_field(body, "repository")},
                                                 {"revision", form_field(body, "revision")},
                                                 {"target", form_field(body, "target")}},
@@ -7476,7 +7565,119 @@ struct ApiServer::Impl {
         if (selection.customer_id.empty() && !selection.customers.empty()) {
             selection.customer_id = selection.customers.front().id;
         }
+        if (requested.empty() && !context.remembered_workspace_id.empty() && options.store) {
+            const auto workspace = options.store->get_workspace(context.remembered_workspace_id);
+            if (workspace && workspace->desired != "deleted" &&
+                std::ranges::any_of(selection.customers, [&](const auto& customer) {
+                    return customer.id == workspace->customer_id;
+                })) {
+                selection.customer_id = workspace->customer_id;
+            }
+        }
+        if (!context.path_workspace_id.empty() && options.store) {
+            const auto workspace = options.store->get_workspace(context.path_workspace_id);
+            if (workspace && std::ranges::any_of(selection.customers, [&](const auto& customer) {
+                    return customer.id == workspace->customer_id;
+                })) {
+                selection.customer_id = workspace->customer_id;
+            }
+        }
         return selection;
+    }
+
+    boost::http::route_task workspace_route(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const std::string path(route.url.path());
+        const std::string selected = workspace_path_id(path);
+        const bool switching = path == "/workspace/select";
+        const std::string local = workspace_local_path(path);
+        if (!workspace_page_path(local) && !switching) {
+            co_return http::route_next;
+        }
+        auto context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        if (local.starts_with("/workspaces/") && !selected.empty() && context.session_credential) {
+            co_return http::route_next;
+        }
+        auto selection = workspace_selection(context, query_value(route, "customer_id"));
+        const std::string requested_customer = query_value(route, "customer_id");
+        if (!selected.empty()) {
+            const auto workspace = options.store
+                ? options.store->get_workspace(selected)
+                : control::Result<control::Workspace>(std::unexpect,
+                      control::StoreError{"invalid_input", "workspace_id is unknown"});
+            const std::string requested_workspace = query_value(route, "workspace_id");
+            if (!workspace || workspace->desired == "deleted" || workspace->customer_id != selection.customer_id ||
+                (!requested_customer.empty() && requested_customer != workspace->customer_id) ||
+                (!requested_workspace.empty() && requested_workspace != selected)) {
+                co_return co_await send_text(route, http::status::bad_request,
+                    error_body("invalid_input", "workspace_id is not a workspace Zetta in this space"),
+                    "application/json", "no-store");
+            }
+            route.res.set(http::field::set_cookie,
+                "lake_workspace=" + selected + "; HttpOnly; SameSite=Lax; Path=/");
+            co_return http::route_next;
+        }
+        if (path.starts_with("/w/") || route.req.method() != http::method::get) {
+            co_return co_await send_text(route, http::status::bad_request,
+                error_body("invalid_input", "workspace_id is required in the URL path"),
+                "application/json", "no-store");
+        }
+        auto viewer = viewer_for(context);
+        viewer.customer_id = selection.customer_id;
+        viewer.workspace_id.clear();
+        viewer.workspaces.clear();
+        const auto services = options.store->list_workspaces(selection.customer_id);
+        if (services) {
+            for (const auto& service : *services) {
+                if (service.desired != "deleted") {
+                    viewer.workspaces.emplace_back(service.id, service.name + " (" + service.environment + ")");
+                }
+            }
+        }
+        std::string choice = switching ? query_value(route, "workspace_id")
+                                       : cookie_value(route, "lake_workspace");
+        if (std::ranges::none_of(viewer.workspaces, [&](const auto& workspace) {
+                return workspace.first == choice;
+            })) {
+            choice.clear();
+        }
+        if (choice.empty() && viewer.workspaces.size() == 1) {
+            choice = viewer.workspaces.front().first;
+        }
+        const std::string page = switching ? query_value(route, "page") : local;
+        const std::string destination = (workspace_page_path(page) || page == "/workspaces") && !page.contains('?') &&
+            !page.contains('#') ? page : "/design/projects";
+        if (!choice.empty()) {
+            std::string query;
+            if (!switching && !route.url.encoded_query().empty()) {
+                query = "?" + std::string(route.url.encoded_query());
+            }
+            if (switching) {
+                const std::string page_query = query_value(route, "page_query");
+                const auto parameters = boost::urls::parse_query(page_query);
+                if (parameters) {
+                    for (const auto& parameter : *parameters) {
+                        if (parameter.key != "workspace_id" && parameter.key != "customer_id") {
+                            query += query.empty() ? "?" : "&";
+                            query += oauth_url_encode(parameter.key) + "=" + oauth_url_encode(parameter.value);
+                        }
+                    }
+                }
+                query += query.empty() ? "?" : "&";
+                query += "customer_id=" + oauth_url_encode(selection.customer_id);
+            }
+            const std::string prefix = destination == "/workspaces" ? "" : "/w/" + choice;
+            co_return co_await redirect(route, prefix + destination + query,
+                "lake_workspace=" + choice + "; HttpOnly; SameSite=Lax; Path=/");
+        }
+        viewer.path = destination;
+        co_return co_await send_text(route, http::status::ok,
+            web_ui_shell("lake — Choose a Workspace", "",
+                "<h1>Choose a Workspace</h1><p>Select a workspace above or create a new one.</p>", viewer),
+            "text/html; charset=utf-8", "no-store");
     }
 
     static ApiResult unwrap(std::expected<ApiResult, liquid::error> completed) {
@@ -7488,6 +7689,11 @@ struct ApiServer::Impl {
     // them by reference, runs.
     liquid::runtime::task<ApiResult>
     workspace_call(std::string capability, nlohmann::json input, ApiContext& context) {
+        const auto definition = registry.find(capability);
+        if (definition && definition->input_schema.value("properties", nlohmann::json::object())
+                              .contains("workspace_id") && !input.contains("workspace_id")) {
+            input["workspace_id"] = context.path_workspace_id;
+        }
         co_return unwrap(co_await registry.call_async(capability, input, context));
     }
 
@@ -7656,6 +7862,14 @@ struct ApiServer::Impl {
                 : options.external_origin;
         if (page.customer_id.empty()) {
             page.unavailable = "You have no space to work in yet.";
+        } else if (section == "workspaces") {
+            const ApiResult listed = unwrap(co_await workspace_call(
+                "list_workspaces", {{"customer_id", page.customer_id}}, context));
+            if (listed.ok) {
+                page.data["list_workspaces"] = listed.value;
+            } else {
+                page.unavailable = listed.error.message;
+            }
         } else if (!options.workspaces) {
             page.unavailable = section == "services"
                                    ? "Services are not available on this lake yet: the operator "
@@ -7790,7 +8004,8 @@ struct ApiServer::Impl {
         if (page.unavailable.empty() && page.state.value("ready", false) &&
             section == "project" && !page.subject.empty() && context.store) {
             if (auto build = context.store->latest_agent_task(page.customer_id,
-                                                              "build:" + page.subject)) {
+                                                              "build:" + page.subject,
+                                                              context.path_workspace_id)) {
                 const ApiResult followed = unwrap(co_await workspace_call(
                     "get_agent_task",
                     {{"customer_id", page.customer_id}, {"task_id", build->id}},
@@ -7806,7 +8021,8 @@ struct ApiServer::Impl {
                 }
             }
             if (auto solution = context.store->latest_agent_task(page.customer_id,
-                                                                 "solution:" + page.subject)) {
+                                                                 "solution:" + page.subject,
+                                                                 context.path_workspace_id)) {
                 const ApiResult followed = unwrap(co_await workspace_call(
                     "get_agent_task",
                     {{"customer_id", page.customer_id}, {"task_id", solution->id}},
@@ -8363,6 +8579,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         ApiContext context = context_for(route);
         if (!context.authorized || context.acting_user_id.empty() || !options.store) {
             co_return co_await redirect(route, "/sign-in");
@@ -8550,6 +8770,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         ApiContext context = context_for(route);
         if (!context.authorized || context.acting_user_id.empty() || !options.store) {
             co_return co_await redirect(route, "/sign-in");
@@ -8664,6 +8888,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         ApiContext context = context_for(route);
         if (!context.authorized) {
             co_return co_await redirect(route, "/sign-in");
@@ -8688,6 +8916,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         ApiContext context = context_for(route);
         if (!context.authorized) {
             co_return co_await redirect(route, "/sign-in");
@@ -8703,7 +8935,19 @@ struct ApiServer::Impl {
         };
         std::string back;
         ApiResult result = ApiResult::success(nlohmann::json::object());
-        if (action == "start") {
+        if (action == "workspace_create" || action == "workspace_delete") {
+            back = "/workspaces?" + query;
+            nlohmann::json input{{"customer_id", customer_id}};
+            if (action == "workspace_create") {
+                input["name"] = form_field(body, "name");
+                input["environment"] = form_field(body, "environment");
+            } else {
+                input["workspace_id"] = form_field(body, "workspace_id");
+                input["confirm"] = form_field(body, "confirm");
+            }
+            result = unwrap(co_await workspace_call(
+                action == "workspace_create" ? "create_workspace" : "delete_workspace", input, context));
+        } else if (action == "start") {
             const std::string requested = form_field(body, "return");
             back = requested == "/design/projects" || requested == "/train/data" ||
                            requested == "/train/agents" || requested == "/train/runs" ||
@@ -9206,6 +9450,7 @@ struct ApiServer::Impl {
         } else if (action == "service_create") {
             back = "/services?" + query;
             nlohmann::json input{{"customer_id", customer_id},
+                                 {"workspace_id", form_field(body, "workspace_id")},
                                  {"kind", form_field(body, "kind")},
                                  {"name", form_field(body, "name")}};
             for (const char* field : {"instances", "storage_gi"}) {
@@ -9625,6 +9870,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         ApiContext context = context_for(route);
         if (!context.authorized) {
             co_return co_await redirect(route, "/sign-in");
@@ -9961,6 +10210,10 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
+        }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
         }
         ApiContext context = context_for(route);
         if (!context.authorized) {
@@ -12254,6 +12507,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object()) {
             co_return co_await send_text(route,
@@ -12282,6 +12539,10 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
+        }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
         }
         nlohmann::json operations = nlohmann::json::array();
         std::string message = "Hugging Face upload";
@@ -12348,6 +12609,10 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
+        }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
         }
         const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object()) {
@@ -12431,6 +12696,10 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
+        }
         const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object() || !request.contains("content") ||
             !request.at("content").is_string() || !request.contains("repoType") ||
@@ -12493,6 +12762,10 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
+        }
+        if (const auto error = workspace_form_error(route, body); !error.empty()) {
+            co_return co_await send_text(route, boost::http::status::bad_request,
+                error_body("invalid_input", error), "application/json", "no-store");
         }
         const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object() ||
@@ -13109,7 +13382,8 @@ struct ApiServer::Impl {
         std::string allow;
         if (openapi) {
             auto completed = co_await registry.call_async(
-                "workspace_openapi", {{"customer_id", customer_id}}, context);
+                "workspace_openapi", {{"customer_id", customer_id},
+                                      {"workspace_id", context.path_workspace_id}}, context);
             const ApiResult result =
                 completed ? std::move(*completed)
                           : ApiResult::failure("store_error", completed.error().message);
@@ -13152,7 +13426,8 @@ struct ApiServer::Impl {
             if (body.empty()) {
                 auto completed = co_await registry.call_async(
                     read ? "workspace_query" : "workspace_act",
-                    {{"customer_id", customer_id}, {"capability", capability}, {"input", input}},
+                    {{"customer_id", customer_id}, {"workspace_id", context.path_workspace_id},
+                     {"capability", capability}, {"input", input}},
                     context);
                 const ApiResult result =
                     completed ? std::move(*completed)
@@ -13355,6 +13630,13 @@ bool ApiServer::start() {
     }
 
     http::router<http::route_params> router;
+    const auto add_route = [&router](auto method, auto path, auto handler) {
+        const std::string original(path);
+        if (workspace_page_path(original)) {
+            router.add(method, "/w/:workspace_id" + original, decltype(handler)(handler));
+        }
+        router.add(method, original, std::move(handler));
+    };
     router.use([&impl, cors = http::cors()](http::route_params& route) -> http::route_task {
         // Beast2 reuses this response across requests and client connections.
         // Reset before CORS or handlers add fields belonging to this request.
@@ -13368,15 +13650,18 @@ bool ApiServer::start() {
         }
         co_return result;
     });
-    router.add(http::method::get, "/", [&impl](http::route_params& route) -> http::route_task {
+    router.use([&impl](http::route_params& route) -> http::route_task {
+        return impl.workspace_route(route);
+    });
+    add_route(http::method::get, "/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/", impl.serve_web_root(route));
     });
-    router.add(
+    add_route(
         http::method::get, "/style.css", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/style.css", impl.serve_style(route));
         });
     const std::string stylesheet_path(web_ui_stylesheet_url());
-    router.add(http::method::get,
+    add_route(http::method::get,
                stylesheet_path,
                [&impl, stylesheet_path](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route, stylesheet_path, impl.serve_style(route));
@@ -13384,7 +13669,7 @@ bool ApiServer::start() {
     for (const std::string_view asset : web_ui_experiment_asset_names()) {
         for (const auto& path : {"/assets/experiments/" + std::string(asset),
                                  std::string(web_ui_experiment_asset_url(asset))}) {
-            router.add(http::method::get, path,
+            add_route(http::method::get, path,
                 [&impl, asset, path](http::route_params& route) -> http::route_task {
                     return impl.observe_request(route, path, impl.serve_experiment_asset(route, asset));
                 });
@@ -13392,179 +13677,179 @@ bool ApiServer::start() {
     }
     for (const std::string_view font : web_ui_font_names()) {
         const std::string route_path = "/fonts/" + std::string(font);
-        router.add(http::method::get,
+        add_route(http::method::get,
                    route_path,
                    [&impl, font, route_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(route, route_path, impl.serve_font(route, font));
                    });
         const std::string hashed_route_path(web_ui_font_url(font));
-        router.add(http::method::get,
+        add_route(http::method::get,
                    hashed_route_path,
                    [&impl, font, hashed_route_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, hashed_route_path, impl.serve_font(route, font));
                    });
     }
-    router.add(
+    add_route(
         http::method::get, "/healthz", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/healthz", impl.serve_healthz(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/readyz", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/readyz", impl.serve_readyz(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/metrics", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/metrics", impl.serve_metrics(route));
         });
-    router.add(http::method::get, "/login", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/login", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/login", impl.serve_login(route));
     });
-    router.add(
+    add_route(
         http::method::post, "/session", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/session", impl.serve_session(route));
         });
-    router.add(
+    add_route(
         http::method::post, "/logout", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/logout", impl.serve_logout(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/customers", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/customers", impl.serve_customers_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/applications", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/applications", impl.serve_applications_page(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/applications",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/applications", impl.serve_application_register(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/application", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/application", impl.serve_application_page(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/application/users",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/application/users", impl.serve_application_users_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/application/users/suspend",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/application/users/suspend",
                                                impl.serve_application_user_suspend(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/application/organizations",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/application/organizations",
                                                impl.serve_application_organizations_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/application/organizations",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/application/organizations",
                                                impl.serve_application_organization_create(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/application/organizations/delete",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/application/organizations/delete",
                                                impl.serve_application_organization_delete(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/application/events",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/application/events", impl.serve_application_events_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/application/webhooks",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/application/webhooks",
                                                impl.serve_application_webhook_create(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/organizations",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/organizations", impl.serve_organizations_page(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/organization", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/organization", impl.serve_organization_page(route));
         });
-    router.add(http::method::get, "/team", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/team", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/team", impl.serve_team_page(route));
     });
-    router.add(
+    add_route(
         http::method::get, "/member", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/member", impl.serve_member_page(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/organization/invitations",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/organization/invitations",
                                                impl.serve_organization_invitation(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/organization/sso",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/organization/sso", impl.serve_organization_sso(route));
                });
-    router.add(
+    add_route(
         http::method::post, "/member/role", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/member/role", impl.serve_member_role(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/member/remove",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/member/remove", impl.serve_member_remove(route));
                });
-    router.add(http::method::get, "/sso", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/sso", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/sso", impl.serve_sso_page(route));
     });
-    router.add(http::method::get, "/teams", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/teams", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/teams", impl.serve_teams_page(route));
     });
-    router.add(
+    add_route(
         http::method::get, "/members", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/members", impl.serve_members_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/invitations", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/invitations", impl.serve_invitations_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/grants", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/grants", impl.serve_grants_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/access", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/access", impl.serve_access_page(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/repository/access",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/repository/access",
                                                impl.serve_entity_access_page(route, "repository"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/organization/access",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -13572,35 +13857,35 @@ bool ApiServer::start() {
                        "/organization/access",
                        impl.serve_entity_access_page(route, "organization"));
                });
-    router.add(
+    add_route(
         http::method::get, "/team/access", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/team/access", impl.serve_entity_access_page(route, "team"));
         });
-    router.add(
+    add_route(
         http::method::get, "/sign-up", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/sign-up", impl.serve_sign_up(route));
         });
-    router.add(
+    add_route(
         http::method::get,
         "/apps/:id/sign-up",
         [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/apps/:id/sign-up", impl.serve_application_identity_page(route, "sign-up"));
         });
-    router.add(
+    add_route(
         http::method::get,
         "/apps/:id/sign-in",
         [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/apps/:id/sign-in", impl.serve_application_identity_page(route, "sign-in"));
         });
-    router.add(
+    add_route(
         http::method::get, "/apps/:id/mfa", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/apps/:id/mfa", impl.serve_application_identity_page(route, "mfa"));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/apps/:id/passkey-sign-in",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -13608,7 +13893,7 @@ bool ApiServer::start() {
                        "/apps/:id/passkey-sign-in",
                        impl.serve_application_identity_page(route, "passkey"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/apps/:id/identity/sign-up",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -13616,7 +13901,7 @@ bool ApiServer::start() {
                        "/apps/:id/identity/sign-up",
                        impl.serve_application_password(route, "sign_up_password"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/apps/:id/identity/sign-in",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -13624,7 +13909,7 @@ bool ApiServer::start() {
                        "/apps/:id/identity/sign-in",
                        impl.serve_application_password(route, "sign_in_password"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/apps/:id/identity/mfa/verify",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -13632,7 +13917,7 @@ bool ApiServer::start() {
                        "/apps/:id/identity/mfa/verify",
                        impl.serve_application_password(route, "verify_mfa"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/apps/:id/identity/passkey/begin",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -13640,7 +13925,7 @@ bool ApiServer::start() {
                        "/apps/:id/identity/passkey/begin",
                        impl.serve_application_passkey(route, "begin_passkey_sign_in"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/apps/:id/identity/passkey/sign-in",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -13648,49 +13933,49 @@ bool ApiServer::start() {
                        "/apps/:id/identity/passkey/sign-in",
                        impl.serve_application_passkey(route, "sign_in_passkey"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/apps/:id/identity/oauth",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/apps/:id/identity/oauth", impl.serve_application_oauth(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/v1/apps/:id/.well-known/jwks.json",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/v1/apps/:id/.well-known/jwks.json",
                                                impl.serve_application_jwks(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/sign-in", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/sign-in", impl.serve_sign_in(route));
         });
-    router.add(http::method::get, "/mfa", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/mfa", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/mfa", impl.serve_mfa(route));
     });
-    router.add(
+    add_route(
         http::method::get, "/passkeys", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/passkeys", impl.serve_passkeys(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/passkey-sign-in",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/passkey-sign-in", impl.serve_passkey_sign_in(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/sessions", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/sessions", impl.serve_sessions(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/tokens", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/tokens", impl.serve_tokens(route));
         });
     // The Docs section (lake#252): public, rendered from the guides embedded at build time.
-    router.add(http::method::get, "/docs", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/docs", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/docs", impl.serve_docs(route, ""));
     });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/docs/:page",
                [&impl](http::route_params& route) -> http::route_task {
                    std::string page;
@@ -13701,123 +13986,124 @@ bool ApiServer::start() {
                    }
                    return impl.observe_request(route, "/docs/:page", impl.serve_docs(route, page));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/developer/mcp",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route, "/developer/mcp", impl.serve_mcp_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/developer/mcp/key",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/developer/mcp/key", impl.serve_mcp_key(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/developer/mcp/skill",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/developer/mcp/skill", impl.serve_mcp_skill(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/skills/lake/SKILL.md",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/skills/lake/SKILL.md", impl.serve_mcp_skill(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/llms.txt", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/llms.txt", impl.serve_llms(route, false));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/llms-full.txt",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/llms-full.txt", impl.serve_llms(route, true));
                });
-    router.add(
+    add_route(
         http::method::get, "/settings", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/settings", impl.serve_settings(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/sign-up",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/sign-up", impl.serve_identity_sign_up(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/sign-in",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/sign-in", impl.serve_identity_sign_in(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/clerk-session",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/clerk-session", impl.serve_clerk_session(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/mfa/verify",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/mfa/verify", impl.serve_identity_mfa_verify(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/mfa/enroll",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/mfa/enroll", impl.serve_identity_mfa_enroll(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/mfa/disable",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/mfa/disable", impl.serve_identity_mfa_disable(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/oauth",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/oauth", impl.serve_identity_oauth(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/session/revoke",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/identity/session/revoke",
                                                impl.serve_identity_session_revoke(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/device/revoke",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/device/revoke", impl.serve_identity_device_revoke(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/identity/token/create",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/identity/token/create", impl.serve_identity_token_create(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/repository/create",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/repository/create", impl.serve_repository_create(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/repository/build",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/repository/build", impl.serve_repository_build(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 21>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 22>{{{"/design/projects", "projects"},
+                                                              {"/workspaces", "workspaces"},
                                                               {"/design/solutions", "solutions"},
                                                               {"/design/solution", "solution"},
                                                               {"/design/methodologies", "methodologies"},
@@ -13838,15 +14124,17 @@ bool ApiServer::start() {
                                                               {"/ship/indexes", "indexes"},
                                                               {"/ship/index", "index"},
                                                               {"/services", "services"}}}) {
-        router.add(http::method::get,
+        add_route(http::method::get,
                    path,
                    [&impl, path, section](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 49>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 51>{
              {{"/workspace/start", "start"},
+              {"/workspaces/create", "workspace_create"},
+              {"/workspaces/delete", "workspace_delete"},
               {"/design/solutions/start", "solution_start"},
               {"/design/solution/confirm", "solution_confirm"},
               {"/design/solution/run", "solution_run"},
@@ -13895,71 +14183,71 @@ bool ApiServer::start() {
               {"/design/project/approve", "approve"},
               {"/design/project/run", "run"},
               {"/ship/models/publish", "publish"}}}) {
-        router.add(http::method::post,
+        add_route(http::method::post,
                    path,
                    [&impl, path, action](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, path, impl.serve_workspace_form(route, action));
                    });
     }
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/design/discover/scan",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/design/discover/scan", impl.serve_discover_scan(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/design/opportunities/scan",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/design/opportunities/scan", impl.serve_discover_scan(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/train/agents/new",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/train/agents/new", impl.serve_factory_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/train/agents/new/send",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/train/agents/new/send", impl.serve_factory_form(route, false));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/train/agents/new/approve",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/train/agents/new/approve", impl.serve_factory_form(route, true));
                });
-    router.add(http::method::get, "/ask", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/ask", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/ask", impl.serve_ask_page(route));
     });
-    router.add(
+    add_route(
         http::method::post, "/ask/send", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/ask/send", impl.serve_ask_form(route, false));
         });
-    router.add(
+    add_route(
         http::method::post, "/ask/confirm", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/ask/confirm", impl.serve_ask_form(route, true));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/train/data/upload",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/train/data/upload", impl.serve_workspace_upload(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/ship/packages",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/ship/packages", impl.serve_packages_page(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/ship/apps", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/ship/apps", impl.serve_apps_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/ship/app", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/ship/app", impl.serve_app_page(route));
         });
@@ -13983,36 +14271,36 @@ bool ApiServer::start() {
               {"/ship/app/delete", "delete"},
               {"/ship/app/build", "build"},
               {"/ship/app/build/cancel", "build_cancel"}}}) {
-        router.add(http::method::post,
+        add_route(http::method::post,
                    path,
                    [&impl, path, action](http::route_params& route) -> http::route_task {
                        return impl.observe_request(route, path, impl.serve_app_form(route, action));
                    });
     }
-    router.add(
+    add_route(
         http::method::get, "/deployments", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/deployments", impl.serve_deployments_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/environments", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/environments", impl.serve_environments_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/environment", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/environment", impl.serve_environment_page(route));
         });
-    router.add(http::method::get, "/logs", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/logs", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/logs", impl.serve_logs_page(route));
     });
-    router.add(
+    add_route(
         http::method::post,
         "/platform/env/set",
         [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/platform/env/set", impl.serve_platform_form(route, "set_environment_env"));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/platform/env/unset",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
@@ -14020,262 +14308,262 @@ bool ApiServer::start() {
                        "/platform/env/unset",
                        impl.serve_platform_form(route, "unset_environment_env"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/platform/domain/create",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/platform/domain/create",
                                                impl.serve_platform_form(route, "create_domain"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/platform/domain/delete",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/platform/domain/delete",
                                                impl.serve_platform_form(route, "delete_domain"));
                });
-    router.add(
+    add_route(
         http::method::get, "/exports", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/exports", impl.serve_exports_page(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/exports/download",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/exports/download", impl.serve_export_download(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/repository", impl.serve_repository_page(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/repository/tree",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/repository/tree", impl.serve_repository_tree_page(route));
                });
-    router.add(http::method::get, "/file", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/file", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/file", impl.serve_repository_file_page(route));
     });
-    router.add(
+    add_route(
         http::method::get, "/file/raw", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/file/raw", impl.serve_repository_file_content(route, false));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/file/download",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/file/download", impl.serve_repository_file_content(route, true));
                });
-    router.add(
+    add_route(
         http::method::get, "/changes", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/changes", impl.serve_changes_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/change", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/change", impl.serve_change_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/issues", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/issues", impl.serve_issues_page(route));
         });
-    router.add(http::method::get, "/issue", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/issue", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/issue", impl.serve_issue_page(route));
     });
-    router.add(
+    add_route(
         http::method::get, "/releases", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/releases", impl.serve_releases_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/webhooks", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/webhooks", impl.serve_webhooks_page(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/webhooks/retry",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/webhooks/retry", impl.serve_webhook_retry(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/protection", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/protection", impl.serve_branch_protection_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/conflicts", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/conflicts", impl.serve_conflicts_page(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/conflicts/resolve",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/conflicts/resolve", impl.serve_conflict_resolution(route, false));
                });
-    router.add(
+    add_route(
         http::method::get, "/artifacts", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/artifacts", impl.serve_artifacts_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/artifact", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/artifact", impl.serve_artifact_page(route));
         });
-    router.add(http::method::get, "/drive", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/drive", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/drive", impl.serve_drive_page(route));
     });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/drive/preview",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/preview", impl.serve_drive_preview_page(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/drive/download",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/download", impl.serve_drive_download(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/drive/history",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/history", impl.serve_drive_history_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/history/restore",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/history/restore", impl.serve_drive_restore(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/drive/history/diff",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/history/diff", impl.serve_drive_history_diff(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/drive/conflict",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/conflict", impl.serve_drive_conflict_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/conflict/resolve",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/drive/conflict/resolve",
                                                impl.serve_conflict_resolution(route, true));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/folder",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/folder", impl.serve_drive_folder_create(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/upload",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/upload", impl.serve_drive_upload(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/rename",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/rename", impl.serve_drive_rename(route));
                });
-    router.add(
+    add_route(
         http::method::post, "/drive/move", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/drive/move", impl.serve_drive_move(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/delete",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/delete", impl.serve_drive_delete(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/drive/share", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/drive/share", impl.serve_drive_share_page(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/drive/share/link",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/share/link", impl.serve_drive_share_link_page(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/shared-with-me",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/shared-with-me", impl.serve_shared_with_me_page(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/share/direct",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/share/direct", impl.serve_drive_share_direct(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/share/link",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/share/link", impl.serve_drive_share_link_create(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/drive/share/revoke",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/drive/share/revoke", impl.serve_drive_share_link_revoke(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/share/:token", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/share/:token", impl.serve_drive_share_link(route));
         });
-    router.add(http::method::get, "/share/:token/preview", [&impl](http::route_params& route) {
+    add_route(http::method::get, "/share/:token/preview", [&impl](http::route_params& route) {
         return impl.observe_request(
             route, "/share/:token/preview", impl.serve_drive_share_preview(route));
     });
-    router.add(http::method::get, "/share/:token/download", [&impl](http::route_params& route) {
+    add_route(http::method::get, "/share/:token/download", [&impl](http::route_params& route) {
         return impl.observe_request(
             route, "/share/:token/download", impl.serve_drive_share_download(route));
     });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/api/repos/create",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/api/repos/create", impl.serve_hub_create(route));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/api/validate-yaml",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/api/validate-yaml", impl.serve_hub_validate_yaml(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/models/:id/resolve/:revision/*file",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/models/:id/resolve/:revision/*file",
                                                impl.serve_hub_file(route, "model"));
                });
-    router.add(http::method::head,
+    add_route(http::method::head,
                "/models/:id/resolve/:revision/*file",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/models/:id/resolve/:revision/*file",
                                                impl.serve_hub_file(route, "model"));
                });
-    const auto add_hub_info = [&router, &impl](std::string_view pattern, std::string_view kind) {
-        router.add(http::method::get,
+    const auto add_hub_info = [&add_route, &impl](std::string_view pattern, std::string_view kind) {
+        add_route(http::method::get,
                    pattern,
                    [&impl, pattern, kind](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, std::string(pattern), impl.serve_hub_info(route, kind));
                    });
     };
-    const auto add_hub_tree = [&router, &impl](std::string_view pattern, std::string_view kind) {
-        router.add(http::method::get,
+    const auto add_hub_tree = [&add_route, &impl](std::string_view pattern, std::string_view kind) {
+        add_route(http::method::get,
                    pattern,
                    [&impl, pattern, kind](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
@@ -14283,8 +14571,8 @@ bool ApiServer::start() {
                    });
     };
     const auto add_hub_file =
-        [&router, &impl](http::method method, std::string_view pattern, std::string_view kind) {
-            router.add(method,
+        [&add_route, &impl](http::method method, std::string_view pattern, std::string_view kind) {
+            add_route(method,
                        pattern,
                        [&impl, pattern, kind](http::route_params& route) -> http::route_task {
                            return impl.observe_request(
@@ -14313,8 +14601,8 @@ bool ApiServer::start() {
     add_hub_file(http::method::head, "/:namespace/:id/resolve/:revision/*file", "model");
     add_hub_file(http::method::get, "/:id/resolve/:revision/*file", "model");
     add_hub_file(http::method::head, "/:id/resolve/:revision/*file", "model");
-    const auto add_hub_post = [&router, &impl](std::string_view pattern, bool commit) {
-        router.add(http::method::post,
+    const auto add_hub_post = [&add_route, &impl](std::string_view pattern, bool commit) {
+        add_route(http::method::post,
                    pattern,
                    [&impl, pattern, commit](http::route_params& route) -> http::route_task {
                        return impl.observe_request(route,
@@ -14331,8 +14619,8 @@ bool ApiServer::start() {
     add_hub_post("/api/models/:id/commit/:revision", true);
     add_hub_post("/api/datasets/:namespace/:id/commit/:revision", true);
     add_hub_post("/api/datasets/:id/commit/:revision", true);
-    const auto add_lfs_batch = [&router, &impl](std::string_view pattern) {
-        router.add(http::method::post,
+    const auto add_lfs_batch = [&add_route, &impl](std::string_view pattern) {
+        add_route(http::method::post,
                    pattern,
                    [&impl, pattern](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
@@ -14343,156 +14631,156 @@ bool ApiServer::start() {
     add_lfs_batch("/datasets/:repo_git/info/lfs/objects/batch");
     add_lfs_batch("/:namespace/:repo_git/info/lfs/objects/batch");
     add_lfs_batch("/:repo_git/info/lfs/objects/batch");
-    router.add(http::method::put,
+    add_route(http::method::put,
                "/api/lfs/:repository/:oid",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/api/lfs/:repository/:oid", impl.serve_hub_lfs_upload(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/models/:namespace/:id",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/models/:namespace/:id", impl.serve_model_page(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/models/:id", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/models/:id", impl.serve_model_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/search", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/search", impl.serve_search_page(route));
         });
-    router.add(
+    add_route(
         http::method::get, "/metering", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/metering", impl.serve_metering_page(route));
         });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/metering/quota",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/metering/quota", impl.serve_metering_quota(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/activity", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/activity", impl.serve_activity_page(route));
         });
-    router.add(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/audit", impl.serve_audit_page(route));
     });
-    router.add(
+    add_route(
         http::method::get, "/transparency", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/transparency", impl.serve_transparency_page(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/secret-mounts",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/secret-mounts", impl.serve_secret_mounts_page(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/secrets", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/secrets", impl.serve_secrets_page(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/encryption-keys",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/encryption-keys", impl.serve_encryption_keys_page(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/v1/oauth/:provider/callback",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/v1/oauth/:provider/callback", impl.serve_oauth_callback(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/scim/v2/Users",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Users", impl.serve_scim_collection(route, "Users"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/scim/v2/Users",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Users", impl.serve_scim_collection(route, "Users"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/scim/v2/Users/:id",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Users/:id", impl.serve_scim_resource(route, "Users"));
                });
-    router.add(http::method::patch,
+    add_route(http::method::patch,
                "/scim/v2/Users/:id",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Users/:id", impl.serve_scim_resource(route, "Users"));
                });
-    router.add(http::method::delete_,
+    add_route(http::method::delete_,
                "/scim/v2/Users/:id",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Users/:id", impl.serve_scim_resource(route, "Users"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/scim/v2/Groups",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Groups", impl.serve_scim_collection(route, "Groups"));
                });
-    router.add(http::method::post,
+    add_route(http::method::post,
                "/scim/v2/Groups",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Groups", impl.serve_scim_collection(route, "Groups"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/scim/v2/Groups/:id",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Groups/:id", impl.serve_scim_resource(route, "Groups"));
                });
-    router.add(http::method::patch,
+    add_route(http::method::patch,
                "/scim/v2/Groups/:id",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Groups/:id", impl.serve_scim_resource(route, "Groups"));
                });
-    router.add(http::method::delete_,
+    add_route(http::method::delete_,
                "/scim/v2/Groups/:id",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/scim/v2/Groups/:id", impl.serve_scim_resource(route, "Groups"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/v1/openapi.json",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/v1/openapi.json", impl.serve_openapi(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/acme/:customer_id/directory",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/acme/:customer_id/directory", impl.serve_acme_directory(route));
                });
-    router.add(http::method::head,
+    add_route(http::method::head,
                "/acme/:customer_id/new-nonce",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/acme/:customer_id/new-nonce", impl.serve_acme_nonce(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/.well-known/acme-challenge/:token",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/.well-known/acme-challenge/:token", impl.serve_acme_http01(route));
                });
-    const auto add_acme_post = [&router, &impl](std::string path, std::string capability_name) {
-        router.add(http::method::post,
+    const auto add_acme_post = [&add_route, &impl](std::string path, std::string capability_name) {
+        add_route(http::method::post,
                    path,
                    [&impl, path, capability_name](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
@@ -14506,8 +14794,8 @@ bool ApiServer::start() {
     add_acme_post("/acme/:customer_id/challenge/:authorization_id", "acme_http01_challenge");
     add_acme_post("/acme/:customer_id/finalize/:order_id", "acme_finalize_order");
     add_acme_post("/acme/:customer_id/certificate/:order_id", "acme_certificate");
-    const auto add_sync_post = [&router, &impl](std::string path, std::string capability_name) {
-        router.add(http::method::post,
+    const auto add_sync_post = [&add_route, &impl](std::string path, std::string capability_name) {
+        add_route(http::method::post,
                    path,
                    [&impl, path, capability_name](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
@@ -14518,13 +14806,13 @@ bool ApiServer::start() {
     add_sync_post("/v1/repositories/:repository_id/sync/push", "push");
     add_sync_post("/v1/repositories/:repository_id/sync/pull", "pull");
     add_sync_post("/v1/repositories/:repository_id/sync/chunks", "upload_chunks");
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/v1/repositories/:repository_id/sync/chunks/:digest",
                [&impl](http::route_params& route) -> http::route_task {
                    const std::string path = "/v1/repositories/:repository_id/sync/chunks/:digest";
                    return impl.observe_request(route, path, impl.serve_sync_range(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/workspaces/:customer_id/zetta/v1/openapi.json",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
@@ -14532,7 +14820,7 @@ bool ApiServer::start() {
                                                impl.serve_workspace_zetta(route, true));
                });
     for (const auto method : {http::method::get, http::method::post}) {
-        router.add(method,
+        add_route(method,
                    "/workspaces/:customer_id/zetta/v1/:capability",
                    [&impl](http::route_params& route) -> http::route_task {
                        return impl.observe_request(route,
@@ -14543,7 +14831,7 @@ bool ApiServer::start() {
     for (const auto& [path, mode] : std::map<std::string, std::string>{
              {"/train/experiments", "list"}, {"/train/experiment", "study"},
              {"/train/experiment/run", "run"}, {"/train/experiments/compare", "compare"}}) {
-        router.add(http::method::get, path,
+        add_route(http::method::get, path,
             [&impl, path, mode](http::route_params& route) -> http::route_task {
                 return impl.observe_request(route, path, impl.serve_experiments_page(route, mode));
             });
@@ -14551,7 +14839,7 @@ bool ApiServer::start() {
     for (const auto& [path, confirm] :
          std::map<std::string, bool>{{"/train/experiments/agent", false},
                                      {"/train/experiments/agent/confirm", true}}) {
-        router.add(http::method::post,
+        add_route(http::method::post,
                    path,
                    [&impl, path, confirm](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
@@ -14559,7 +14847,7 @@ bool ApiServer::start() {
                    });
     }
     for (const std::string path : {"/train/streams", "/train/stream"}) {
-        router.add(http::method::get, path,
+        add_route(http::method::get, path,
                    [&impl, path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(route, path,
                            impl.serve_streams_page(route, path == "/train/stream"));
@@ -14573,60 +14861,60 @@ bool ApiServer::start() {
             rest_method(*capability) == "GET" ? http::method::get : http::method::post;
         const std::string path = rest_path(*capability);
         if (capability->kind == CapabilityKind::Read && capability->post_alias) {
-            router.add(http::method::post, path,
+            add_route(http::method::post, path,
                        [&impl, capability, path](http::route_params& route) -> http::route_task {
                            return impl.observe_request(
                                route, path, impl.serve_capability(route, capability));
                        });
         }
-        router.add(
+        add_route(
             method, path, [&impl, capability, path](http::route_params& route) -> http::route_task {
                 return impl.observe_request(route, path, impl.serve_capability(route, capability));
             });
     }
-    router.add(http::method::post, "/mcp", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::post, "/mcp", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/mcp", impl.serve_mcp(route));
     });
-    router.add(http::method::get, "/v2/", [&impl](http::route_params& route) -> http::route_task {
+    add_route(http::method::get, "/v2/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/v2/", impl.serve_oci_ping(route));
     });
     for (const std::string prefix :
          {"/v2/:repository", "/v2/:space/:repository", "/v2/:space/:category/:repository"}) {
         const std::string start_path = prefix + "/blobs/uploads/";
-        router.add(http::method::post,
+        add_route(http::method::post,
                    start_path,
                    [&impl, start_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, start_path, impl.serve_oci_upload_start(route));
                    });
         const std::string upload_path = prefix + "/blobs/uploads/:upload";
-        router.add(http::method::patch,
+        add_route(http::method::patch,
                    upload_path,
                    [&impl, upload_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, upload_path, impl.serve_oci_upload(route, false));
                    });
-        router.add(http::method::put,
+        add_route(http::method::put,
                    upload_path,
                    [&impl, upload_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, upload_path, impl.serve_oci_upload(route, true));
                    });
         const std::string blob_path = prefix + "/blobs/:digest";
-        router.add(http::method::get,
+        add_route(http::method::get,
                    blob_path,
                    [&impl, blob_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(
                            route, blob_path, impl.serve_oci_blob(route, false));
                    });
-        router.add(http::method::head,
+        add_route(http::method::head,
                    blob_path,
                    [&impl, blob_path](http::route_params& route) -> http::route_task {
                        return impl.observe_request(route, blob_path, impl.serve_oci_blob(route, true));
                    });
         const std::string manifest_path = prefix + "/manifests/:reference";
         for (const auto method : {http::method::get, http::method::head, http::method::put}) {
-            router.add(
+            add_route(
                 method,
                 manifest_path,
                 [&impl, method, manifest_path](http::route_params& route) -> http::route_task {
@@ -14637,66 +14925,66 @@ bool ApiServer::start() {
                 });
         }
     }
-    router.add(
+    add_route(
         http::method::post, "/legacy/", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/legacy/", impl.serve_python_publish(route));
         });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/simple/:package/",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/simple/:package/", impl.serve_python_simple(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/packages/:filename",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/packages/:filename", impl.serve_python_package(route, false));
                });
-    router.add(http::method::head,
+    add_route(http::method::head,
                "/packages/:filename",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/packages/:filename", impl.serve_python_package(route, true));
                });
-    router.add(http::method::put,
+    add_route(http::method::put,
                "/_lake/debug/:build_id/:kind",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/_lake/debug/:build_id/:kind", impl.serve_debug_publish(route));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/buildid/:build_id/executable",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/buildid/:build_id/executable",
                                                impl.serve_debug_artifact(route, "executable"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/buildid/:build_id/debuginfo",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/buildid/:build_id/debuginfo",
                                                impl.serve_debug_artifact(route, "debuginfo"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/buildid/:build_id/source/*source",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(route,
                                                "/buildid/:build_id/source/*source",
                                                impl.serve_debug_artifact(route, "source"));
                });
-    router.add(http::method::get,
+    add_route(http::method::get,
                "/:package/-/:filename",
                [&impl](http::route_params& route) -> http::route_task {
                    return impl.observe_request(
                        route, "/:package/-/:filename", impl.serve_npm_tarball(route));
                });
-    router.add(
+    add_route(
         http::method::get, "/:package", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/:package", impl.serve_npm_metadata(route));
         });
-    router.add(
+    add_route(
         http::method::put, "/:package", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/:package", impl.serve_npm_metadata(route));
         });
@@ -14752,6 +15040,23 @@ const std::string& ApiServer::reason() const {
 
 void ApiServer::drain() {
     impl_->renew_due_timestamps();
+    const auto now = std::chrono::steady_clock::now();
+    if (impl_->options.store && impl_->options.workspaces && now >= impl_->next_topic_reap) {
+        impl_->next_topic_reap = now + std::chrono::minutes(1);
+        if (impl_->options.agent_bus) {
+            static_cast<void>(liquid::runtime::block_on(impl_->options.agent_bus->reap()));
+            const auto count = impl_->options.agent_bus->reaped_topics();
+            impl_->metrics.increment_counter("lake_bus_topics_reaped_total", {}, count - impl_->reported_bus_reaps);
+            impl_->reported_bus_reaps = count;
+        }
+        const auto result = liquid::runtime::block_on(control::reap_workspace_topics(
+            *impl_->options.store, *impl_->options.workspaces));
+        if (result && *result) {
+            impl_->metrics.increment_counter("lake_workspace_topics_reaped_total", {}, **result);
+        } else {
+            impl_->metrics.increment_counter("lake_workspace_topic_reap_errors_total");
+        }
+    }
     if (impl_->options.platform && impl_->options.platform->sync_due()) {
         static_cast<void>(liquid::runtime::block_on(impl_->options.platform->sync()));
     }

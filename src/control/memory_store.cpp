@@ -623,6 +623,108 @@ Result<std::optional<std::uint64_t>> InMemoryStore::storage_quota(const std::str
     return quota->second;
 }
 
+Result<std::vector<Workspace>> InMemoryStore::list_workspaces(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Workspace> rows;
+    for (const Workspace& row : workspaces_) {
+        if (row.customer_id == customer_id && !(row.desired == "deleted" && row.phase == "Deleted")) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
+}
+
+Result<Workspace> InMemoryStore::get_workspace(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+    }
+    return *row;
+}
+
+Result<Workspace> InMemoryStore::create_workspace(const NewWorkspace& input) {
+    std::lock_guard lock(mutex_);
+    if (input.name.empty() || input.name.size() > 128 || !valid_workspace_environment(input.environment)) {
+        return std::unexpected(StoreError{"invalid_input", "name and DNS-label safe environment are required"});
+    }
+    if (std::ranges::none_of(customers_, [&](const Customer& row) {
+            return row.id == input.customer_id;
+        })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + input.customer_id});
+    }
+    for (const Workspace& row : workspaces_) {
+        if (row.customer_id == input.customer_id && row.name == input.name && row.desired != "deleted") {
+            return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
+        }
+    }
+    Workspace row;
+    row.id = new_uuid_v4();
+    row.customer_id = input.customer_id;
+    row.name = input.name;
+    row.environment = input.environment;
+    row.phase = "Pending";
+    row.created_at = row.updated_at = now_iso8601();
+    ManagedService service;
+    service.id = new_uuid_v4();
+    service.workspace_id = row.id;
+    service.customer_id = row.customer_id;
+    service.kind = "zetta";
+    service.name = managed_service_slug("ws", row.id);
+    service.slug = managed_service_slug("ws", row.id);
+    service.desired = "present";
+    service.created_by_taap_id = input.created_by_taap_id;
+    service.created_at = service.updated_at = row.created_at;
+    service.is_default = std::ranges::none_of(services_, [&](const ManagedService& existing) {
+        return existing.customer_id == input.customer_id && existing.is_default;
+    });
+    row.zetta_service_id = service.id;
+    services_.push_back(service);
+    workspaces_.push_back(row);
+    return row;
+}
+
+Result<Workspace> InMemoryStore::update_workspace(const std::string& id, const WorkspacePatch& patch) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+    }
+    if ((patch.name && (patch.name->empty() || patch.name->size() > 128)) ||
+        (patch.environment && !valid_workspace_environment(*patch.environment)) ||
+        (patch.desired && *patch.desired != "running" && *patch.desired != "stopped" && *patch.desired != "deleted")) {
+        return std::unexpected(StoreError{"invalid_input", "invalid name, environment or desired"});
+    }
+    if (row->desired == "deleted") {
+        return std::unexpected(StoreError{"conflict", "the workspace is deleted"});
+    }
+    const std::string name = patch.name.value_or(row->name);
+    for (const Workspace& other : workspaces_) {
+        if (other.id != id && other.customer_id == row->customer_id && other.name == name && other.desired != "deleted") {
+            return std::unexpected(StoreError{"conflict", "a workspace with this name already exists"});
+        }
+    }
+    const std::string environment = patch.environment.value_or(row->environment);
+    const std::string desired = patch.desired.value_or(row->desired);
+    if (name != row->name || environment != row->environment || desired != row->desired) {
+        row->name = name;
+        row->environment = environment;
+        row->desired = desired;
+        ++row->generation;
+        row->updated_at = now_iso8601();
+        for (ManagedService& service : services_) {
+            if (service.workspace_id == id &&
+                (desired == "deleted" || service.id == row->zetta_service_id) &&
+                service.desired != (desired == "running" ? "present" : "absent")) {
+                service.desired = desired == "running" ? "present" : "absent";
+                ++service.generation;
+                service.updated_at = row->updated_at;
+            }
+        }
+    }
+    return *row;
+}
+
 Result<std::vector<ManagedService>> InMemoryStore::list_services(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedService> services;
@@ -673,6 +775,7 @@ Result<ManagedService> InMemoryStore::create_service(const NewManagedService& in
     ManagedService service;
     service.id = new_uuid_v4();
     service.customer_id = in.customer_id;
+    service.workspace_id = in.workspace_id;
     service.kind = in.kind;
     service.name = in.name;
     service.slug = managed_service_slug("svc", service.id);
@@ -751,6 +854,12 @@ Result<WebApp> InMemoryStore::get_web_app(const std::string& id) {
 
 Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
     std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == input.workspace_id && workspace.customer_id == input.customer_id &&
+                   workspace.desired != "deleted";
+        })) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+    }
     if (std::ranges::none_of(customers_, [&](const Customer& customer) {
             return customer.id == input.customer_id;
         })) {
@@ -786,6 +895,7 @@ Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
     WebApp app;
     app.id = new_uuid_v4();
     app.customer_id = input.customer_id;
+    app.workspace_id = input.workspace_id;
     app.name = input.name;
     app.mode = input.mode;
     app.source_repository = input.source_repository;
@@ -947,7 +1057,7 @@ InMemoryStore::list_agent_task_stream_scopes(const std::string& customer_id) {
     std::vector<AgentTaskStreamScope> tasks;
     for (const auto& task : agent_tasks_) {
         if (task.customer_id == customer_id) {
-            tasks.push_back({task.id, task.agent, task.finished_at});
+            tasks.push_back({task.id, task.agent, task.finished_at, task.workspace_id});
         }
     }
     return tasks;
@@ -975,6 +1085,12 @@ Result<Build> InMemoryStore::get_build(const std::string& id) {
 
 Result<Build> InMemoryStore::create_build(const NewBuild& input) {
     std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == input.workspace_id && workspace.customer_id == input.customer_id &&
+                   workspace.desired != "deleted";
+        })) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+    }
     if (std::ranges::none_of(customers_, [&](const Customer& customer) {
             return customer.id == input.customer_id;
         })) {
@@ -989,6 +1105,7 @@ Result<Build> InMemoryStore::create_build(const NewBuild& input) {
     Build build;
     build.id = new_uuid_v4();
     build.customer_id = input.customer_id;
+    build.workspace_id = input.workspace_id;
     build.repository = input.repository;
     build.revision = input.revision;
     build.context = input.context;
@@ -1333,6 +1450,12 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
 
 Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
     std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == in.workspace_id && workspace.customer_id == in.customer_id &&
+                   workspace.desired != "deleted";
+        })) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+    }
     if (in.agent.empty() || in.scopes.empty()) {
         return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
     }
@@ -1356,10 +1479,11 @@ std::string utc_now() {
 } // namespace
 
 Result<AgentTask> InMemoryStore::latest_agent_task(const std::string& customer_id,
-                                                   const std::string& kind) {
+                                                   const std::string& kind,
+                                                   const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
     for (auto task = agent_tasks_.rbegin(); task != agent_tasks_.rend(); ++task) {
-        if (task->customer_id == customer_id && task->kind == kind) {
+        if (task->customer_id == customer_id && task->kind == kind && task->workspace_id == workspace_id) {
             return *task;
         }
     }

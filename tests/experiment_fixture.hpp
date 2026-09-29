@@ -23,7 +23,8 @@ inline ExperimentJson experiment_start_input() {
             {"max_wall_time_ms", 60000}, {"cost_cap", 5}}}, {"confirm", true}};
 }
 
-inline std::vector<std::pair<std::string, ExperimentJson>> experiment_calls(const std::string& customer) {
+inline std::vector<std::pair<std::string, ExperimentJson>> experiment_calls(
+    const std::string& customer, const std::string& workspace) {
     using json = ExperimentJson;
     auto start = experiment_start_input();
     start["customer_id"] = customer;
@@ -32,7 +33,7 @@ inline std::vector<std::pair<std::string, ExperimentJson>> experiment_calls(cons
     confirmed["confirm"] = true;
     auto trial = confirmed;
     trial["run"] = "trial-1";
-    return {{"start_study", start}, {"list_experiments", {{"customer_id", customer}}},
+    std::vector<std::pair<std::string, json>> calls{{"start_study", start}, {"list_experiments", {{"customer_id", customer}}},
         {"get_experiment_study", study}, {"list_experiment_trials", study},
         {"get_experiment_analysis", study},
         {"get_run_metrics", {{"customer_id", customer}, {"run", "run-a"}}},
@@ -40,6 +41,10 @@ inline std::vector<std::pair<std::string, ExperimentJson>> experiment_calls(cons
         {"tail_experiment_events", {{"customer_id", customer}, {"kind", "study"},
             {"id", "study-one"}, {"wait_ms", 100}, {"max_events", 10}}},
         {"promote_trial", trial}, {"stop_experiment_trial", trial}, {"stop_study", confirmed}};
+    for (auto& [name, input] : calls) {
+        input["workspace_id"] = workspace;
+    }
+    return calls;
 }
 
 inline ExperimentJson experiment_metrics(const std::string& run, int count = 3) {
@@ -281,6 +286,7 @@ public:
 };
 
 struct ExperimentWorkspace {
+    std::string id;
     std::shared_ptr<ExperimentCaller> caller = std::make_shared<ExperimentCaller>();
     std::shared_ptr<control::WorkspaceService> service;
 
@@ -294,6 +300,7 @@ struct ExperimentWorkspace {
             throw std::runtime_error("could not request experiment workspace");
         }
         const auto& workspace = **state;
+        id = workspace.workspace_id;
         const auto ready = store->set_service_status(workspace.service_id, "Ready", "", "http://experiments.test");
         if (!ready) {
             throw std::runtime_error(ready.error().message);

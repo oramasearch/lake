@@ -19,6 +19,8 @@ using nlohmann::json;
 
 json input_schema(json properties, json required = json::array()) {
     properties["customer_id"] = {{"type", "string"}};
+    properties["workspace_id"] = {{"type", "string"}};
+    required.push_back("workspace_id");
     if (std::ranges::find(required, "customer_id") == required.end()) {
         required.insert(required.begin(), "customer_id");
     }
@@ -52,7 +54,8 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
 
 std::expected<control::Build, ApiResult> owned_build(const json& input, ApiContext& context) {
     auto build = context.store->get_build(input.at("build_id"));
-    if (!build || build->customer_id != input.at("customer_id").get<std::string>()) {
+    if (!build || build->customer_id != input.at("customer_id").get<std::string>() ||
+        build->workspace_id != input.at("workspace_id").get<std::string>()) {
         return std::unexpected(ApiResult::failure("not_found", "no such build in this space"));
     }
     return *build;
@@ -202,6 +205,7 @@ std::expected<control::Build, ApiResult> create_build(const json& input,
     }
     control::NewBuild requested;
     requested.customer_id = customer->id;
+    requested.workspace_id = input.at("workspace_id");
     requested.repository = std::move(repository);
     requested.revision = std::move(revision);
     requested.context = std::move(source_context);
@@ -275,6 +279,7 @@ void register_build_capabilities(Registry& registry) {
         .handler = [](const json& input, ApiContext& context) {
             auto app = context.store->get_web_app(input.at("app"));
             if (!app || app->customer_id != input.at("customer_id").get<std::string>() ||
+                app->workspace_id != input.at("workspace_id").get<std::string>() ||
                 app->desired == "deleted") {
                 return ApiResult::failure("not_found", "no such app in this space");
             }
@@ -360,6 +365,9 @@ void register_build_capabilities(Registry& registry) {
             }
             json items = json::array();
             for (const control::Build& build : *builds) {
+                if (build.workspace_id != input.at("workspace_id").get<std::string>()) {
+                    continue;
+                }
                 items.push_back(control::build_json(build));
             }
             context.audit_kind = "build.list";
@@ -394,6 +402,7 @@ void register_build_capabilities(Registry& registry) {
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"build_id", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}},
                            {"customer_id", {{"type", "string"}}},
                            {"type",
                             {{"type", "string"},
@@ -407,7 +416,7 @@ void register_build_capabilities(Registry& registry) {
                            {"digest", {{"type", "string"}}},
                            {"size", {{"type", "integer"}, {"minimum", 0}}},
                            {"message", {{"type", "string"}}}}},
-                         {"required", json::array({"build_id", "type"})},
+                         {"required", json::array({"build_id", "workspace_id", "type"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -417,6 +426,7 @@ void register_build_capabilities(Registry& registry) {
                              ApiContext& context) -> std::expected<std::string, ApiError> {
             auto build = context.store->get_build(input.at("build_id"));
             if (!build ||
+                build->workspace_id != input.at("workspace_id").get<std::string>() ||
                 (input.contains("customer_id") && input.at("customer_id") != build->customer_id)) {
                 return std::unexpected(
                     ApiError{"not_found", "no such build in this space", "/build_id"});
@@ -429,6 +439,7 @@ void register_build_capabilities(Registry& registry) {
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             auto build = context.store->get_build(input.at("build_id"));
             if (!build ||
+                build->workspace_id != input.at("workspace_id").get<std::string>() ||
                 (input.contains("customer_id") && input.at("customer_id") != build->customer_id)) {
                 co_return ApiResult::failure("not_found", "no such build in this space");
             }
@@ -436,12 +447,16 @@ void register_build_capabilities(Registry& registry) {
                 co_return ApiResult::failure("invalid_input",
                                              "one build event must not exceed 64 KiB");
             }
-            if (context.agent_bus == nullptr) {
+            if (context.workspaces == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
                                              "the build event bus is not configured");
             }
             const std::string topic = build_events_topic(build->id);
-            auto created = control::settled(co_await context.agent_bus->bus().create_topic(topic));
+            control::WorkspaceAgentBus bus(context.workspaces, build->customer_id, build->workspace_id);
+            if (control::build_topic_expired(*build)) {
+                co_return ApiResult::failure("not_found", "build events have expired");
+            }
+            auto created = control::settled(co_await bus.create_topic(topic));
             if (!created) {
                 co_return ApiResult::failure("store_unavailable", created.error().message);
             }
@@ -449,7 +464,7 @@ void register_build_capabilities(Registry& registry) {
             event["customer_id"] = build->customer_id;
             event["principal"] = context.acting_identity;
             auto published = control::settled(
-                co_await context.agent_bus->bus().publish(topic, std::move(event), build->id));
+                co_await bus.publish(topic, std::move(event), build->id));
             if (!published) {
                 co_return ApiResult::failure("store_unavailable", published.error().message);
             }
@@ -475,18 +490,18 @@ void register_build_capabilities(Registry& registry) {
             }
             const auto from = std::max<std::int64_t>(input.value("from_sequence", 1), 1);
             const auto wait = std::clamp<std::int64_t>(input.value("wait_ms", 0), 0, 30'000);
-            if (context.agent_bus == nullptr) {
+            if (context.workspaces == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
                                              "the build event bus is not configured");
             }
             const std::string topic = build_events_topic(build->id);
-            auto created = control::settled(co_await context.agent_bus->bus().create_topic(topic));
-            if (!created) {
-                co_return ApiResult::failure("store_unavailable", created.error().message);
-            }
-            auto batch = control::settled(co_await context.agent_bus->bus().receive(
+            control::WorkspaceAgentBus bus(context.workspaces, build->customer_id, build->workspace_id);
+            auto batch = control::settled(co_await bus.receive(
                 topic, static_cast<std::uint64_t>(from), 1000, std::chrono::milliseconds(wait)));
             if (!batch) {
+                if (batch.error().code == "not_found") {
+                    co_return ApiResult::success({{"events", json::array()}, {"next_sequence", from}});
+                }
                 co_return ApiResult::failure("store_unavailable", batch.error().message);
             }
             json events = json::array();
@@ -516,22 +531,22 @@ void register_build_capabilities(Registry& registry) {
             if (!build) {
                 co_return build.error();
             }
-            if (context.agent_bus == nullptr) {
+            if (context.workspaces == nullptr) {
                 co_return ApiResult::failure("store_unavailable",
                                              "the build event bus is not configured");
             }
             const std::string topic = build_events_topic(build->id);
-            auto created = control::settled(co_await context.agent_bus->bus().create_topic(topic));
-            if (!created) {
-                co_return ApiResult::failure("store_unavailable", created.error().message);
-            }
+            control::WorkspaceAgentBus bus(context.workspaces, build->customer_id, build->workspace_id);
             json events = json::array();
             json lines = json::array();
             std::uint64_t next_sequence = 1;
             for (int page = 0; page < 100; ++page) {
-                auto batch = control::settled(co_await context.agent_bus->bus().receive(
+                auto batch = control::settled(co_await bus.receive(
                     topic, next_sequence, 1000, std::chrono::milliseconds(0)));
                 if (!batch) {
+                    if (batch.error().code == "not_found") {
+                        break;
+                    }
                     co_return ApiResult::failure("store_unavailable", batch.error().message);
                 }
                 for (const control::BusEvent& event : batch->events) {

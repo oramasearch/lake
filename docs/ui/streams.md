@@ -1,11 +1,11 @@
 # Train → Streams
 
-Streams follows Runs in Train. `/train/streams` lists the selected space's exposed topics grouped
+Streams follows Runs in Train. `/w/<workspace_id>/train/streams` lists the selected workspace's exposed topics grouped
 by workspace Zetta and Lake bus Zetta, with subscriber count, held events, next sequence and a
 name-prefix filter. The list defaults to 50 rows and provides Previous and Next cursor links; page
 size and name filtering are sent to `list_streams`. Names are shown without Zetta's `topic:`
-resource prefix. Shared Agent events and Agent tasks rows show unavailable counts rather than a
-misleading global total. `/train/stream?customer_id=<space>&zetta=<workspace|bus>&topic=<name>`
+resource prefix. Shared Agent tasks rows show unavailable counts rather than a
+misleading global total. `/w/<workspace_id>/train/stream?customer_id=<space>&zetta=<workspace|bus>&topic=<name>`
 opens one topic. Both routes belong to Streams in `navigation_routes`, select its link with
 `aria-current="page"`, and use the Streams icon from the shared icon set. No charts or extra
 stylesheet are used.
@@ -26,7 +26,7 @@ subscription identities do not reach the page.
 
 | Control | Registered capability |
 |---|---|
-| Space selection, prefix filter, page size and cursor links | `list_streams` |
+| Prefix filter, page size and cursor links | `list_streams` |
 | Topic link, settings and subscriptions | `get_stream` |
 | Messages, paging, jump, Live/pause, copy | `browse_stream` (copy/pause are local presentation) |
 | New Topic with JSON settings | `create_stream` |
@@ -64,8 +64,10 @@ so Lake does not invent one. A deploy's app consumer and this page independently
 events; viewing never advances that consumer.
 
 ApplicationAgent, Ask Orama and Agent Factory turn views link to
-`/train/stream?zetta=bus&topic=agent-events&task=<task-id>`. The event page remains one shared
-space-scoped row; a link selects a turn without adding a permanent list row.
+`/w/<workspace_id>/train/stream?zetta=workspace&topic=agent-events&task=<task-id>`.
+The event page reads the selected workspace topic; a link selects a turn without a permanent
+per-turn row. Only per-agent dispatch rows come from the Lake bus. The global top-bar selector
+owns workspace selection; filters and all REST/MCP requests carry `workspace_id` explicitly.
 
 Tests cover HTML escaping, hidden service credentials, both selected-nav routes, all control
 mappings, the live long-poll contract and continued app-consumer delivery. API details and all
