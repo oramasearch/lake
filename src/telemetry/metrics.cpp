@@ -731,6 +731,17 @@ public:
                         return store_->latest_agent_task(customer_id, kind, workspace_id);
                     });
     }
+    control::Result<control::AgentTask> latest_agent_conversation_task(
+        const std::string& customer_id,
+        const std::string& conversation_id,
+        const std::string& agent,
+        const std::string& kind,
+        const std::string& workspace_id) override {
+        return call("latest_agent_conversation_task", [&] {
+            return store_->latest_agent_conversation_task(
+                customer_id, conversation_id, agent, kind, workspace_id);
+        });
+    }
     control::Result<control::AgentTask> claim_agent_task(const std::string& id,
                                                          const std::string& agent,
                                                          const std::string& sha256,

@@ -2,7 +2,9 @@
 
 `StreamOwner` and its Store methods bind topic management to the creator, customer and actual
 workspace service ID. `list_agent_task_stream_scopes` supplies one customer's compact durable task
-and agent scope for the shared Agent events and Agent tasks views. `AgentBus::call` carries named
+and agent scope for the shared Agent events and Agent tasks views.
+`latest_agent_conversation_task` resolves the preceding task for a same-agent, same-kind follow-up.
+`AgentBus::call` carries named
 CRUD read requests over the existing service transport; unsupported custom bus implementations
 fail explicitly. See `docs/control-plane/streams.md`.
 

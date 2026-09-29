@@ -4,8 +4,8 @@ The live 100 ms p95 page rule and stricter 80 ms regression budget, `Server-Timi
 route-derived coverage, registry invalidation and populated cold-start fixtures are in
 [performance.md](performance.md).
 
-Train → Experiments' ExperimentsAgent proposal, studies, run charts, comparison, local chart
-assets, accessibility and control-to-capability mappings are in
+Train → Experiments' ExperimentsAgent questions, conversation replies, proposals, studies, run
+charts, comparison, local chart assets, accessibility and control-to-capability mappings are in
 [experiments.md](experiments.md).
 
 Repository clone/push instructions use the configured external origin and a valid first checkout.
@@ -18,9 +18,8 @@ The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
 Organization and personal settings are in [`settings.md`](settings.md).
 The top-bar breadcrumb (every page's trail, mirroring its URL) is in [`breadcrumb.md`](breadcrumb.md).
 Developer → MCP (keys, copy-ready agent setup, the lake skill and `llms.txt`) is in [`../api/mcp.md`](../api/mcp.md).
-Ship → Apps list, detail, ApplicationAgent proposal confirmation, controls, and live event behavior
-are in [`apps.md`](apps.md).
-Ship → Apps list, detail, controls, and live event behavior are in [`apps.md`](apps.md).
+Ship → Apps list, detail, ApplicationAgent question replies and proposal confirmation, controls,
+and live event behavior are in [`apps.md`](apps.md).
 Train → Streams topic/message CRUD, Live/pause, paging and capability mappings are in
 [`streams.md`](streams.md). Apps, build logs and Runs link into that space's Streams pages.
 

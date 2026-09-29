@@ -1425,6 +1425,24 @@ TEST(WebUi, ShipAppsShowAFailedAgentTaskInsteadOfDroppingThePage) {
     EXPECT_NE(apps.find("topic=agent-events&amp;task=task-1"), std::string::npos) << apps;
 }
 
+TEST(WebUi, ShipAppsShowAReplyBoxUnderAnAgentQuestion) {
+    lake::api::AppsPage list;
+    list.customer_id = "customer-1";
+    list.customers = {{"customer-1", "Personal", true}};
+    list.application_agent = true;
+    list.agent_reply = true;
+    list.agent_task = {{"task_id", "task-question"},
+                       {"status", "succeeded"},
+                       {"answer",
+                        {{"reply", "Which dataset should the app use?"},
+                         {"result", {{"kind", "question"}, {"confirm", false}}}}}};
+    const std::string apps = lake::api::web_ui_apps(list, true);
+    EXPECT_NE(apps.find("Which dataset should the app use?"), std::string::npos);
+    EXPECT_NE(apps.find("<h3>Reply</h3>"), std::string::npos);
+    EXPECT_NE(apps.find("name=\"task_id\" value=\"task-question\""), std::string::npos);
+    EXPECT_NE(apps.find("name=\"reply\""), std::string::npos);
+}
+
 TEST(WebUi, ShipAppsRenderControlsMaskedSecretsAndLiveEvents) {
     lake::api::AppsPage list;
     list.customer_id = "customer-1";

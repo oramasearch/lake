@@ -1490,6 +1490,22 @@ Result<AgentTask> InMemoryStore::latest_agent_task(const std::string& customer_i
     return std::unexpected(StoreError{"not_found", "no " + kind + " task"});
 }
 
+Result<AgentTask> InMemoryStore::latest_agent_conversation_task(
+    const std::string& customer_id,
+    const std::string& conversation_id,
+    const std::string& agent,
+    const std::string& kind,
+    const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    for (auto task = agent_tasks_.rbegin(); task != agent_tasks_.rend(); ++task) {
+        if (task->customer_id == customer_id && task->conversation_id == conversation_id &&
+            task->agent == agent && task->kind == kind && task->workspace_id == workspace_id) {
+            return *task;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no earlier turn in this conversation"});
+}
+
 Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
                                                   const std::string& agent,
                                                   const std::string& credential_sha256,

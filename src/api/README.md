@@ -11,7 +11,9 @@ and [metering](../../docs/api/metering.md).
 closed contracts in `experiment_schemas.hpp`. `web_ui_experiments.cpp` is their pure page renderer;
 embedded, hashed chart assets call only registered capabilities. The page's ExperimentsAgent box
 uses `agent_turn`; the HTTP adapter hashes the stored proposal and sends the edited study only in a
-confirmed turn. Workspace action aliases retain the same confirmation, scope and promotion checks.
+confirmed turn. Questions and absent proposals get a reply form that reuses the task conversation;
+Apps and Design pipeline questions use the same follow-up contract. Workspace action aliases retain
+the same confirmation, scope and promotion checks.
 See [API](../../docs/api/experiments.md) and [UI](../../docs/ui/experiments.md) contracts.
 
 `stream_capabilities.cpp` registers the nine Streams REST/MCP operations, enforces space and

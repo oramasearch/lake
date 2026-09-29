@@ -8148,6 +8148,9 @@ struct ApiServer::Impl {
                             answer.is_object() && answer.contains("result")
                                 ? answer["result"].value("reply", std::string("no proposal"))
                                 : followed.value.value("message", std::string("no proposal"));
+                        shown["project_agent_reply"] =
+                            agent_task_needs_reply(followed.value, "agent-project");
+                        shown["project_agent_task_id"] = task;
                     }
                 }
             }
@@ -9040,6 +9043,43 @@ struct ApiServer::Impl {
         return control::identity_crypto::sha256_hex(proposal.dump());
     }
 
+    static nlohmann::json agent_result(const nlohmann::json& task) {
+        const nlohmann::json answer = task.value("answer", nlohmann::json::object());
+        if (!answer.is_object()) {
+            return nlohmann::json::object();
+        }
+        const nlohmann::json result = answer.value("result", nlohmann::json::object());
+        return result.is_object() ? result : nlohmann::json::object();
+    }
+
+    static bool agent_task_needs_reply(const nlohmann::json& task,
+                                       std::string_view agent) {
+        if (task.value("status", std::string()) != "succeeded") {
+            return false;
+        }
+        const nlohmann::json result = agent_result(task);
+        const std::string kind = result.value("kind", std::string());
+        if (kind == "question") {
+            return true;
+        }
+        if (agent == "agent-project") {
+            return !result.value("proposal", nlohmann::json()).is_object();
+        }
+        if (agent == "agent-application") {
+            return kind.empty() ||
+                   (kind == "proposal" &&
+                    (!result.value("confirm", false) ||
+                     !result.value("app", nlohmann::json()).is_object()));
+        }
+        if (agent == "agent-experiments") {
+            return kind.empty() ||
+                   (kind == "proposal" &&
+                    (!result.value("confirm", false) ||
+                     !result.value("study", nlohmann::json()).is_object()));
+        }
+        return false;
+    }
+
     boost::http::route_task serve_factory_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized || context.acting_user_id.empty()) {
@@ -9627,14 +9667,33 @@ struct ApiServer::Impl {
             } else if (action == "pipeline_ask") {
                 // Ask the Project Agent for a change (lake#249): it answers with a proposal, kept
                 // for review; nothing changes until the person applies it.
-                result = unwrap(co_await workspace_call(
-                    "agent_turn",
-                    {{"customer_id", customer_id},
-                     {"agent", "agent-project"},
-                     {"message", form_field(body, "request")},
-                     {"kind", "pipeline"},
-                     {"context", {{"project", project}, {"graph", graph}}}},
-                    context));
+                nlohmann::json turn{{"customer_id", customer_id},
+                                    {"agent", "agent-project"},
+                                    {"message", form_field(body, "request")},
+                                    {"kind", "pipeline"},
+                                    {"context", {{"project", project}, {"graph", graph}}}};
+                const std::string task_id = form_field(body, "task_id");
+                if (!task_id.empty()) {
+                    const ApiResult task = unwrap(co_await workspace_call(
+                        "get_agent_task",
+                        {{"customer_id", customer_id}, {"task_id", task_id}},
+                        context));
+                    if (!task.ok) {
+                        result = task;
+                    } else if (task.value.value("agent", std::string()) != "agent-project" ||
+                               task.value.value("kind", std::string()) != "pipeline" ||
+                               !agent_task_needs_reply(task.value, "agent-project") ||
+                               task.value.value("conversation_id", std::string()).empty()) {
+                        result = ApiResult::failure(
+                            "invalid_input", "That task has no Project Agent question to answer.");
+                    } else {
+                        turn["message"] = form_field(body, "reply");
+                        turn["conversation_id"] = task.value.at("conversation_id");
+                    }
+                }
+                if (result.ok) {
+                    result = unwrap(co_await workspace_call("agent_turn", std::move(turn), context));
+                }
                 if (result.ok) {
                     // The Project Agent works in the background (lake#269).
                     back = page_of(graph, "") + "&task=" +
@@ -10134,6 +10193,8 @@ struct ApiServer::Impl {
                         proposal.value("study", nlohmann::json()).is_object()) {
                         page.proposal_sha256 = proposal_digest(proposal);
                     }
+                    page.agent_reply =
+                        agent_task_needs_reply(task.value, "agent-experiments");
                 }
             }
         }
@@ -10208,7 +10269,25 @@ struct ApiServer::Impl {
                              {"kind", "experiment"}};
         std::optional<ApiResult> prepared;
         if (!confirm) {
-            input["message"] = form_field(body, "goal");
+            const std::string task_id = form_field(body, "task_id");
+            if (task_id.empty()) {
+                input["message"] = form_field(body, "goal");
+            } else {
+                const ApiResult task = unwrap(co_await workspace_call(
+                    "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
+                if (!task.ok) {
+                    prepared = task;
+                } else if (task.value.value("agent", std::string()) != "agent-experiments" ||
+                           task.value.value("kind", std::string()) != "experiment" ||
+                           !agent_task_needs_reply(task.value, "agent-experiments") ||
+                           task.value.value("conversation_id", std::string()).empty()) {
+                    prepared = ApiResult::failure(
+                        "invalid_input", "That task has no ExperimentsAgent question to answer.");
+                } else {
+                    input["message"] = form_field(body, "reply");
+                    input["conversation_id"] = task.value.at("conversation_id");
+                }
+            }
         } else {
             const std::string task_id = form_field(body, "task_id");
             const ApiResult task = unwrap(co_await workspace_call(
@@ -10435,6 +10514,8 @@ struct ApiServer::Impl {
                             proposal.value("confirm", false)) {
                             page.proposal_sha256 = proposal_digest(proposal);
                         }
+                        page.agent_reply =
+                            agent_task_needs_reply(task.value, "agent-application");
                     }
                 }
             }
@@ -10629,10 +10710,31 @@ struct ApiServer::Impl {
             input.erase("app_id");
             input["build_id"] = form_field(body, "build_id");
         } else if (action == "agent") {
-            capability = "agent_turn";
-            input["agent"] = "agent-application";
-            input["kind"] = "app";
-            input["message"] = form_field(body, "description");
+            const std::string task_id = form_field(body, "task_id");
+            if (task_id.empty()) {
+                capability = "agent_turn";
+                input["agent"] = "agent-application";
+                input["kind"] = "app";
+                input["message"] = form_field(body, "description");
+            } else {
+                const ApiResult task = unwrap(co_await workspace_call(
+                    "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
+                if (!task.ok) {
+                    prepared = task;
+                } else if (task.value.value("agent", std::string()) != "agent-application" ||
+                           task.value.value("kind", std::string()) != "app" ||
+                           !agent_task_needs_reply(task.value, "agent-application") ||
+                           task.value.value("conversation_id", std::string()).empty()) {
+                    prepared = ApiResult::failure(
+                        "invalid_input", "That task has no ApplicationAgent question to answer.");
+                } else {
+                    capability = "agent_turn";
+                    input["agent"] = "agent-application";
+                    input["kind"] = "app";
+                    input["message"] = form_field(body, "reply");
+                    input["conversation_id"] = task.value.at("conversation_id");
+                }
+            }
         } else if (action == "agent_confirm") {
             const std::string task_id = form_field(body, "task_id");
             const ApiResult task = unwrap(co_await workspace_call(

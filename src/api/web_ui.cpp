@@ -2772,6 +2772,17 @@ std::string pipeline_content(const WorkspacePage& page) {
                "Project Agent is working on it…</strong> It reads your data and prepares the "
                "edits; nothing changes until you apply them. This page checks again every 3 "
                "seconds.</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
+    } else if (page.data.value("project_agent_reply", false)) {
+        out +=
+            "<section class=\"panel notice\" id=\"proposal\"><h2>Project Agent Question</h2>"
+            "<div class=\"ask-reply\">" +
+            web_ui_markdown(json_text(page.data, "project_agent_error")) +
+            "</div><h3>Reply</h3><form class=\"stack\" method=\"post\" "
+            "action=\"/design/pipeline/ask\">" +
+            common() + hidden("task_id", json_text(page.data, "project_agent_task_id")) +
+            "<label>Reply<textarea name=\"reply\" rows=\"3\" required></textarea></label>"
+            "<button class=\"button button-primary\" type=\"submit\">Reply to the Project "
+            "Agent</button></form></section>";
     } else if (!json_text(page.data, "project_agent_error").empty()) {
         out += "<p class=\"error\" role=\"alert\" id=\"proposal\">The Project Agent did not propose "
                "a change: " +
@@ -5566,6 +5577,16 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
             if (!url.empty()) {
                 content += std::format("<p><a href=\"{}\">Open the app</a></p>",
                                        web_ui_escape(url));
+            }
+            if (page.agent_reply) {
+                content +=
+                    "<h3>Reply</h3><form class=\"stack\" method=\"post\" "
+                    "action=\"/ship/apps/agent\">" +
+                    hidden("customer_id", page.customer_id) +
+                    hidden("task_id", page.agent_task.value("task_id", std::string())) +
+                    "<label>Reply<textarea name=\"reply\" rows=\"4\" required></textarea>"
+                    "</label><button class=\"button button-primary\" type=\"submit\">Reply to "
+                    "ApplicationAgent</button></form>";
             }
             content += "</section>";
         }

@@ -3147,9 +3147,13 @@ void register_agent_run_capabilities(Registry& registry) {
             const std::string customer_id = input.at("customer_id");
             const std::string agent = input.at("agent");
             const std::string message = input.at("message");
+            std::string conversation_id = input.value("conversation_id", std::string());
+            if (conversation_id.empty()) {
+                conversation_id = control::new_uuid_v4();
+            }
             const control::WorkspaceConfig& config = context.workspaces->config();
             agent_audit(context, "agent.turn", customer_id, {{"agent", agent}});
-            json body{{"conversation_id", input.value("conversation_id", std::string())},
+            json body{{"conversation_id", conversation_id},
                       {"workspace_id", input.at("workspace_id")},
                       {"message", message},
                       {"customer_id", customer_id},
@@ -3168,7 +3172,24 @@ void register_agent_run_capabilities(Registry& registry) {
                 }
                 std::vector<std::string> scopes{"workspace_query", "workspace_openapi"};
                 std::string task_kind = input.value("kind", std::string("api"));
+                if (agent == "agent-application") {
+                    task_kind = "app";
+                }
                 std::string lake_url = config.internal_url;
+                const auto prior = context.store->latest_agent_conversation_task(
+                    customer_id, conversation_id, agent, task_kind, input.at("workspace_id"));
+                if (prior) {
+                    if (!context.operator_credential &&
+                        prior->requested_by_user_id != context.acting_user_id) {
+                        co_return ApiResult::failure(
+                            "not_found", "no earlier turn in this conversation");
+                    }
+                    body["prior_turn"] = {{"task_id", prior->id},
+                                          {"message", prior->body.value("message", std::string())},
+                                          {"answer", prior->result}};
+                } else if (prior.error().code != "not_found") {
+                    co_return ApiResult::failure(prior.error().code, prior.error().message);
+                }
                 if (agent == "agent-ask-orama") {
                     // Ask Orama reads everything the person may read and changes nothing itself:
                     // its key carries every read capability and agent_turn, never an action.
@@ -3275,6 +3296,21 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (agent == "agent-project") {
                     scopes.push_back("agent_turn");
                     body["request"] = message;
+                    if (prior) {
+                        std::string prior_reply;
+                        if (prior->result.is_object()) {
+                            prior_reply = prior->result.value("reply", std::string());
+                            const json prior_result =
+                                prior->result.value("result", json::object());
+                            if (prior_reply.empty() && prior_result.is_object()) {
+                                prior_reply = prior_result.value("reply", std::string());
+                            }
+                        }
+                        if (!prior_reply.empty()) {
+                            body["request"] = "The Project Agent previously replied:\n" +
+                                              prior_reply + "\n\nThe person's reply:\n" + message;
+                        }
+                    }
                     body["context"] = input.value("context", json::object());
                     // A request about an existing pipeline is a change request (lake#249): the
                     // agent is handed the graph as it is and answers with a proposal.
@@ -3327,8 +3363,7 @@ void register_agent_run_capabilities(Registry& registry) {
                     control::AgentTask{.customer_id = customer_id,
                                        .agent = agent,
                                        .kind = std::move(task_kind),
-                                       .conversation_id =
-                                           input.value("conversation_id", std::string()),
+                                       .conversation_id = conversation_id,
                                        .workspace_id = input.at("workspace_id"),
                                        .body = std::move(body),
                                        .scopes = std::move(scopes),

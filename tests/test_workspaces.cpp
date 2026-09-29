@@ -1325,6 +1325,19 @@ TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
     page.data.erase("proposal");
     page.data.erase("run_dataset");
 
+    page.data["project_agent_error"] = "Which dataset should I use?";
+    page.data["project_agent_reply"] = true;
+    page.data["project_agent_task_id"] = "task-question";
+    const std::string question = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(question.find("Project Agent Question"), std::string::npos);
+    EXPECT_NE(question.find("Which dataset should I use?"), std::string::npos);
+    EXPECT_NE(question.find("<h3>Reply</h3>"), std::string::npos);
+    EXPECT_NE(question.find("name=\"task_id\" value=\"task-question\""), std::string::npos);
+    EXPECT_NE(question.find("name=\"reply\""), std::string::npos);
+    page.data.erase("project_agent_error");
+    page.data.erase("project_agent_reply");
+    page.data.erase("project_agent_task_id");
+
     page.section = "run";
     page.subject = "r1";
     page.data = {{"get_run",
@@ -3136,6 +3149,83 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
         {{"app", created.value["id"]}, {"image", "registry.example.test/reports:confirmed"}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
     EXPECT_EQ(deployed.value["image"], "registry.example.test/reports:confirmed");
+}
+
+TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-application", "http://application:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+
+    const auto started =
+        r.call("agent_turn", {{"agent", "agent-application"}, {"message", "Build reports"}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.store.get_agent_task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    ASSERT_FALSE(first->conversation_id.empty());
+    const json question{{"ok", true},
+                        {"conversation_id", first->conversation_id},
+                        {"reply", "Which dataset should the report use?"},
+                        {"result", {{"kind", "question"}, {"confirm", false}}}};
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        first->id, "Succeeded", "", "Which dataset should the report use?", question));
+
+    const auto followed = r.call(
+        "agent_turn",
+        {{"agent", "agent-application"},
+         {"kind", "app"},
+         {"message", "Use datasets/accounts."},
+         {"conversation_id", first->conversation_id}});
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    const auto second = r.store.get_agent_task(followed.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->conversation_id, first->conversation_id);
+    EXPECT_EQ(second->body["message"], "Use datasets/accounts.");
+    EXPECT_EQ(second->body["prior_turn"]["task_id"], first->id);
+    EXPECT_EQ(second->body["prior_turn"]["answer"], question);
+}
+
+TEST(AgentRuns, AProjectAgentReplyIncludesTheQuestionAndAnswer) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-project", "http://project:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    r.w.caller->answers["get_graph"] = {
+        {"name", "churn"}, {"project", "retention"}, {"nodes", json::array()}, {"edges", json::array()}};
+
+    const json context{{"project", "retention"}, {"graph", "churn"}};
+    const auto started = r.call(
+        "agent_turn",
+        {{"agent", "agent-project"},
+         {"kind", "pipeline"},
+         {"message", "Train a churn model"},
+         {"context", context}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto first = r.store.get_agent_task(started.value["task_id"]);
+    ASSERT_TRUE(first);
+    const json question{{"ok", true},
+                        {"result",
+                         {{"kind", "question"},
+                          {"proposal", nullptr},
+                          {"reply", "Which dataset should I use?"}}}};
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        first->id, "Succeeded", "", "Which dataset should I use?", question));
+
+    const auto followed = r.call(
+        "agent_turn",
+        {{"agent", "agent-project"},
+         {"kind", "pipeline"},
+         {"message", "Use datasets/accounts."},
+         {"conversation_id", first->conversation_id},
+         {"context", context}});
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    const auto second = r.store.get_agent_task(followed.value["task_id"]);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->body["prior_turn"]["task_id"], first->id);
+    EXPECT_NE(second->body["request"].get<std::string>().find("Which dataset should I use?"),
+              std::string::npos);
+    EXPECT_NE(second->body["request"].get<std::string>().find("Use datasets/accounts."),
+              std::string::npos);
 }
 
 TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
