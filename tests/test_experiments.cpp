@@ -86,6 +86,7 @@ protected:
 
     lake::api::ApiResult call(const std::string& name, json input) {
         input["customer_id"] = customer;
+        input["workspace_id"] = workspace->id;
         context.request_id = lake::control::new_uuid_v4();
         const auto result = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(result);
@@ -175,7 +176,8 @@ TEST_F(Experiments, SpacePolicyConfirmationAndWorkspaceAliasesCannotBypassPromot
     context.acting_identity = "outsider";
     context.operator_credential = false;
     count = workspace->caller->calls.size();
-    for (const auto& [name, input] : lake::test::experiment_calls(customer)) {
+    for (auto [name, input] : lake::test::experiment_calls(customer, workspace->id)) {
+        input["workspace_id"] = workspace->id;
         EXPECT_FALSE(call(name, input).ok) << name;
     }
     EXPECT_EQ(workspace->caller->calls.size(), count);
@@ -221,7 +223,7 @@ TEST_F(Experiments, ListsFilterTrackedRunsAndMetricsRespectPrivacyAndBounds) {
     EXPECT_FALSE(call("start_study", invalid).ok);
     invalid["objective"]["direction"] = "sideways";
     EXPECT_FALSE(call("start_study", invalid).ok);
-    for (const auto& [name, input] : lake::test::experiment_calls(customer)) {
+    for (const auto& [name, input] : lake::test::experiment_calls(customer, workspace->id)) {
         closed_objects(registry.find(name)->input_schema);
         closed_objects(registry.find(name)->output_schema);
     }
@@ -261,7 +263,7 @@ TEST_F(Experiments, RestAndMcpExposeMatchingSchemasAndCallEveryOperation) {
     const auto openapi = json::parse(request(server.port(), "GET", "/v1/openapi.json"));
     const auto tools = json::parse(request(server.port(), "POST", "/mcp", {
         {"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}})).at("result").at("tools");
-    for (const auto& [name, input] : lake::test::experiment_calls(customer)) {
+    for (const auto& [name, input] : lake::test::experiment_calls(customer, workspace->id)) {
         const auto tool = std::ranges::find_if(tools, [&](const auto& item) {
             return item.at("name") == name;
         });
@@ -290,9 +292,9 @@ TEST_F(Experiments, EveryPageControlUsesACapabilityAndNavigationOwnsAllExperimen
     const std::vector<std::string> paths = {"/train/experiments?", "/train/experiment?study=study-one&",
         "/train/experiment/run?run=run-a&", "/train/experiments/compare?runs=run-a,run-b&"};
     for (const auto& path : paths) {
-        const auto html = request(server.port(), "GET", path + "customer_id=" + customer);
+        const auto html = request(server.port(), "GET", "/w/" + workspace->id + path + "customer_id=" + customer);
         controls_registered(html, registry);
-        const auto navigation = html.find("href=\"/train/experiments\" aria-current=\"page\"");
+        const auto navigation = html.find("href=\"/w/" + workspace->id + "/train/experiments\" aria-current=\"page\"");
         ASSERT_NE(navigation, std::string::npos);
         const auto link = html.substr(navigation, html.find("</a>", navigation) - navigation);
         EXPECT_NE(link.find("<svg class=\"icon\""), std::string::npos);
@@ -308,7 +310,7 @@ TEST_F(Experiments, EveryPageControlUsesACapabilityAndNavigationOwnsAllExperimen
             EXPECT_EQ(request(server.port(), "GET", asset), lake::api::web_ui_experiment_asset(name));
         }
     }
-    const auto dp = request(server.port(), "GET", "/train/experiment/run?run=dp-run&customer_id=" + customer);
+    const auto dp = request(server.port(), "GET", "/w/" + workspace->id + "/train/experiment/run?run=dp-run&customer_id=" + customer);
     EXPECT_NE(dp.find("curves suppressed for differential privacy"), std::string::npos);
     const auto agent_docs = lake::api::agent_docs::llms_full_txt(registry, "http://127.0.0.1");
     EXPECT_NE(agent_docs.find("tail_experiment_events"), std::string::npos);

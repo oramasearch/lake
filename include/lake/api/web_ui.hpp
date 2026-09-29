@@ -37,6 +37,8 @@ struct WebUiViewer {
     std::string query;
     // The signed-in user's id, so pages can mark the viewer's own personal space.
     std::string user_id;
+    std::string customer_id, workspace_id;
+    std::vector<std::pair<std::string, std::string>> spaces, workspaces;
     // True when Clerk is lake's sign-in (docs/api/clerk.md); lake's own passkey page is then not
     // offered.
     bool clerk = false;
@@ -59,6 +61,11 @@ std::span<const std::string_view> web_ui_font_names();
 std::string_view web_ui_font_url(std::string_view name);
 std::string_view web_ui_asset_cache_control(std::string_view path);
 std::string web_ui_icon(std::string_view name);
+// Canonical workspace paths and server-rendered link/form propagation.
+bool workspace_page_path(std::string_view path);
+std::string workspace_path_id(std::string_view path);
+std::string workspace_local_path(std::string_view path);
+std::string web_ui_workspace_document(std::string html, std::string_view workspace_id);
 
 // A self-hosted IBM Plex WOFF2 face embedded in the binary. Unknown names return an empty view.
 std::string_view web_ui_font(std::string_view name);

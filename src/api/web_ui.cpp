@@ -21,6 +21,85 @@
 
 namespace lake::api {
 
+bool workspace_page_path(std::string_view path) {
+    for (const std::string_view prefix : {"/design", "/train", "/ship", "/ask", "/workspace",
+                                           "/workspaces"}) {
+        if (path == prefix || path.starts_with(std::string(prefix) + "/")) {
+            return path != "/workspace/select";
+        }
+    }
+    return false;
+}
+
+std::string workspace_path_id(std::string_view path) {
+    if (!path.starts_with("/w/")) {
+        return {};
+    }
+    const auto end = path.find('/', 3);
+    if (end == std::string_view::npos) {
+        return {};
+    }
+    const std::string id(path.substr(3, end - 3));
+    if (id.size() != 36 || std::ranges::any_of(id, [](unsigned char c) {
+            return !std::isxdigit(c) && c != '-';
+        })) {
+        return {};
+    }
+    return id;
+}
+
+std::string workspace_local_path(std::string_view path) {
+    const auto id = workspace_path_id(path);
+    return std::string(id.empty() ? path : path.substr(3 + id.size()));
+}
+
+std::string web_ui_workspace_document(std::string html, std::string_view workspace_id) {
+    if (workspace_path_id("/w/" + std::string(workspace_id) + "/").empty()) {
+        return html;
+    }
+    const std::string prefix = "/w/" + std::string(workspace_id);
+    // Rewrite URL attributes and inline navigation scripts, never hidden form values.
+    for (std::size_t pos = 0; pos < html.size(); ++pos) {
+        if ((html[pos] != '\'' && html[pos] != '"') || pos + 1 == html.size() || html[pos + 1] != '/') {
+            continue;
+        }
+        const std::string_view leading(html.data(), pos);
+        const auto script = leading.rfind("<script");
+        const auto closed = leading.rfind("</script");
+        const bool in_script = script != std::string_view::npos &&
+            (closed == std::string_view::npos || script > closed);
+        if (!in_script && !leading.ends_with("href=") && !leading.ends_with("action=") &&
+            !leading.ends_with("src=")) {
+            continue;
+        }
+        const auto end = html.find_first_of("?\"'# <", pos + 1);
+        const std::string_view path(html.data() + pos + 1,
+            (end == std::string::npos ? html.size() : end) - pos - 1);
+        if (workspace_page_path(path)) {
+            html.insert(pos + 1, prefix);
+            pos += prefix.size();
+        }
+    }
+    const std::string field = "<input type=\"hidden\" name=\"workspace_id\" value=\"" +
+                             std::string(workspace_id) + "\">";
+    std::size_t pos = 0;
+    while ((pos = html.find("<form", pos)) != std::string::npos) {
+        const auto open = html.find('>', pos);
+        const auto close = html.find("</form>", open);
+        if (open == std::string::npos || close == std::string::npos) {
+            break;
+        }
+        const auto body = std::string_view(html).substr(open + 1, close - open - 1);
+        if (!body.contains("name=\"workspace_id\"")) {
+            html.insert(open + 1, field);
+            pos = close + field.size() + 7;
+        } else {
+            pos = close + 7;
+        }
+    }
+    return html;
+}
+
 std::string web_ui_escape(std::string_view text) {
     std::string out;
     out.reserve(text.size());
@@ -413,7 +492,7 @@ bool navigation_is_current(const WebUiViewer& viewer,
         return title_is_current(title, key);
     }
     for (const std::string_view route : navigation_routes(key)) {
-        if (route_owns(viewer.path, route)) {
+        if (route_owns(workspace_local_path(viewer.path), route)) {
             return true;
         }
     }
@@ -610,7 +689,7 @@ std::string agent_events_link(std::string_view customer_id, std::string_view tas
     }
     return "<p class=\"sub\">" +
            row_link("/train/stream?customer_id=" + url_component(customer_id) +
-                        "&zetta=bus&topic=agent-events&task=" + url_component(task_id),
+                        "&zetta=workspace&topic=agent-events&task=" + url_component(task_id),
                     "View this turn in Streams") +
            "</p>";
 }
@@ -1167,7 +1246,31 @@ std::string web_ui_shell(std::string_view title,
                          const std::vector<WebUiCrumb>& trail,
                          std::string_view content,
                          WebUiViewer viewer) {
-    return std::format(
+    std::string selection;
+    if (viewer.signed_in && !viewer.spaces.empty()) {
+        selection = "<form method=\"get\" action=\"/workspace/select\" class=\"filters\">"
+                    "<input type=\"hidden\" name=\"page\" value=\"" +
+                    web_ui_escape(workspace_local_path(viewer.path)) + "\">"
+                    "<input type=\"hidden\" name=\"page_query\" value=\"" + web_ui_escape(viewer.query) + "\">"
+                    "<label>Space<select name=\"customer_id\" "
+                    "onchange=\"this.form.elements.workspace_id.value='';this.form.submit()\">";
+        for (const auto& [id, name] : viewer.spaces) {
+            selection += "<option value=\"" + web_ui_escape(id) + "\"" +
+                (id == viewer.customer_id ? " selected" : "") + ">" + web_ui_escape(name) + "</option>";
+        }
+        selection += "</select></label><label>Workspace<select name=\"workspace_id\" required>";
+        if (viewer.workspace_id.empty()) {
+            selection += "<option value=\"\">Choose a workspace</option>";
+        }
+        for (const auto& [id, name] : viewer.workspaces) {
+            selection += "<option value=\"" + web_ui_escape(id) + "\"" +
+                (id == viewer.workspace_id ? " selected" : "") + ">" + web_ui_escape(name) + "</option>";
+        }
+        selection += "</select></label><button type=\"submit\">Switch</button></form>"
+                     "<a href=\"/services?customer_id=" + web_ui_escape(viewer.customer_id) +
+                     "&amp;create=zetta\">New workspace</a>";
+    }
+    auto html = std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<meta name=\"color-scheme\" content=\"light dark\"><title>{}</title>{}{}</head><body>"
@@ -1186,11 +1289,12 @@ std::string web_ui_shell(std::string_view title,
         stylesheet_link(),
         web_ui_icon("lake"),
         nav(viewer, title),
-        web_ui_breadcrumb(trail),
+        selection + web_ui_breadcrumb(trail),
         web_ui_icon("theme"),
         session_control(viewer),
         content,
         theme_toggle_script);
+    return web_ui_workspace_document(std::move(html), viewer.workspace_id);
 }
 
 std::string web_ui_error(std::string_view code, std::string_view message, WebUiViewer viewer) {
@@ -4844,19 +4948,6 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     if (!section.sub.empty()) {
         content += std::format("<p class=\"sub\">{}</p>", web_ui_escape(section.sub));
     }
-    if (page.customers.size() > 1) {
-        content += std::format("<form class=\"inline\" method=\"get\" action=\"{}\"><label>Space "
-                               "<select name=\"customer_id\">",
-                               section.path);
-        for (const WorkspaceCustomer& customer : page.customers) {
-            content += std::format("<option value=\"{}\"{}>{}{}</option>",
-                                   web_ui_escape(customer.id),
-                                   customer.id == page.customer_id ? " selected" : "",
-                                   web_ui_escape(customer.handle),
-                                   customer.yours ? " (your personal space)" : "");
-        }
-        content += "</select></label> <button type=\"submit\">Show</button></form>";
-    }
     if (!page.error.empty()) {
         content +=
             std::format("<p class=\"error\" role=\"alert\">{}</p>", web_ui_escape(page.error));
@@ -4978,7 +5069,7 @@ std::string web_ui_packages(const nlohmann::json& catalog,
                 "<tr data-build-id=\"{}\"><td><code>{}</code></td><td class=\"build-phase\">{}"
                 "</td><td><code>{}</code></td><td><details><summary>Live log</summary>"
                 "<pre class=\"build-log\"></pre></details><a href=\"/train/stream?customer_id={}"
-                "&amp;zetta=bus&amp;topic=build-events.{}\">Browse messages</a></td></tr>",
+                "&amp;zetta=workspace&amp;topic=build-events.{}\">Browse messages</a></td></tr>",
                 web_ui_escape(id),
                 web_ui_escape(build.value("target", std::string())),
                 web_ui_escape(build.value("phase", std::string())),
@@ -4987,7 +5078,37 @@ std::string web_ui_packages(const nlohmann::json& catalog,
         }
         content += "</tbody></table></section>";
         content += std::format(
-            R"(<script>(()=>{{const customer={};for(const row of document.querySelectorAll('[data-build-id]')){{let next=1;const follow=async()=>{{const query=new URLSearchParams({{customer_id:customer,build_id:row.dataset.buildId,from_sequence:String(next),wait_ms:'25000'}});try{{const response=await fetch('/v1/receive_build_events?'+query);const envelope=await response.json();if(envelope.ok){{for(const event of envelope.value.events){{next=Math.max(next,event.sequence+1);if(event.phase)row.querySelector('.build-phase').textContent=event.phase;for(const line of event.lines||[])row.querySelector('.build-log').textContent+=line+'\n';}}next=Math.max(next,envelope.value.next_sequence||next);}}}}catch(error){{}}setTimeout(follow,250);}};follow();}}}})();</script>)",
+            R"(<script>(() => {{
+    const customer = {};
+    const workspace = location.pathname.split('/')[2];
+    for (const row of document.querySelectorAll('[data-build-id]')) {{
+        let next = 1;
+        const follow = async () => {{
+            const query = new URLSearchParams({{
+                customer_id: customer, workspace_id: workspace,
+                build_id: row.dataset.buildId, from_sequence: String(next), wait_ms: '25000'
+            }});
+            try {{
+                const response = await fetch('/v1/receive_build_events?' + query);
+                const envelope = await response.json();
+                if (envelope.ok) {{
+                    for (const event of envelope.value.events) {{
+                        next = Math.max(next, event.sequence + 1);
+                        if (event.phase) row.querySelector('.build-phase').textContent = event.phase;
+                        for (const line of event.lines || []) {{
+                            row.querySelector('.build-log').textContent += line + '\n';
+                        }}
+                    }}
+                    next = Math.max(next, envelope.value.next_sequence || next);
+                }}
+            }} catch (error) {{
+                // A later poll retries a transient transport failure.
+            }}
+            setTimeout(follow, 250);
+        }};
+        follow();
+    }}
+}})();</script>)",
             nlohmann::json(std::string(customer_id)).dump());
     }
     return web_ui_shell("lake — packages", "Packages", content, viewer);
@@ -4998,21 +5119,7 @@ namespace {
 std::string app_customer_selector(const std::vector<WorkspaceCustomer>& customers,
                                   std::string_view customer_id,
                                   std::string_view path) {
-    if (customers.size() < 2) {
-        return {};
-    }
-    std::string output =
-        std::format("<form class=\"filters\" method=\"get\" action=\"{}\"><label>Space<select "
-                    "name=\"customer_id\" onchange=\"this.form.submit()\">",
-                    web_ui_escape(path));
-    for (const WorkspaceCustomer& customer : customers) {
-        output += std::format("<option value=\"{}\"{}>{}{}</option>",
-                              web_ui_escape(customer.id),
-                              customer.id == customer_id ? " selected" : "",
-                              web_ui_escape(customer.handle),
-                              customer.yours ? " (Yours)" : "");
-    }
-    return output + "</select></label><button type=\"submit\">Show</button></form>";
+    return {};
 }
 
 std::string app_phase_badge(std::string_view phase, bool ready) {
@@ -5077,7 +5184,56 @@ std::string app_live_script(std::string_view customer_id,
         }
     }
     return std::format(
-        R"(<script id="app-live-events">(()=>{{const customer={};const app={};const key=`lake-app-events:${{app}}`;let next={};try{{next=Math.max(next,Number(localStorage.getItem(key))||1);}}catch{{}}const log=document.querySelector('[data-app-events]');const phase=document.querySelector('[data-app-phase]');const fill=document.querySelector('.app-phase-fill');const show=e=>{{if(log){{const line=document.createElement('div');line.textContent=`${{e.sequence||''}}  ${{e.type||'event'}}  ${{e.message||JSON.stringify(e.status||{{}})}}`;log.append(line);log.scrollTop=log.scrollHeight;}}const p=e.status&&e.status.phase;if(p&&phase)phase.textContent=p;if(p&&fill)fill.classList.toggle('ready',p==='Running'||p==='Ready');}};const follow=async()=>{{while(document.body.isConnected){{try{{const q=new URLSearchParams({{customer_id:customer,app_id:app,from_sequence:String(next),wait_ms:'25000'}});const response=await fetch('/v1/receive_app_events?'+q,{{credentials:'same-origin'}});if(!response.ok)throw new Error('event request failed');const body=await response.json();const value=body.value||body.data||body;for(const event of value.events||[])show(event);next=value.next_sequence||next;try{{localStorage.setItem(key,String(next));}}catch{{}}}}catch{{await new Promise(resolve=>setTimeout(resolve,2000));}}}}}};follow();}})();</script>)",
+        R"(<script id="app-live-events">(() => {{
+    const customer = {};
+    const app = {};
+    const workspace = location.pathname.split('/')[2];
+    const key = `lake-app-events:${{app}}`;
+    let next = {};
+    try {{
+        next = Math.max(next, Number(localStorage.getItem(key)) || 1);
+    }} catch {{
+        // Storage may be disabled; the server-provided cursor still works.
+    }}
+    const log = document.querySelector('[data-app-events]');
+    const phase = document.querySelector('[data-app-phase]');
+    const fill = document.querySelector('.app-phase-fill');
+    const show = event => {{
+        if (log) {{
+            const line = document.createElement('div');
+            line.textContent = `${{event.sequence || ''}}  ${{event.type || 'event'}}  ${{event.message || JSON.stringify(event.status || {{}})}}`;
+            log.append(line);
+            log.scrollTop = log.scrollHeight;
+        }}
+        const status = event.status && event.status.phase;
+        if (status && phase) phase.textContent = status;
+        if (status && fill) fill.classList.toggle('ready', status === 'Running' || status === 'Ready');
+    }};
+    const follow = async () => {{
+        while (document.body.isConnected) {{
+            try {{
+                const query = new URLSearchParams({{
+                    customer_id: customer, workspace_id: workspace,
+                    app_id: app, from_sequence: String(next), wait_ms: '25000'
+                }});
+                const response = await fetch('/v1/receive_app_events?' + query, {{credentials: 'same-origin'}});
+                if (!response.ok) throw new Error('event request failed');
+                const body = await response.json();
+                const value = body.value || body.data || body;
+                for (const event of value.events || []) show(event);
+                next = value.next_sequence || next;
+                try {{
+                    localStorage.setItem(key, String(next));
+                }} catch {{
+                    // Keep following with the in-memory cursor.
+                }}
+            }} catch {{
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }}
+        }}
+    }};
+    follow();
+}})();</script>)",
         customer,
         app,
         next_sequence);
@@ -5092,7 +5248,49 @@ std::string build_live_script(std::string_view customer_id, const nlohmann::json
         }
     }
     return std::format(
-        R"(<script id="build-live-events">(()=>{{const customer={};const builds={};const follow=async id=>{{const key=`lake-build-events:${{id}}`;let next=1;try{{next=Number(localStorage.getItem(key))||1;}}catch{{}}const log=document.querySelector(`[data-build-events="${{CSS.escape(id)}}"]`);while(document.body.isConnected){{try{{const q=new URLSearchParams({{customer_id:customer,build_id:id,from_sequence:String(next),wait_ms:'25000'}});const response=await fetch('/v1/receive_build_events?'+q,{{credentials:'same-origin'}});if(!response.ok)throw new Error('event request failed');const body=await response.json();const value=body.value||body.data||body;for(const event of value.events||[]){{if(log){{const line=document.createElement('div');line.textContent=`${{event.sequence||''}}  ${{event.message||event.type||JSON.stringify(event)}}`;log.append(line);}}}}next=value.next_sequence||next;try{{localStorage.setItem(key,String(next));}}catch{{}}}}catch{{await new Promise(resolve=>setTimeout(resolve,2000));}}}}}};for(const id of builds)follow(id);}})();</script>)",
+        R"(<script id="build-live-events">(() => {{
+    const customer = {};
+    const builds = {};
+    const workspace = location.pathname.split('/')[2];
+    const follow = async id => {{
+        const key = `lake-build-events:${{id}}`;
+        let next = 1;
+        try {{
+            next = Number(localStorage.getItem(key)) || 1;
+        }} catch {{
+            // Storage may be disabled; start at the first retained event.
+        }}
+        const log = document.querySelector(`[data-build-events="${{CSS.escape(id)}}"]`);
+        while (document.body.isConnected) {{
+            try {{
+                const query = new URLSearchParams({{
+                    customer_id: customer, workspace_id: workspace,
+                    build_id: id, from_sequence: String(next), wait_ms: '25000'
+                }});
+                const response = await fetch('/v1/receive_build_events?' + query, {{credentials: 'same-origin'}});
+                if (!response.ok) throw new Error('event request failed');
+                const body = await response.json();
+                const value = body.value || body.data || body;
+                for (const event of value.events || []) {{
+                    if (log) {{
+                        const line = document.createElement('div');
+                        line.textContent = `${{event.sequence || ''}}  ${{event.message || event.type || JSON.stringify(event)}}`;
+                        log.append(line);
+                    }}
+                }}
+                next = value.next_sequence || next;
+                try {{
+                    localStorage.setItem(key, String(next));
+                }} catch {{
+                    // Keep following with the in-memory cursor.
+                }}
+            }} catch {{
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }}
+        }}
+    }};
+    for (const id of builds) follow(id);
+}})();</script>)",
         nlohmann::json(std::string(customer_id)).dump(),
         ids.dump());
 }
@@ -5342,7 +5540,7 @@ std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
     content += "<button type=\"submit\">Deploy</button></form></section>";
     content += app_event_history(page);
     content += "<p>" + row_link("/train/stream?customer_id=" + url_component(page.customer_id) +
-        "&zetta=bus&topic=app-events." + url_component(id), "Browse app event stream") + "</p>";
+        "&zetta=workspace&topic=app-events." + url_component(id), "Browse app event stream") + "</p>";
     content += "<section class=\"panel\"><h2>Live Events</h2><div class=\"app-stream\" "
                "data-app-events role=\"log\">";
     for (const nlohmann::json& event : page.events) {
@@ -5390,7 +5588,7 @@ std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
                                                         id,
                                                         hidden("build_id", build_id));
             build_actions += row_link("/train/stream?customer_id=" + url_component(page.customer_id) +
-                "&zetta=bus&topic=build-events." + url_component(build_id), "Browse build stream");
+                "&zetta=workspace&topic=build-events." + url_component(build_id), "Browse build stream");
             if (!built_image.empty()) {
                 build_actions += app_action_form("/ship/app/deploy",
                                                  "Deploy Build",

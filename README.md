@@ -16,6 +16,14 @@ cmake --build build -j 6
 ctest --test-dir build --output-on-failure
 ```
 
+Design, Train, Ship and Ask pages use `/w/<workspace_id>/...`. The global top-bar selector lists
+the space's workspaces. Workspace paths in the table are abbreviated: prepend `/w/<workspace_id>`
+to both GET and POST routes. Old unprefixed GET routes redirect to the remembered or sole workspace;
+unprefixed mutations are refused.
+Forms, REST and MCP calls send `workspace_id` explicitly. Task/app/build events live in that
+workspace Zetta; only `agent-tasks.*` remain on the Lake bus. See the
+[workspace data-plane design and audit](docs/architecture/workspace-data-plane.md).
+
 | Route | Serves |
 |---|---|
 | `GET /` | the account → repository → push journey, with navigation matched to the viewer |

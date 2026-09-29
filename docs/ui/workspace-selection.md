@@ -27,5 +27,10 @@ same-page switching with filters, explicit mismatched/missing form refusals, and
 provisioning. Existing page scenarios select their test workspace explicitly before making
 requests; their workspace-aware HTTP helper sends the same path and hidden field a browser uses.
 
+`WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms` exercises the
+server without that helper's selection support. `WebUi.WorkspacePathOwnsNavigationAndEveryFormCarriesTheSelection`
+checks active navigation and repeated rendering. The HTTP page scenarios cover Ask, Agent Factory,
+pipelines, Streams, apps and experiments with explicitly selected workspaces.
+
 The storage rule, migration, retention, cleanup and cross-repository follow-ups are in the
 [workspace data-plane design](../architecture/workspace-data-plane.md).

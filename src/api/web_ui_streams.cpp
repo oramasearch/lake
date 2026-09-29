@@ -71,6 +71,7 @@ constexpr std::string_view script = R"html(<script id="streams-controls">
     notice.textContent = error.message;
   };
   async function call(name, input, signal) {
+    input.workspace_id = location.pathname.split('/')[2];
     const response = await fetch('/v1/' + name, {
       method: 'POST', credentials: 'same-origin', signal,
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify(input)
@@ -222,12 +223,8 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
             "updates and confirmed changes, or use the same stream capabilities through REST or MCP.</p></noscript>";
     if (page.topic.empty()) {
         html += "<form method=\"get\" action=\"/train/streams\" data-capability=\"list_streams\">"
-            "<label>Space<select name=\"customer_id\">";
-        for (const auto& customer : page.customers) {
-            html += "<option value=\"" + escape(customer.id) + "\"" +
-                (customer.id == page.customer_id ? " selected" : "") + ">" + escape(customer.handle) + "</option>";
-        }
-        html += "</select></label><label>Name prefix<input name=\"prefix\" value=\"" + escape(page.prefix) +
+            "<input type=\"hidden\" name=\"customer_id\" value=\"" + escape(page.customer_id) + "\">";
+        html += "<label>Name prefix<input name=\"prefix\" value=\"" + escape(page.prefix) +
             "\"></label><label>Page size<input type=\"number\" name=\"limit\" min=\"1\" max=\"200\" value=\"" +
             std::to_string(page.limit) + "\"></label><button type=\"submit\">Filter</button></form>";
         for (const auto& group : page.listing.value("groups", json::array())) {
@@ -291,7 +288,7 @@ std::string web_ui_streams(const StreamsPage& page, WebUiViewer viewer) {
                 "</td><td>" + subscription.at("lag").dump() + "</td></tr>";
         }
         html += "</tbody></table>";
-        if (page.zetta == "bus" && page.topic == "agent-events") {
+        if (page.zetta == "workspace" && page.topic == "agent-events") {
             html += "<form method=\"get\" action=\"/train/stream\" data-capability=\"browse_stream\">" +
                 scope(page) + "<label>Turn (task ID)<input name=\"task\" value=\"" +
                 escape(page.task) + "\"></label><label>Agent<input name=\"agent\" value=\"" +
