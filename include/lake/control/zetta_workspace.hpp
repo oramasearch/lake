@@ -150,8 +150,6 @@ public:
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> withdraw(std::string customer_id);
     // Calls `capability` on the customer's own cluster. Refuses when the workspace is not ready.
     liquid::runtime::task<ZettaControlResult<nlohmann::json>>
-    call(std::string customer_id, std::string capability, bool read, nlohmann::json input);
-    liquid::runtime::task<ZettaControlResult<nlohmann::json>>
     call(std::string customer_id, std::string workspace_id, std::string capability,
          bool read, nlohmann::json input,
          std::function<void(std::chrono::nanoseconds)> observe = {},

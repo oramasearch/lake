@@ -4632,6 +4632,36 @@ private:
     std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
 };
 
+std::string agent_task_openapi(nlohmann::json document) {
+    for (auto& operations : document["paths"]) {
+        for (auto& [method, operation] : operations.items()) {
+            if (method == "get") {
+                if (operation.contains("parameters")) {
+                    for (auto& parameter : operation["parameters"]) {
+                        if (parameter.value("name", std::string()) == "workspace_id") {
+                            parameter["required"] = false;
+                        }
+                    }
+                }
+                continue;
+            }
+            const nlohmann::json::json_pointer schema_path(
+                "/requestBody/content/application~1json/schema");
+            if (method != "post" || !operation.contains(schema_path)) {
+                continue;
+            }
+            auto& schema = operation[schema_path];
+            auto required = schema.value("required", nlohmann::json::array());
+            const auto workspace = std::ranges::find(required, "workspace_id");
+            if (workspace != required.end()) {
+                required.erase(workspace);
+                schema["required"] = std::move(required);
+            }
+        }
+    }
+    return document.dump();
+}
+
 } // namespace
 
 struct ApiServer::Impl {
@@ -4651,6 +4681,7 @@ struct ApiServer::Impl {
     std::unique_ptr<control::callers::StoreFederationIssuerPolicy> store_federation_policy;
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
+    std::string agent_openapi_body;
     mutable OutboundHttpClient outbound_http;
     struct CachedJwks {
         std::string document;
@@ -4709,7 +4740,9 @@ struct ApiServer::Impl {
         }
         clerk = clerk_config(options.clerk_publishable_key);
         register_core_capabilities(registry, version_string());
-        openapi_body = openapi_document(registry, version_string()).dump();
+        nlohmann::json openapi = openapi_document(registry, version_string());
+        openapi_body = openapi.dump();
+        agent_openapi_body = agent_task_openapi(std::move(openapi));
         metrics.set_gauge("lake_build_info",
                           {{"version", std::string(version_string())}, {"node", options.node_name}},
                           1.0);
@@ -7761,6 +7794,10 @@ struct ApiServer::Impl {
         auto context = context_for(route);
         if (!context.authorized) {
             co_return co_await redirect(route, "/sign-in");
+        }
+        if (local.starts_with("/workspaces/") &&
+            context.credential_kind == "agent_task") {
+            co_return http::route_next;
         }
         if (local.starts_with("/workspaces/") && !selected.empty() && context.session_credential) {
             co_return http::route_next;
@@ -13445,9 +13482,11 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task serve_openapi(boost::http::route_params& route) {
+        const ApiContext context = context_for(route);
         return send_text(route,
                          boost::http::status::ok,
-                         openapi_body,
+                         context.credential_kind == "agent_task" ? agent_openapi_body
+                                                                 : openapi_body,
                          "application/json; charset=utf-8",
                          "no-store");
     }
@@ -13669,13 +13708,16 @@ struct ApiServer::Impl {
         const std::string customer_id = route_value(route, "customer_id");
         const bool get = route.req.method() == http::method::get;
         ApiContext context = context_for(route);
+        nlohmann::json scoped_input{{"customer_id", customer_id}};
+        if (!context.path_workspace_id.empty()) {
+            scoped_input["workspace_id"] = context.path_workspace_id;
+        }
         http::status status = http::status::ok;
         std::string body;
         std::string allow;
         if (openapi) {
-            auto completed = co_await registry.call_async(
-                "workspace_openapi", {{"customer_id", customer_id},
-                                      {"workspace_id", context.path_workspace_id}}, context);
+            auto completed =
+                co_await registry.call_async("workspace_openapi", scoped_input, context);
             const ApiResult result =
                 completed ? std::move(*completed)
                           : ApiResult::failure("store_error", completed.error().message);
@@ -13716,11 +13758,10 @@ struct ApiServer::Impl {
                 }
             }
             if (body.empty()) {
+                scoped_input["capability"] = capability;
+                scoped_input["input"] = input;
                 auto completed = co_await registry.call_async(
-                    read ? "workspace_query" : "workspace_act",
-                    {{"customer_id", customer_id}, {"workspace_id", context.path_workspace_id},
-                     {"capability", capability}, {"input", input}},
-                    context);
+                    read ? "workspace_query" : "workspace_act", scoped_input, context);
                 const ApiResult result =
                     completed ? std::move(*completed)
                               : ApiResult::failure("store_error", completed.error().message);

@@ -436,11 +436,6 @@ void WorkspaceService::invalidate_registry(const std::string& customer_id,
 }
 
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
-    std::string customer_id, std::string capability, bool read, nlohmann::json input) {
-    co_return workspace_failure<nlohmann::json>("invalid_input", "workspace_id is required");
-}
-
-liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
     std::string customer_id, std::string workspace_id, std::string capability,
     bool read, nlohmann::json input,
     std::function<void(std::chrono::nanoseconds)> observe, bool cache_definitions) {

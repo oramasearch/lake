@@ -250,6 +250,31 @@ authorize_build_token(const Capability& entry, const nlohmann::json& input, ApiC
     return ApiResult::success(nullptr);
 }
 
+const nlohmann::json& agent_task_input(const Capability& capability,
+                                     const nlohmann::json& input,
+                                     ApiContext& context,
+                                     nlohmann::json& resolved) {
+    constexpr std::string_view prefix = "task:";
+    if (context.credential_kind != "agent_task" || !input.is_object() ||
+        input.contains("workspace_id") || context.store == nullptr ||
+        !context.credential_session_id.starts_with(prefix)) {
+        return input;
+    }
+    const auto properties = capability.input_schema.find("properties");
+    if (properties == capability.input_schema.end() ||
+        !properties->contains("workspace_id")) {
+        return input;
+    }
+    const auto task =
+        context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
+    if (!task) {
+        return input;
+    }
+    resolved = input;
+    resolved["workspace_id"] = task->workspace_id;
+    return resolved;
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
@@ -421,12 +446,15 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     const auto capability = find(name);
     if (!capability)
         return ApiResult::failure("unknown_capability", "no capability named " + name);
-    CallState state = prepare_call(capability, input, context);
+    nlohmann::json resolved_input;
+    const nlohmann::json& call_input =
+        agent_task_input(*capability, input, context, resolved_input);
+    CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
         try {
             if (capability->handler) {
-                state.result = capability->handler(input, context);
+                state.result = capability->handler(call_input, context);
             } else {
                 state.result =
                     ApiResult::failure("store_error", "capability requires asynchronous dispatch");
@@ -449,19 +477,22 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     if (!capability) {
         co_return ApiResult::failure("unknown_capability", "no capability named " + name);
     }
-    CallState state = prepare_call(capability, input, context);
+    nlohmann::json resolved_input;
+    const nlohmann::json& call_input =
+        agent_task_input(*capability, input, context, resolved_input);
+    CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
         const auto start = std::chrono::steady_clock::now();
         try {
             if (capability->async_handler) {
-                auto completed = co_await capability->async_handler(input, context);
+                auto completed = co_await capability->async_handler(call_input, context);
                 if (!completed) {
                     state.result = ApiResult::failure("store_error", completed.error().message);
                 } else {
                     state.result = std::move(*completed);
                 }
             } else if (capability->handler) {
-                state.result = capability->handler(input, context);
+                state.result = capability->handler(call_input, context);
             } else {
                 state.result = ApiResult::failure("store_error", "capability has no handler");
             }

@@ -228,6 +228,11 @@ std::string response_header(const std::string& response, std::string_view name) 
                            end == std::string::npos ? header_end - value_start : end - value_start);
 }
 
+std::string response_body(const std::string& response) {
+    const auto header_end = response.find("\r\n\r\n");
+    return header_end == std::string::npos ? std::string() : response.substr(header_end + 4);
+}
+
 class HttpConnection {
 public:
     explicit HttpConnection(unsigned short port) : descriptor_(connect_loopback(port)) {}
@@ -485,12 +490,60 @@ protected:
         tx.commit();
     }
 
+    void verify_agent_workspace(HttpConnection& connection,
+                                const lake::control::AgentTask& task,
+                                const std::string& credential) {
+        const std::string selected_workspace = connection.workspace_id;
+        connection.workspace_id.clear();
+        const std::string zetta_openapi = connection.request(
+            "GET", "/workspaces/" + task.customer_id + "/zetta/v1/openapi.json",
+            "", "", "HTTP/1.1", credential);
+        const std::string lake_openapi_response = connection.request(
+            "GET", "/v1/openapi.json", "", "", "HTTP/1.1", credential);
+        const std::string workspace_read = connection.request(
+            "GET", "/workspaces/" + task.customer_id + "/zetta/v1/list_methodologies",
+            "", "", "HTTP/1.1", credential);
+        const std::string malformed = connection.request(
+            "POST", "/v1/workspace_query", "[]", "", "HTTP/1.1", credential,
+            "application/json");
+        std::string app_list;
+        if (task.agent == "agent-application") {
+            app_list = connection.request(
+                "GET", "/v1/list_apps?customer_id=" + task.customer_id,
+                "", "", "HTTP/1.1", credential);
+        }
+        connection.workspace_id = selected_workspace;
+        EXPECT_TRUE(zetta_openapi.starts_with("HTTP/1.1 200")) << zetta_openapi;
+        EXPECT_TRUE(workspace_read.starts_with("HTTP/1.1 200")) << workspace_read;
+        EXPECT_TRUE(malformed.starts_with("HTTP/1.1 400")) << malformed;
+        if (task.agent == "agent-application") {
+            EXPECT_TRUE(app_list.starts_with("HTTP/1.1 200")) << app_list;
+        }
+        ASSERT_TRUE(lake_openapi_response.starts_with("HTTP/1.1 200"))
+            << lake_openapi_response;
+        const nlohmann::json lake_openapi =
+            nlohmann::json::parse(response_body(lake_openapi_response));
+        const auto& parameters = lake_openapi["paths"]["/v1/list_apps"]["get"]["parameters"];
+        const auto workspace_parameter =
+            std::ranges::find_if(parameters, [](const nlohmann::json& parameter) {
+                return parameter.value("name", std::string()) == "workspace_id";
+            });
+        ASSERT_NE(workspace_parameter, parameters.end());
+        EXPECT_FALSE(workspace_parameter->value("required", true));
+        const auto& required = lake_openapi["paths"]["/v1/workspace_query"]["post"]
+                                           ["requestBody"]["content"]["application/json"]
+                                           ["schema"]["required"];
+        EXPECT_EQ(std::ranges::find(required, "workspace_id"), required.end());
+    }
+
     // A library agent's part of a background turn (docs/api/agent-bus.md), done here through
     // lake's own capabilities with the agent service token: the task is received from the agent's
     // topic, claimed (its body arrives with the task's credential in place of "{{credential}}"),
     // handed to the scripted agent, and its answer published on agent-events. Lake's bus loop then
     // applies it. Answers the credential the agent was handed.
-    std::string run_agent_task(HttpConnection& connection, const std::string& task_id) {
+    std::string run_agent_task(HttpConnection& connection,
+                              const std::string& task_id,
+                              bool verify_workspace_inference = false) {
         const auto task = store_->get_agent_task(task_id);
         EXPECT_TRUE(task) << task_id;
         if (!task) {
@@ -522,17 +575,40 @@ protected:
             call("POST", "/v1/claim_agent_task", {{"task_id", task_id}, {"agent", task->agent}});
         EXPECT_EQ(claimed["ok"], true) << claimed.dump();
         const nlohmann::json body = claimed["value"]["body"];
+        const std::string credential = body.value("lake_token", std::string());
         agents_->turns.push_back(body);
-        const nlohmann::json published = call("POST",
-                                              "/v1/publish_agent_event",
-                                              {{"task_id", task_id},
-                                               {"workspace_id", task->workspace_id},
-                                               {"agent", task->agent},
-                                               {"type", "result"},
-                                               {"result", agents_->answer}});
+        if (verify_workspace_inference) {
+            verify_agent_workspace(connection, *task, credential);
+        }
+        const nlohmann::json progress =
+            call("POST",
+                 "/v1/publish_agent_event",
+                 {{"task_id", task_id},
+                  {"agent", task->agent},
+                  {"type", "progress"},
+                  {"message", "Working on the task"}});
+        EXPECT_EQ(progress["ok"], true) << progress.dump();
+        const auto running = store_->get_agent_task(task_id);
+        EXPECT_TRUE(running);
+        if (running) {
+            EXPECT_EQ(running->phase, "Running");
+            EXPECT_EQ(running->message, "Working on the task");
+        }
+        const nlohmann::json published =
+            call("POST",
+                 "/v1/publish_agent_event",
+                 {{"task_id", task_id},
+                  {"agent", task->agent},
+                  {"type", "result"},
+                  {"result", agents_->answer}});
         EXPECT_EQ(published["ok"], true) << published.dump();
+        const auto finished = store_->get_agent_task(task_id);
+        EXPECT_TRUE(finished);
+        if (finished) {
+            EXPECT_EQ(finished->phase, "Succeeded");
+        }
         EXPECT_TRUE(liquid::runtime::block_on(agent_bus_->pump(std::chrono::milliseconds(0))));
-        return body.value("lake_token", std::string());
+        return credential;
     }
 
     static std::string task_of(const std::string& response) {
@@ -994,6 +1070,64 @@ TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShap
     EXPECT_FALSE(document["paths"].contains("/v1/add_nodes"));
     EXPECT_EQ(document["servers"][0]["url"],
               "/w/" + connection->workspace_id + "/workspaces/" + customer_id + "/zetta");
+}
+
+TEST_P(HttpResponseIsolation, LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const nlohmann::json customers = nlohmann::json::parse(
+        response_body(connection->request("GET", "/v1/list_customers", "", cookie)));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    select_workspace(*connection, customer_id);
+
+    const std::vector<std::pair<std::string, std::string>> turns = {
+        {"agent-application", "app"},
+        {"agent-project", "solution:retention"},
+        {"agent-experiments", "experiment"},
+    };
+    for (const auto& [agent, kind] : turns) {
+        const nlohmann::json input = {{"customer_id", customer_id},
+                                      {"workspace_id", connection->workspace_id},
+                                      {"agent", agent},
+                                      {"kind", kind},
+                                      {"message", "Run the regression turn"}};
+        const nlohmann::json started = nlohmann::json::parse(response_body(connection->request(
+            "POST",
+            "/v1/agent_turn",
+            input.dump(),
+            cookie,
+            "HTTP/1.1",
+            "",
+            "application/json")));
+        ASSERT_EQ(started["ok"], true) << started.dump();
+        const std::string task_id = started["value"]["task_id"];
+        const auto task = store_->get_agent_task(task_id);
+        ASSERT_TRUE(task);
+        EXPECT_EQ(task->kind, kind);
+        const auto dispatch = bus_->events("agent-tasks." + agent);
+        const lake::control::BusEvent* event = nullptr;
+        for (const auto& row : dispatch) {
+            if (row.correlation_id == task_id) {
+                event = &row;
+                break;
+            }
+        }
+        ASSERT_NE(event, nullptr);
+        EXPECT_EQ(event->payload["workspace_id"], connection->workspace_id);
+
+        agents_->answer = {{"ok", true},
+                           {"reply", "The turn finished."},
+                           {"result", {{"kind", kind}}}};
+        run_agent_task(*connection, task_id, true);
+        const auto finished = store_->get_agent_task(task_id);
+        ASSERT_TRUE(finished);
+        EXPECT_EQ(finished->phase, "Succeeded");
+        EXPECT_EQ(finished->result["reply"], "The turn finished.");
+    }
 }
 
 TEST_P(HttpResponseIsolation, CreateAnAgentBuildsANativeOrAPythonAgentFromStudiosBoxes) {

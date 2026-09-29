@@ -380,6 +380,7 @@ liquid::runtime::task<ZettaControlResult<void>> AgentTaskBus::publish_task(Agent
     auto published = settled(co_await bus_->publish(agent_tasks_topic(task.agent),
                                             {{"task_id", task.id},
                                              {"customer_id", task.customer_id},
+                                             {"workspace_id", task.workspace_id},
                                              {"agent", task.agent},
                                              {"kind", task.kind}},
                                             task.id));

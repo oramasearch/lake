@@ -3,7 +3,8 @@
 **Issue:** [lake#269](https://github.com/oramasearch/lake/issues/269) · **Code:**
 `include/lake/control/agent_bus.hpp`, `src/control/agent_bus.cpp`, the bus capabilities in
 `src/api/workspace_capabilities.cpp` · **Tests:** `AgentRuns.LibraryAgentsTakeTasksAndAnswerOverTheBus`,
-the Ask Orama, Agent Factory, Discover and pipeline tests in `tests/test_http_server.cpp`
+`HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho`, the Ask Orama,
+Agent Factory, Discover and pipeline tests in `tests/test_http_server.cpp`
 
 **No lake page or capability waits on a library agent inside an HTTP request.** Lake and the
 library agents (Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest,
@@ -14,7 +15,7 @@ explicit workspace Zetta. See the [workspace data-plane design](../architecture/
 
 | Topic | Published by | Payload (JSON; the correlation id is the task id) |
 |---|---|---|
-| Lake bus `topic:agent-tasks.<agent>` | lake, when a turn is asked | `{task_id, customer_id, agent, kind}` |
+| Lake bus `topic:agent-tasks.<agent>` | lake, when a turn is asked | `{task_id, customer_id, workspace_id, agent, kind}` |
 | Workspace `topic:agent-events` | the agent, through lake | `{task_id, agent, type, message, result}`; `type` is `progress`, `result` or `failed` |
 
 Lake creates exposed dispatch topics at startup with one-hour/10,000-event retention. Workspace
@@ -36,9 +37,11 @@ workspaces' events are stored on different Zettas.
    claim succeeds.** Lake generates the task's credential, `lat.<task id>.<secret>`, stores only its
    SHA-256 in `agent_task_status`, and answers the task's body with every `"{{credential}}"` in it
    replaced (as `lake_token` and `zetta_token`). The credential acts as the person who asked,
-   with the task's scopes, until the task finishes.
+   with the task's scopes, until the task finishes. Neither call requires the agent to echo the
+   workspace ID from dispatch.
 3. The agent does the work and reports with `publish_agent_event`: `progress` messages while it
-   works, then its `result` (its whole answer, `{ok, result, …}`) or `failed`.
+   works, then its `result` (its whole answer, `{ok, result, …}`) or `failed`. The workspace ID is
+   optional here too.
 4. Lake publishes directly to that workspace and applies accepted progress to `agent_task_status`.
    A finished task stays finished. Moving remaining task bodies/results out of the control store
    is tracked in the architecture audit; no new PostgreSQL event storage is introduced here.
@@ -53,8 +56,9 @@ wait on a subagent it delegated to. Following a task reads retained events in it
 selects its correlation ID. Cursors belong to that workspace topic. Task creates require
 `workspace_id` from `workspaces.id` (resolved through `zetta_service_id`); missing, unknown or
 foreign IDs return `invalid_input`. Agent instructions list workspaces rather than inferring
-identity from services. Claim replies include the
-persisted ID in the envelope and body. Event reads/publication must supply the same ID.
+identity from services. Dispatch and claim replies include the persisted ID for information.
+Agent-side receive, claim and publish inputs may omit it; Lake uses the task row's immutable ID.
+When an agent supplies an ID, it must match. Person-side event reads still require the ID.
 
 **Nothing secret is on the bus.** Topics carry task ids only. The body travels in the answer to a
 claim, and the credential is handed over once and never stored.
@@ -63,9 +67,9 @@ claim, and the credential is handed over once and never stored.
 
 | Capability | Kind | Who | What |
 |---|---|---|---|
-| `receive_agent_tasks {agent, from_sequence?, wait_ms?}` | read | that library agent | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; `next_sequence` continues |
-| `claim_agent_task {task_id, agent}` | action | that library agent | take the task; the body with its credential. A second claim, or a claim by another agent, is a `conflict` |
-| `publish_agent_event {workspace_id, task_id, agent, type, message?, result?}` | action | that library agent | publish on the task workspace's `agent-events`, only for a claimed, unfinished task |
+| `receive_agent_tasks {agent, workspace_id?, from_sequence?, wait_ms?}` | read | that library agent | the tasks on `agent-tasks.<agent>` from `from_sequence`, without those already claimed; an optional workspace filters the reply; `next_sequence` continues |
+| `claim_agent_task {task_id, agent, workspace_id?}` | action | that library agent | take the task; the body with its credential. An optional workspace must match. A second claim, or a claim by another agent, is a `conflict` |
+| `publish_agent_event {task_id, agent, type, workspace_id?, message?, result?}` | action | that library agent | publish on the task workspace's `agent-events`, only for a claimed, unfinished task; an optional workspace must match |
 | `receive_agent_events {customer_id, workspace_id, task_id, from_sequence?, wait_ms?}` | read | whoever asked the task (or the operator) | retained task events and current task state |
 
 **Each library agent has its own bus credential.** The operator keeps one Secret,
@@ -77,7 +81,9 @@ and only with its own agent's name.
 ApplicationAgent receives only tasks from `agent-tasks.agent-application` and only its
 `agent-application` bus credential can claim or answer them. The task itself has kind `app`; its
 short-lived task credential carries read tools initially and gains repository/App writes only on a
-later task with the person's reviewed proposal.
+later task with the person's reviewed proposal. Task credentials also derive the workspace for
+Lake capability and Zetta-shaped proxy calls, including clients that use the unprefixed
+`/workspaces/<customer>/zetta/v1/...` route.
 
 ExperimentsAgent has the independent topic and credential `agent-tasks.agent-experiments` /
 `agent-experiments`. Its task kinds are `experiment`, `experiment_status` and
@@ -124,6 +130,14 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 `no`.
 
 ## Verify on a deployment
+
+The [#389 regression](https://github.com/oramasearch/lake/issues/389) is covered locally by a fake
+library agent receiving, claiming, publishing progress and publishing its result without a
+workspace field. The HTTP test runs `app`, `solution:` and `experiment` turns against both stores,
+checks dispatch metadata, and reads workspace data with the task credential through the original
+unprefixed route. Lake OpenAPI marks the task credential's workspace inputs optional; malformed
+JSON still fails validation, and explicit mismatches remain rejected. The shared HTTP helper also
+exercises Ask Orama and the Ship App proposal flow without echoing workspace IDs.
 
 `tools/e2e/agents.py <base-url> <token-file> <customer-id> [T1 …]` is the agents' live scenario
 suite: each library agent over the bus, as the person whose key it holds, with a pass condition per

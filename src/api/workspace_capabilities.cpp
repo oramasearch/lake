@@ -3566,6 +3566,7 @@ void register_agent_bus_capabilities(Registry& registry) {
                          {"additionalProperties", false},
                          {"properties",
                           {{"agent", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}},
                            {"from_sequence", {{"type", "integer"}, {"minimum", 1}}},
                            {"wait_ms", bus_wait_schema()}}}},
         .output_schema = {{"type", "object"}},
@@ -3602,9 +3603,14 @@ void register_agent_bus_capabilities(Registry& registry) {
                 if (!task || !task->phase.empty() || task->desired != "present") {
                     continue;
                 }
+                if (input.contains("workspace_id") &&
+                    task->workspace_id != input.at("workspace_id").get<std::string>()) {
+                    continue;
+                }
                 tasks.push_back({{"sequence", event.sequence},
                                  {"task_id", task->id},
                                  {"customer_id", task->customer_id},
+                                 {"workspace_id", task->workspace_id},
                                  {"kind", task->kind}});
             }
             co_return ApiResult::success(
@@ -3622,7 +3628,9 @@ void register_agent_bus_capabilities(Registry& registry) {
                          {"required", json::array({"task_id", "agent"})},
                          {"additionalProperties", false},
                          {"properties",
-                          {{"task_id", {{"type", "string"}}}, {"agent", {{"type", "string"}}}}}},
+                          {{"task_id", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}},
+                           {"agent", {{"type", "string"}}}}}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .requires_auth = false,
@@ -3637,6 +3645,14 @@ void register_agent_bus_capabilities(Registry& registry) {
                 return unavailable();
             }
             const std::string task_id = input.at("task_id");
+            if (input.contains("workspace_id")) {
+                const auto current = context.store->get_agent_task(task_id);
+                if (current &&
+                    current->workspace_id != input.at("workspace_id").get<std::string>()) {
+                    return ApiResult::failure(
+                        "conflict", "workspace_id does not match the task", "/workspace_id");
+                }
+            }
             const std::string credential = std::string(control::agent_task_credential_prefix) +
                                            task_id + "." +
                                            control::identity_crypto::random_secret();
@@ -3672,7 +3688,7 @@ void register_agent_bus_capabilities(Registry& registry) {
             "`failed`. Lake applies it to the task. Only that agent may call it, with its own "
             "bus credential, and only for a task it claimed that has not finished.",
         .input_schema = {{"type", "object"},
-                         {"required", json::array({"task_id", "workspace_id", "agent", "type"})},
+                         {"required", json::array({"task_id", "agent", "type"})},
                          {"additionalProperties", false},
                          {"properties",
                           {{"task_id", {{"type", "string"}}},
@@ -3701,10 +3717,14 @@ void register_agent_bus_capabilities(Registry& registry) {
             const std::string task_id = input.at("task_id");
             auto task = context.store->get_agent_task(task_id);
             if (!task || task->agent != input.at("agent").get<std::string>() ||
-                task->workspace_id != input.at("workspace_id").get<std::string>() ||
                 task->phase != "Running") {
                 co_return ApiResult::failure(
                     "conflict", "the task is not running on this agent", "/task_id");
+            }
+            if (input.contains("workspace_id") &&
+                task->workspace_id != input.at("workspace_id").get<std::string>()) {
+                co_return ApiResult::failure(
+                    "conflict", "workspace_id does not match the task", "/workspace_id");
             }
             json event = input;
             WorkspaceApiBus bus(context, task->customer_id, task->workspace_id);

@@ -226,11 +226,13 @@ workspace-native event topics and the space's Agent tasks rows replace per-turn 
 schema/guard handoff remains a rollout prerequisite.
 
 Workspace data-plane cutover adds migrations `0038_workspace_data_plane` and `0039_workspaces`:
-tasks, apps and builds require immutable explicit `workspaces.id` values; event topics use that workspace, never the
-Lake bus. Only agent dispatch topics remain on the bus. Design, Train and Ship navigation uses
+tasks, apps and builds retain immutable explicit `workspaces.id` values; library-agent bus and task
+credential calls may omit the ID because Lake derives it from the task and rejects a mismatch.
+Event topics use that workspace, never the Lake bus. Only agent dispatch topics remain on the bus.
+Design, Train and Ship navigation uses
 `/w/<workspace_id>/...` and a global top-bar selector. The storage audit and remaining migrations
-are tracked in `docs/architecture/workspace-data-plane.md`; operator and agent client cutover,
-and upstream 60-second polls, are linked follow-ups rather than deployment claims. Workspace CRUD
+are tracked in `docs/architecture/workspace-data-plane.md`; operator cutover and upstream
+60-second polls are linked follow-ups rather than deployment claims. Workspace CRUD
 and the Workspaces page write desired state; the operator owns observations. See
 `docs/control-plane/workspaces.md` for the contract, guard and approved dev-cluster replacement.
 

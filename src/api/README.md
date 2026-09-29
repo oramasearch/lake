@@ -40,6 +40,11 @@ contract in `docs/api/identity.md` updated with changes to token derivation.
 REST and MCP use those definitions; recursive input validation rejects malformed array items
 before capability handlers run. The contract and HTTP conformance proof are in
 [`docs/api/README.md`](../../docs/api/README.md).
+For an authenticated agent-task credential, the registry supplies the immutable task workspace
+when an allowed capability has a `workspace_id` property and the caller omitted it. Explicit IDs
+still pass normal task-scope authorization. `http_server.cpp` serves the matching agent OpenAPI,
+and routes unprefixed Zetta-shaped task calls through the same registry path. See
+[`docs/api/agent-bus.md`](../../docs/api/agent-bus.md).
 The sign-up registry contract includes personal customer provisioning, with atomic ownership and
 retry semantics shared by all transports. See `docs/api/provisioning.md`.
 The sign-up registry contract includes personal customer provisioning. Its form redirects to
