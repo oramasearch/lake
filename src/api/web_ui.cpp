@@ -22,6 +22,9 @@
 namespace lake::api {
 
 bool workspace_page_path(std::string_view path) {
+    if (path == "/workspaces" || path == "/workspaces/create" || path == "/workspaces/delete") {
+        return false;
+    }
     for (const std::string_view prefix : {"/design", "/train", "/ship", "/ask", "/workspace",
                                            "/workspaces"}) {
         if (path == prefix || path.starts_with(std::string(prefix) + "/")) {
@@ -359,6 +362,7 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
     static constexpr std::string_view packages[] = {"/ship/packages"};
     static constexpr std::string_view apps[] = {"/ship/apps", "/ship/app"};
     static constexpr std::string_view services[] = {"/services"};
+    static constexpr std::string_view workspaces[] = {"/workspaces"};
     static constexpr std::string_view activity[] = {"/activity"};
     static constexpr std::string_view customers[] = {"/customers"};
     static constexpr std::string_view organizations[] = {"/organizations",
@@ -413,6 +417,9 @@ std::span<const std::string_view> navigation_routes(std::string_view key) {
         return indexes;
     if (key == "services")
         return services;
+    if (key == "workspaces") {
+        return workspaces;
+    }
     if (key == "packages")
         return packages;
     if (key == "apps")
@@ -554,6 +561,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back({"Ship", "/ship/apps", "Apps", "api", "apps"});
         items.push_back({"Ship", "/deployments", "Deployments", "api", "deployments"});
         items.push_back({"Ship", "/services", "Services", "api", "services"});
+        items.push_back({"Ship", "/workspaces", "Workspaces", "api", "workspaces"});
     }
     // A signed-in account's own organizations, secrets, usage and activity. Operators reach the
     // instance-wide versions under Administration instead.
@@ -1267,8 +1275,8 @@ std::string web_ui_shell(std::string_view title,
                 (id == viewer.workspace_id ? " selected" : "") + ">" + web_ui_escape(name) + "</option>";
         }
         selection += "</select></label><button type=\"submit\">Switch</button></form>"
-                     "<a href=\"/services?customer_id=" + web_ui_escape(viewer.customer_id) +
-                     "&amp;create=zetta\">New workspace</a>";
+                     "<a href=\"/workspaces?customer_id=" + web_ui_escape(viewer.customer_id) +
+                     "\">New workspace</a>";
     }
     auto html = std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -1796,7 +1804,8 @@ struct WorkspaceSection {
 
 // The Design, Train and Ship pages, in navigation order. `path` is the list page a detail page
 // belongs to.
-constexpr std::array<WorkspaceSection, 22> workspace_sections{{
+constexpr std::array<WorkspaceSection, 23> workspace_sections{{
+    {"workspaces", "Ship", "Workspaces", "/workspaces", "Isolated environments for your space."},
     {"projects",
      "Design",
      "Projects",
@@ -1938,27 +1947,14 @@ workspace_table(const nlohmann::json& rows,
     return output + "</tbody></table>";
 }
 
-// Deleting needs the box ticked; its value is the workspace id, which delete_workspace checks.
+// Lifecycle actions live on the control-plane page, including failed provisioning requests.
 std::string workspace_delete_form(const WorkspacePage& page,
                                   std::string_view heading,
                                   std::string_view explanation,
                                   std::string_view button) {
-    const std::string slug = page.state.value("workspace", std::string());
-    if (slug.empty()) {
-        return {};
-    }
-    return std::format(
-        "<section class=\"panel\"><h2>{}</h2><p>{}</p><form class=\"stack\" method=\"post\" "
-        "action=\"/workspace/delete\">{}<label><input type=\"checkbox\" name=\"confirm\" "
-        "value=\"{}\" required> I understand that workspace <code>{}</code> and everything in it "
-        "is deleted and cannot be recovered.</label><button class=\"button button-danger\" "
-        "type=\"submit\">{}</button></form></section>",
-        web_ui_escape(heading),
-        web_ui_escape(explanation),
-        hidden("customer_id", page.customer_id),
-        web_ui_escape(slug),
-        web_ui_escape(slug),
-        web_ui_escape(button));
+    return "<section class=\"panel\"><h2>" + web_ui_escape(heading) + "</h2><p>" +
+        web_ui_escape(explanation) + "</p><a href=\"/workspaces?customer_id=" +
+        web_ui_escape(page.customer_id) + "\">" + web_ui_escape(button) + "</a></section>";
 }
 
 std::string workspace_gate(const WorkspacePage& page, const WorkspaceSection& section) {
@@ -4922,6 +4918,42 @@ std::optional<std::string> web_ui_docs(std::string_view slug, WebUiViewer viewer
                         viewer);
 }
 
+std::string workspaces_content(const WorkspacePage& page) {
+    const std::string customer = web_ui_escape(page.customer_id);
+    std::string content = "<section class=\"panel\"><h2>New workspace</h2>"
+        "<form method=\"post\" action=\"/workspaces/create\">"
+        "<input type=\"hidden\" name=\"customer_id\" value=\"" + customer + "\">"
+        "<label>Name<input name=\"name\" required maxlength=\"128\"></label>"
+        "<label>Environment<input name=\"environment\" value=\"dev\" required maxlength=\"47\" "
+        "pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\"></label>"
+        "<p>Use dev, staging, prod or a lowercase DNS label.</p>"
+        "<button type=\"submit\">New workspace</button></form></section>"
+        "<div class=\"panel\"><table><thead><tr><th>Name</th><th>Environment</th>"
+        "<th>Phase</th><th>Namespace</th><th>Created</th><th>Actions</th></tr></thead><tbody>";
+    for (const auto& row : page.data.value("list_workspaces", nlohmann::json::object())
+                                  .value("workspaces", nlohmann::json::array())) {
+        const std::string id = web_ui_escape(row.value("id", ""));
+        const std::string name = web_ui_escape(row.value("name", ""));
+        content += "<tr><td><a href=\"/w/" + id + "/design/projects\">" + name + "</a></td>";
+        for (const char* field : {"environment", "phase", "namespace", "created_at"}) {
+            content += "<td>" + web_ui_escape(row.value(field, "")) + "</td>";
+        }
+        content += "<td>";
+        if (row.value("desired", "") != "deleted") {
+            content += "<details><summary>Delete</summary><p>Deletes the workspace and its data. Type " +
+                name + " to confirm.</p><form method=\"post\" action=\"/workspaces/delete\">"
+                "<input type=\"hidden\" name=\"customer_id\" value=\"" + customer + "\">"
+                "<input type=\"hidden\" name=\"workspace_id\" value=\"" + id + "\">"
+                "<label>Workspace name<input name=\"confirm\" required autocomplete=\"off\"></label>"
+                "<button type=\"submit\">Delete workspace</button></form></details>";
+        } else {
+            content += "Deletion requested";
+        }
+        content += "</td></tr>";
+    }
+    return content + "</tbody></table></div>";
+}
+
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     const WorkspaceSection& section = workspace_section(page.section);
     std::string named =
@@ -4955,6 +4987,8 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
     if (!page.unavailable.empty()) {
         content +=
             std::format("<div class=\"panel empty\">{}</div>", web_ui_escape(page.unavailable));
+    } else if (page.section == "workspaces") {
+        content += workspaces_content(page);
     } else if (page.section == "services") {
         content += services_content(page);
     } else if (page.section == "library") {
@@ -4970,18 +5004,6 @@ std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer) {
             content += store_connection_notice(page);
         }
         content += workspace_content(page);
-        if (page.section == "projects") {
-            // Tucked away until the Workspaces page exists (lake#265, lake#257).
-            content += "<details class=\"panel\"><summary>Workspace settings</summary>";
-            content += workspace_delete_form(
-                page,
-                "Delete Workspace",
-                "Removes your Zetta cluster with every project, dataset, run and model in it. "
-                "Nothing else in lake is touched, and you can start a new, empty workspace "
-                "afterwards.",
-                "Delete workspace");
-            content += "</details>";
-        }
     }
     if (page.unavailable.empty() && page.section == "data") {
         content += storage_content(page);

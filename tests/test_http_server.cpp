@@ -322,9 +322,30 @@ TEST(WorkspaceNavigationHttp, SelectorRedirectsRememberedWorkspaceAndValidatesFo
         EXPECT_NE(refused.find("invalid_input"), std::string::npos);
         EXPECT_NE(refused.find("workspace_id"), std::string::npos);
     }
-    const auto created = request("POST", "/services/create", query + "&kind=zetta&name=third&instances=1&storage_gi=10");
+    const auto created = request("POST", "/workspaces/create", query + "&name=third&environment=staging");
     EXPECT_TRUE(created.starts_with("HTTP/1.1 302")) << created;
     EXPECT_EQ(store->list_services(customer->id)->size(), 3);
+    const auto rows = store->list_workspaces(customer->id);
+    ASSERT_TRUE(rows);
+    ASSERT_EQ(rows->size(), 3);
+    const auto third = rows->back();
+    EXPECT_NE(third.id, third.zetta_service_id);
+    EXPECT_EQ(third.environment, "staging");
+    EXPECT_EQ(third.phase, "Pending");
+    const auto management = request("GET", "/workspace/select?" + query + "&workspace_id=" +
+        third.id + "&page=%2Fworkspaces");
+    EXPECT_EQ(response_header(management, "location"), "/workspaces?" + query);
+    const auto page = request("GET", "/workspaces?" + query);
+    EXPECT_TRUE(page.starts_with("HTTP/1.1 200")) << page;
+    EXPECT_NE(page.find("href=\"/workspaces\" aria-current=\"page\""), std::string::npos);
+    for (const std::string field : {"Environment", "Phase", "Namespace", "Created", "staging", "Pending"}) {
+        EXPECT_NE(page.find(field), std::string::npos) << field;
+    }
+    EXPECT_NE(page.find("name=\"workspace_id\" value=\"" + third.id + "\""), std::string::npos);
+    request("POST", "/workspaces/delete", query + "&workspace_id=" + third.id + "&confirm=wrong");
+    EXPECT_EQ(store->get_workspace(third.id)->desired, "running");
+    request("POST", "/workspaces/delete", query + "&workspace_id=" + third.id + "&confirm=third");
+    EXPECT_EQ(store->get_workspace(third.id)->desired, "deleted");
 }
 
 // A workspace cluster that answers from a table, recording what reached it.
@@ -554,9 +575,9 @@ protected:
     void select_workspace(HttpConnection& connection, const std::string& customer_id) {
         const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
         ASSERT_TRUE(requested && *requested);
-        connection.workspace_id = (*requested)->service_id;
+        connection.workspace_id = (*requested)->workspace_id;
         selected_workspace_id_ = connection.workspace_id;
-        const auto service = store_->get_service(connection.workspace_id);
+        const auto service = store_->get_service((*requested)->service_id);
         ASSERT_TRUE(service);
         if (auto memory = std::dynamic_pointer_cast<lake::control::InMemoryStore>(store_)) {
             ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://workspace.test"));
@@ -903,8 +924,8 @@ TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShap
     const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
     ASSERT_TRUE(requested && *requested);
     const auto service = memory->get_service((*requested)->service_id);
-    connection->workspace_id = service->id;
-    selected_workspace_id_ = service->id;
+    connection->workspace_id = service->workspace_id;
+    selected_workspace_id_ = service->workspace_id;
     ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
     std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
     workspace_caller_->answers["list_datasets"] = {
@@ -989,8 +1010,8 @@ TEST_P(HttpResponseIsolation, CreateAnAgentBuildsANativeOrAPythonAgentFromStudio
     const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
     ASSERT_TRUE(requested && *requested);
     const auto service = memory->get_service((*requested)->service_id);
-    connection->workspace_id = service->id;
-    selected_workspace_id_ = service->id;
+    connection->workspace_id = service->workspace_id;
+    selected_workspace_id_ = service->workspace_id;
     ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
     std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
     workspace_caller_->answers["create_agent"] = {{"id", "a-1"}, {"name", "Renewal watcher"}};
@@ -1152,8 +1173,8 @@ TEST_P(HttpResponseIsolation, GrantingAPipelineWritesTheWholeListBackToZetta) {
             .at("id");
     const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
     const auto service = memory->get_service((*requested)->service_id);
-    connection->workspace_id = service->id;
-    selected_workspace_id_ = service->id;
+    connection->workspace_id = service->workspace_id;
+    selected_workspace_id_ = service->workspace_id;
     ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
     std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
     workspace_caller_->answers["get_agent"] = {
@@ -1201,8 +1222,8 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
             .at("value").at("items").at(0).at("id");
     const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
     const auto service = memory->get_service((*requested)->service_id);
-    connection->workspace_id = service->id;
-    selected_workspace_id_ = service->id;
+    connection->workspace_id = service->workspace_id;
+    selected_workspace_id_ = service->workspace_id;
     ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
     std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
 
@@ -1282,7 +1303,7 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
         cookie);
     ASSERT_TRUE(started.starts_with("HTTP/1.1 302")) << started.substr(0, 300);
     EXPECT_NE(response_header(started, "location").find("/design/project?"), std::string::npos);
-    const auto task = store_->latest_agent_task(customer_id, "solution:churn", store_->list_services(customer_id)->front().id);
+    const auto task = store_->latest_agent_task(customer_id, "solution:churn", connection->workspace_id);
     ASSERT_TRUE(task) << "Start launches the Project Agent";
     EXPECT_EQ(task->body["context"]["delivery"]["owner"], "retention-team");
     EXPECT_EQ(task->body["context"]["roi_model"]["investment"], 4000.0);
@@ -1503,8 +1524,8 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
             .at("id");
     const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
     const auto service = memory->get_service((*requested)->service_id);
-    connection->workspace_id = service->id;
-    selected_workspace_id_ = service->id;
+    connection->workspace_id = service->workspace_id;
+    selected_workspace_id_ = service->workspace_id;
     ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
     std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
     workspace_caller_->answers["list_datasets"] = {
@@ -1582,7 +1603,7 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
 
     // The Project Agent designs the new project's pipeline in the background, and the project's
     // page compiles the design once it is done (Steve, 2026-09-27).
-    const auto build = store_->latest_agent_task(customer_id, "build:" + project, store_->list_services(customer_id)->front().id);
+    const auto build = store_->latest_agent_task(customer_id, "build:" + project, connection->workspace_id);
     ASSERT_TRUE(build) << "creating the project started the Project Agent";
     EXPECT_EQ(build->agent, "agent-project");
     EXPECT_NE(build->body["message"].get<std::string>().find("Predict which accounts will churn"),
@@ -1643,7 +1664,7 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
 
     // Zetta compiles a pipeline from a project's intent when it is created, and a design may name
     // its table under training_sources: the project's own pipeline is pointed at it, once.
-    const auto second = store_->latest_agent_task(customer_id, "build:" + project, store_->list_services(customer_id)->front().id);
+    const auto second = store_->latest_agent_task(customer_id, "build:" + project, connection->workspace_id);
     const std::string again = lake::control::new_uuid_v4();
     auto rebuild = store_->create_agent_task(lake::control::AgentTask{
         .customer_id = customer_id, .agent = "agent-project", .kind = "build:" + project,
@@ -2043,8 +2064,8 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
             .at("id");
     const auto requested = liquid::runtime::block_on(workspaces_->request(customer_id));
     const auto service = memory->get_service((*requested)->service_id);
-    connection->workspace_id = service->id;
-    selected_workspace_id_ = service->id;
+    connection->workspace_id = service->workspace_id;
+    selected_workspace_id_ = service->workspace_id;
     ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://ws:4800"));
     std::ofstream(workspace_dir_ / (service->slug + ".json")) << R"({"kind":"zetta","token":"t"})";
     workspace_caller_->answers["create_agent"] = {{"id", "a-new"}, {"name", "Renewal watcher"}};

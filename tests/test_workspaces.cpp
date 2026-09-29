@@ -86,9 +86,9 @@ struct Workspaces {
     std::string customer_id, secret;
 
     std::string workspace_id() const {
-        const auto services = store->list_services(customer_id);
+        const auto services = store->list_workspaces(customer_id);
         for (const auto& workspace : *services) {
-            if (workspace.kind == "zetta" && workspace.desired == "present" && workspace.is_default) {
+            if (workspace.desired != "deleted") {
                 return workspace.id;
             }
         }
@@ -137,8 +137,7 @@ TEST(Workspaces, TheWorkspaceIsTheDefaultZettaServiceAndReadyNeedsTheOperator) {
     auto requested = w.run(w.service->request(w.customer_id, "taap:owner"));
     ASSERT_TRUE(requested);
     EXPECT_TRUE(requested->requested);
-    EXPECT_EQ(requested->slug, lake::control::workspace_slug(w.customer_id))
-        << "the first workspace keeps decision 45's name, so its cluster is adopted";
+    EXPECT_EQ(requested->slug, lake::control::workspace_slug(requested->workspace_id));
     ASSERT_TRUE(w.run(w.service->request(w.customer_id)));
     const auto services = w.store->list_services(w.customer_id);
     ASSERT_TRUE(services);
@@ -158,6 +157,54 @@ TEST(Workspaces, TheWorkspaceIsTheDefaultZettaServiceAndReadyNeedsTheOperator) {
     ASSERT_TRUE(state);
     EXPECT_TRUE(state->ready());
     EXPECT_EQ(state->to_json()["ready"], true);
+}
+
+TEST(Workspaces, DesiredStateCapabilitiesUseWorkspaceIdentityAndTypedDeletion) {
+    Workspaces w;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = w.store.get();
+    context.workspaces = w.service.get();
+    context.authorized = true;
+    context.acting_identity = "admin";
+    const auto call = [&](const std::string& name, json input) {
+        input["customer_id"] = w.customer_id;
+        return *liquid::runtime::block_on(registry.call_async(name, input, context));
+    };
+    EXPECT_FALSE(call("create_workspace", {{"name", "missing-env"}}).ok);
+    EXPECT_FALSE(call("create_workspace", {{"name", "invalid"}, {"environment", "Prod_1"}}).ok);
+    const auto created = call("create_workspace", {{"name", "Research"}, {"environment", "dev"}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("id");
+    const std::string service_id = created.value.at("zetta_service_id");
+    EXPECT_NE(id, service_id);
+    EXPECT_EQ(w.store->get_service(service_id)->workspace_id, id);
+    EXPECT_EQ(w.service->workspace(w.customer_id, id)->id, service_id);
+    EXPECT_FALSE(w.service->delete_service(w.customer_id, service_id));
+    EXPECT_FALSE(w.service->workspace(w.customer_id, service_id));
+    EXPECT_FALSE(call("get_workspace", {{"workspace_id", service_id}}).ok);
+    EXPECT_EQ(created.value.at("phase"), "Pending");
+    EXPECT_EQ(call("list_workspaces", json::object()).value.at("workspaces").size(), 1);
+    const auto stopped = call("update_workspace", {{"workspace_id", id}, {"desired", "stopped"}});
+    ASSERT_TRUE(stopped.ok) << stopped.error.message;
+    EXPECT_EQ(stopped.value.at("generation"), 2);
+    EXPECT_EQ(stopped.value.at("observed_generation"), 0);
+    EXPECT_EQ(stopped.value.at("phase"), "Pending");
+    EXPECT_EQ(w.service->workspace(w.customer_id, id).error().code, "workspace_not_ready");
+    EXPECT_EQ(call("update_workspace", {{"workspace_id", id}, {"desired", "stopped"}}).value.at("generation"), 2);
+    EXPECT_FALSE(call("update_workspace", {{"workspace_id", id}, {"phase", "Ready"}}).ok);
+    ASSERT_TRUE(call("create_workspace", {{"name", "Another"}, {"environment", "staging"}}).ok);
+    const auto resumed = call("update_workspace", {{"workspace_id", id}, {"desired", "running"}});
+    ASSERT_TRUE(resumed.ok) << resumed.error.message;
+    EXPECT_EQ(resumed.value.at("generation"), 3);
+    EXPECT_EQ(w.store->get_service(service_id)->desired, "present");
+    EXPECT_FALSE(call("delete_workspace", {{"workspace_id", id}, {"confirm", id}}).ok);
+    const auto deleted = call("delete_workspace", {{"workspace_id", id}, {"confirm", "Research"}});
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value.at("desired"), "deleted");
+    EXPECT_EQ(w.store->get_service(service_id)->desired, "absent");
+    EXPECT_FALSE(call("update_workspace", {{"workspace_id", id}, {"desired", "running"}}).ok);
 }
 
 TEST(Workspaces, DeletingTheWorkspaceWithdrawsItAndARestartGetsANewSlug) {
@@ -183,7 +230,7 @@ TEST(Workspaces, DeletingTheWorkspaceWithdrawsItAndARestartGetsANewSlug) {
     auto second = w.run(w.service->request(w.customer_id));
     ASSERT_TRUE(second);
     EXPECT_NE(second->service_id, first->service_id);
-    EXPECT_TRUE(second->slug.starts_with("svc-")) << "a slug is never reused";
+    EXPECT_TRUE(second->slug.starts_with("ws-")) << "a slug is never reused";
     EXPECT_EQ(second->phase, "") << "the old Ready does not carry over";
 
     ASSERT_TRUE(w.store->set_service_status(first->service_id, "Deleted", "", ""));
@@ -285,7 +332,7 @@ TEST(Workspaces, CallsReachOnlyTheCustomersOwnCluster) {
     w.deliver(*workspace, {{"kind", "zetta"}, {"token", "workspace-admin-token"}});
     w.caller->value = {{"projects", json::array({"retention"})}};
     auto called =
-        w.run(w.service->call(w.customer_id, workspace->id, "get_project", true, {{"name", "retention"}}));
+        w.run(w.service->call(w.customer_id, workspace->workspace_id, "get_project", true, {{"name", "retention"}}));
     ASSERT_TRUE(called);
     EXPECT_EQ((*called)["projects"][0], "retention");
     EXPECT_EQ(w.caller->url, "http://prod-ws-own-zetta-client.lake.svc.cluster.local:4800");
@@ -328,7 +375,7 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     const auto started =
         call(*owner_principal, "start_workspace", {{"customer_id", owner_customer}});
     ASSERT_TRUE(started.ok) << started.error.message;
-    EXPECT_EQ(started.value["workspace"], lake::control::workspace_slug(owner_customer));
+    EXPECT_EQ(started.value["workspace"], lake::control::workspace_slug(w.workspace_id()));
 
     const auto foreign =
         call(*other_principal, "workspace_status", {{"customer_id", owner_customer}});
@@ -467,7 +514,7 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     ASSERT_TRUE(deleted_service.ok) << deleted_service.error.message;
     EXPECT_EQ(deleted_service.value["desired"], "absent");
 
-    const std::string slug = lake::control::workspace_slug(owner_customer);
+    const std::string slug = "workspace";
     const auto foreign_delete = call(
         *other_principal, "delete_workspace", {{"customer_id", owner_customer}, {"confirm", slug}});
     EXPECT_FALSE(foreign_delete.ok) << "another customer cannot delete the workspace";
@@ -479,7 +526,7 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     const auto deleted = call(
         *owner_principal, "delete_workspace", {{"customer_id", owner_customer}, {"confirm", slug}});
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
-    EXPECT_EQ(deleted.value["requested"], false);
+    EXPECT_EQ(deleted.value["desired"], "deleted");
 }
 
 TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
@@ -712,8 +759,8 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
         << "the delete form needs the workspace id from the state";
     page.state["workspace"] = "ws-0f1e2d3c4b5a";
     html = lake::api::web_ui_workspace(page, true);
-    EXPECT_NE(html.find("action=\"/workspace/delete\""), std::string::npos);
-    EXPECT_NE(html.find("name=\"confirm\" value=\"ws-0f1e2d3c4b5a\" required"), std::string::npos);
+    EXPECT_EQ(html.find("action=\"/workspace/delete\""), std::string::npos);
+    EXPECT_NE(html.find("href=\"/workspaces\""), std::string::npos);
 
     page.state = {{"requested", true},
                   {"phase", "Failed"},
@@ -722,7 +769,7 @@ TEST(Workspaces, PagesGateOnTheWorkspaceAndRenderZettaResults) {
                   {"message", "workspace quota reached (3)"}};
     html = lake::api::web_ui_workspace(page, true);
     EXPECT_NE(html.find("as many workspaces as it allows"), std::string::npos);
-    EXPECT_NE(html.find(">Cancel workspace</button>"), std::string::npos);
+    EXPECT_NE(html.find(">Cancel workspace</a>"), std::string::npos);
     page.state = {
         {"requested", true}, {"phase", "Ready"}, {"ready", true}, {"workspace", "ws-0f1e2d3c4b5a"}};
 
@@ -1522,6 +1569,7 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
     context.acting_identity = principal->taap_id;
 
     const std::vector<std::string> features = {
+        "list_workspaces", "get_workspace", "create_workspace", "update_workspace",
         "workspace_status",   "start_workspace",    "delete_workspace",     "workspace_query",
         "workspace_act",      "list_services",      "create_service",       "delete_service",
         "service_connection", "list_service_kinds", "list_store_providers", "list_stores",

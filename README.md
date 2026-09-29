@@ -24,6 +24,11 @@ Forms, REST and MCP calls send `workspace_id` explicitly. Task/app/build events 
 workspace Zetta; only `agent-tasks.*` remain on the Lake bus. See the
 [workspace data-plane design and audit](docs/architecture/workspace-data-plane.md).
 
+Workspaces are explicit `workspaces` contract rows, not service aliases. `/workspaces` lists
+their environment and operator status, creates desired state, and deletes with typed-name
+confirmation. Routing resolves `workspaces.zetta_service_id`; migration 0039 and the operator's
+`workspaces_guard` handoff are documented in [the contract](docs/control-plane/workspaces.md).
+
 | Route | Serves |
 |---|---|
 | `GET /` | the account → repository → push journey, with navigation matched to the viewer |

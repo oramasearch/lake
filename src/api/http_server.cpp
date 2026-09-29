@@ -5090,9 +5090,21 @@ struct ApiServer::Impl {
                     viewer.spaces.emplace_back(customer.id, customer.name);
                 }
             }
+            const auto query = boost::urls::parse_query(context.request_query);
+            if (query && context.path_workspace_id.empty()) {
+                for (const auto& parameter : *query) {
+                    if (parameter.key == "customer_id" &&
+                        std::ranges::any_of(viewer.spaces, [&](const auto& space) {
+                            return space.first == parameter.value;
+                        })) {
+                        viewer.customer_id = parameter.value;
+                    }
+                }
+            }
             if (!viewer.workspace_id.empty()) {
-                const auto workspace = options.store->get_service(viewer.workspace_id);
-                if (workspace && workspace->kind == "zetta" && workspace->desired == "present" &&
+                const auto workspace = options.store->get_workspace(viewer.workspace_id);
+                if (workspace && workspace->desired != "deleted" &&
+                    (viewer.customer_id.empty() || viewer.customer_id == workspace->customer_id) &&
                     std::ranges::any_of(viewer.spaces, [&](const auto& space) {
                         return space.first == workspace->customer_id;
                     })) {
@@ -5104,11 +5116,11 @@ struct ApiServer::Impl {
             if (viewer.customer_id.empty() && !viewer.spaces.empty()) {
                 viewer.customer_id = viewer.spaces.front().first;
             }
-            const auto services = options.store->list_services(viewer.customer_id);
+            const auto services = options.store->list_workspaces(viewer.customer_id);
             if (services) {
                 for (const auto& service : *services) {
-                    if (service.kind == "zetta" && service.desired == "present") {
-                        viewer.workspaces.emplace_back(service.id, service.name);
+                    if (service.desired != "deleted") {
+                        viewer.workspaces.emplace_back(service.id, service.name + " (" + service.environment + ")");
                     }
                 }
             }
@@ -7554,8 +7566,8 @@ struct ApiServer::Impl {
             selection.customer_id = selection.customers.front().id;
         }
         if (requested.empty() && !context.remembered_workspace_id.empty() && options.store) {
-            const auto workspace = options.store->get_service(context.remembered_workspace_id);
-            if (workspace && workspace->kind == "zetta" && workspace->desired == "present" &&
+            const auto workspace = options.store->get_workspace(context.remembered_workspace_id);
+            if (workspace && workspace->desired != "deleted" &&
                 std::ranges::any_of(selection.customers, [&](const auto& customer) {
                     return customer.id == workspace->customer_id;
                 })) {
@@ -7563,7 +7575,7 @@ struct ApiServer::Impl {
             }
         }
         if (!context.path_workspace_id.empty() && options.store) {
-            const auto workspace = options.store->get_service(context.path_workspace_id);
+            const auto workspace = options.store->get_workspace(context.path_workspace_id);
             if (workspace && std::ranges::any_of(selection.customers, [&](const auto& customer) {
                     return customer.id == workspace->customer_id;
                 })) {
@@ -7592,12 +7604,13 @@ struct ApiServer::Impl {
         auto selection = workspace_selection(context, query_value(route, "customer_id"));
         const std::string requested_customer = query_value(route, "customer_id");
         if (!selected.empty()) {
-            const auto workspace = options.workspaces
-                ? options.workspaces->workspace(selection.customer_id, selected)
-                : control::Result<control::ManagedService>(std::unexpect,
+            const auto workspace = options.store
+                ? options.store->get_workspace(selected)
+                : control::Result<control::Workspace>(std::unexpect,
                       control::StoreError{"invalid_input", "workspace_id is unknown"});
             const std::string requested_workspace = query_value(route, "workspace_id");
-            if (!workspace || (!requested_customer.empty() && requested_customer != workspace->customer_id) ||
+            if (!workspace || workspace->desired == "deleted" || workspace->customer_id != selection.customer_id ||
+                (!requested_customer.empty() && requested_customer != workspace->customer_id) ||
                 (!requested_workspace.empty() && requested_workspace != selected)) {
                 co_return co_await send_text(route, http::status::bad_request,
                     error_body("invalid_input", "workspace_id is not a workspace Zetta in this space"),
@@ -7616,11 +7629,11 @@ struct ApiServer::Impl {
         viewer.customer_id = selection.customer_id;
         viewer.workspace_id.clear();
         viewer.workspaces.clear();
-        const auto services = options.store->list_services(selection.customer_id);
+        const auto services = options.store->list_workspaces(selection.customer_id);
         if (services) {
             for (const auto& service : *services) {
-                if (service.kind == "zetta" && service.desired == "present") {
-                    viewer.workspaces.emplace_back(service.id, service.name);
+                if (service.desired != "deleted") {
+                    viewer.workspaces.emplace_back(service.id, service.name + " (" + service.environment + ")");
                 }
             }
         }
@@ -7635,7 +7648,7 @@ struct ApiServer::Impl {
             choice = viewer.workspaces.front().first;
         }
         const std::string page = switching ? query_value(route, "page") : local;
-        const std::string destination = workspace_page_path(page) && !page.contains('?') &&
+        const std::string destination = (workspace_page_path(page) || page == "/workspaces") && !page.contains('?') &&
             !page.contains('#') ? page : "/design/projects";
         if (!choice.empty()) {
             std::string query;
@@ -7656,7 +7669,8 @@ struct ApiServer::Impl {
                 query += query.empty() ? "?" : "&";
                 query += "customer_id=" + oauth_url_encode(selection.customer_id);
             }
-            co_return co_await redirect(route, "/w/" + choice + destination + query,
+            const std::string prefix = destination == "/workspaces" ? "" : "/w/" + choice;
+            co_return co_await redirect(route, prefix + destination + query,
                 "lake_workspace=" + choice + "; HttpOnly; SameSite=Lax; Path=/");
         }
         viewer.path = destination;
@@ -7848,6 +7862,14 @@ struct ApiServer::Impl {
                 : options.external_origin;
         if (page.customer_id.empty()) {
             page.unavailable = "You have no space to work in yet.";
+        } else if (section == "workspaces") {
+            const ApiResult listed = unwrap(co_await workspace_call(
+                "list_workspaces", {{"customer_id", page.customer_id}}, context));
+            if (listed.ok) {
+                page.data["list_workspaces"] = listed.value;
+            } else {
+                page.unavailable = listed.error.message;
+            }
         } else if (!options.workspaces) {
             page.unavailable = section == "services"
                                    ? "Services are not available on this lake yet: the operator "
@@ -8913,7 +8935,19 @@ struct ApiServer::Impl {
         };
         std::string back;
         ApiResult result = ApiResult::success(nlohmann::json::object());
-        if (action == "start") {
+        if (action == "workspace_create" || action == "workspace_delete") {
+            back = "/workspaces?" + query;
+            nlohmann::json input{{"customer_id", customer_id}};
+            if (action == "workspace_create") {
+                input["name"] = form_field(body, "name");
+                input["environment"] = form_field(body, "environment");
+            } else {
+                input["workspace_id"] = form_field(body, "workspace_id");
+                input["confirm"] = form_field(body, "confirm");
+            }
+            result = unwrap(co_await workspace_call(
+                action == "workspace_create" ? "create_workspace" : "delete_workspace", input, context));
+        } else if (action == "start") {
             const std::string requested = form_field(body, "return");
             back = requested == "/design/projects" || requested == "/train/data" ||
                            requested == "/train/agents" || requested == "/train/runs" ||
@@ -9416,6 +9450,7 @@ struct ApiServer::Impl {
         } else if (action == "service_create") {
             back = "/services?" + query;
             nlohmann::json input{{"customer_id", customer_id},
+                                 {"workspace_id", form_field(body, "workspace_id")},
                                  {"kind", form_field(body, "kind")},
                                  {"name", form_field(body, "name")}};
             for (const char* field : {"instances", "storage_gi"}) {
@@ -14067,7 +14102,8 @@ bool ApiServer::start() {
                 route, "/repositories", impl.serve_repositories_page(route));
         });
     for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 21>{{{"/design/projects", "projects"},
+         std::array<std::pair<const char*, const char*>, 22>{{{"/design/projects", "projects"},
+                                                              {"/workspaces", "workspaces"},
                                                               {"/design/solutions", "solutions"},
                                                               {"/design/solution", "solution"},
                                                               {"/design/methodologies", "methodologies"},
@@ -14095,8 +14131,10 @@ bool ApiServer::start() {
                            route, path, impl.serve_workspace_page(route, section));
                    });
     }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 49>{
+    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 51>{
              {{"/workspace/start", "start"},
+              {"/workspaces/create", "workspace_create"},
+              {"/workspaces/delete", "workspace_delete"},
               {"/design/solutions/start", "solution_start"},
               {"/design/solution/confirm", "solution_confirm"},
               {"/design/solution/run", "solution_run"},
