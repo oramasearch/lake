@@ -63,6 +63,12 @@ publishes it on the agent bus, and answers `{task_id, status: pending}` at once.
 it, is handed the body with a `lat.` credential lake never stores, and publishes its progress and
 answer, all over Zetta pub/sub: [agent-bus.md](agent-bus.md).
 
+Lake assigns a conversation ID when a library-agent caller omits one. A later `agent_turn` with
+that ID and the same agent kind receives `prior_turn` in its body: the preceding task ID, the
+person's message and the agent's answer. This is the transport contract used by REST, MCP and the
+page reply forms; it keeps a clarifying answer in the original conversation instead of starting a
+replacement goal.
+
 `get_agent_task {task_id}` follows a task, and `receive_agent_events` follows it live. A finished
 Project Agent proposal carries `review_url` (the pipeline page with `&task=`). Pages redirect at
 once and follow the task:
@@ -70,9 +76,10 @@ once and follow the task:
 - Ask Orama and the Agent Factory show *Thinking…* / *Working on it…* and record the answer in the
   conversation once;
 - the pipeline page shows *The Project Agent is working on it…*;
-- Ship → Apps shows ApplicationAgent working, then the exact proposal and its confirmation;
-- Train → Experiments shows ExperimentsAgent working, then an editable study proposal and its
-  confirmation;
+- Ship → Apps shows ApplicationAgent working, then a reply form for a question or the exact
+  proposal and its confirmation;
+- Train → Experiments shows ExperimentsAgent working, then a reply form for a question or an
+  editable study proposal and its confirmation;
 - Design → Opportunities shows *Scanning your workspace…*.
 
 Auto-Suggest builds the workspace profile itself with its read-only credential. Your own Python and
@@ -107,7 +114,7 @@ service.
 | `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only |
 | `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with the operator's phase and last firing |
 | `unschedule_agent` | action | `write` | `{schedule_id}`; the operator deletes its CronJob |
-| `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?, kind?}`; ExperimentsAgent accepts `experiment`, `experiment_status`, or `experiment_explain` |
+| `agent_turn` | action | `write` | `{agent, message, conversation_id?, context?, page?, kind?}`; Lake creates the conversation ID when omitted and uses it to attach the preceding same-kind turn; ExperimentsAgent accepts `experiment`, `experiment_status`, or `experiment_explain` |
 
 Audit kinds: `agent.launch`, `agent.stop`, `agent.schedule`, `agent.unschedule`, `agent.turn`.
 

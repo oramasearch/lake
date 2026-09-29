@@ -144,9 +144,20 @@ std::string agent_panel(const ExperimentsPage& page) {
                                    "get_experiment_study") +
                       "</p>";
     }
+    std::string reply_form;
+    if (page.agent_reply) {
+        reply_form =
+            "<h3>Reply</h3><form class=\"stack\" method=\"post\" "
+            "action=\"/train/experiments/agent\" data-capability=\"agent_turn\">" +
+            hidden("customer_id", page.customer_id) +
+            hidden("task_id", page.agent_task.value("task_id", std::string())) +
+            "<label>Reply<textarea name=\"reply\" rows=\"4\" required></textarea></label>"
+            "<button class=\"button button-primary\" type=\"submit\">Reply to "
+            "ExperimentsAgent</button></form>";
+    }
     return html + "<section class=\"panel\"><h2>ExperimentsAgent Result</h2><div "
                   "class=\"ask-reply\">" +
-           web_ui_markdown(reply) + "</div>" + result_link + "</section>";
+           web_ui_markdown(reply) + "</div>" + result_link + reply_form + "</section>";
 }
 
 std::string study_listing(const ExperimentsPage& page) {

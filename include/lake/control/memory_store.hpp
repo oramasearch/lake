@@ -257,6 +257,11 @@ public:
     Result<AgentTask> latest_agent_task(const std::string& customer_id,
                                         const std::string& kind,
                                         const std::string& workspace_id) override;
+    Result<AgentTask> latest_agent_conversation_task(const std::string& customer_id,
+                                                     const std::string& conversation_id,
+                                                     const std::string& agent,
+                                                     const std::string& kind,
+                                                     const std::string& workspace_id) override;
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,

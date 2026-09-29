@@ -981,6 +981,12 @@ public:
     virtual Result<AgentTask> latest_agent_task(const std::string& customer_id,
                                                 const std::string& kind,
                                                 const std::string& workspace_id) = 0;
+    // The newest earlier turn in one conversation; not_found when this is its first turn.
+    virtual Result<AgentTask> latest_agent_conversation_task(const std::string& customer_id,
+                                                             const std::string& conversation_id,
+                                                             const std::string& agent,
+                                                             const std::string& kind,
+                                                             const std::string& workspace_id) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
     // it and where on agent-events its events will start. Exactly one claim succeeds; another is
     // a conflict, as is a claim by a different agent.

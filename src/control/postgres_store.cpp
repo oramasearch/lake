@@ -5133,6 +5133,32 @@ public:
         });
     }
 
+    Result<AgentTask> latest_agent_conversation_task(const std::string& customer_id,
+                                                     const std::string& conversation_id,
+                                                     const std::string& agent,
+                                                     const std::string& kind,
+                                                     const std::string& workspace_id) override {
+        return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + task_columns +
+                    " FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                    "WHERE t.customer_id = $1::uuid AND t.conversation_id = $2::uuid "
+                    "AND t.agent = $3 AND t.kind = $4 AND t.workspace_id = $5::uuid "
+                    "ORDER BY t.created_at DESC "
+                    "LIMIT 1",
+                customer_id,
+                conversation_id,
+                agent,
+                kind,
+                workspace_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no earlier turn in this conversation"});
+            }
+            return task_from(rows[0]);
+        });
+    }
+
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,

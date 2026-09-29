@@ -23,6 +23,12 @@ the form starts an `agent_turn` for `agent-experiments` with kind `experiment` a
 task on the same page. While it runs, the page refreshes its durable task state. A completed
 proposal shows the agent's explanation and its complete `study` JSON in an editable text area.
 
+If the completed turn asks a question or returns no proposal, its answer is followed by a
+**Reply** box. Submitting it starts another `experiment` turn with the source task's conversation
+ID and prior turn, so ExperimentsAgent can use the answer without the person restating the goal.
+The server accepts only a completed, replyable ExperimentsAgent task owned by that person and
+space.
+
 **Confirm and start study** submits the edited JSON, the source task id and a digest of the stored
 proposal. The server reloads the task for the same person and space, verifies its agent, kind,
 successful state and digest, parses the edited object, and starts a second `agent_turn` carrying it

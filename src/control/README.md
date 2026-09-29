@@ -36,8 +36,9 @@ Password Argon2 policy remains unchanged. See `docs/api/auth.md` and `docs/contr
 Agent tasks (lake#269) are claimed with one insert into `agent_task_status`, so exactly one claim
 wins. A finished task keeps its phase and loses its credential digest. `agent_bus.cpp` publishes
 tasks with their informational workspace ID on Zetta pub/sub and applies what agents publish;
-`stale_agent_tasks` is what its loop
-re-publishes or fails. See `docs/api/agent-bus.md`.
+`stale_agent_tasks` is what its loop re-publishes or fails. Memory and PostgreSQL stores can also
+select the latest same-kind task in a conversation so a follow-up carries its prior turn. See
+`docs/api/agent-bus.md`.
 
 `web_apps.cpp` defines the Ship App JSON and deterministic namespace contract. Memory and
 PostgreSQL stores enforce live name/host uniqueness and app/replica quotas; desired writes advance

@@ -33,6 +33,11 @@ is available, **Build an App With the ApplicationAgent** starts an `agent_turn` 
 agent-application` and `kind: app`, redirects with the task id, and follows the background turn.
 The first turn has read tools only.
 
+If the turn asks a question or has no proposal, the result includes a **Reply** box. Its source
+task ID selects the same ApplicationAgent `app` conversation and supplies the preceding turn to
+the follow-up. Lake rejects tasks belonging to another person, space, agent or kind, and rejects a
+reply after a proposal is ready for confirmation.
+
 A successful proposal renders the agent's reply, App settings, and every proposed file. The
 confirmation form carries the SHA-256 of the exact stored proposal. Lake reloads the task for the
 same customer, verifies that it is a succeeded ApplicationAgent `app` task and that the digest is

@@ -1920,6 +1920,32 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     const std::string working = connection->request("GET", agent_location, "", cookie);
     EXPECT_NE(working.find("ApplicationAgent Is Working"), std::string::npos) << working;
 
+    agents_->answer = {{"ok", true},
+                       {"reply", "Which dataset should the app use?"},
+                       {"result", {{"kind", "question"}, {"confirm", false}}}};
+    connection.reset();
+    connection = connect();
+    run_agent_task(*connection, agent_task);
+    connection.reset();
+    connection = connect();
+    const std::string question = connection->request("GET", agent_location, "", cookie);
+    EXPECT_NE(question.find("Which dataset should the app use?"), std::string::npos);
+    EXPECT_NE(question.find("<h3>Reply</h3>"), std::string::npos);
+    EXPECT_NE(question.find("name=\"reply\""), std::string::npos);
+    const std::string replied = connection->request(
+        "POST",
+        "/ship/apps/agent",
+        "customer_id=" + customer_id + "&task_id=" + agent_task +
+            "&reply=Use+datasets%2Faccounts",
+        cookie);
+    ASSERT_TRUE(replied.starts_with("HTTP/1.1 302")) << replied.substr(0, 300);
+    const std::string proposal_task = task_of(replied);
+    const auto continued_task = store_->get_agent_task(proposal_task);
+    ASSERT_TRUE(continued_task);
+    EXPECT_EQ(continued_task->conversation_id, first_task->conversation_id);
+    EXPECT_EQ(continued_task->body["message"], "Use datasets/accounts");
+    EXPECT_EQ(continued_task->body["prior_turn"]["task_id"], agent_task);
+
     const nlohmann::json proposal = {
         {"kind", "proposal"},
         {"confirm", true},
@@ -1939,11 +1965,11 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
                        {"result", proposal}};
     connection.reset();
     connection = connect();
-    run_agent_task(*connection, agent_task);
+    run_agent_task(*connection, proposal_task);
     connection.reset();
     connection = connect();
     const std::string review = connection->request(
-        "GET", agent_location, "", cookie);
+        "GET", response_header(replied, "location"), "", cookie);
     EXPECT_NE(review.find("Proposed App: customer-health"), std::string::npos);
     EXPECT_NE(review.find("app.py"), std::string::npos);
     const std::string sha_marker = "name=\"proposal_sha256\" value=\"";
@@ -1954,7 +1980,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     const std::string stale = connection->request(
         "POST",
         "/ship/apps/agent/confirm",
-        "customer_id=" + customer_id + "&task_id=" + agent_task +
+        "customer_id=" + customer_id + "&task_id=" + proposal_task +
             "&proposal_sha256=" + std::string(64, '0'),
         cookie);
     EXPECT_NE(response_header(stale, "location").find("error="), std::string::npos);
@@ -1964,7 +1990,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     const std::string confirmed = connection->request(
         "POST",
         "/ship/apps/agent/confirm",
-        "customer_id=" + customer_id + "&task_id=" + agent_task +
+        "customer_id=" + customer_id + "&task_id=" + proposal_task +
             "&proposal_sha256=" + proposal_sha,
         cookie);
     ASSERT_TRUE(confirmed.starts_with("HTTP/1.1 302")) << confirmed.substr(0, 300);
@@ -2097,7 +2123,8 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
                                  {"workspace_id", connection->workspace_id},
                                  {"agent", "agent-experiments"},
                                  {"kind", "experiment"},
-                                 {"message", "Tune retention"}};
+                                 {"message", "Tune retention"},
+                                 {"conversation_id", "d92a57b7-04bb-4c35-8277-4833e791aa79"}};
     const nlohmann::json rest = body_of(connection->request(
         "POST", "/v1/agent_turn", turn.dump(), cookie, "HTTP/1.1", "", "application/json"));
     ASSERT_TRUE(rest["ok"].get<bool>()) << rest.dump();
@@ -2115,6 +2142,14 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
         "",
         "application/json"));
     ASSERT_TRUE(mcp["result"]["structuredContent"]["ok"].get<bool>()) << mcp.dump();
+    const auto rest_task = store_->get_agent_task(rest["value"]["task_id"]);
+    const auto mcp_task = store_->get_agent_task(
+        mcp["result"]["structuredContent"]["value"]["task_id"]);
+    ASSERT_TRUE(rest_task);
+    ASSERT_TRUE(mcp_task);
+    EXPECT_EQ(rest_task->conversation_id, turn["conversation_id"].get<std::string>());
+    EXPECT_EQ(mcp_task->conversation_id, turn["conversation_id"].get<std::string>());
+    EXPECT_EQ(mcp_task->body["prior_turn"]["task_id"], rest_task->id);
 
     const std::string empty = connection->request(
         "GET", "/train/experiments?customer_id=" + customer_id, "", cookie);
@@ -2141,6 +2176,28 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
         "GET", response_header(started, "location"), "", cookie);
     EXPECT_NE(working.find("ExperimentsAgent Is Working"), std::string::npos);
 
+    agents_->answer = {{"ok", true},
+                       {"reply", "Which project should I use for the dataset?"},
+                       {"result", {{"kind", "question"}, {"confirm", false}}}};
+    run_agent_task(*connection, task_id);
+    const std::string question = connection->request(
+        "GET", response_header(started, "location"), "", cookie);
+    EXPECT_NE(question.find("Which project should I use for the dataset?"), std::string::npos);
+    EXPECT_NE(question.find("<h3>Reply</h3>"), std::string::npos);
+    EXPECT_NE(question.find("name=\"reply\""), std::string::npos);
+    const std::string replied = connection->request(
+        "POST",
+        "/train/experiments/agent",
+        "customer_id=" + customer_id + "&task_id=" + task_id + "&reply=Use+retention",
+        cookie);
+    ASSERT_TRUE(replied.starts_with("HTTP/1.1 302")) << replied.substr(0, 300);
+    const std::string proposal_task_id = task_of(replied);
+    const auto continued = store_->get_agent_task(proposal_task_id);
+    ASSERT_TRUE(continued);
+    EXPECT_EQ(continued->conversation_id, first->conversation_id);
+    EXPECT_EQ(continued->body["message"], "Use retention");
+    EXPECT_EQ(continued->body["prior_turn"]["task_id"], task_id);
+
     nlohmann::json study = {{"name", "Retention Tuning"},
                             {"project", "retention"},
                             {"pipeline", "training"},
@@ -2159,9 +2216,9 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
                                    {"confirm", true},
                                    {"study", study},
                                    {"explanations", {{"objective", "Use validation AUC."}}}}}};
-    run_agent_task(*connection, task_id);
+    run_agent_task(*connection, proposal_task_id);
     const std::string review = connection->request(
-        "GET", response_header(started, "location"), "", cookie);
+        "GET", response_header(replied, "location"), "", cookie);
     EXPECT_NE(review.find("Proposed Study"), std::string::npos);
     EXPECT_NE(review.find("Study proposal (JSON)"), std::string::npos);
     const std::string sha_marker = "name=\"proposal_sha256\" value=\"";
@@ -2173,7 +2230,7 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
     const std::string confirmed = connection->request(
         "POST",
         "/train/experiments/agent/confirm",
-        "customer_id=" + customer_id + "&task_id=" + task_id +
+        "customer_id=" + customer_id + "&task_id=" + proposal_task_id +
             "&proposal_sha256=" + proposal_sha +
             "&study=" + lake::api::oauth_url_encode(study.dump()),
         cookie);

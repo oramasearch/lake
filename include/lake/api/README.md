@@ -1,7 +1,8 @@
 # Public API types
 
 `ExperimentsPage` contains capability values, resolved display permissions, ExperimentsAgent task
-state and the stored proposal digest for the pure study/run/comparison renderer. Experiment asset
+state, reply availability and the stored proposal digest for the pure study/run/comparison
+renderer. `AppsPage` carries the equivalent ApplicationAgent reply state. Experiment asset
 declarations expose embedded bytes and hashed URLs without filesystem or HTTP dependencies. See
 [the UI contract](../../../docs/ui/experiments.md) and
 [registered API operations](../../../docs/api/experiments.md).

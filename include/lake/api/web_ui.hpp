@@ -262,6 +262,7 @@ struct ExperimentsPage {
     bool can_promote = false;
     bool experiments_agent = false;
     bool agent_working = false;
+    bool agent_reply = false;
 };
 std::string web_ui_experiments(const ExperimentsPage& page, WebUiViewer viewer = true);
 
@@ -312,6 +313,7 @@ struct AppsPage {
     nlohmann::json agent_task = nlohmann::json::object();
     bool application_agent = false;
     bool agent_working = false;
+    bool agent_reply = false;
     std::string proposal_sha256;
     std::string error;
 };
