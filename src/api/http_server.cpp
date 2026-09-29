@@ -323,6 +323,7 @@ struct RequestTiming {
     std::chrono::steady_clock::time_point started;
     std::shared_ptr<WorkspaceCallTiming> workspace_calls =
         std::make_shared<WorkspaceCallTiming>();
+    std::optional<ApiContext> context;
 };
 
 std::mutex request_timings_mutex;
@@ -407,11 +408,15 @@ boost::http::route_task send_text(boost::http::route_params& route,
                    : 0.0;
         const std::size_t workspace_count =
             timing ? timing->workspace_calls->count.load(std::memory_order_relaxed) : 0;
+        const std::size_t workspace_rounds = timing
+            ? timing->workspace_calls->completed_rounds.load(std::memory_order_relaxed) : 0;
         route.res.set("Server-Timing",
-                      std::format("total;dur={:.3f}, workspace;dur={:.3f};desc=\"{} calls\"",
+                      std::format("total;dur={:.3f}, workspace;dur={:.3f};desc=\"{} calls\", "
+                                  "workspace_rounds;desc=\"{} rounds\"",
                                   total_ms,
                                   workspace_ms,
-                                  workspace_count));
+                                  workspace_count,
+                                  workspace_rounds));
     }
     stamp_response_headers(route, body);
     auto [send_error] = co_await route.send(body);
@@ -2043,6 +2048,50 @@ class LiquidCustomerStores final : public SyncStore {
 public:
     explicit LiquidCustomerStores(std::string root) : root_(std::move(root)) {}
 
+    SyncStoreResult<void> warm_metering() try {
+        if (root_.empty()) {
+            return {};
+        }
+        std::error_code error;
+        if (!std::filesystem::exists(root_, error) && !error) {
+            return {};
+        }
+        if (error) {
+            return std::unexpected(SyncStoreError{"io", error.message()});
+        }
+        for (const auto& customer : std::filesystem::directory_iterator(root_, error)) {
+            const auto repositories = customer.path() / "repositories";
+            if (!std::filesystem::is_directory(repositories, error)) {
+                error.clear();
+                continue;
+            }
+            for (const auto& repository : std::filesystem::directory_iterator(repositories, error)) {
+                if (!repository.is_directory()) {
+                    continue;
+                }
+                RepositoryArtifactFilter filter;
+                filter.limit = 1000;
+                for (;;) {
+                    const auto page = repository_artifacts(customer.path().filename().string(),
+                        repository.path().filename().string(), filter);
+                    if (!page) {
+                        return std::unexpected(page.error());
+                    }
+                    if (page->done || page->next_cursor.empty()) {
+                        break;
+                    }
+                    filter.cursor = page->next_cursor;
+                }
+            }
+        }
+        if (error) {
+            return std::unexpected(SyncStoreError{"io", error.message()});
+        }
+        return {};
+    } catch (const std::filesystem::filesystem_error& error) {
+        return std::unexpected(SyncStoreError{"io", error.what()});
+    }
+
     SyncStoreResult<std::vector<std::string>>
     find_missing(const std::string& customer_id, const std::vector<std::string>& digests) override {
         std::lock_guard lock(mutex_);
@@ -2122,10 +2171,6 @@ public:
 
     SyncStoreResult<std::uint64_t> unique_stored_bytes(const std::string& customer_id) override {
         std::lock_guard lock(mutex_);
-        auto store = open_customer(customer_id);
-        if (!store) {
-            return std::unexpected(store.error());
-        }
         return unique_stored_bytes_locked(customer_id);
     }
 
@@ -2572,6 +2617,17 @@ public:
                          const std::string& repository_id,
                          const RepositoryArtifactFilter& filter) override {
         std::lock_guard lock(mutex_);
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
+        }
+        std::error_code error;
+        const auto path = std::filesystem::path(root_) / customer_id / "repositories" / repository_id;
+        if (!std::filesystem::exists(path, error) && !error) {
+            return RepositoryArtifactPage{.done = true};
+        }
+        if (error) {
+            return std::unexpected(SyncStoreError{"io", error.message()});
+        }
         auto repository = open_repository(customer_id, repository_id);
         if (!repository) {
             return std::unexpected(repository.error());
@@ -5041,7 +5097,15 @@ struct ApiServer::Impl {
     }
 
     ApiContext context_for(const boost::http::route_params& route) const {
+        const auto timing = request_timing(route);
+        const bool page_read = route.req.method() == boost::http::method::get;
+        if (page_read && timing && timing->context) {
+            return *timing->context;
+        }
         ApiContext ctx;
+        if (page_read) {
+            ctx.page_customers = std::make_shared<std::optional<ApiResult>>();
+        }
         ctx.request_path = std::string(route.url.path());
         ctx.request_query = std::string(route.url.encoded_query());
         ctx.path_workspace_id = workspace_path_id(ctx.request_path);
@@ -5053,7 +5117,7 @@ struct ApiServer::Impl {
         ctx.agents = &agents;
         ctx.platform = options.platform.get();
         ctx.workspaces = options.workspaces.get();
-        if (const auto timing = request_timing(route)) {
+        if (timing) {
             ctx.workspace_call_timing = timing->workspace_calls;
         }
         ctx.non_expiring_credentials_allowed = options.allow_non_expiring_credentials;
@@ -5154,7 +5218,21 @@ struct ApiServer::Impl {
         if (route.req.count("liquid-offline-grant") != 0) {
             ctx.offline_grant_id = std::string(route.req.at("liquid-offline-grant"));
         }
+        if (page_read && timing) {
+            timing->context = ctx;
+        }
         return ctx;
+    }
+
+    ApiResult page_customers(ApiContext& context) const {
+        if (context.page_customers && *context.page_customers) {
+            return **context.page_customers;
+        }
+        auto result = registry.call("list_customers", {{"limit", 200}}, context);
+        if (context.page_customers) {
+            *context.page_customers = result;
+        }
+        return result;
     }
 
     WebUiViewer viewer_for(const ApiContext& context) const {
@@ -5169,7 +5247,7 @@ struct ApiServer::Impl {
         }
         if (context.authorized && options.store && options.workspaces) {
             auto read_context = context;
-            const auto customers = registry.call("list_customers", {{"limit", 200}}, read_context);
+            const auto customers = page_customers(read_context);
             if (customers.ok) {
                 for (const auto& row : customers.value.at("items")) {
                     const auto customer = customer_from_json(row);
@@ -7630,7 +7708,7 @@ struct ApiServer::Impl {
 
     WorkspaceSelection workspace_selection(ApiContext& context, std::string_view requested) {
         WorkspaceSelection selection;
-        const ApiResult rows = registry.call("list_customers", {{"limit", 200}}, context);
+        const ApiResult rows = page_customers(context);
         if (rows.ok) {
             for (const auto& value : rows.value.value("items", nlohmann::json::array())) {
                 const control::Customer customer = customer_from_json(value);
@@ -7830,14 +7908,44 @@ struct ApiServer::Impl {
     liquid::runtime::task<std::vector<ApiResult>>
     workspace_reads(ApiContext context,
                     const std::string& customer_id,
-                    std::vector<WorkspaceRead> reads) {
-        for (auto& [capability, input] : reads) {
+                    std::vector<WorkspaceRead> reads,
+                    bool lean_datasets = false) {
+        context.cache_workspace_definitions = true;
+        std::vector<std::size_t> projected;
+        for (std::size_t index = 0; index < reads.size(); ++index) {
+            auto& [capability, input] = reads[index];
+            if (capability == "list_services" || capability == "list_stores" ||
+                capability == "list_agent_launches" || capability == "list_agent_schedules" ||
+                capability == "workspace_status") {
+                input["customer_id"] = customer_id;
+                continue;
+            }
+            if (capability == "list_agent_library") {
+                continue;
+            }
+            if (lean_datasets && capability == "list_datasets") {
+                capability = "workspace_sql";
+                input = {{"customer_id", customer_id},
+                         {"statement", "SELECT database, name FROM system.datasets"}};
+                projected.push_back(index);
+                continue;
+            }
             input = {{"customer_id", customer_id},
                      {"capability", capability},
                      {"input", std::move(input)}};
             capability = "workspace_query";
         }
-        co_return co_await page_reads(std::move(context), std::move(reads));
+        auto results = co_await page_reads(std::move(context), std::move(reads));
+        if (!results) {
+            co_return std::unexpected(results.error());
+        }
+        for (const auto index : projected) {
+            auto& result = results->at(index);
+            if (result.ok) {
+                result.value = {{"datasets", result.value.value("rows", nlohmann::json::array())}};
+            }
+        }
+        co_return std::move(*results);
     }
 
     struct ProjectGraphReads {
@@ -7845,8 +7953,33 @@ struct ApiServer::Impl {
         std::vector<ApiResult> graphs;
     };
 
+    static std::vector<WorkspaceRead> initial_workspace_reads(const WorkspacePage& page) {
+        if (page.section == "runs") {
+            return {{"list_runs", nlohmann::json::object()}};
+        }
+        if (page.section == "agents") {
+            return {{"list_agents", nlohmann::json::object()},
+                    {"list_agent_library", nlohmann::json::object()}};
+        }
+        if (page.section != "data") {
+            return {};
+        }
+        std::vector<WorkspaceRead> reads{
+            {"list_connections", nlohmann::json::object()},
+            {"list_datasets", nlohmann::json::object()},
+            {"list_dataset_generators", nlohmann::json::object()},
+            {"list_services", nlohmann::json::object()},
+            {"list_stores", nlohmann::json::object()}};
+        if (!page.subject.empty()) {
+            reads.push_back({"list_source_tables", {{"connection", page.subject},
+                {"include_columns", true}, {"max_tables", 100}}});
+        }
+        return reads;
+    }
+
     liquid::runtime::task<ProjectGraphReads>
     project_graph_reads(ApiContext context, std::string customer_id, std::string name) {
+        context.cache_workspace_definitions = true;
         ApiResult project = unwrap(co_await workspace_call(
             "workspace_query",
             {{"customer_id", customer_id},
@@ -8063,15 +8196,30 @@ struct ApiServer::Impl {
                 page.unavailable = listed.error.message;
             }
         } else {
-            const ApiResult status = unwrap(co_await workspace_call(
-                "workspace_status", {{"customer_id", page.customer_id}}, context));
+            auto reads = initial_workspace_reads(page);
+            reads.push_back({"workspace_status", nlohmann::json::object()});
+            const auto results = co_await workspace_reads(
+                context, page.customer_id, reads, section == "data");
+            const ApiResult status = results ? results->back() :
+                ApiResult::failure("store_unavailable", results.error().message);
             if (!status.ok) {
                 page.unavailable = status.error.message;
             } else {
                 page.state = status.value;
+                if (page.state.value("ready", false)) {
+                    for (std::size_t index = 0; index + 1 < reads.size(); ++index) {
+                        const auto& result = results->at(index);
+                        const auto& capability = reads[index].first;
+                        if (result.ok) {
+                            page.data[capability] = result.value;
+                        } else if (page.error.empty() && capability != "list_agent_library") {
+                            page.error = result.error.message;
+                        }
+                    }
+                }
             }
         }
-        if (section == "agent" && page.unavailable.empty()) {
+        if (section == "agent" && page.unavailable.empty() && !page.state.value("ready", false)) {
             const ApiResult launches = unwrap(co_await workspace_call(
                 "list_agent_launches",
                 {{"customer_id", page.customer_id}, {"agent_id", page.subject}, {"limit", 20}},
@@ -8114,7 +8262,8 @@ struct ApiServer::Impl {
                 page.data["list_methodologies"] = *methodologies;
             }
         }
-        if (section == "agents" || section == "discover" || section == "library") {
+        if ((section == "agents" || section == "discover" || section == "library") &&
+            !page.data.contains("list_agent_library")) {
             // The Agent Library does not need the workspace (docs/api/train-agents.md).
             const ApiResult library = unwrap(
                 co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
@@ -8122,7 +8271,7 @@ struct ApiServer::Impl {
                 page.data["list_agent_library"] = library.value;
             }
         }
-        if (page.unavailable.empty() && section == "data") {
+        if (page.unavailable.empty() && section == "data" && !page.state.value("ready", false)) {
             // Storage does not need the workspace (docs/api/storage.md).
             const ApiResult stores = unwrap(co_await workspace_call(
                 "list_stores", {{"customer_id", page.customer_id}}, context));
@@ -8171,7 +8320,9 @@ struct ApiServer::Impl {
         if (page.unavailable.empty() && page.state.value("ready", false)) {
             std::vector<std::pair<std::string, nlohmann::json>> reads;
             std::vector<ApiResult> project_graphs;
-            if (section == "methodologies" || section == "methodology") {
+            if (section == "methodologies") {
+                reads = {{"list_methodologies", nlohmann::json::object()}};
+            } else if (section == "methodology") {
                 reads = {{"list_methodologies", nlohmann::json::object()},
                          {"list_solutions", nlohmann::json::object()}};
             } else if (section == "solutions") {
@@ -8185,10 +8336,12 @@ struct ApiServer::Impl {
                 const std::vector<WorkspaceRead> catalogues{
                     {"list_datasets", nlohmann::json::object()},
                     {"list_methodologies", nlohmann::json::object()}};
-                auto [wait_error, project, listed] = co_await liquid::runtime::when_all(
+                // Start remote catalogue reads before cached definitions: their synchronous
+                // authorization and audit work can then overlap the catalogue round trip.
+                auto [wait_error, listed, project] = co_await liquid::runtime::when_all(
+                    liquid::runtime::as_io(workspace_reads(context, page.customer_id, catalogues)),
                     liquid::runtime::as_io(
-                        project_graph_reads(context, page.customer_id, page.subject)),
-                    liquid::runtime::as_io(workspace_reads(context, page.customer_id, catalogues)));
+                        project_graph_reads(context, page.customer_id, page.subject)));
                 if (wait_error) {
                     page.error = wait_error.message();
                 }
@@ -8218,28 +8371,12 @@ struct ApiServer::Impl {
                 if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
                     page.data["loaded"] = {{"table", loaded}, {"rows", query_value(route, "rows")}};
                 }
-                reads = {{"list_connections", nlohmann::json::object()},
-                         {"list_datasets", nlohmann::json::object()},
-                         {"list_dataset_generators", nlohmann::json::object()}};
-                if (!page.subject.empty()) {
-                    reads.push_back({"list_source_tables",
-                                     {{"connection", page.subject},
-                                      {"include_columns", true},
-                                      {"max_tables", 100}}});
-                }
-                const ApiResult services = unwrap(co_await workspace_call(
-                    "list_services", {{"customer_id", page.customer_id}}, context));
-                if (services.ok) {
-                    page.data["list_services"] = services.value;
-                }
-            } else if (section == "agents") {
-                reads = {{"list_agents", nlohmann::json::object()}};
             } else if (section == "agent") {
                 reads = {{"get_agent", {{"id", page.subject}}},
                          {"agent_training_status", {{"id", page.subject}}},
-                         {"list_projects", nlohmann::json::object()}};
-            } else if (section == "runs") {
-                reads = {{"list_runs", nlohmann::json::object()}};
+                         {"list_projects", nlohmann::json::object()},
+                         {"list_agent_launches", {{"agent_id", page.subject}, {"limit", 20}}},
+                         {"list_agent_schedules", {{"agent_id", page.subject}}}};
             } else if (section == "run") {
                 // The report is requested once the run has finished: asking a running run for
                 // its report makes the deployed Zetta drop the connection.
@@ -8258,7 +8395,8 @@ struct ApiServer::Impl {
                        {"input", {{"dataset", page.subject}, {"database", selected_database}}}}},
                      {"workspace_sql",
                       {{"customer_id", page.customer_id},
-                       {"statement", "SELECT * FROM " + selected_database + "." + page.subject}}}});
+                       {"statement", "SELECT * FROM " + selected_database + "." + page.subject +
+                                         " LIMIT 20"}}}});
                 if (!results) {
                     page.error = results.error().message;
                 } else {
@@ -8317,7 +8455,8 @@ struct ApiServer::Impl {
                 }
             }
             bool needs_run_report = false;
-            auto completed_reads = co_await workspace_reads(context, page.customer_id, reads);
+            auto completed_reads = co_await workspace_reads(
+                context, page.customer_id, reads, section == "data");
             if (!completed_reads) {
                 page.error = completed_reads.error().message;
             } else {
@@ -8332,7 +8471,9 @@ struct ApiServer::Impl {
                                             status != "queued" && status != "pending");
                     } else if (page.error.empty() && capability != "list_methodologies" &&
                                capability != "list_solutions" &&
-                               !(section == "agent" && capability == "list_projects") &&
+                               !(section == "agent" && (capability == "list_projects" ||
+                                   capability == "list_agent_launches" ||
+                                   capability == "list_agent_schedules")) &&
                                !(capability == "get_solution" &&
                                  result.error.code == "unknown_capability")) {
                         page.error = result.error.message;
@@ -13778,6 +13919,13 @@ bool ApiServer::start() {
             impl.failure_reason = signing_identity.error().message;
             return false;
         }
+    }
+
+    // Open existing repository/result indexes before accepting traffic. Usage reads do not
+    // create stores for empty customers or initialize these indexes on the first request.
+    const auto warmed = impl.sync_store.warm_metering();
+    if (!warmed) {
+        std::println(stderr, "metering warmup: {}", warmed.error().message);
     }
 
     CatalogRouter router(impl.get_routes);

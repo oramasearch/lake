@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -150,9 +153,20 @@ public:
     call(std::string customer_id, std::string capability, bool read, nlohmann::json input);
     liquid::runtime::task<ZettaControlResult<nlohmann::json>>
     call(std::string customer_id, std::string workspace_id, std::string capability,
-         bool read, nlohmann::json input);
+         bool read, nlohmann::json input,
+         std::function<void(std::chrono::nanoseconds)> observe = {},
+         bool cache_definitions = false);
+    // Invalidate on a workspace change notification; successful actions also do this.
+    void invalidate_registry(const std::string& customer_id, const std::string& workspace_id);
 
 private:
+    struct RegistryEntry {
+        nlohmann::json value;
+        std::chrono::steady_clock::time_point expires;
+        std::string customer_id;
+        std::string workspace_id;
+    };
+
     WorkspaceState state_of(const std::string& customer_id,
                             const std::optional<ManagedService>& service) const;
     Result<std::optional<ManagedService>> default_service(const std::string& customer_id);
@@ -160,6 +174,9 @@ private:
     WorkspaceConfig config_;
     std::shared_ptr<Store> store_;
     std::shared_ptr<WorkspaceCaller> caller_;
+    std::mutex registry_mutex_;
+    std::map<std::string, RegistryEntry> registry_cache_;
+    std::uint64_t registry_epoch_ = 0;
 };
 
 } // namespace lake::control

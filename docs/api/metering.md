@@ -21,6 +21,13 @@ ledger before returning the hourly rows. This lets a repeated report safely obse
 history. Migration `0014_metering` owns `metering_usage`, `metering_build_records`, and
 `metering_guard`.
 
+Before accepting requests, Lake opens existing customer repositories and walks their result
+indexes so the first Metering request does not pay libliquid initialization costs. This warmup
+does not reconcile usage or write billing rows; failures are logged and do not stop the server.
+Storage-byte reads inspect pack metadata without opening or creating a customer store. A
+repository with no local storage has no artifact results and is not created by a usage read.
+Usage and build reconciliation still read current data on every request; they are not cached.
+
 ## Capability
 
 `GET /v1/metering_usage` accepts:
@@ -71,6 +78,11 @@ capability audit event.
 `PostgresMetering.*` exercises the production aggregate and build ledger. `SyncHttp.StorageQuota*`
 pushes existing content, enables a quota, proves a new write returns `busy`, and then pulls the
 original bytes unchanged. `WebUi.Metering*` covers the renderer.
+
+`PagePerformance.EveryRegisteredGetPageStaysUnderTheServerBudget` creates four repositories
+with 128 files before starting a new server. Its very first request is Metering, must finish
+below 80 ms, and must report nonzero stored bytes. The same populated page participates in the
+router-derived 20-render p95 proof. See [page performance](../ui/performance.md).
 
 ## Empty personal customers
 

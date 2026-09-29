@@ -19,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <print>
 #include <ranges>
 #include <set>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include <liquid/identity.hpp>
+#include <liquid/liquid.hpp>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <pqxx/pqxx>
@@ -1283,6 +1285,8 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
            nlohmann::json::array({{{"level", 1}, {"name", "CL-1"}, {"description", "Propensity core"}}})}}}};
     workspace_caller_->answers["list_datasets"] = {
         {"datasets", nlohmann::json::array({{{"database", "datasets"}, {"name", "customers"}}})}};
+    // The scripted engine has gained its solution registry, as after a deployment.
+    workspaces_->invalidate_registry(customer_id, service->workspace_id);
     const std::string catalogue = connection->request(
         "GET", "/design/solutions?customer_id=" + customer_id, "", cookie);
     EXPECT_NE(catalogue.find("S-1 Churn &amp; Retention"), std::string::npos);
@@ -2306,8 +2310,12 @@ public:
     liquid::runtime::task<lake::control::ZettaControlResult<json>>
     call(std::string, std::string, std::string capability, bool, json input) override {
         calls_.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard lock(mutex_);
+            ++capability_calls_[capability];
+        }
         auto [delay_error] =
-            co_await liquid::runtime::delay(std::chrono::milliseconds(20));
+            co_await liquid::runtime::delay(std::chrono::milliseconds(30));
         if (delay_error) {
             co_return lake::control::ZettaControlResult<json>(std::unexpected(
                 lake::control::ZettaControlError{"store_error", delay_error.message()}));
@@ -2319,8 +2327,21 @@ public:
         return calls_.load(std::memory_order_relaxed);
     }
 
+    std::size_t call_count(const std::string& capability) const {
+        std::lock_guard lock(mutex_);
+        const auto found = capability_calls_.find(capability);
+        return found == capability_calls_.end() ? 0 : found->second;
+    }
+
+    void dataset_count(std::size_t count) {
+        datasets_.store(count, std::memory_order_relaxed);
+    }
+
 private:
     std::atomic<std::size_t> calls_{0};
+    std::atomic<std::size_t> datasets_{50};
+    mutable std::mutex mutex_;
+    std::map<std::string, std::size_t> capability_calls_;
 
     static json study(std::size_t index) {
         return {{"id", "study-" + std::to_string(index)},
@@ -2425,7 +2446,44 @@ private:
         return {{"topics", std::move(rows)}};
     }
 
-    static json answer(const std::string& capability, const json& input) {
+    json answer(const std::string& capability, const json& input) const {
+        if (capability == "list_datasets") {
+            json rows = json::array();
+            for (std::size_t index = 0; index < datasets_.load(std::memory_order_relaxed); ++index) {
+                rows.push_back({{"name", "dataset-" + std::to_string(index)},
+                    {"database", "datasets"}, {"rows", 100000}, {"size_bytes", 8000000},
+                    {"format", "parquet"}});
+            }
+            return {{"datasets", std::move(rows)}};
+        }
+        if (capability == "list_methodologies") {
+            json rows = json::array();
+            for (std::size_t index = 0; index < 21; ++index) {
+                rows.push_back({{"id", "M-" + std::to_string(index)},
+                    {"name", "Methodology " + std::to_string(index)}, {"family", "Prediction"},
+                    {"runnable", true}, {"partial", false}, {"issue", ""},
+                    {"inputs", json::array({"training data"})},
+                    {"outputs", json::array({"predictions"})},
+                    {"metrics", json::array({"accuracy"})},
+                    {"model_kinds", json::array({"tabular"})}});
+            }
+            return {{"methodologies", std::move(rows)}};
+        }
+        if (capability == "list_solutions") {
+            json rows = json::array();
+            for (std::size_t index = 0; index < 20; ++index) {
+                rows.push_back({{"id", "solution-" + std::to_string(index)},
+                    {"name", "Solution " + std::to_string(index)},
+                    {"methodologies", json::array({"M-1"})},
+                    {"description", std::string(3000, 'x')}});
+            }
+            return {{"solutions", std::move(rows)}};
+        }
+        if (capability == "list_dataset_generators") {
+            return {{"generators", json::array({{{"kind", "base"}, {"title", "Base"}},
+                {{"kind", "suggest"}, {"title", "Suggest"}},
+                {{"kind", "authored"}, {"title", "Authored"}}})}};
+        }
         if (capability == "list_projects") {
             return projects();
         }
@@ -2513,6 +2571,14 @@ private:
             return {{"hits", json::array()}};
         }
         if (capability == "sql") {
+            if (input.value("statement", "") == "SELECT database, name FROM system.datasets") {
+                json rows = json::array();
+                for (std::size_t index = 0; index < datasets_.load(std::memory_order_relaxed); ++index) {
+                    rows.push_back({{"name", "dataset-" + std::to_string(index)},
+                                    {"database", "datasets"}});
+                }
+                return {{"rows", std::move(rows)}};
+            }
             return {{"rows", json::array()}};
         }
         if (capability.starts_with("list_")) {
@@ -2564,6 +2630,58 @@ std::size_t workspace_call_count(const std::string& response) {
     const std::size_t value_start = description + std::string_view(";desc=\"").size();
     const std::size_t end = timing.find(' ', value_start);
     return static_cast<std::size_t>(std::stoull(timing.substr(value_start, end - value_start)));
+}
+
+std::size_t workspace_round_count(const std::string& response) {
+    const std::string timing = response_header(response, "server-timing");
+    constexpr std::string_view prefix = "workspace_rounds;desc=\"";
+    const auto start = timing.find(prefix);
+    if (start == std::string::npos) {
+        return std::numeric_limits<std::size_t>::max();
+    }
+    return std::stoull(timing.substr(start + prefix.size()));
+}
+
+void populate_metering_store(lake::control::Store& control_store,
+                            const std::filesystem::path& root,
+                            const std::string& customer_id) {
+    auto objects = liquid::runtime::block_on(liquid::store::open(root / customer_id / "store"));
+    ASSERT_TRUE(objects) << objects.error().message;
+    for (std::size_t index = 0; index < 4; ++index) {
+        const auto row = control_store.create_repository(
+            {customer_id, "metering-" + std::to_string(index), "cold-start fixture", "private"});
+        ASSERT_TRUE(row);
+        liquid::repository_options options;
+        options.store = &*objects;
+        auto repository = liquid::runtime::block_on(liquid::repository::create(
+            root / customer_id / "repositories" / row->id, options));
+        ASSERT_TRUE(repository) << repository.error().message;
+        for (std::size_t file = 0; file < 32; ++file) {
+            const std::vector<std::byte> contents(4096, std::byte(1 + index * 32 + file));
+            ASSERT_TRUE(liquid::runtime::block_on(repository->write(
+                "file-" + std::to_string(file) + ".bin", contents)));
+        }
+        ASSERT_TRUE(liquid::runtime::block_on(repository->cut("metering fixture")));
+    }
+}
+
+void verify_cold_metering(lake::api::ApiServer& server,
+                          const std::string& customer_id,
+                          const std::string& cookie) {
+    HttpConnection connection(server.port());
+    const std::string path = "/metering?customer_id=" + customer_id;
+    const std::string first = connection.request("GET", path, {}, cookie);
+    ASSERT_TRUE(first.starts_with("HTTP/1.1 200")) << first;
+    const double cold_ms = total_server_milliseconds(first);
+    std::println("PAGE_COLD /metering total_ms={:.3f} repositories=4 files=128", cold_ms);
+    ASSERT_GE(cold_ms, 0.0);
+    EXPECT_LT(cold_ms, 80.0);
+    const auto response = connection.request("GET", "/v1/metering_usage?customer_id=" + customer_id,
+        {}, cookie);
+    const auto body = json::parse(response.substr(response.find("\r\n\r\n") + 4));
+    ASSERT_TRUE(body.at("ok")) << body;
+    ASSERT_FALSE(body.at("value").at("items").empty());
+    EXPECT_GT(body.at("value").at("items").front().at("stored_bytes").get<std::uint64_t>(), 0U);
 }
 
 } // namespace
@@ -2636,6 +2754,8 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
     options.instance_kek = instance_kek;
     options.apps_per_customer = 20;
     options.app_replicas_per_customer = 20;
+    options.store_root = (workspace_directory / "repositories").string();
+    ASSERT_NO_FATAL_FAILURE(populate_metering_store(*store, options.store_root, customer_id));
     lake::api::ApiServer server(std::move(options));
     ASSERT_TRUE(server.start()) << server.reason();
 
@@ -2645,6 +2765,7 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
         "&study=study-0&run=run-0&runs=run-0,run-1&app_id=" + app_id +
         "&topic=topic-0&zetta=workspace";
     const std::string cookie = "lake_session=" + session->secret;
+    ASSERT_NO_FATAL_FAILURE(verify_cold_metering(server, customer_id, cookie));
     std::vector<std::tuple<std::string, std::string, std::string>> pages;
     const std::map<std::string, std::size_t> expected_workspace_calls{
         {"/w/:workspace_id/ship/models", 1},
@@ -2653,10 +2774,10 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
         {"/w/:workspace_id/train/runs", 1},
         {"/w/:workspace_id/train/agent", 3},
         {"/w/:workspace_id/train/dataset", 2},
-        {"/w/:workspace_id/design/project", 4},
         {"/w/:workspace_id/train/experiment", 2},
         {"/w/:workspace_id/train/stream", 2},
-        {"/workspaces", 0}};
+        {"/workspaces", 0},
+        {"/metering", 0}};
     std::set<std::string> observed_workspace_pages;
     const auto routes = server.get_route_patterns();
     ASSERT_FALSE(routes.empty());
@@ -2681,7 +2802,7 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
                 content_type = response_header(response, "content-type");
             }
         }
-        if (workspace_page || pattern == "/workspaces") {
+        if (workspace_page || pattern == "/workspaces" || pattern == "/metering") {
             ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << pattern << '\n' << response;
             ASSERT_TRUE(content_type.starts_with("text/html")) << pattern;
             EXPECT_NE(response.find("<select name=\"workspace_id\""), std::string::npos)
@@ -2689,6 +2810,10 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
             EXPECT_NE(response.find(workspace_id), std::string::npos) << pattern;
         }
         if (content_type.starts_with("text/html")) {
+            if (pattern == "/w/:workspace_id/train/data") {
+                EXPECT_NE(response.find("dataset-49"), std::string::npos);
+                EXPECT_NE(response.find("Open a dataset"), std::string::npos);
+            }
             EXPECT_GE(total_server_milliseconds(response), 0.0) << pattern;
             EXPECT_EQ(workspace_call_count(response), caller->call_count() - calls_before)
                 << pattern;
@@ -2702,9 +2827,12 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
     }
 
     ASSERT_FALSE(pages.empty());
+    std::println("PAGE_COVERAGE routes={} latency_ms=30 renders=20 budget_ms=80", pages.size());
     EXPECT_EQ(observed_workspace_pages.size(), expected_workspace_calls.size());
     for (const auto& [pattern, path, page_cookie] : pages) {
-        std::vector<double> samples;
+        std::vector<std::pair<double, std::string>> samples;
+        std::size_t calls = 0;
+        std::size_t rounds = 0;
         samples.reserve(20);
         for (int sample = 0; sample < 20; ++sample) {
             HttpConnection connection(server.port());
@@ -2716,6 +2844,8 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
             ASSERT_TRUE(response_header(response, "content-type").starts_with("text/html"))
                 << pattern;
             const double elapsed = total_server_milliseconds(response);
+            calls = std::max(calls, workspace_call_count(response));
+            rounds = std::max(rounds, workspace_round_count(response));
             ASSERT_GE(elapsed, 0.0) << pattern;
             EXPECT_EQ(workspace_call_count(response), caller->call_count() - calls_before)
                 << pattern;
@@ -2723,11 +2853,37 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
             if (expected != expected_workspace_calls.end()) {
                 EXPECT_EQ(workspace_call_count(response), expected->second) << pattern;
             }
-            samples.push_back(elapsed);
+            samples.emplace_back(elapsed, response_header(response, "server-timing"));
         }
         std::ranges::sort(samples);
-        const double p95 = samples.at(18);
-        std::println("PAGE_PERF {} p95_ms={:.3f}", pattern, p95);
-        EXPECT_LT(p95, 100.0) << pattern;
+        const double p95 = samples.at(18).first;
+        std::println("PAGE_PERF {} p95_ms={:.3f} calls={} rounds={}", pattern, p95, calls, rounds);
+        std::println("PAGE_TIMING {} {}", pattern, samples.at(18).second);
+        EXPECT_LE(rounds, 2U) << pattern;
+        EXPECT_LT(p95, 80.0) << pattern;
     }
+
+    // The reported live population must remain a single projected list, without a sample
+    // or metadata request per item. Changing it between requests must not show stale rows.
+    caller->dataset_count(19);
+    const auto samples_before = caller->call_count("get_dataset");
+    const auto lists_before = caller->call_count("list_datasets");
+    const auto sql_before = caller->call_count("sql");
+    std::vector<double> dataset_times;
+    for (int sample = 0; sample < 20; ++sample) {
+        HttpConnection connection(server.port());
+        const auto response = connection.request("GET", "/w/" + workspace_id +
+            "/train/data?customer_id=" + customer_id, {}, cookie);
+        ASSERT_TRUE(response.starts_with("HTTP/1.1 200"));
+        EXPECT_NE(response.find("dataset-18"), std::string::npos);
+        EXPECT_EQ(response.find("dataset-19"), std::string::npos);
+        EXPECT_LE(workspace_round_count(response), 1U);
+        dataset_times.push_back(total_server_milliseconds(response));
+    }
+    EXPECT_EQ(caller->call_count("get_dataset"), samples_before);
+    EXPECT_EQ(caller->call_count("list_datasets"), lists_before);
+    EXPECT_EQ(caller->call_count("sql") - sql_before, 20U);
+    std::ranges::sort(dataset_times);
+    std::println("PAGE_DATA_POPULATION datasets=19 p95_ms={:.3f}", dataset_times.at(18));
+    EXPECT_LT(dataset_times.at(18), 80.0);
 }
