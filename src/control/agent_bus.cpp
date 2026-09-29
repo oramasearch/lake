@@ -288,15 +288,15 @@ reap_workspace_topics(Store& store, WorkspaceService& workspaces,
     }
     std::size_t reaped = 0;
     for (const auto& customer : *customers) {
-        const auto services = store.list_services(customer.id);
-        if (!services) {
-            co_return bus_failure<std::size_t>(services.error().code, services.error().message);
+        const auto rows = store.list_workspaces(customer.id);
+        if (!rows) {
+            co_return bus_failure<std::size_t>(rows.error().code, rows.error().message);
         }
-        for (const auto& service : *services) {
-            if (service.kind != "zetta" || service.desired != "present" || service.phase != "Ready") {
+        for (const auto& workspace : *rows) {
+            if (workspace.desired != "running") {
                 continue;
             }
-            WorkspaceAgentBus bus(&workspaces, customer.id, service.id);
+            WorkspaceAgentBus bus(&workspaces, customer.id, workspace.id);
             const auto topics = settled(co_await bus.call("list_topics", nlohmann::json::object()));
             if (!topics) {
                 continue;
@@ -310,12 +310,12 @@ reap_workspace_topics(Store& store, WorkspaceService& workspaces,
                 if (topic.starts_with("app-events.")) {
                     const auto app = store.get_web_app(topic.substr(11));
                     remove = !app ? app.error().code == "not_found"
-                        : app->customer_id == customer.id && app->workspace_id == service.id &&
+                        : app->customer_id == customer.id && app->workspace_id == workspace.id &&
                           (app->desired == "deleted" || app->phase == "Deleted");
                 } else if (topic.starts_with("build-events.")) {
                     const auto build = store.get_build(topic.substr(13));
                     remove = !build && build.error().code == "not_found";
-                    if (build && build->customer_id == customer.id && build->workspace_id == service.id) {
+                    if (build && build->customer_id == customer.id && build->workspace_id == workspace.id) {
                         remove = build_topic_expired(*build, now);
                     }
                 }

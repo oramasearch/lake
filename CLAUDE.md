@@ -225,12 +225,14 @@ workspace-native event topics and the space's Agent tasks rows replace per-turn 
 `docs/api/streams.md`, `docs/ui/streams.md` and `docs/control-plane/streams.md`; the operator
 schema/guard handoff remains a rollout prerequisite.
 
-Workspace data-plane cutover adds migration `0038_workspace_data_plane`: tasks, apps and builds
-require immutable explicit workspace service IDs; event topics use that workspace, never the
+Workspace data-plane cutover adds migrations `0038_workspace_data_plane` and `0039_workspaces`:
+tasks, apps and builds require immutable explicit `workspaces.id` values; event topics use that workspace, never the
 Lake bus. Only agent dispatch topics remain on the bus. Design, Train and Ship navigation uses
 `/w/<workspace_id>/...` and a global top-bar selector. The storage audit and remaining migrations
 are tracked in `docs/architecture/workspace-data-plane.md`; operator and agent client cutover,
-and upstream 60-second polls, are linked follow-ups rather than deployment claims.
+and upstream 60-second polls, are linked follow-ups rather than deployment claims. Workspace CRUD
+and the Workspaces page write desired state; the operator owns observations. See
+`docs/control-plane/workspaces.md` for the contract, guard and approved dev-cluster replacement.
 
 Agent-session custody adds migration `0017_agent_sessions` and a maximum 15-minute Ed25519 key
 delegated to a durable agent by a canonical `delegation/1` attestation. The attestation is appended
@@ -331,7 +333,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `workspace_data_plane_guard` in the source tree, versioned by content hash).
+  `workspaces_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

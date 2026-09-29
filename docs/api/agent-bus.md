@@ -51,7 +51,9 @@ another workspace, even when the same customer owns both workspaces.
 Anyone who may read a task can follow it live with `receive_agent_events`. Ask Orama uses it to
 wait on a subagent it delegated to. Following a task reads retained events in its workspace and
 selects its correlation ID. Cursors belong to that workspace topic. Task creates require
-`workspace_id`; missing, unknown or foreign IDs return `invalid_input`. Claim replies include the
+`workspace_id` from `workspaces.id` (resolved through `zetta_service_id`); missing, unknown or
+foreign IDs return `invalid_input`. Agent instructions list workspaces rather than inferring
+identity from services. Claim replies include the
 persisted ID in the envelope and body. Event reads/publication must supply the same ID.
 
 **Nothing secret is on the bus.** Topics carry task ids only. The body travels in the answer to a

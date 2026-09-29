@@ -6,7 +6,7 @@ Job and reports status through the [build row](../control-plane/builds.md).
 
 ## Capabilities
 
-All build capabilities require `workspace_id`, the owning workspace Zetta's `services.id`.
+All build capabilities require `workspace_id`, the owning workspace's `workspaces.id`.
 Creation persists it immutably; missing, unknown or foreign IDs return `invalid_input`.
 App builds use the app's same workspace. Event publication, reads and logs use that workspace's
 `build-events.<id>`, retained for 24 hours/5,000 events and reaped after the terminal 24-hour

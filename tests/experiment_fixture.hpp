@@ -300,7 +300,7 @@ struct ExperimentWorkspace {
             throw std::runtime_error("could not request experiment workspace");
         }
         const auto& workspace = **state;
-        id = workspace.service_id;
+        id = workspace.workspace_id;
         const auto ready = store->set_service_status(workspace.service_id, "Ready", "", "http://experiments.test");
         if (!ready) {
             throw std::runtime_error(ready.error().message);

@@ -225,9 +225,9 @@ std::string flows_markdown(const Registry& registry) {
 }
 
 constexpr std::string_view rules =
-    "- Every Design, Train and Ship tool takes `customer_id`: the space you work in "
-    "(`list_services` or `workspace_status` with your own customer id). Start the workspace "
-    "once with `start_workspace` and wait for `workspace_status` to report ready.\n"
+    "- Every Design, Train and Ship data-plane tool takes `customer_id` and an explicit "
+    "`workspace_id` from `list_workspaces`. A workspace ID is not a service ID. Create one with "
+    "`create_workspace` (name and environment), then wait for `workspace_status` to report ready.\n"
     "- An edited pipeline is **proposed** again: approve it (`workspace_act`, capability "
     "`approve_plan`) before `run_pipeline`.\n"
     "- `run_pipeline` runs Zetta's checks first; a failing gate answers `{gate}` and runs "

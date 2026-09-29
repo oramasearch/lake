@@ -496,6 +496,9 @@ space-scoped bus views are specified in [`streams.md`](streams.md).
 `0038_workspace_data_plane` adds immutable workspace service IDs to tasks, apps and builds.
 `workspace_assignments` records sole-default legacy assignments and unresolved object/customer
 IDs; no event payloads are added. Inserts require a live Zetta in the same customer and updates
-cannot change workspace/customer identity. The newest guard is `workspace_data_plane_guard`.
+cannot change workspace/customer identity. Migration `0039_workspaces` replaces the service
+foreign keys with `workspaces(id)`, records legacy naming remaps, and adds workspace desired
+state with notifications on every change. The newest guard is `workspaces_guard`.
+See [the workspace contract](workspaces.md) for the operator handoff and migration details.
 See the [workspace data-plane design](../architecture/workspace-data-plane.md) for remediation,
 cutover, retention and the complete storage audit.

@@ -3,6 +3,9 @@
 One folder per topic, one file per subject. The root README is the front door; this index points
 to the detailed contracts and records.
 
+[control-plane/workspaces.md](control-plane/workspaces.md) defines migration 0039, workspace
+desired state, operator notifications, the schema guard and the approved dev-cluster cutover.
+
 | Topic | Files |
 |---|---|
 | [`architecture/`](architecture/) | [`workspace-data-plane.md`](architecture/workspace-data-plane.md) — explicit workspace ownership, event cutover, storage audit and migration; [`workspace-selection.md`](ui/workspace-selection.md) — global selector and canonical navigation |

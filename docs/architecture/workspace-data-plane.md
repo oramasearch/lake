@@ -12,17 +12,19 @@ exception whose design remains open; metering is workspace data, not an implicit
 A customer can own multiple workspaces. Lake's control stores retain customer/workspace identities,
 memberships, grants, workspace-to-service routing, and content-free agent dispatch.
 
-`workspace_id` is the immutable `services.id` of a customer's Zetta service. Creates require it.
+`workspace_id` is the immutable `workspaces.id` of a customer's workspace. Creates require it.
 Missing, malformed, unknown, foreign-customer, non-Zetta, or withdrawn IDs return `invalid_input`
 with `/workspace_id`. A known workspace without its Ready endpoint and mounted credential returns
-`workspace_not_ready`. The person can provision a workspace through the existing services flow.
+`workspace_not_ready`. The person requests a workspace by name and environment on Workspaces.
 There is no implicit default and no event fallback to Lake's Zetta or PostgreSQL.
 
 Tasks, apps, and builds persist this routing identity in the control store in this first step;
 their other data remains a separately tracked migration. Task claims return the ID and the task's
 workspace URL. Child tasks must pass it explicitly. App builds must name their app's workspace.
-Workspace callers validate ownership and use that exact service's endpoint and mounted credential.
-Replacement services have new IDs; existing objects never silently move to a replacement.
+Workspace callers validate ownership, resolve `workspaces.zetta_service_id`, and use that
+service's endpoint and mounted credential. The operator reconciles desired state; Lake does
+not provision Kubernetes resources. See [the workspace contract](../control-plane/workspaces.md)
+for migration 0039, notifications, the schema guard and the approved dev-cluster replacement.
 
 Migration assigns existing rows only when a customer has exactly one live Zetta service and that
 service is its current default. Each assignment is recorded. Unresolved object/customer IDs are
@@ -47,7 +49,9 @@ The path is authoritative; a contradictory form or customer ID is refused.
 
 Old page URLs redirect to the last valid workspace remembered in a cookie, or the space's only
 workspace. Multiple choices without a valid remembered ID require selection. A remembered ID is
-validated against the current caller and customer. New workspace provisions through services.
+validated against the current caller and customer. New workspace opens `/workspaces`, with
+name/environment creation and typed-name deletion. The selector lists workspace rows, including
+Pending workspaces; it does not infer workspaces from services.
 
 ## Events and Retention
 
@@ -101,6 +105,8 @@ only the three listed below; no names are invented for the four unobserved datas
 | `schema_migrations` | multitenancy/dispatch | Control-schema version bookkeeping. |
 | `workspace_assignments` | multitenancy/dispatch | Recorded legacy routing assignments and unresolved ownership; no event bodies. |
 | `workspace_data_plane_guard` | multitenancy/dispatch | Migration 0038 application marker. |
+| `workspaces` | multitenancy/dispatch | Customer workspace identity, desired lifecycle and operator routing/status contract. |
+| `workspaces_guard` | multitenancy/dispatch | Migration 0039 application marker for the operator schema Job. |
 | `users` | multitenancy/dispatch | Identity reference for customer membership. |
 | `organizations` | multitenancy/dispatch | Tenant identity and organization boundary. |
 | `customers` | multitenancy/dispatch | Space ownership and tenant routing. |

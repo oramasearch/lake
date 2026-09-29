@@ -324,10 +324,10 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     }
     if (state.proceed && input.contains("workspace_id")) {
         const auto workspace = context.store
-            ? context.store->get_service(context.workspace_id)
-            : control::Result<control::ManagedService>(std::unexpect,
+            ? context.store->get_workspace(context.workspace_id)
+            : control::Result<control::Workspace>(std::unexpect,
                   control::StoreError{"invalid_input", "workspace_id is unknown"});
-        if (!workspace || workspace->kind != "zetta" || workspace->desired != "present" ||
+        if (!workspace ||
             (input.contains("customer_id") && input.at("customer_id") != workspace->customer_id) ||
             (!context.path_workspace_id.empty() && context.workspace_id != context.path_workspace_id)) {
             state.result = ApiResult::failure("invalid_input",

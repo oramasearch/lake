@@ -186,7 +186,7 @@ struct StreamWorkspace {
             throw std::runtime_error("could not request test workspace");
         }
         const auto& workspace = **state;
-        id = workspace.service_id;
+        id = workspace.workspace_id;
         const auto ready = store->set_service_status(workspace.service_id, "Ready", "", "http://workspace.test");
         if (!ready) {
             throw std::runtime_error(ready.error().message);
@@ -197,17 +197,18 @@ struct StreamWorkspace {
 
     std::string add(const std::shared_ptr<control::InMemoryStore>& store,
                     const std::string& customer, const std::string& name) {
-        const auto workspace = service->create_service({customer, "zetta", name, ""});
-        if (!workspace) {
-            throw std::runtime_error(workspace.error().message);
+        const auto row = store->create_workspace({customer, name, "prod", ""});
+        if (!row) {
+            throw std::runtime_error(row.error().message);
         }
+        const auto workspace = store->get_service(row->zetta_service_id);
         const auto ready = store->set_service_status(workspace->id, "Ready", "", "http://" + name + ".test");
         if (!ready) {
             throw std::runtime_error(ready.error().message);
         }
         std::ofstream(directory / (workspace->slug + ".json")) <<
             nlohmann::json{{"kind", "zetta"}, {"token", "token-" + name}}.dump();
-        return workspace->id;
+        return row->id;
     }
 };
 } // namespace lake::test

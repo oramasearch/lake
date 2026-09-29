@@ -30,7 +30,7 @@ in `payload`, not as an unspecified schema object.
 | `update_stream_message` | write | `update_event` |
 | `delete_stream_messages` | admin | `delete_events` |
 
-`customer_id` is the space ID. Required `workspace_id` is the immutable workspace service ID;
+`customer_id` is the space ID. Required `workspace_id` is the immutable `workspaces.id`;
 missing, unknown or foreign IDs return `invalid_input`. `zetta` is `workspace` or `bus`, not a URL.
 `list_streams` declares candidate authorization and explicitly checks the space's read permission
 inside its handler before either Zetta is called. The other operations use registry authorization.

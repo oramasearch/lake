@@ -937,11 +937,16 @@ void register_web_app_capabilities(Registry& registry) {
                 co_return ApiResult::failure("store_unavailable",
                                              "managed services are not configured");
             }
+            const auto app = owned_app(input, context);
+            if (!app) {
+                co_return app.error();
+            }
             json create{{"customer_id", input.at("customer_id")},
                         {"kind", input.at("kind")},
                         {"name", input.at("name")},
                         {"instances", input.value("instances", 1)},
                         {"storage_gi", input.value("storage_gi", 10)}};
+            create["workspace_id"] = input.at("workspace_id");
             auto created = co_await registry.call_async("create_service", create, context);
             if (!created) {
                 co_return ApiResult::failure("store_error", created.error().message);

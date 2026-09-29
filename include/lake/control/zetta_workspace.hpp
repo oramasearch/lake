@@ -19,7 +19,7 @@ namespace lake::control {
 // and Postgres clusters that lake records in its control Postgres and the Orama operator runs.
 // The operator mounts each Ready service's connection into lake as `<service_dir>/<slug>.json`.
 // The customer's workspace, the Zetta cluster Design, Train and Ship delegate to
-// (docs/api/workspaces.md), is its default Zetta service.
+// (docs/api/workspaces.md), resolves its Zetta service through workspaces.zetta_service_id.
 struct WorkspaceConfig {
     std::string service_dir;          // LAKE_SERVICE_DIR
     std::size_t max_per_customer = 0; // LAKE_SERVICES_PER_CUSTOMER; 0 (the default) means no limit
@@ -56,11 +56,12 @@ std::string workspace_slug(std::string_view customer_id);
 
 // A service as the API and the pages show it: never its credential.
 nlohmann::json service_json(const ManagedService& service);
+nlohmann::json workspace_json(const Workspace& workspace);
 // A store as the API and the pages show it (docs/control-plane/storage.md): never its credential.
 nlohmann::json store_json(const ManagedStore& store);
 
 struct WorkspaceState {
-    std::string slug, service_id;
+    std::string slug, service_id, workspace_id;
     bool requested = false; // a default Zetta service is present
     std::string phase;      // the operator's: Provisioning, Ready, Failed, Deleting; empty if none
     std::string message;
@@ -134,11 +135,11 @@ public:
     // connections, or nothing before it is delivered.
     std::optional<nlohmann::json> store_connection(const ManagedStore& store) const;
 
-    // The workspace: the default Zetta service.
+    // Legacy default status, and explicit workspace status for data-plane callers.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>> state(std::string customer_id);
     liquid::runtime::task<ZettaControlResult<WorkspaceState>>
     state(std::string customer_id, std::string workspace_id);
-    // Creates the default Zetta service; asking again for an existing one is harmless.
+    // Legacy idempotent request for the named `workspace` in the prod environment.
     liquid::runtime::task<ZettaControlResult<WorkspaceState>>
     request(std::string customer_id, std::string requested_by = {});
     // Marks the default service absent: the operator deletes the cluster, its data volume and

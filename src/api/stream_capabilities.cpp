@@ -357,7 +357,7 @@ owner_key(ApiContext& context, const json& input) {
         co_return std::expected<control::StreamOwner, ApiResult>(std::unexpect,
             ApiResult::failure("store_unavailable", "workspace is not ready"));
     }
-    co_return control::StreamOwner{input.at("customer_id"), state->service_id,
+    co_return control::StreamOwner{input.at("customer_id"), input.at("workspace_id"),
                                   topic_name(input.at("topic")), context.acting_identity};
 }
 

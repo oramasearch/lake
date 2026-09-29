@@ -352,7 +352,7 @@ void register_service_capabilities(Registry& registry) {
         .description = "Ask the operator for a new service from the catalog (Postgres, Zetta, "
                        "Kafka, ClickHouse, TiDB, Cassandra, Valkey as a preview). "
                        "`instances` is 1-3 (default 1), `storage_gi` 1-100 (default 10).",
-        .input_schema = control_input_schema(
+        .input_schema = customer_input_schema(
             {{"kind",
               {{"type", "string"},
                {"enum",
@@ -379,6 +379,7 @@ void register_service_capabilities(Registry& registry) {
             }
             control::NewManagedService service;
             service.customer_id = input.at("customer_id");
+            service.workspace_id = input.at("workspace_id");
             service.kind = input.at("kind");
             service.name = input.at("name");
             service.instances = input.value("instances", 1);
@@ -3775,6 +3776,98 @@ void register_agent_bus_capabilities(Registry& registry) {
 }
 
 void register_workspace_capabilities(Registry& registry) {
+    for (const std::string operation : {"list_workspaces", "get_workspace", "create_workspace",
+                                        "update_workspace", "delete_workspace"}) {
+        const bool listing = operation == "list_workspaces";
+        const bool creating = operation == "create_workspace";
+        const bool updating = operation == "update_workspace";
+        const bool deleting = operation == "delete_workspace";
+        const bool read = listing || operation == "get_workspace";
+        json properties = json::object();
+        json required = json::array();
+        if (creating || updating) {
+            properties["name"] = {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}};
+            properties["environment"] = {{"type", "string"}, {"minLength", 1}, {"maxLength", 47},
+                {"pattern", "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"}};
+        }
+        if (creating) {
+            required = json::array({"name", "environment"});
+        }
+        if (updating) {
+            properties["desired"] = {{"type", "string"}, {"enum", {"running", "stopped"}}};
+        }
+        if (deleting) {
+            properties["confirm"] = {{"type", "string"}};
+            required.push_back("confirm");
+        }
+        registry.add(Capability{
+            .name = operation,
+            .title = operation,
+            .description = "Manage workspace desired state. Operator observations are read-only.",
+            .input_schema = listing || creating ? control_input_schema(properties, required)
+                                                : customer_input_schema(properties, required),
+            .output_schema = {{"type", "object"}},
+            .kind = read ? CapabilityKind::Read : CapabilityKind::Action,
+            .object = "customer",
+            .action = deleting ? "admin" : read ? "read" : "write",
+            .resolve_object = customer_object,
+            .authorizes_candidates = listing,
+            .handler = [operation, listing, creating, deleting](const json& input, ApiContext& context) {
+                if (listing) {
+                    const auto object = customer_object(input, context);
+                    if (!object) {
+                        return ApiResult::failure(object.error().code, object.error().message);
+                    }
+                    if (context.acting_identity != "admin") {
+                        const auto decision = control::authorize(*context.store, context.acting_identity,
+                            *object, "read", context.authorization_cache);
+                        if (!decision || !decision->allowed) {
+                            return ApiResult::failure("unauthorized", "principal cannot read this space");
+                        }
+                    }
+                    const auto rows = context.store->list_workspaces(input.at("customer_id"));
+                    if (!rows) {
+                        return store_failure(rows.error());
+                    }
+                    json result = json::array();
+                    for (const auto& row : *rows) {
+                        result.push_back(control::workspace_json(row));
+                    }
+                    return ApiResult::success({{"workspaces", result}});
+                }
+                if (creating) {
+                    const auto row = context.store->create_workspace({input.at("customer_id"),
+                        input.at("name"), input.at("environment"), context.acting_identity});
+                    return row ? ApiResult::success(control::workspace_json(*row)) : store_failure(row.error());
+                }
+                const auto row = context.store->get_workspace(input.at("workspace_id"));
+                if (!row || row->customer_id != input.at("customer_id").get<std::string>()) {
+                    return ApiResult::failure("invalid_input", "workspace_id is not in this space", "/workspace_id");
+                }
+                if (operation == "get_workspace") {
+                    return ApiResult::success(control::workspace_json(*row));
+                }
+                control::WorkspacePatch patch;
+                if (deleting) {
+                    if (input.at("confirm") != row->name) {
+                        return ApiResult::failure("invalid_input", "confirm must match the workspace name", "/confirm");
+                    }
+                    patch.desired = "deleted";
+                } else {
+                    if (input.contains("name")) {
+                        patch.name = input.at("name").get<std::string>();
+                    }
+                    if (input.contains("environment")) {
+                        patch.environment = input.at("environment").get<std::string>();
+                    }
+                    if (input.contains("desired")) {
+                        patch.desired = input.at("desired").get<std::string>();
+                    }
+                }
+                const auto updated = context.store->update_workspace(row->id, patch);
+                return updated ? ApiResult::success(control::workspace_json(*updated)) : store_failure(updated.error());
+            }});
+    }
     register_agent_run_capabilities(registry);
     register_agent_flow_capabilities(registry);
     register_agent_bus_capabilities(registry);
@@ -3836,47 +3929,6 @@ void register_workspace_capabilities(Registry& registry) {
                 co_return ApiResult::failure(state->error().code, state->error().message);
             }
             co_return ApiResult::success((*state)->to_json());
-        }});
-    registry.add(Capability{
-        .name = "delete_workspace",
-        .title = "Delete a workspace",
-        .description =
-            "Delete the customer's Zetta workspace. The operator removes its cluster, "
-            "projects, data and models, which cannot be recovered. `confirm` must be the "
-            "workspace id.",
-        .input_schema =
-            customer_input_schema({{"confirm", {{"type", "string"}}}}, json::array({"confirm"})),
-        .output_schema = {{"type", "object"}},
-        .kind = CapabilityKind::Action,
-        .object = "customer",
-        .action = "admin",
-        .resolve_object = customer_object,
-        .async_handler = [](const json& input,
-                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            if (!context.workspaces) {
-                co_return unavailable();
-            }
-            auto current = co_await context.workspaces->state(input.at("customer_id"), input.at("workspace_id"));
-            if (!current) {
-                co_return ApiResult::failure("store_unavailable", current.error().message);
-            }
-            if (!*current) {
-                co_return ApiResult::failure(current->error().code, current->error().message);
-            }
-            const std::string slug = (*current)->slug;
-            if (input.at("confirm") != slug) {
-                co_return ApiResult::failure(
-                    "invalid_input", "confirm must be the workspace id " + slug, "/confirm");
-            }
-            set_audit(context, "workspace.delete", input, "");
-            const auto removed = context.workspaces->delete_service(input.at("customer_id"),
-                                                                    input.at("workspace_id"));
-            if (!removed) {
-                co_return ApiResult::failure(removed.error().code, removed.error().message);
-            }
-            co_return ApiResult::success({{"workspace", removed->slug},
-                {"service_id", removed->id}, {"requested", false}, {"ready", false},
-                {"phase", "Deleting"}, {"message", ""}});
         }});
     registry.add(Capability{
         .name = "workspace_openapi",
