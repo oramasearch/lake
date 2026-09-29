@@ -11,6 +11,7 @@
 #include "lake/control/builds.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
+#include "workspace_bus.hpp"
 
 namespace lake::api {
 namespace {
@@ -452,7 +453,7 @@ void register_build_capabilities(Registry& registry) {
                                              "the build event bus is not configured");
             }
             const std::string topic = build_events_topic(build->id);
-            control::WorkspaceAgentBus bus(context.workspaces, build->customer_id, build->workspace_id);
+            WorkspaceApiBus bus(context, build->customer_id, build->workspace_id);
             if (control::build_topic_expired(*build)) {
                 co_return ApiResult::failure("not_found", "build events have expired");
             }
@@ -495,7 +496,7 @@ void register_build_capabilities(Registry& registry) {
                                              "the build event bus is not configured");
             }
             const std::string topic = build_events_topic(build->id);
-            control::WorkspaceAgentBus bus(context.workspaces, build->customer_id, build->workspace_id);
+            WorkspaceApiBus bus(context, build->customer_id, build->workspace_id);
             auto batch = control::settled(co_await bus.receive(
                 topic, static_cast<std::uint64_t>(from), 1000, std::chrono::milliseconds(wait)));
             if (!batch) {
@@ -536,7 +537,7 @@ void register_build_capabilities(Registry& registry) {
                                              "the build event bus is not configured");
             }
             const std::string topic = build_events_topic(build->id);
-            control::WorkspaceAgentBus bus(context.workspaces, build->customer_id, build->workspace_id);
+            WorkspaceApiBus bus(context, build->customer_id, build->workspace_id);
             json events = json::array();
             json lines = json::array();
             std::uint64_t next_sequence = 1;

@@ -4,6 +4,10 @@
 production router, renders every discovered HTML page 20 times, and enforces p95 below 100 ms.
 Its workspace fixture adds 20 ms per call and supplies high-cardinality project, run, model,
 study, topic, and app lists. Passing output includes one `PAGE_PERF` row per page.
+It requires `LAKE_TEST_DB_URI`, uses a regular authenticated user, and rejects redirects or errors
+for canonical `/w/:workspace_id/...` pages and `/workspaces`.
+Non-workspace discovery also tries operator and signed-out profiles to include protected operator
+pages and public sign-in forms.
 
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
 workspace alias checks, audit, REST/MCP parity and actual calls, hashed assets, navigation and

@@ -334,6 +334,12 @@ std::shared_ptr<RequestTiming> request_timing(const boost::http::route_params& r
     return found == request_timings.end() ? nullptr : found->second;
 }
 
+void start_request_timing(const boost::http::route_params& route,
+                          std::chrono::steady_clock::time_point started) {
+    std::lock_guard lock(request_timings_mutex);
+    request_timings.insert_or_assign(&route, std::make_shared<RequestTiming>(started));
+}
+
 class RequestTimingScope {
 public:
     RequestTimingScope(const boost::http::route_params& route,
@@ -4824,7 +4830,8 @@ struct ApiServer::Impl {
     boost::http::route_task observe_request(boost::http::route_params& route,
                                             std::string route_pattern,
                                             boost::http::route_task task) {
-        const auto start = std::chrono::steady_clock::now();
+        const auto timing = request_timing(route);
+        const auto start = timing ? timing->started : std::chrono::steady_clock::now();
         const RequestTimingScope timing_scope(route, start);
         auto result = co_await std::move(task);
         record_request(route, route_pattern, start);
@@ -7789,9 +7796,7 @@ struct ApiServer::Impl {
     }
 
     liquid::runtime::task<std::vector<ApiResult>>
-    workspace_reads(ApiContext context,
-                    const std::string& customer_id,
-                    std::vector<WorkspaceRead> reads) {
+    page_reads(ApiContext context, std::vector<WorkspaceRead> reads) {
         if (reads.empty()) {
             co_return std::vector<ApiResult>{};
         }
@@ -7805,11 +7810,7 @@ struct ApiServer::Impl {
         for (std::size_t index = 0; index < reads.size(); ++index) {
             auto& [capability, input] = reads[index];
             pending.push_back(complete_workspace_read(workspace_call(
-                "workspace_query",
-                {{"customer_id", customer_id},
-                 {"capability", capability},
-                 {"input", std::move(input)}},
-                contexts[index])));
+                std::move(capability), std::move(input), contexts[index])));
         }
         auto [wait_error, completed] =
             co_await liquid::runtime::when_all(std::move(pending));
@@ -7824,6 +7825,45 @@ struct ApiServer::Impl {
             results.push_back(unwrap(std::move(result.value)));
         }
         co_return results;
+    }
+
+    liquid::runtime::task<std::vector<ApiResult>>
+    workspace_reads(ApiContext context,
+                    const std::string& customer_id,
+                    std::vector<WorkspaceRead> reads) {
+        for (auto& [capability, input] : reads) {
+            input = {{"customer_id", customer_id},
+                     {"capability", capability},
+                     {"input", std::move(input)}};
+            capability = "workspace_query";
+        }
+        co_return co_await page_reads(std::move(context), std::move(reads));
+    }
+
+    struct ProjectGraphReads {
+        ApiResult project;
+        std::vector<ApiResult> graphs;
+    };
+
+    liquid::runtime::task<ProjectGraphReads>
+    project_graph_reads(ApiContext context, std::string customer_id, std::string name) {
+        ApiResult project = unwrap(co_await workspace_call(
+            "workspace_query",
+            {{"customer_id", customer_id},
+             {"capability", "get_project"},
+             {"input", {{"name", name}}}},
+            context));
+        std::vector<WorkspaceRead> reads;
+        if (project.ok) {
+            for (const auto& graph : project.value.value("graphs", nlohmann::json::array())) {
+                reads.push_back({"get_graph",
+                                 {{"project", name},
+                                  {"graph", graph.value("name", std::string())}}});
+            }
+        }
+        auto graphs = co_await workspace_reads(std::move(context), customer_id, std::move(reads));
+        co_return ProjectGraphReads{
+            std::move(project), graphs ? std::move(*graphs) : std::vector<ApiResult>{}};
     }
 
     // The pipeline page's data (docs/design/zetta-parity.md): the graph, this workspace's runs and
@@ -8031,32 +8071,6 @@ struct ApiServer::Impl {
                 page.state = status.value;
             }
         }
-        if (section == "agent" && page.unavailable.empty() && page.state.value("ready", false)) {
-            // The approved Pipelines this agent could be granted (lake#238).
-            nlohmann::json approved = nlohmann::json::array();
-            const ApiResult projects =
-                unwrap(co_await workspace_call("workspace_query",
-                                               {{"customer_id", page.customer_id},
-                                                {"capability", "list_projects"},
-                                                {"input", nlohmann::json::object()}},
-                                               context));
-            for (const nlohmann::json& entry :
-                 projects.ok ? projects.value.value("projects", nlohmann::json::array())
-                             : nlohmann::json::array()) {
-                if (!entry.is_object()) {
-                    continue;
-                }
-                const std::string project = entry.value("name", std::string());
-                for (const nlohmann::json& graph :
-                     entry.value("graphs", nlohmann::json::array())) {
-                    if (graph.value("approval", std::string()) == "approved") {
-                        approved.push_back(
-                            {{"project", project}, {"graph", graph.value("name", std::string())}});
-                    }
-                }
-            }
-            page.data["approved_pipelines"] = std::move(approved);
-        }
         if (section == "agent" && page.unavailable.empty()) {
             const ApiResult launches = unwrap(co_await workspace_call(
                 "list_agent_launches",
@@ -8156,6 +8170,7 @@ struct ApiServer::Impl {
         }
         if (page.unavailable.empty() && page.state.value("ready", false)) {
             std::vector<std::pair<std::string, nlohmann::json>> reads;
+            std::vector<ApiResult> project_graphs;
             if (section == "methodologies" || section == "methodology") {
                 reads = {{"list_methodologies", nlohmann::json::object()},
                          {"list_solutions", nlohmann::json::object()}};
@@ -8167,10 +8182,38 @@ struct ApiServer::Impl {
             } else if (section == "projects") {
                 reads = {{"list_projects", nlohmann::json::object()}};
             } else if (section == "project") {
-                reads = {{"get_project", {{"name", page.subject}}},
-                         {"list_datasets", nlohmann::json::object()},
-                         // What the engine runs (lake#289); an older engine has no registry.
-                         {"list_methodologies", nlohmann::json::object()}};
+                const std::vector<WorkspaceRead> catalogues{
+                    {"list_datasets", nlohmann::json::object()},
+                    {"list_methodologies", nlohmann::json::object()}};
+                auto [wait_error, project, listed] = co_await liquid::runtime::when_all(
+                    liquid::runtime::as_io(
+                        project_graph_reads(context, page.customer_id, page.subject)),
+                    liquid::runtime::as_io(workspace_reads(context, page.customer_id, catalogues)));
+                if (wait_error) {
+                    page.error = wait_error.message();
+                }
+                if (project) {
+                    if (project->project.ok) {
+                        page.data["get_project"] = std::move(project->project.value);
+                    } else if (page.error.empty()) {
+                        page.error = project->project.error.message;
+                    }
+                    project_graphs = std::move(project->graphs);
+                } else if (page.error.empty()) {
+                    page.error = project.error().message;
+                }
+                if (listed) {
+                    for (std::size_t index = 0; index < listed->size(); ++index) {
+                        const ApiResult& result = listed->at(index);
+                        if (result.ok) {
+                            page.data[catalogues[index].first] = result.value;
+                        } else if (index == 0 && page.error.empty()) {
+                            page.error = result.error.message;
+                        }
+                    }
+                } else if (page.error.empty()) {
+                    page.error = listed.error().message;
+                }
             } else if (section == "data") {
                 if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
                     page.data["loaded"] = {{"table", loaded}, {"rows", query_value(route, "rows")}};
@@ -8193,7 +8236,8 @@ struct ApiServer::Impl {
                 reads = {{"list_agents", nlohmann::json::object()}};
             } else if (section == "agent") {
                 reads = {{"get_agent", {{"id", page.subject}}},
-                         {"agent_training_status", {{"id", page.subject}}}};
+                         {"agent_training_status", {{"id", page.subject}}},
+                         {"list_projects", nlohmann::json::object()}};
             } else if (section == "runs") {
                 reads = {{"list_runs", nlohmann::json::object()}};
             } else if (section == "run") {
@@ -8205,24 +8249,33 @@ struct ApiServer::Impl {
                 reads = {{"list_models", nlohmann::json::object()}};
             } else if (section == "dataset") {
                 const std::string database = query_value(route, "database");
-                reads = {{"get_dataset",
-                          {{"dataset", page.subject},
-                           {"database", database.empty() ? std::string("datasets") : database}}}};
-                const ApiResult sample = unwrap(co_await workspace_call(
-                    "workspace_sql",
-                    {{"customer_id", page.customer_id},
-                     {"statement",
-                      // The workspace's SQL has no LIMIT yet (zetta issue filed from the UX
-                      // review), so lake keeps the first rows itself.
-                      "SELECT * FROM " + (database.empty() ? std::string("datasets") : database) +
-                          "." + page.subject}},
-                    context));
-                if (sample.ok) {
-                    nlohmann::json rows = sample.value.value("rows", nlohmann::json::array());
-                    if (rows.is_array() && rows.size() > 20) {
-                        rows.erase(rows.begin() + 20, rows.end());
+                const std::string selected_database = database.empty() ? "datasets" : database;
+                const auto results = co_await page_reads(
+                    context,
+                    {{"workspace_query",
+                      {{"customer_id", page.customer_id},
+                       {"capability", "get_dataset"},
+                       {"input", {{"dataset", page.subject}, {"database", selected_database}}}}},
+                     {"workspace_sql",
+                      {{"customer_id", page.customer_id},
+                       {"statement", "SELECT * FROM " + selected_database + "." + page.subject}}}});
+                if (!results) {
+                    page.error = results.error().message;
+                } else {
+                    const ApiResult& dataset = results->at(0);
+                    if (dataset.ok) {
+                        page.data["get_dataset"] = dataset.value;
+                    } else if (page.error.empty()) {
+                        page.error = dataset.error.message;
                     }
-                    page.data["sample"] = {{"rows", std::move(rows)}};
+                    const ApiResult& sample = results->at(1);
+                    if (sample.ok) {
+                        nlohmann::json rows = sample.value.value("rows", nlohmann::json::array());
+                        if (rows.is_array() && rows.size() > 20) {
+                            rows.erase(rows.begin() + 20, rows.end());
+                        }
+                        page.data["sample"] = {{"rows", std::move(rows)}};
+                    }
                 }
             } else if (section == "query") {
                 const std::string statement = query_value(route, "statement");
@@ -8279,11 +8332,29 @@ struct ApiServer::Impl {
                                             status != "queued" && status != "pending");
                     } else if (page.error.empty() && capability != "list_methodologies" &&
                                capability != "list_solutions" &&
+                               !(section == "agent" && capability == "list_projects") &&
                                !(capability == "get_solution" &&
                                  result.error.code == "unknown_capability")) {
                         page.error = result.error.message;
                     }
                 }
+            }
+            if (section == "agent") {
+                nlohmann::json approved = nlohmann::json::array();
+                const auto projects = page.data.value("list_projects", nlohmann::json::object());
+                for (const auto& entry : projects.value("projects", nlohmann::json::array())) {
+                    if (!entry.is_object()) {
+                        continue;
+                    }
+                    const std::string project = entry.value("name", std::string());
+                    for (const auto& graph : entry.value("graphs", nlohmann::json::array())) {
+                        if (graph.value("approval", std::string()) == "approved") {
+                            approved.push_back({{"project", project},
+                                                {"graph", graph.value("name", std::string())}});
+                        }
+                    }
+                }
+                page.data["approved_pipelines"] = std::move(approved);
             }
             if (needs_run_report) {
                 const ApiResult report = unwrap(co_await workspace_call(
@@ -8304,21 +8375,12 @@ struct ApiServer::Impl {
                 // page needs no duplicate lake-side solution state (lake#292).
                 const nlohmann::json graphs =
                     page.data["get_project"].value("graphs", nlohmann::json::array());
-                std::vector<WorkspaceRead> graph_reads;
-                for (const nlohmann::json& summary : graphs) {
-                    graph_reads.push_back(
-                        {"get_graph",
-                         {{"project", page.subject},
-                          {"graph", summary.value("name", std::string())}}});
-                }
-                auto graph_details =
-                    co_await workspace_reads(context, page.customer_id, graph_reads);
                 for (std::size_t graph_index = 0;
-                     graph_details && graph_index < graph_details->size();
+                     graph_index < project_graphs.size();
                      ++graph_index) {
                     const nlohmann::json& summary = graphs.at(graph_index);
                     const std::string graph = summary.value("name", std::string());
-                    const ApiResult& detail = graph_details->at(graph_index);
+                    const ApiResult& detail = project_graphs.at(graph_index);
                     if (!detail.ok) {
                         continue;
                     }
@@ -9922,7 +9984,13 @@ struct ApiServer::Impl {
             input["project"] = page.project;
             input["state"] = page.state;
         }
-        const auto result = unwrap(co_await workspace_call(capability, input, context));
+        std::vector<WorkspaceRead> reads{{capability, input}};
+        if (mode == "study") {
+            reads.push_back({"get_experiment_analysis", input});
+        }
+        const auto results = co_await page_reads(context, std::move(reads));
+        const ApiResult result = results ? results->at(0)
+                                         : ApiResult::failure("store_error", results.error().message);
         if (!result.ok) {
             if (page.error.empty()) {
                 page.error = result.error.message;
@@ -9930,7 +9998,7 @@ struct ApiServer::Impl {
         } else {
             page.data = result.value;
             if (mode == "study") {
-                const auto analysis = unwrap(co_await workspace_call("get_experiment_analysis", input, context));
+                const ApiResult& analysis = results->at(1);
                 if (analysis.ok) {
                     page.analysis = analysis.value;
                 } else {
@@ -10056,31 +10124,35 @@ struct ApiServer::Impl {
             page.zetta = query_value(route, "zetta");
             input["zetta"] = page.zetta;
             input["topic"] = page.topic;
-            const auto info = unwrap(co_await workspace_call("get_stream", input, context));
-            if (info.ok) {
-                page.detail = info.value;
-                const auto from = query_value(route, "from_sequence");
-                if (!from.empty()) {
-                    input["from_sequence"] = nlohmann::json::parse(from, nullptr, false);
-                    if (input["from_sequence"].is_discarded()) {
-                        input["from_sequence"] = from;
-                    }
+            const nlohmann::json info_input = input;
+            const auto from = query_value(route, "from_sequence");
+            if (!from.empty()) {
+                input["from_sequence"] = nlohmann::json::parse(from, nullptr, false);
+                if (input["from_sequence"].is_discarded()) {
+                    input["from_sequence"] = from;
                 }
-                input["direction"] = "backward";
-                if (!page.task.empty()) {
-                    input["task"] = page.task;
-                }
-                if (!page.agent.empty()) {
-                    input["agent"] = page.agent;
-                }
-                const auto messages = unwrap(co_await workspace_call("browse_stream", input, context));
+            }
+            input["direction"] = "backward";
+            if (!page.task.empty()) {
+                input["task"] = page.task;
+            }
+            if (!page.agent.empty()) {
+                input["agent"] = page.agent;
+            }
+            const auto results = co_await page_reads(
+                context, {{"get_stream", info_input}, {"browse_stream", std::move(input)}});
+            if (!results) {
+                page.error = results.error().message;
+            } else if (results->at(0).ok) {
+                page.detail = results->at(0).value;
+                const ApiResult& messages = results->at(1);
                 if (messages.ok) {
                     page.messages = messages.value;
                 } else {
                     page.error = messages.error.message;
                 }
             } else {
-                page.error = info.error.message;
+                page.error = results->at(0).error.message;
             }
         } else {
             input["prefix"] = page.prefix;
@@ -10241,7 +10313,8 @@ struct ApiServer::Impl {
             page.builds_available = true;
             const nlohmann::json source =
                 page.app.value("source", nlohmann::json::object());
-            const std::string repository = source.value("repository", std::string());
+            const std::string repository =
+                source.is_object() ? source.value("repository", std::string()) : std::string();
             const std::string target_marker =
                 "/" + page.app.value("name", std::string()) + ":";
             for (nlohmann::json build :
@@ -13722,14 +13795,23 @@ bool ApiServer::start() {
         route.res.set_start_line(http::status::ok, route.req.version());
         route.res.set_keep_alive(route.req.keep_alive());
         const auto start = std::chrono::steady_clock::now();
+        start_request_timing(route, start);
         auto result = co_await cors(route);
         if (result.what() != http::route_what::next) {
+            const RequestTimingScope timing_scope(route, start);
             impl.record_request(route, impl.route_pattern_for(route), start);
         }
         co_return result;
     });
     router.use([&impl](http::route_params& route) -> http::route_task {
-        return impl.workspace_route(route);
+        auto result = co_await impl.workspace_route(route);
+        if (result.what() != http::route_what::next) {
+            const auto timing = request_timing(route);
+            const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+            const RequestTimingScope timing_scope(route, start);
+            impl.record_request(route, impl.route_pattern_for(route), start);
+        }
+        co_return result;
     });
     add_route(http::method::get, "/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/", impl.serve_web_root(route));

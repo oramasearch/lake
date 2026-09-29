@@ -19,6 +19,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "workspace_bus.hpp"
 
 namespace lake::api {
 
@@ -3702,7 +3703,7 @@ void register_agent_bus_capabilities(Registry& registry) {
                     "conflict", "the task is not running on this agent", "/task_id");
             }
             json event = input;
-            control::WorkspaceAgentBus bus(context.workspaces, task->customer_id, task->workspace_id);
+            WorkspaceApiBus bus(context, task->customer_id, task->workspace_id);
             const auto created = control::settled(co_await bus.create_topic("agent-events"));
             if (!created) {
                 co_return ApiResult::failure(created.error().code, created.error().message);
@@ -3759,8 +3760,7 @@ void register_agent_bus_capabilities(Registry& registry) {
             const auto until = std::chrono::steady_clock::now() +
                                std::chrono::milliseconds(input.value("wait_ms", 0));
             json events = json::array();
-            control::WorkspaceAgentBus bus(context.workspaces, input.at("customer_id"),
-                                           input.at("workspace_id"));
+            WorkspaceApiBus bus(context, input.at("customer_id"), input.at("workspace_id"));
             const auto created = control::settled(co_await bus.create_topic("agent-events"));
             if (!created) {
                 co_return ApiResult::failure(created.error().code, created.error().message);

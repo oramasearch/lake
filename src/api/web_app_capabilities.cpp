@@ -14,6 +14,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "scan/detectors.hpp"
+#include "workspace_bus.hpp"
 
 namespace lake::api {
 namespace {
@@ -268,7 +269,7 @@ liquid::runtime::task<ApiResult> publish_event(ApiContext& context,
                                      "the app event bus is not configured on this lake");
     }
     const std::string topic = app_events_topic(app.id);
-    control::WorkspaceAgentBus bus(context.workspaces, app.customer_id, app.workspace_id);
+    WorkspaceApiBus bus(context, app.customer_id, app.workspace_id);
     if (app.desired == "deleted" || app.phase == "Deleted") {
         const auto dropped = control::settled(co_await bus.call("drop_topic", {{"topic", topic}}));
         if (!dropped && dropped.error().code != "not_found") {
@@ -1031,7 +1032,7 @@ void register_web_app_capabilities(Registry& registry) {
                                              "the app event bus is not configured");
             }
             const std::string topic = app_events_topic(app->id);
-            control::WorkspaceAgentBus bus(context.workspaces, app->customer_id, app->workspace_id);
+            WorkspaceApiBus bus(context, app->customer_id, app->workspace_id);
             if (app->desired == "deleted" || app->phase == "Deleted") {
                 co_return ApiResult::failure("not_found", "app events have been deleted");
             }
@@ -1077,7 +1078,7 @@ void register_web_app_capabilities(Registry& registry) {
                            co_return ApiResult::failure("store_unavailable",
                                                         "the app event bus is not configured");
                        }
-                       control::WorkspaceAgentBus bus(context.workspaces, app->customer_id, app->workspace_id);
+                       WorkspaceApiBus bus(context, app->customer_id, app->workspace_id);
                        auto batch = control::settled(co_await bus.receive(
                            app_events_topic(app->id),
                            input.value("from_sequence", std::uint64_t{1}),

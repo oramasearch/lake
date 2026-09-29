@@ -6,6 +6,7 @@
 #include "lake/control/identity_crypto.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <chrono>
@@ -18,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <print>
 #include <ranges>
 #include <set>
 #include <string>
@@ -39,6 +41,7 @@
 
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
+#include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
@@ -2302,6 +2305,7 @@ class DelayedPageWorkspace final : public lake::control::WorkspaceCaller {
 public:
     liquid::runtime::task<lake::control::ZettaControlResult<json>>
     call(std::string, std::string, std::string capability, bool, json input) override {
+        calls_.fetch_add(1, std::memory_order_relaxed);
         auto [delay_error] =
             co_await liquid::runtime::delay(std::chrono::milliseconds(20));
         if (delay_error) {
@@ -2311,7 +2315,13 @@ public:
         co_return answer(capability, input);
     }
 
+    std::size_t call_count() const {
+        return calls_.load(std::memory_order_relaxed);
+    }
+
 private:
+    std::atomic<std::size_t> calls_{0};
+
     static json study(std::size_t index) {
         return {{"id", "study-" + std::to_string(index)},
                 {"status", "complete"},
@@ -2512,14 +2522,16 @@ private:
     }
 };
 
-std::string concrete_route(std::string pattern) {
+std::string concrete_route(std::string pattern, const std::string& workspace_id) {
     std::size_t begin = 0;
     while (begin < pattern.size()) {
         const std::size_t slash = pattern.find('/', begin + 1);
         const std::size_t end = slash == std::string::npos ? pattern.size() : slash;
         if (begin + 1 < pattern.size() &&
             (pattern[begin + 1] == ':' || pattern[begin + 1] == '*')) {
-            pattern.replace(begin + 1, end - begin - 1, "fixture");
+            const std::string parameter = pattern.substr(begin + 1, end - begin - 1);
+            pattern.replace(begin + 1, end - begin - 1,
+                            parameter == ":workspace_id" ? workspace_id : "fixture");
         }
         if (slash == std::string::npos) {
             break;
@@ -2557,10 +2569,18 @@ std::size_t workspace_call_count(const std::string& response) {
 } // namespace
 
 TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
-    auto store = std::make_shared<lake::control::InMemoryStore>();
-    const auto session = store->sign_up_password(
-        {"lake", "page-performance@example.test", "correct horse battery staple",
-         "Page performance", "fixture", "{}"});
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is required for authenticated page performance";
+    }
+    const std::string instance_kek = std::getenv("LAKE_INSTANCE_KEK");
+    std::shared_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, instance_kek);
+    const auto identity = lake::audit::mint_custodial_identity(instance_kek);
+    ASSERT_TRUE(identity);
+    const auto session = store->sign_in_clerk(
+        {"page-performance", "page-performance@example.test", "Page performance", "fixture",
+         identity->taap_id, identity->public_key, identity->wrapped_seed});
     ASSERT_TRUE(session);
     const auto principal = store->context_for(session->secret);
     ASSERT_TRUE(principal);
@@ -2568,19 +2588,6 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
     ASSERT_TRUE(customers);
     ASSERT_EQ(customers->size(), 1U);
     const std::string customer_id = customers->front().id;
-
-    for (std::size_t index = 0; index < 20; ++index) {
-        lake::control::NewWebApp app;
-        app.customer_id = customer_id;
-        app.name = "app-" + std::to_string(index);
-        app.mode = "image";
-        app.image = "registry.example.test/app:latest";
-        app.port = 8080;
-        app.host = app.name + ".apps.example.test";
-        app.max_apps = 20;
-        app.max_replicas = 20;
-        ASSERT_TRUE(store->create_web_app(app));
-    }
 
     const std::filesystem::path workspace_directory =
         lake::test::fixture_path("page-performance-" + lake::control::new_uuid_v4());
@@ -2591,10 +2598,34 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
     const auto requested = liquid::runtime::block_on(workspaces->request(customer_id));
     ASSERT_TRUE(requested);
     ASSERT_TRUE(*requested);
-    ASSERT_TRUE(store->set_service_status(
-        (*requested)->service_id, "Ready", "", "http://workspace.example.test"));
+    {
+        pqxx::connection database(uri);
+        pqxx::work tx(database);
+        tx.exec("INSERT INTO service_status (service_id, phase, endpoint) "
+                "VALUES ($1::uuid, 'Ready', 'http://workspace.example.test')",
+                pqxx::params{(*requested)->service_id});
+        tx.commit();
+    }
     std::ofstream(workspace_directory / ((*requested)->slug + ".json"))
         << json{{"kind", "zetta"}, {"token", "page-performance-token"}}.dump();
+    const std::string workspace_id = (*requested)->workspace_id;
+    ASSERT_FALSE(workspace_id.empty());
+    std::string app_id;
+    for (std::size_t index = 0; index < 20; ++index) {
+        lake::control::NewWebApp app;
+        app.customer_id = customer_id;
+        app.workspace_id = workspace_id;
+        app.name = "app-" + std::to_string(index);
+        app.mode = "image";
+        app.image = "registry.example.test/app:latest";
+        app.port = 8080;
+        app.host = app.name + ".apps.example.test";
+        app.max_apps = 20;
+        app.max_replicas = 20;
+        const auto created = store->create_web_app(app);
+        ASSERT_TRUE(created);
+        app_id = created->id;
+    }
 
     lake::api::ServerOptions options;
     options.port = 0;
@@ -2602,7 +2633,7 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
     options.store = store;
     options.workspaces = workspaces;
     options.admin_token = "page-performance-operator";
-    options.instance_kek = "page-performance-instance-kek";
+    options.instance_kek = instance_kek;
     options.apps_per_customer = 20;
     options.app_replicas_per_customer = 20;
     lake::api::ApiServer server(std::move(options));
@@ -2611,46 +2642,92 @@ TEST(PagePerformance, EveryRegisteredGetPageStaysUnderTheServerBudget) {
     const std::string query =
         "?customer_id=" + customer_id +
         "&id=fixture&name=project-0&project=project-0&graph=pipeline-0"
-        "&study=study-0&run=run-0&runs=run-0,run-1&app_id=fixture"
+        "&study=study-0&run=run-0&runs=run-0,run-1&app_id=" + app_id +
         "&topic=topic-0&zetta=workspace";
-    std::vector<std::pair<std::string, std::string>> pages;
-    std::map<std::string, std::size_t> expected_workspace_calls{
-        {"/ship/models", 1}, {"/train/experiments", 2}, {"/train/runs", 1}};
+    const std::string cookie = "lake_session=" + session->secret;
+    std::vector<std::tuple<std::string, std::string, std::string>> pages;
+    const std::map<std::string, std::size_t> expected_workspace_calls{
+        {"/w/:workspace_id/ship/models", 1},
+        {"/w/:workspace_id/ship/app", 1},
+        {"/w/:workspace_id/train/experiments", 2},
+        {"/w/:workspace_id/train/runs", 1},
+        {"/w/:workspace_id/train/agent", 3},
+        {"/w/:workspace_id/train/dataset", 2},
+        {"/w/:workspace_id/design/project", 4},
+        {"/w/:workspace_id/train/experiment", 2},
+        {"/w/:workspace_id/train/stream", 2},
+        {"/workspaces", 0}};
+    std::set<std::string> observed_workspace_pages;
     const auto routes = server.get_route_patterns();
     ASSERT_FALSE(routes.empty());
     for (const std::string& pattern : routes) {
-        const std::string path = concrete_route(pattern) + query;
+        const std::string path = concrete_route(pattern, workspace_id) + query;
+        const bool workspace_page = pattern.starts_with("/w/:workspace_id/") &&
+                                    !pattern.starts_with("/w/:workspace_id/workspaces/");
+        std::string page_cookie = cookie;
         HttpConnection connection(server.port());
-        const std::string response = connection.request(
-            "GET", path, {}, "lake_session=page-performance-operator");
-        const std::string content_type = response_header(response, "content-type");
+        std::size_t calls_before = caller->call_count();
+        std::string response = connection.request("GET", path, {}, page_cookie);
+        std::string content_type = response_header(response, "content-type");
+        if (!workspace_page && pattern != "/workspaces") {
+            for (const std::string alternate : {"lake_session=page-performance-operator", ""}) {
+                if (content_type.starts_with("text/html")) {
+                    break;
+                }
+                HttpConnection alternate_connection(server.port());
+                page_cookie = alternate;
+                calls_before = caller->call_count();
+                response = alternate_connection.request("GET", path, {}, page_cookie);
+                content_type = response_header(response, "content-type");
+            }
+        }
+        if (workspace_page || pattern == "/workspaces") {
+            ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << pattern << '\n' << response;
+            ASSERT_TRUE(content_type.starts_with("text/html")) << pattern;
+            EXPECT_NE(response.find("<select name=\"workspace_id\""), std::string::npos)
+                << pattern;
+            EXPECT_NE(response.find(workspace_id), std::string::npos) << pattern;
+        }
         if (content_type.starts_with("text/html")) {
             EXPECT_GE(total_server_milliseconds(response), 0.0) << pattern;
+            EXPECT_EQ(workspace_call_count(response), caller->call_count() - calls_before)
+                << pattern;
             const auto expected = expected_workspace_calls.find(pattern);
             if (expected != expected_workspace_calls.end()) {
                 EXPECT_EQ(workspace_call_count(response), expected->second) << pattern;
-                expected_workspace_calls.erase(expected);
+                observed_workspace_pages.insert(pattern);
             }
-            pages.emplace_back(pattern, path);
+            pages.emplace_back(pattern, path, page_cookie);
         }
     }
 
     ASSERT_FALSE(pages.empty());
-    EXPECT_TRUE(expected_workspace_calls.empty());
-    for (const auto& [pattern, path] : pages) {
+    EXPECT_EQ(observed_workspace_pages.size(), expected_workspace_calls.size());
+    for (const auto& [pattern, path, page_cookie] : pages) {
         std::vector<double> samples;
         samples.reserve(20);
         for (int sample = 0; sample < 20; ++sample) {
             HttpConnection connection(server.port());
-            const std::string response = connection.request(
-                "GET", path, {}, "lake_session=page-performance-operator");
+            const std::size_t calls_before = caller->call_count();
+            const std::string response = connection.request("GET", path, {}, page_cookie);
+            if (pattern.starts_with("/w/:workspace_id/") || pattern == "/workspaces") {
+                ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << pattern << '\n' << response;
+            }
+            ASSERT_TRUE(response_header(response, "content-type").starts_with("text/html"))
+                << pattern;
             const double elapsed = total_server_milliseconds(response);
             ASSERT_GE(elapsed, 0.0) << pattern;
+            EXPECT_EQ(workspace_call_count(response), caller->call_count() - calls_before)
+                << pattern;
+            const auto expected = expected_workspace_calls.find(pattern);
+            if (expected != expected_workspace_calls.end()) {
+                EXPECT_EQ(workspace_call_count(response), expected->second) << pattern;
+            }
             samples.push_back(elapsed);
         }
         std::ranges::sort(samples);
         const double p95 = samples.at(18);
-        std::cout << "PAGE_PERF " << pattern << " p95_ms=" << p95 << '\n';
+        std::println("PAGE_PERF {} p95_ms={:.3f}", pattern, p95);
         EXPECT_LT(p95, 100.0) << pattern;
     }
 }
