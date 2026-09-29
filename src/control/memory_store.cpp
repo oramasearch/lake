@@ -3660,7 +3660,7 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
         return std::unexpected(StoreError{"invalid_input", "visibility must be private or public"});
     }
     for (const auto& r : repositories_) {
-        if (r.customer_id == in.customer_id && r.name == in.name) {
+        if (r.customer_id == in.customer_id && r.name == in.name && r.deleted_at.empty()) {
             return std::unexpected(
                 StoreError{"conflict", "this customer already has a repository named " + in.name});
         }
@@ -3716,7 +3716,7 @@ bool repository_name_taken(const std::vector<Repository>& repositories,
                            const std::string& except_id) {
     return std::any_of(repositories.begin(), repositories.end(), [&](const Repository& repository) {
         return repository.id != except_id && repository.customer_id == customer_id &&
-               repository.name == name;
+               repository.name == name && repository.deleted_at.empty();
     });
 }
 

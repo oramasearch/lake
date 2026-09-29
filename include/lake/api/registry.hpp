@@ -53,7 +53,7 @@ namespace lake::api {
 struct ApiError {
     std::string code;    // invalid_input | unauthorized | not_found | conflict | unrecoverable |
                          // unknown_capability | store_unavailable | store_error
-    std::string message; // the real reason, verbatim where one exists
+    std::string message; // a product-facing reason; database diagnostics remain server-side
     std::string path;    // JSON pointer when the input is at fault
 };
 

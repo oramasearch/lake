@@ -56,9 +56,9 @@ row deliberately does not change App desired state before the image exists.
 
 ## Schema rollout
 
-`workspaces_guard` is the newest guard. The operator must vendor `db/schema.sql` byte-for-byte and
-apply it before builds are enabled. The migration is idempotent and adds customer/time and
-purpose-hash indexes. Lake pods do not run migrations.
+`repository_names_guard` is the newest guard. The operator must vendor `db/schema.sql`
+byte-for-byte and apply it before builds are enabled. The migration is idempotent and adds
+customer/time and purpose-hash indexes. Lake pods do not run migrations.
 
 ## Verify and change
 

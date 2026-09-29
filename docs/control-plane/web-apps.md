@@ -24,7 +24,7 @@ earlier mode and deletion values, normalizes binding JSON, and removes the super
 The old partial unique indexes are removed before conversion, preserving deleted rows that reuse
 a name or host, then recreated with the new deletion value.
 Migration `0038_workspace_data_plane` adds immutable `workspace_id`, required on create.
-The current deployment guard is `workspaces_guard`; the operator must vendor the schema.
+The current deployment guard is `repository_names_guard`; the operator must vendor the schema.
 Workspace assignment and event-client cutover are tracked in
 [orama-operator#216](https://github.com/oramasearch/orama-operator/issues/216).
 

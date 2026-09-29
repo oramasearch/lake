@@ -2,13 +2,14 @@
 
 A repository is owned by a customer (the tenant) and named within it: the address is
 `<customer handle>/<name>`. Schema: [`../control-plane/schema.md`](../control-plane/schema.md)
-(migrations `0002_repositories` and `0006_repository_lifecycle`).
+(migrations `0002_repositories`, `0006_repository_lifecycle`, and
+`0040_active_repository_names`, which limits name uniqueness to live rows).
 
 | Field | |
 |---|---|
 | `id` | uuid v4 |
 | `customer_id` | the owning customer; deleting the customer deletes its repositories |
-| `name` | slug, same format as the handle (lowercase, digits, inner hyphens, 1–256); unique per customer |
+| `name` | slug, same format as the handle (lowercase, digits, inner hyphens, 1–256); unique among live repositories in the customer |
 | `description` | free text, default empty |
 | `visibility` | `private` (default), `organization`, or `public` |
 | `deleted_at`, `retention_until` | null while live; deletion tombstones the repository for 30 days before its customer store may collect unreferenced data |
@@ -105,7 +106,13 @@ authorization, and atomic-rejection guarantees.
 Delete is a tombstone, not an immediate erase: `deleted_at` and `retention_until` are stored on the
 repository record. The collector may reclaim data after the documented 30-day retention period,
 but only when no remaining repository root leases it. A tombstoned repository cannot be renamed,
-transferred, or have visibility changed.
+transferred, or have visibility changed. Deletion releases the customer-scoped name immediately;
+creating a new repository with that name creates a new identity and leaves the tombstone intact.
+
+Store diagnostics never enter the REST or MCP envelope. A duplicate live name returns
+`conflict: a repository named '<name>' already exists` with `path: /name`; the raw database detail
+is written only to the server log. Other database diagnostics are replaced with a product message
+at the API boundary.
 
 The repository detail page at `/repository?id=<id>` presents current lifecycle state. The signed
 audit page at `/audit` exposes the same capability outcomes. All mutations remain capabilities,
@@ -135,7 +142,9 @@ with `repository_options.store` over the one caller-owned store at
 
 Run `ctest --test-dir build --output-on-failure`. The repository lifecycle tests create two
 customers, change visibility, rename, transfer, tombstone, verify policy denial, and verify the
-signed audit stream contains the deletion outcome. For Postgres, apply `db/schema.sql` through
+signed audit stream contains the deletion outcome. Memory and PostgreSQL cases also create,
+delete, and recreate the same repository name, and assert duplicate errors contain no database
+diagnostics. For Postgres, apply `db/schema.sql` through
 the operator’s `PostgresSchema` before running the integration test. `SyncHttp.*` proves push,
 incremental chunk transfer, pull, atomic bad-signature rejection, policy denial, and audit records.
 `PostgresSync.*` repeats the exchange with the production control store. The repository, drive,
@@ -144,7 +153,7 @@ kind.
 
 ## Change
 
-Lifecycle changes update the `0006_repository_lifecycle` section of `db/schema.sql`, the
+Lifecycle changes update the applicable migration in `db/schema.sql`, the
 byte-identical operator schema asset, this page, `docs/control-plane/schema.md`, and the repository
 page renderer in one change. Do not shorten the retention window without a migration and a
 documented collection policy.

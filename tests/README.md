@@ -197,6 +197,11 @@ proof is in [front-door.md](../docs/ui/front-door.md). `PostgresCapabilities.Org
 filters its deletion audit assertion by the exact request ID and `repository/<id>` object.
 `Stores/AuditIsolation.*` proves lookup after 1,105 same-object events and complete cursor traversal
 against memory and PostgreSQL stores. Personal-customer lookup filters by user before limiting.
+Repository lifecycle coverage deletes a repository and recreates its name against both stores.
+The PostgreSQL case also exercises the live-name unique index through the registry and asserts the
+product conflict message and `/name` pointer. `ApiErrors.DatabaseDiagnosticsStayOutOfErrorMessages`
+pins the final registry boundary: database diagnostic markers are absent from API messages while
+the raw detail is retained in the server log.
 
 `PostgresSessionAuthentication.*` in `test_token_attenuation.cpp` compares 7/17 real sessions,
 measures 7,000 rows, checks actual tuple counts, password policy, stored-digest refusal, operator

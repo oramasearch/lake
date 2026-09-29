@@ -7,7 +7,7 @@ must vendor the same bytes and use `session_lookup_guard`; that handoff is a sep
 See `docs/control-plane/schema.md` and `docs/api/auth.md` for rollout and replacement credentials.
 
 Migrations `0034_web_apps` and `0035_web_apps_operator_contract` add the App desired/observed row,
-runtime mode, optional source entrypoint and operator-written token hashes. The latest guard is
+runtime mode, optional source entrypoint and operator-written token hashes. Their rollout guard is
 `web_apps_operator_contract_guard`. Apply before exposing Apps; the upgrade removes the obsolete
 credential table. Lake never stores app tokens. See `docs/control-plane/web-apps.md`.
 
@@ -16,8 +16,14 @@ Its guard is `builds_guard`; desired writes notify `lake_builds`, and only SHA-2
 the operator's source, push and event credentials are stored. See `docs/control-plane/builds.md`.
 
 Migration `0037_streams` adds durable topic creator ownership keyed by customer, workspace
-service ID and topic. The latest guard is `streams_guard`. Vendor/apply the schema in the
+service ID and topic. Its guard is `streams_guard`. Vendor/apply the schema in the
 operator rollout before exposing Streams; see `docs/control-plane/streams.md`.
+
+Migration `0040_active_repository_names` replaces the repository table constraint with the
+partial unique index `repository_name_unique`, which applies only while `deleted_at IS NULL`.
+Deleting a repository therefore releases its customer-scoped name while preserving the tombstone.
+The latest guard is `repository_names_guard`; Apps, services, stores and workspaces already use
+equivalent live-row predicates for their name indexes.
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
