@@ -26,7 +26,7 @@ same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).
 
 Agent tasks now have renewable claim leases, two retries and a terminal failure after three
-expiries. Retry notices reach workspace event streams. Shared bus
+expiries. Retry notices reach workspace event streams and the working panels. Shared bus
 credentials retain first-terminal-write-wins behavior; task-scoped event authentication and
 operator schema/configuration handoff remain follow-ups. See `docs/api/agent-bus.md`.
 

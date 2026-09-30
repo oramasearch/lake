@@ -139,8 +139,10 @@ allows a turn to run beyond the old fixed running deadline; the deadline now cov
 The registry renews before dispatch, checks the current credential hash and rejects a reclaimed
 credential even if its principal was resolved before reclaim. Agents require no heartbeat changes.
 
-`receive_agent_events` exposes the retained retry notices and attempt numbers, and
-`get_agent_task` includes `attempts`, `lease_until` and `lease_seconds`.
+Experiments, Apps, Project foundation and pipeline working panels render the same persisted
+message that recovery publishes on `agent-events`; ordinary page refresh reads the existing task
+state without another workspace call. `receive_agent_events` exposes the retained retry notices
+and attempt numbers, and `get_agent_task` includes `attempts`, `lease_until` and `lease_seconds`.
 
 ### Re-delivery and the shared-credential limitation
 
@@ -192,8 +194,8 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 
 Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL) and
 `AgentLeaseConfig.*`. They age clocks without sleeping, exercise three expiries, credential
-revocation, event/capability renewal, racing terminal writes, retry publication recovery,
-the indexed migration and schema reapplication. Run full CTest with local PostgreSQL
+revocation, event/capability renewal, racing terminal writes, retry publication recovery, page
+messages, the indexed migration and schema reapplication. Run full CTest with local PostgreSQL
 in static and shared builds, including `PagePerformance.*`; see [local builds](../build/local.md).
 To change policy, update both stores, config bounds, schema checks and these tests together.
 
@@ -213,6 +215,43 @@ ApplicationAgent, confirms the exact proposal, waits for deployment, and request
 prints one line per scenario and exits 1 when one fails. T12 gives ExperimentsAgent a goal,
 confirms its exact study, waits for trials and requests the explanation. Run the relevant scenario
 after a roll of lake, Zetta or an agent.
+
+## Local lease proof (2026-09-30)
+
+Native macOS Release builds used `BUILD_SHARED_LIBS=OFF` in `build` and `ON` in
+`build-shared`, with separate dependency build directories and at most six build jobs.
+The full suites ran one at a time against local PostgreSQL; each database-backed case used
+the repository's isolated database fixture.
+
+```sh
+export TMPDIR="$PWD/.cache/proof-tmp"
+export LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue414_proof_20260930
+ctest --test-dir build --output-on-failure -j 1
+ctest --test-dir build-shared --output-on-failure -j 1
+```
+
+```text
+Static:
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) = 352.38 sec
+
+Shared:
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) = 352.20 sec
+```
+
+Each suite registered 477 cases, with one disabled search benchmark and 14 existing skips:
+the optional Liquid CLI browser-to-terminal test, the uninstalled optional Hugging Face client,
+and 12 PostgreSQL UI variants with memory-only status-injection fixtures. All lease regressions
+ran on both stores. The focused lease, agent-run and stream selection passed all 45 cases.
+
+Apps, Experiments, Project and Pipeline stayed below 100 ms p95 in both page-performance runs,
+with unchanged workspace-call budgets. `lake version`, `/v1/server_info` and `/readyz` passed
+the manual binary smoke check. No deployment is claimed.
+
+Linux proof deferred: the provided remote-lane helper was absent. No Docker was used.
+Operator schema/configuration handoff and task-scoped event credentials remain the follow-ups
+described above.
 
 ## Not yet
 

@@ -2,7 +2,7 @@
 
 `test_agent_leases.cpp` runs the same claim, activity, expiry, re-claim, three-attempt exhaustion,
 workspace notice recovery and racing-terminal-write cases on memory and PostgreSQL stores.
-It checks legacy migration adoption, schema reapplication,
+It checks Apps/Experiments/Project rendering, legacy migration adoption, schema reapplication,
 the partial expiry index, and duration bounds without clock sleeps. The Streams task-credential
 fixture takes a real claim before making calls. See [agent-bus.md](../docs/api/agent-bus.md).
 

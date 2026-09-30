@@ -8506,6 +8506,7 @@ struct ApiServer::Impl {
                     followed.ok ? followed.value.value("status", std::string()) : "";
                 if (status == "pending" || status == "running") {
                     shown["project_agent_working"] = true;
+                    shown["project_agent_message"] = followed.value.value("message", std::string());
                 } else if (followed.ok) {
                     const nlohmann::json answer =
                         followed.value.value("answer", nlohmann::json::object());
@@ -10545,10 +10546,11 @@ struct ApiServer::Impl {
                 (pending->phase.empty() || pending->phase == "Pending" ||
                  pending->phase == "Running")) {
                 page.agent_task = {{"task_id", pending->id},
+                                   {"message", pending->message},
+                                   {"attempts", pending->attempts},
                                    {"agent", pending->agent},
                                    {"kind", pending->kind},
-                                   {"status", pending->phase == "Running" ? "running"
-                                                                           : "pending"}};
+                                   {"status", pending->phase == "Running" ? "running" : "pending"}};
                 page.agent_working = true;
             } else {
                 const ApiResult task = unwrap(co_await workspace_call(
@@ -10866,11 +10868,13 @@ struct ApiServer::Impl {
                     pending->agent == "agent-application" && pending->kind == "app" &&
                     (pending->phase.empty() || pending->phase == "Pending" ||
                      pending->phase == "Running")) {
-                    page.agent_task = {{"task_id", pending->id},
-                                       {"agent", pending->agent},
-                                       {"kind", pending->kind},
-                                       {"status", pending->phase == "Running" ? "running"
-                                                                               : "pending"}};
+                    page.agent_task = {
+                        {"task_id", pending->id},
+                        {"message", pending->message},
+                        {"attempts", pending->attempts},
+                        {"agent", pending->agent},
+                        {"kind", pending->kind},
+                        {"status", pending->phase == "Running" ? "running" : "pending"}};
                     page.agent_working = true;
                 } else {
                     const ApiResult task = unwrap(co_await workspace_call(

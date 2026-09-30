@@ -111,7 +111,9 @@ std::string agent_panel(const ExperimentsPage& page) {
         return html +
                "<section class=\"panel\" aria-live=\"polite\"><h2>ExperimentsAgent Is "
                "Working</h2><p>It keeps working if you leave; this page checks again every 2 "
-               "seconds.</p><meta http-equiv=\"refresh\" content=\"2\"></section>";
+               "seconds.</p><p role=\"status\">" +
+               web_ui_escape(page.agent_task.value("message", std::string())) +
+               "</p><meta http-equiv=\"refresh\" content=\"2\"></section>";
     }
     if (result.value("kind", std::string()) == "proposal" &&
         result.value("confirm", false) && result.value("study", json()).is_object()) {
