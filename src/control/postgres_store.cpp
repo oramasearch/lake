@@ -946,6 +946,35 @@ Result<Key> derive(const Key& key, std::string_view context) {
     return output;
 }
 
+Result<Key> derive_hkdf(const Key& key, std::string_view label) {
+    EVP_KDF* algorithm = EVP_KDF_fetch(nullptr, "HKDF", nullptr);
+    if (algorithm == nullptr) {
+        return std::unexpected(StoreError{"store_error", "could not load HKDF"});
+    }
+    EVP_KDF_CTX* context = EVP_KDF_CTX_new(algorithm);
+    EVP_KDF_free(algorithm);
+    if (context == nullptr) {
+        return std::unexpected(StoreError{"store_error", "could not allocate HKDF"});
+    }
+    Key output{};
+    char digest[] = "SHA256";
+    OSSL_PARAM parameters[] = {
+        OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST, digest, 0),
+        OSSL_PARAM_construct_octet_string(
+            OSSL_KDF_PARAM_KEY, const_cast<unsigned char*>(key.data()), key.size()),
+        OSSL_PARAM_construct_octet_string(
+            OSSL_KDF_PARAM_INFO, const_cast<char*>(label.data()), label.size()),
+        OSSL_PARAM_construct_end(),
+    };
+    const int result = EVP_KDF_derive(context, output.data(), output.size(), parameters);
+    EVP_KDF_CTX_free(context);
+    if (result != 1) {
+        cleanse(output);
+        return std::unexpected(StoreError{"store_error", "could not derive HKDF subkey"});
+    }
+    return output;
+}
+
 Result<std::string> seal(const Key& key, std::string_view plaintext, std::string_view associated) {
     std::array<unsigned char, 12> nonce{};
     if (RAND_bytes(nonce.data(), static_cast<int>(nonce.size())) != 1) {
@@ -4229,6 +4258,132 @@ public:
     Result<WebApp> get_web_app(const std::string& id) override {
         return with_tx<WebApp>(
             [&](pqxx::work& tx) -> Result<WebApp> { return one_web_app(tx, id); });
+    }
+
+    Result<WebApp> resolve_web_app_auth_host(const std::string& host,
+                                             const std::string& workspace_id) override {
+        return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + web_app_columns +
+                    " FROM apps a JOIN workspaces w ON w.id = a.workspace_id "
+                    "WHERE a.host = $1 AND a.auth = 'lake' AND a.desired <> 'deleted' "
+                    "AND w.desired <> 'deleted' "
+                    "AND (NULLIF($2, '') IS NULL OR a.workspace_id = $2::uuid)",
+                host,
+                workspace_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no protected app uses this host"});
+            }
+            return web_app_from(rows[0]);
+        });
+    }
+
+    Result<WebApp> authorize_web_app(const std::string& app_id,
+                                     const std::string& user_id) override {
+        return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + web_app_columns +
+                    ", (c.customer_type = 'individual' AND c.user_id = $2::uuid) OR "
+                    "(c.customer_type = 'organization' AND EXISTS ("
+                    "SELECT 1 FROM memberships m WHERE m.organization_id = c.organization_id "
+                    "AND m.principal_type = 'user' AND m.principal_id = $2::text)) "
+                    "FROM apps a JOIN workspaces w ON w.id = a.workspace_id "
+                    "JOIN customers c ON c.id = a.customer_id "
+                    "WHERE a.id = $1::uuid AND a.auth = 'lake' "
+                    "AND a.desired <> 'deleted' AND w.desired <> 'deleted'",
+                app_id,
+                user_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no protected app " + app_id});
+            }
+            if (!rows[0][27].as<bool>()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "user is not a member of this space"});
+            }
+            return web_app_from(rows[0]);
+        });
+    }
+
+    Result<WebApp> authorize_web_app_session(const std::string& host,
+                                             const std::string& workspace_id,
+                                             const std::string& app_id,
+                                             const std::string& user_id) override {
+        return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("SELECT ") + web_app_columns +
+                    " FROM apps a JOIN workspaces w ON w.id = a.workspace_id "
+                    "JOIN customers c ON c.id = a.customer_id "
+                    "WHERE a.host = $1 AND a.workspace_id = $2::uuid AND a.id = $3::uuid "
+                    "AND a.auth = 'lake' AND a.desired <> 'deleted' AND w.desired <> 'deleted' "
+                    "AND ((c.customer_type = 'individual' AND c.user_id = $4::uuid) OR "
+                    "(c.customer_type = 'organization' AND EXISTS ("
+                    "SELECT 1 FROM memberships m WHERE m.organization_id = c.organization_id "
+                    "AND m.principal_type = 'user' AND m.principal_id = $4::text)))",
+                host,
+                workspace_id,
+                app_id,
+                user_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"unauthorized", "app session is not authorized"});
+            }
+            return web_app_from(rows[0]);
+        });
+    }
+
+    Result<void> create_web_app_authorization_code(const WebAppAuthorizationCode& value) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("INSERT INTO app_authorization_codes (code_hash, app_id, user_id, host) "
+                           "VALUES ($1, $2::uuid, $3::uuid, $4)",
+                           value.code_hash,
+                           value.app_id,
+                           value.user_id,
+                           value.host);
+            return {};
+        });
+    }
+
+    Result<WebAppAuthorization>
+    consume_web_app_authorization_code(const std::string& host,
+                                       const std::string& workspace_id,
+                                       const std::string& code_hash) override {
+        return with_tx<WebAppAuthorization>([&](pqxx::work& tx) -> Result<WebAppAuthorization> {
+            const pqxx::result rows = tx.exec_params(
+                std::string("WITH spent AS (") +
+                    "UPDATE app_authorization_codes code SET used_at = now() "
+                    "FROM apps candidate JOIN workspaces w "
+                    "ON w.id = candidate.workspace_id JOIN customers c "
+                    "ON c.id = candidate.customer_id "
+                    "WHERE code.code_hash = $1 AND code.app_id = candidate.id "
+                    "AND code.host = $2 AND code.expires_at > now() "
+                    "AND code.used_at IS NULL AND candidate.host = $2 "
+                    "AND candidate.auth = 'lake' AND candidate.desired <> 'deleted' "
+                    "AND w.desired <> 'deleted' "
+                    "AND (NULLIF($3, '') IS NULL OR candidate.workspace_id = $3::uuid) "
+                    "AND ((c.customer_type = 'individual' AND c.user_id = code.user_id) OR "
+                    "(c.customer_type = 'organization' AND EXISTS ("
+                    "SELECT 1 FROM memberships m WHERE m.organization_id = c.organization_id "
+                    "AND m.principal_type = 'user' "
+                    "AND m.principal_id = code.user_id::text))) "
+                    "RETURNING code.app_id, code.user_id) SELECT " +
+                    web_app_columns +
+                    ", spent.user_id::text FROM spent JOIN apps a ON a.id = spent.app_id",
+                code_hash,
+                host,
+                workspace_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"unauthorized", "app authorization code is invalid or expired"});
+            }
+            return WebAppAuthorization{web_app_from(rows[0]), rows[0][27].as<std::string>()};
+        });
+    }
+
+    Result<void> sweep_web_app_authorization_codes() override {
+        return with_tx<void>([](pqxx::work& tx) -> Result<void> {
+            tx.exec("DELETE FROM app_authorization_codes "
+                    "WHERE expires_at <= now() OR used_at IS NOT NULL");
+            return {};
+        });
     }
 
     Result<WebApp> create_web_app(const NewWebApp& input) override {

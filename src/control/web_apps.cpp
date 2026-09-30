@@ -1,15 +1,40 @@
 #include "lake/control/web_apps.hpp"
 
 #include <cctype>
+#include <chrono>
 
 #include <openssl/crypto.h>
+
+#include "secrets_crypto.hpp"
 
 namespace lake::control {
 
 namespace {
 
+constexpr std::int64_t web_app_session_lifetime_seconds = 12 * 60 * 60;
+constexpr std::string_view web_app_session_hkdf_label = "lake/app-session/v1";
+
 nlohmann::json nullable(const std::string& value) {
     return value.empty() ? nlohmann::json(nullptr) : nlohmann::json(value);
+}
+
+std::int64_t unix_now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+std::expected<secrets_crypto::Key, std::string> web_app_session_key(std::string_view instance_kek) {
+    auto root = secrets_crypto::instance_key(instance_kek);
+    if (!root) {
+        return std::unexpected(root.error().message);
+    }
+    auto derived = secrets_crypto::derive_hkdf(*root, web_app_session_hkdf_label);
+    secrets_crypto::cleanse(*root);
+    if (!derived) {
+        return std::unexpected(derived.error().message);
+    }
+    return *derived;
 }
 
 } // namespace
@@ -106,6 +131,88 @@ std::string web_app_namespace(std::string_view id) {
         hex += static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
     }
     return hex.size() == 32 ? "app-" + hex.substr(0, 12) : std::string();
+}
+
+std::expected<std::string, std::string> issue_web_app_session(std::string_view instance_kek,
+                                                              std::string_view app_id,
+                                                              std::string_view user_id,
+                                                              std::string_view workspace_id,
+                                                              std::int64_t now_unix) {
+    if (app_id.empty() || user_id.empty() || workspace_id.empty()) {
+        return std::unexpected("app-session identity fields are required");
+    }
+    if (now_unix == 0) {
+        now_unix = unix_now();
+    }
+    const nlohmann::json claims{{"app_id", app_id},
+                                {"user_id", user_id},
+                                {"workspace_id", workspace_id},
+                                {"exp", now_unix + web_app_session_lifetime_seconds},
+                                {"iat", now_unix}};
+    auto payload = secrets_crypto::base64url_encode(claims.dump());
+    if (!payload) {
+        return std::unexpected(payload.error().message);
+    }
+    auto key = web_app_session_key(instance_kek);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    auto signature = secrets_crypto::hmac(*key, *payload);
+    secrets_crypto::cleanse(*key);
+    if (!signature) {
+        return std::unexpected(signature.error().message);
+    }
+    return *payload + "." + *signature;
+}
+
+std::expected<WebAppSessionClaims, std::string> verify_web_app_session(
+    std::string_view instance_kek, std::string_view token, std::int64_t now_unix) {
+    const std::size_t separator = token.find('.');
+    if (separator == std::string_view::npos || separator == 0 || separator + 1 >= token.size() ||
+        token.find('.', separator + 1) != std::string_view::npos) {
+        return std::unexpected("app session is malformed");
+    }
+    const std::string_view payload = token.substr(0, separator);
+    const std::string_view signature = token.substr(separator + 1);
+    auto key = web_app_session_key(instance_kek);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    auto expected = secrets_crypto::hmac(*key, payload);
+    secrets_crypto::cleanse(*key);
+    if (!expected || expected->size() != signature.size() ||
+        CRYPTO_memcmp(expected->data(), signature.data(), signature.size()) != 0) {
+        return std::unexpected("app session signature is invalid");
+    }
+    auto decoded = secrets_crypto::base64url_decode(payload);
+    if (!decoded) {
+        return std::unexpected("app session payload is invalid");
+    }
+    const nlohmann::json claims = nlohmann::json::parse(*decoded, nullptr, false);
+    if (claims.is_discarded() || !claims.is_object() || claims.size() != 5 ||
+        !claims.contains("app_id") || !claims.at("app_id").is_string() ||
+        !claims.contains("user_id") || !claims.at("user_id").is_string() ||
+        !claims.contains("workspace_id") || !claims.at("workspace_id").is_string() ||
+        !claims.contains("exp") || !claims.at("exp").is_number_integer() ||
+        !claims.contains("iat") || !claims.at("iat").is_number_integer()) {
+        return std::unexpected("app session claims are invalid");
+    }
+    WebAppSessionClaims verified{claims.at("app_id").get<std::string>(),
+                                 claims.at("user_id").get<std::string>(),
+                                 claims.at("workspace_id").get<std::string>(),
+                                 claims.at("exp").get<std::int64_t>(),
+                                 claims.at("iat").get<std::int64_t>()};
+    if (verified.app_id.empty() || verified.user_id.empty() || verified.workspace_id.empty()) {
+        return std::unexpected("app session claims are invalid");
+    }
+    if (now_unix == 0) {
+        now_unix = unix_now();
+    }
+    if (verified.issued_at > now_unix || verified.expires_at <= now_unix ||
+        verified.expires_at - verified.issued_at != web_app_session_lifetime_seconds) {
+        return std::unexpected("app session is expired or has an invalid lifetime");
+    }
+    return verified;
 }
 
 } // namespace lake::control

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -84,6 +85,26 @@ struct WebAppPatch {
     bool rotate_tokens = false;
 };
 
+struct WebAppSessionClaims {
+    std::string app_id;
+    std::string user_id;
+    std::string workspace_id;
+    std::int64_t expires_at = 0;
+    std::int64_t issued_at = 0;
+};
+
+struct WebAppAuthorizationCode {
+    std::string app_id;
+    std::string user_id;
+    std::string host;
+    std::string code_hash;
+};
+
+struct WebAppAuthorization {
+    WebApp app;
+    std::string user_id;
+};
+
 // Returns a purpose only for an active, unambiguous operator hash match.
 std::optional<std::string> web_app_token_purpose(const WebApp& app, std::string_view digest);
 std::vector<std::string> web_app_token_scopes(std::string_view purpose);
@@ -92,5 +113,13 @@ nlohmann::json web_app_json(const WebApp& app);
 // The namespace the operator gives one app: app- followed by the first 12 UUID hex digits.
 // Empty for an invalid id.
 std::string web_app_namespace(std::string_view id);
+
+std::expected<std::string, std::string> issue_web_app_session(std::string_view instance_kek,
+                                                              std::string_view app_id,
+                                                              std::string_view user_id,
+                                                              std::string_view workspace_id,
+                                                              std::int64_t now_unix = 0);
+std::expected<WebAppSessionClaims, std::string> verify_web_app_session(
+    std::string_view instance_kek, std::string_view token, std::int64_t now_unix = 0);
 
 } // namespace lake::control

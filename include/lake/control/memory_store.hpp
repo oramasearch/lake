@@ -185,6 +185,20 @@ public:
                                     std::string endpoint);
     Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) override;
     Result<WebApp> get_web_app(const std::string& id) override;
+    Result<WebApp> resolve_web_app_auth_host(const std::string& host,
+                                             const std::string& workspace_id) override;
+    Result<WebApp> authorize_web_app(const std::string& app_id,
+                                     const std::string& user_id) override;
+    Result<WebApp> authorize_web_app_session(const std::string& host,
+                                             const std::string& workspace_id,
+                                             const std::string& app_id,
+                                             const std::string& user_id) override;
+    Result<void> create_web_app_authorization_code(const WebAppAuthorizationCode& value) override;
+    Result<WebAppAuthorization>
+    consume_web_app_authorization_code(const std::string& host,
+                                       const std::string& workspace_id,
+                                       const std::string& code_hash) override;
+    Result<void> sweep_web_app_authorization_codes() override;
     Result<WebApp> create_web_app(const NewWebApp&) override;
     Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) override;
     Result<void> purge_deleted_web_apps() override;
@@ -479,6 +493,7 @@ public:
                                                                     int limit) override;
 
 private:
+    bool user_can_access_web_app_locked(const WebApp& app, const std::string& user_id) const;
     Result<std::string> customer_kek_locked(const std::string& customer_id, bool create);
     Result<std::string> data_key_locked(const std::string& customer_id,
                                         const std::string& owner_id,
@@ -521,6 +536,12 @@ private:
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
     std::vector<WebApp> web_apps_;
+    struct WebAppAuthorizationCodeRecord {
+        WebAppAuthorizationCode code;
+        std::chrono::steady_clock::time_point expires_at;
+        bool used = false;
+    };
+    std::vector<WebAppAuthorizationCodeRecord> web_app_authorization_codes_;
     std::vector<Build> builds_;
     std::vector<StreamOwner> stream_owners_;
     std::vector<ManagedStore> stores_;

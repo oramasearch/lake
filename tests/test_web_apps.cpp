@@ -156,6 +156,32 @@ struct WebApps {
 
 } // namespace
 
+TEST(WebAppSessions, SignedClaimsAreBoundAndExpireAfterTwelveHours) {
+    constexpr std::string_view instance_kek =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    constexpr std::int64_t issued_at = 1'700'000'000;
+    const std::string app_id = lake::control::new_uuid_v4();
+    const std::string user_id = lake::control::new_uuid_v4();
+    const std::string workspace_id = lake::control::new_uuid_v4();
+
+    const auto token = lake::control::issue_web_app_session(
+        instance_kek, app_id, user_id, workspace_id, issued_at);
+    ASSERT_TRUE(token) << token.error();
+    const auto claims = lake::control::verify_web_app_session(instance_kek, *token, issued_at + 1);
+    ASSERT_TRUE(claims) << claims.error();
+    EXPECT_EQ(claims->app_id, app_id);
+    EXPECT_EQ(claims->user_id, user_id);
+    EXPECT_EQ(claims->workspace_id, workspace_id);
+    EXPECT_EQ(claims->issued_at, issued_at);
+    EXPECT_EQ(claims->expires_at, issued_at + 12 * 60 * 60);
+
+    std::string tampered = *token;
+    tampered.front() = tampered.front() == 'A' ? 'B' : 'A';
+    EXPECT_FALSE(lake::control::verify_web_app_session(instance_kek, tampered, issued_at + 1));
+    EXPECT_FALSE(
+        lake::control::verify_web_app_session(instance_kek, *token, issued_at + 12 * 60 * 60));
+}
+
 TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
     WebApps apps;
     const auto created = apps.create();

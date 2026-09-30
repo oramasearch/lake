@@ -207,6 +207,10 @@ app tokens and writes only their hashes into Lake. Lake validates purpose and ta
 rows after the operator acknowledges deletion. This App entity is distinct from application
 identity pools. Its contracts are `docs/api/web-apps.md` and
 `docs/control-plane/web-apps.md`.
+Protected Ship apps use `GET /v1/apps/auth` (also under `/w/<workspace_id>`) for nginx
+forward-auth and `/apps/authorize` for the Lake-session handoff. The app cookie is host-only,
+expires after 12 hours, and rechecks workspace membership on every request. Migration
+`0041_app_forward_auth` stores only short-lived one-use code hashes.
 The server-rendered Ship → Apps list and detail pages use those capabilities for creation and all
 controls, mask Secret references, follow retained app/build events, and start ApplicationAgent app
 turns with exact proposal confirmation before repository or App writes. Their contract is
@@ -335,7 +339,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `repository_names_guard` in the source tree, versioned by content hash).
+  `app_forward_auth_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

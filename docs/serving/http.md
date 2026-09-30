@@ -31,6 +31,8 @@ out) and are the unit-tested surface.
 | `POST /identity/*` | form adapters that call the corresponding registry capability; see [`../ui/identity.md`](../ui/identity.md) |
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |
+| `GET /apps/authorize?app=<id>&rd=<URL>` | Lake-session handoff for a protected Ship app; validates exact HTTPS app host and redirects with a 60-second one-use code |
+| `GET /v1/apps/auth`, `/w/<workspace_id>/v1/apps/auth` | nginx forward-auth for protected Ship apps; returns app-scoped identity headers and exchanges one-use codes for a host-only cookie |
 | `GET /ship/apps`, `/ship/app?customer_id=<id>&app_id=<id>` | Ship app list and operating page, including retained and live app/build events |
 | `POST /ship/apps/create`, `/ship/apps/agent`, `/ship/app/*` | capability-backed app creation, agent start, deploy, lifecycle, environment, binding, auth, build, and delete form adapters |
 | `GET /train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | space-scoped study, trial, metric, artifact and comparison pages |
@@ -69,6 +71,13 @@ existing capability restrictions and must belong to the selected workspace. Othe
 continue through the same registry policy authorization used by `/v1` and `/mcp`. The prefixed
 OpenAPI response is byte-for-byte the same registry document as `/v1/openapi.json`; page routes
 under `/w/<workspace_id>/...` retain their existing handling.
+
+The prefixed `GET /w/<workspace_id>/v1/apps/auth` route is the one exception to the generic
+workspace resolver. It authenticates the host and checks that the stored app workspace equals the
+path workspace in one indexed control-store query. A valid app cookie therefore makes no Zetta
+call and performs at most one PostgreSQL read. Its `Server-Timing` data is included in the route
+performance regression. The complete handoff, ingress annotations, cookie boundary, and logout
+behavior are in [`../api/web-apps.md`](../api/web-apps.md).
 
 `HttpServer.WorkspacePrefixServesRestOpenApiMcpAndAppSourceReads` compares prefixed and
 unprefixed REST results, rejects a conflicting field, compares both OpenAPI documents, reads an

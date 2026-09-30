@@ -86,6 +86,7 @@ retained progress and build-scoped credentials.
 | Route | Contract |
 |---|---|
 | `GET /healthz`, `GET /readyz`, `GET /metrics` | Liveness and readiness are unauthenticated; metrics uses the same bearer or session cookie as capabilities. These are HTTP operational routes, not capabilities, so they are not rendered into OpenAPI or MCP. See [`../serving/telemetry.md`](../serving/telemetry.md). |
+| `GET /apps/authorize`, `GET /v1/apps/auth`, `GET /w/<workspace_id>/v1/apps/auth` | Lake-protected Ship app browser handoff and nginx forward-auth. They use Lake sessions, host-only app cookies, and one-use codes rather than registry capabilities. See [`web-apps.md`](web-apps.md). |
 | `/scim/v2/Users`, `/scim/v2/Users/:id`, `/scim/v2/Groups`, `/scim/v2/Groups/:id` | SCIM 2.0 list/get/create/PATCH/delete resources. The adapter renders SCIM media types and calls the registry capabilities authenticated by the provider bearer. See [`sso.md`](sso.md). |
 | `/v2/*`, npm package paths, `/legacy/`, `/simple/*`, `/packages/*`, `/buildid/*` | Native artifact registry and debug-information protocols. Publication uses the administrator bearer; published artifacts are public reads. See [`registry.md`](registry.md). |
 

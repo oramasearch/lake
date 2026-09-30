@@ -108,6 +108,8 @@ only the three listed below; no names are invented for the four unobserved datas
 | `workspaces` | multitenancy/dispatch | Customer workspace identity, desired lifecycle and operator routing/status contract. |
 | `workspaces_guard` | multitenancy/dispatch | Migration 0039 application marker for the operator schema Job. |
 | `repository_names_guard` | multitenancy/dispatch | Migration 0040 application marker for active repository-name uniqueness. |
+| `app_authorization_codes` | multitenancy/dispatch | Hashed, short-lived, single-use protected-app browser handoff codes. |
+| `app_forward_auth_guard` | multitenancy/dispatch | Migration 0041 application marker for protected-app forward authentication. |
 | `users` | multitenancy/dispatch | Identity reference for customer membership. |
 | `organizations` | multitenancy/dispatch | Tenant identity and organization boundary. |
 | `customers` | multitenancy/dispatch | Space ownership and tenant routing. |

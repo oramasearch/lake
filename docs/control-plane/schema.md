@@ -288,7 +288,7 @@ With `spec.postgres` on, the operator owns, per Lake, a ConfigMap `lake-<name>-c
 (the SQL) and a `PostgresSchema` `lake-<name>-controldb-schema` whose controller runs an idempotent
 Job: wait for the DB, skip if the guard table exists, apply the whole file in **one transaction**
 with `psql --single-transaction`. **The guard is the table the newest migration creates**
-(`repository_names_guard` in the source tree), so a new migration means a new guard and the next
+(`app_forward_auth_guard` in the source tree), so a new migration means a new guard and the next
 Job re-runs the idempotent file, adding only what is missing. The version is a content hash of the SQL
 (`sha256:<12 hex>`); `kubectl get lake` shows it as `SCHEMA`.
 
@@ -332,8 +332,8 @@ kubectl get postgresschema -n <namespace>                              # APPLIED
 kubectl exec -n <namespace> lake-<name>-controldb-1 -c postgres -- psql -U postgres -d lake \
   -c "SELECT version FROM schema_migrations" \
   -c "SELECT conname FROM pg_constraint WHERE conrelid='customers'::regclass" \
-  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services', '0025_service_catalog', '0034_web_apps', '0035_web_apps_operator_contract', '0040_active_repository_names')" \
-  -c "SELECT to_regclass('repository_names_guard')"
+  -c "SELECT version FROM schema_migrations WHERE version IN ('0007_identity_core', '0008_mfa_recovery', '0009_secrets', '0010_sso_federation', '0011_offline_recovery', '0012_forge_export_import', '0013_pki', '0014_metering', '0015_drive', '0016_auth_apps', '0017_agent_sessions', '0018_settings_surface', '0019_platform', '0020_identity_exit', '0021_token_attenuation', '0022_session_lookup', '0023_custodial_identities', '0024_services', '0025_service_catalog', '0034_web_apps', '0035_web_apps_operator_contract', '0040_active_repository_names', '0041_app_forward_auth')" \
+  -c "SELECT to_regclass('app_forward_auth_guard')"
 ```
 
 ## Token attenuation migration
@@ -519,3 +519,12 @@ The related soft-deletion models already release names: `apps_customer_name_idx`
 `desired = 'present'`, and `workspaces_name_idx` excludes `desired = 'deleted'`. Secret-version
 soft deletion is version history rather than a reusable name namespace, so its `(entry_id,
 version)` key remains unchanged.
+
+## Protected app forward-auth migration
+
+`0041_app_forward_auth` adds `app_authorization_codes`, Lake-owned dispatch state for a browser
+handoff from Lake's host to a protected app host. Rows contain only a SHA-256 code hash, app ID,
+user ID, exact app host, 60-second expiry, and optional use time. The app and user foreign keys
+cascade on deletion. Exchange marks one live row used atomically while rechecking the live app,
+host, workspace, and membership. The expiry index supports the minute sweep of expired and spent
+rows. The idempotent deployment marker is `app_forward_auth_guard`.

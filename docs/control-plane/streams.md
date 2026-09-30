@@ -29,7 +29,7 @@ audit. Zetta's CRUD handlers independently audit the Lake service credential. Pr
 are also audited but do not mutate Zetta.
 
 Apply the schema before deploying this binary. Lake pods do not run migrations. The operator
-must vendor `db/schema.sql` and advance its guard to `repository_names_guard` in its own rollout
+must vendor `db/schema.sql` and advance its guard to `app_forward_auth_guard` in its own rollout
 change; this worktree does not modify the operator repository. An existing installation needs the
 owned PostgresSchema recreated according to [schema.md](schema.md). The live Zettas must include
 Zetta PR #1143 for the new CRUD names, but Lake still builds against the authorized transport

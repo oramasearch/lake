@@ -607,6 +607,42 @@ public:
     control::Result<control::WebApp> get_web_app(const std::string& id) override {
         return call("get_web_app", [&] { return store_->get_web_app(id); });
     }
+    control::Result<control::WebApp>
+    resolve_web_app_auth_host(const std::string& host, const std::string& workspace_id) override {
+        return call("resolve_web_app_auth_host",
+                    [&] { return store_->resolve_web_app_auth_host(host, workspace_id); });
+    }
+    control::Result<control::WebApp> authorize_web_app(const std::string& app_id,
+                                                       const std::string& user_id) override {
+        return call("authorize_web_app",
+                    [&] { return store_->authorize_web_app(app_id, user_id); });
+    }
+    control::Result<control::WebApp>
+    authorize_web_app_session(const std::string& host,
+                              const std::string& workspace_id,
+                              const std::string& app_id,
+                              const std::string& user_id) override {
+        return call("authorize_web_app_session", [&] {
+            return store_->authorize_web_app_session(host, workspace_id, app_id, user_id);
+        });
+    }
+    control::Result<void>
+    create_web_app_authorization_code(const control::WebAppAuthorizationCode& value) override {
+        return call("create_web_app_authorization_code",
+                    [&] { return store_->create_web_app_authorization_code(value); });
+    }
+    control::Result<control::WebAppAuthorization>
+    consume_web_app_authorization_code(const std::string& host,
+                                       const std::string& workspace_id,
+                                       const std::string& code_hash) override {
+        return call("consume_web_app_authorization_code", [&] {
+            return store_->consume_web_app_authorization_code(host, workspace_id, code_hash);
+        });
+    }
+    control::Result<void> sweep_web_app_authorization_codes() override {
+        return call("sweep_web_app_authorization_codes",
+                    [&] { return store_->sweep_web_app_authorization_codes(); });
+    }
     control::Result<control::WebApp> create_web_app(const control::NewWebApp& value) override {
         return call("create_web_app", [&] { return store_->create_web_app(value); });
     }

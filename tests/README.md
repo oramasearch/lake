@@ -145,6 +145,12 @@ store.
 reserved platform and configured names, direct-zone default hosts, app/replica quotas,
 fake-operator status, Secret references, service binding, Loki namespace selection, purpose-scoped
 operator hashes and lifecycle event delivery with the memory store.
+`WebAppSessions.*` checks app-session claims, tamper rejection and expiry.
+`HttpServer/HttpResponseIsolation.ProtectedAppAuthorizationHandsOffAHostOnlySession/*` covers
+anonymous refusal, normal sign-in return, exact redirect-host validation, one-use code exchange,
+host-only cookie issuance, code reuse, cross-app and expired cookies, and membership revocation in
+both stores. `PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` includes the
+workspace-prefixed forward-auth route with no Zetta calls and a 100 ms p95 bound.
 `test_api.cpp` proves successful private repository tree/file reads with a source token.
 `PostgresWebApps.*` proves the production desired row, hash registration/rotation, customer
 locking, `lake_apps` notification, operator status and physical deletion. Both stores exercise

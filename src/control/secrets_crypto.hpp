@@ -22,6 +22,7 @@ struct Ciphertext {
 Result<Key> instance_key(std::string_view encoded);
 Result<Key> random_key();
 Result<Key> derive(const Key& key, std::string_view context);
+Result<Key> derive_hkdf(const Key& key, std::string_view label);
 Result<std::string> seal(const Key& key, std::string_view plaintext, std::string_view associated);
 Result<std::string> open(const Key& key, std::string_view sealed, std::string_view associated);
 Result<std::string> base64url_encode(std::string_view value);

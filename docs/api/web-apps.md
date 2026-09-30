@@ -76,6 +76,41 @@ read scope. Detaching it clears the operator token hash immediately; service det
 that service from the normalized binding list. Deploy and rollback events retain their exact
 source or image input so the UI can offer history-bound rollback.
 
+## Lake-protected app authentication
+
+An app with `auth = lake` uses nginx forward authentication without exposing Lake's browser
+session to customer code. The operator configures the app ingress with:
+
+```yaml
+nginx.ingress.kubernetes.io/auth-url: http://lake-prod.lake.svc.cluster.local:80/w/<workspace>/v1/apps/auth
+nginx.ingress.kubernetes.io/auth-signin: https://<lake public host>/apps/authorize?app=<app id>&rd=$scheme://$host$escaped_request_uri
+nginx.ingress.kubernetes.io/auth-always-set-cookie: "true"
+```
+
+`GET /v1/apps/auth`, including its `/w/<workspace>/v1/apps/auth` form, resolves a live protected
+app by `X-Forwarded-Host` or `Host`. A valid host-only `lake_app_session` returns 200 with
+`X-Orama-User` and `X-Orama-Space`. The signed token carries `app_id`, `user_id`, `workspace_id`,
+`iat`, and `exp`; its HMAC-SHA256 key is derived from the instance KEK with HKDF label
+`lake/app-session/v1`, and it expires after 12 hours. Lake rechecks current workspace membership
+on every request. Invalid, expired, cross-app, or no-longer-authorized tokens return 401.
+
+When no app cookie is usable, nginx sends the browser to
+`GET /apps/authorize?app=<app id>&rd=<original URL>` on Lake's own host. Lake's normal browser
+session is required; a signed-out request goes through `/sign-in` and returns to the authorize
+request after authentication. The redirect destination must be HTTPS on exactly the stored app
+host, and the user must still belong to the app workspace. Lake then creates a random, 60-second,
+single-use code and redirects to `rd` with `__lake_code` appended. The forward-auth endpoint
+atomically spends that code, returns the identity headers, and sets:
+
+```text
+lake_app_session=<token>; Path=/; Secure; HttpOnly; SameSite=Lax
+```
+
+There is deliberately no `Domain` attribute, so customer app code receives only its own app
+cookie and never Lake's `lake_session`. `/logout` cannot clear cookies on app hosts. The 12-hour
+expiry and per-request membership check are the revocation path. Lake audits code exchanges and
+rate-limited denials, but does not audit each successful cookie check.
+
 ## Tokens and events
 
 > The operator generates them, and lake validates hashes. No plaintext token is ever stored in

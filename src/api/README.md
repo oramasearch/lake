@@ -79,6 +79,12 @@ name policy before deriving the direct-zone host. Operator hash credentials are 
 registry to source repository/revision reads, customer workspace reads, or one app's event
 publication. See `docs/api/web-apps.md`.
 
+`http_server.cpp` also owns the non-registry protected-app routes. `/apps/authorize` validates an
+exact HTTPS app destination against the Lake browser session, and `/v1/apps/auth` exchanges its
+one-use code or verifies the host-only app session. The workspace-prefixed form avoids the generic
+workspace lookup and uses the store's single-query app authorization path. See
+`docs/api/web-apps.md` and `docs/serving/http.md`.
+
 ApplicationAgent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
 turn, repository/App writes only when the reviewed proposal is present. `http_server.cpp` and
 `web_ui.cpp` display and hash that stored proposal before starting the confirmed turn.

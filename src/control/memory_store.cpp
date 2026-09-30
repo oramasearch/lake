@@ -852,6 +852,131 @@ Result<WebApp> InMemoryStore::get_web_app(const std::string& id) {
     return *app;
 }
 
+bool InMemoryStore::user_can_access_web_app_locked(const WebApp& app,
+                                                   const std::string& user_id) const {
+    const auto customer = std::ranges::find(customers_, app.customer_id, &Customer::id);
+    if (customer == customers_.end()) {
+        return false;
+    }
+    if (customer->customer_type == "individual") {
+        return customer->user_id == user_id;
+    }
+    return std::ranges::any_of(memberships_, [&](const Membership& membership) {
+        return membership.organization_id == customer->organization_id &&
+               membership.principal_type == "user" && membership.principal_id == user_id;
+    });
+}
+
+Result<WebApp> InMemoryStore::resolve_web_app_auth_host(const std::string& host,
+                                                        const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find_if(web_apps_, [&](const WebApp& candidate) {
+        return candidate.host == host && candidate.auth == "lake" &&
+               candidate.desired != "deleted" &&
+               (workspace_id.empty() || candidate.workspace_id == workspace_id);
+    });
+    if (app == web_apps_.end() ||
+        std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == app->workspace_id && workspace.desired != "deleted";
+        })) {
+        return std::unexpected(StoreError{"not_found", "no protected app uses this host"});
+    }
+    return *app;
+}
+
+Result<WebApp> InMemoryStore::authorize_web_app(const std::string& app_id,
+                                                const std::string& user_id) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find(web_apps_, app_id, &WebApp::id);
+    if (app == web_apps_.end() || app->auth != "lake" || app->desired == "deleted" ||
+        std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == app->workspace_id && workspace.desired != "deleted";
+        })) {
+        return std::unexpected(StoreError{"not_found", "no protected app " + app_id});
+    }
+    if (!user_can_access_web_app_locked(*app, user_id)) {
+        return std::unexpected(StoreError{"unauthorized", "user is not a member of this space"});
+    }
+    return *app;
+}
+
+Result<WebApp> InMemoryStore::authorize_web_app_session(const std::string& host,
+                                                        const std::string& workspace_id,
+                                                        const std::string& app_id,
+                                                        const std::string& user_id) {
+    std::lock_guard lock(mutex_);
+    const auto app = std::ranges::find_if(web_apps_, [&](const WebApp& candidate) {
+        return candidate.id == app_id && candidate.host == host && candidate.auth == "lake" &&
+               candidate.desired != "deleted" && candidate.workspace_id == workspace_id;
+    });
+    if (app == web_apps_.end() ||
+        std::ranges::none_of(workspaces_,
+                             [&](const Workspace& workspace) {
+                                 return workspace.id == app->workspace_id &&
+                                        workspace.desired != "deleted";
+                             }) ||
+        !user_can_access_web_app_locked(*app, user_id)) {
+        return std::unexpected(StoreError{"unauthorized", "app session is not authorized"});
+    }
+    return *app;
+}
+
+Result<void>
+InMemoryStore::create_web_app_authorization_code(const WebAppAuthorizationCode& value) {
+    if (value.app_id.empty() || value.user_id.empty() || value.host.empty() ||
+        value.code_hash.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "app authorization code is invalid"});
+    }
+    std::lock_guard lock(mutex_);
+    std::erase_if(web_app_authorization_codes_, [](const auto& candidate) {
+        return candidate.used || candidate.expires_at <= std::chrono::steady_clock::now();
+    });
+    if (std::ranges::any_of(web_app_authorization_codes_, [&](const auto& candidate) {
+            return candidate.code.code_hash == value.code_hash;
+        })) {
+        return std::unexpected(StoreError{"conflict", "app authorization code already exists"});
+    }
+    web_app_authorization_codes_.push_back(
+        {value, std::chrono::steady_clock::now() + std::chrono::seconds(60), false});
+    return {};
+}
+
+Result<WebAppAuthorization> InMemoryStore::consume_web_app_authorization_code(
+    const std::string& host, const std::string& workspace_id, const std::string& code_hash) {
+    std::lock_guard lock(mutex_);
+    const auto code =
+        std::ranges::find_if(web_app_authorization_codes_, [&](const auto& candidate) {
+            return candidate.code.host == host && candidate.code.code_hash == code_hash &&
+                   !candidate.used && candidate.expires_at > std::chrono::steady_clock::now();
+        });
+    if (code == web_app_authorization_codes_.end()) {
+        return std::unexpected(
+            StoreError{"unauthorized", "app authorization code is invalid or expired"});
+    }
+    const auto app = std::ranges::find(web_apps_, code->code.app_id, &WebApp::id);
+    if (app == web_apps_.end() || app->host != host || app->auth != "lake" ||
+        app->desired == "deleted" || (!workspace_id.empty() && app->workspace_id != workspace_id) ||
+        std::ranges::none_of(workspaces_,
+                             [&](const Workspace& workspace) {
+                                 return workspace.id == app->workspace_id &&
+                                        workspace.desired != "deleted";
+                             }) ||
+        !user_can_access_web_app_locked(*app, code->code.user_id)) {
+        return std::unexpected(
+            StoreError{"unauthorized", "app authorization code is not authorized"});
+    }
+    code->used = true;
+    return WebAppAuthorization{*app, code->code.user_id};
+}
+
+Result<void> InMemoryStore::sweep_web_app_authorization_codes() {
+    std::lock_guard lock(mutex_);
+    std::erase_if(web_app_authorization_codes_, [](const auto& candidate) {
+        return candidate.used || candidate.expires_at <= std::chrono::steady_clock::now();
+    });
+    return {};
+}
+
 Result<WebApp> InMemoryStore::create_web_app(const NewWebApp& input) {
     std::lock_guard lock(mutex_);
     if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {

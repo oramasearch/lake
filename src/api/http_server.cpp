@@ -397,27 +397,27 @@ boost::http::route_task send_text(boost::http::route_params& route,
         body = web_ui_workspace_document(std::move(body), workspace_path_id(std::string(route.url.path())));
         // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
         route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
-        const auto timing = request_timing(route);
-        const auto now = std::chrono::steady_clock::now();
-        const double total_ms =
-            timing ? std::chrono::duration<double, std::milli>(now - timing->started).count() : 0.0;
-        const double workspace_ms =
-            timing ? static_cast<double>(
-                         timing->workspace_calls->nanoseconds.load(std::memory_order_relaxed)) /
-                         1'000'000.0
-                   : 0.0;
-        const std::size_t workspace_count =
-            timing ? timing->workspace_calls->count.load(std::memory_order_relaxed) : 0;
-        const std::size_t workspace_rounds = timing
-            ? timing->workspace_calls->completed_rounds.load(std::memory_order_relaxed) : 0;
-        route.res.set("Server-Timing",
-                      std::format("total;dur={:.3f}, workspace;dur={:.3f};desc=\"{} calls\", "
-                                  "workspace_rounds;desc=\"{} rounds\"",
-                                  total_ms,
-                                  workspace_ms,
-                                  workspace_count,
-                                  workspace_rounds));
     }
+    const auto timing = request_timing(route);
+    const auto now = std::chrono::steady_clock::now();
+    const double total_ms =
+        timing ? std::chrono::duration<double, std::milli>(now - timing->started).count() : 0.0;
+    const double workspace_ms =
+        timing ? static_cast<double>(
+                     timing->workspace_calls->nanoseconds.load(std::memory_order_relaxed)) /
+                     1'000'000.0
+               : 0.0;
+    const std::size_t workspace_count =
+        timing ? timing->workspace_calls->count.load(std::memory_order_relaxed) : 0;
+    const std::size_t workspace_rounds =
+        timing ? timing->workspace_calls->completed_rounds.load(std::memory_order_relaxed) : 0;
+    route.res.set("Server-Timing",
+                  std::format("total;dur={:.3f}, workspace;dur={:.3f};desc=\"{} calls\", "
+                              "workspace_rounds;desc=\"{} rounds\"",
+                              total_ms,
+                              workspace_ms,
+                              workspace_count,
+                              workspace_rounds));
     stamp_response_headers(route, body);
     auto [send_error] = co_await route.send(body);
     if (send_error)
@@ -1534,6 +1534,103 @@ std::string request_host(const boost::http::route_params& route) {
         host.resize(port);
     }
     return host;
+}
+
+std::string app_request_host(const boost::http::route_params& route) {
+    std::string host;
+    if (route.req.count("x-forwarded-host") != 0) {
+        host = std::string(route.req.at("x-forwarded-host"));
+    } else if (route.req.count(boost::http::field::host) != 0) {
+        host = std::string(route.req.at(boost::http::field::host));
+    }
+    if (const std::size_t comma = host.find(','); comma != std::string::npos) {
+        host.resize(comma);
+    }
+    const std::size_t first = host.find_first_not_of(" \t\r\n");
+    const std::size_t last = host.find_last_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    host = host.substr(first, last - first + 1);
+    if (!host.empty() && host.front() == '[') {
+        const std::size_t close = host.find(']');
+        if (close != std::string::npos) {
+            host = host.substr(1, close - 1);
+        }
+    } else if (const std::size_t colon = host.rfind(':'); colon != std::string::npos) {
+        host.resize(colon);
+    }
+    std::ranges::transform(host, host.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return host;
+}
+
+std::string original_app_code(const boost::http::route_params& route) {
+    if (route.req.count("x-original-url") == 0) {
+        return {};
+    }
+    const auto original =
+        boost::urls::parse_uri_reference(std::string_view(route.req.at("x-original-url")));
+    if (!original) {
+        return {};
+    }
+    for (const auto& parameter : original->params()) {
+        if (parameter.key == "__lake_code") {
+            return std::string(parameter.value);
+        }
+    }
+    return {};
+}
+
+std::string app_authorize_path(std::string_view app_id, std::string_view redirect) {
+    return "/apps/authorize?app=" + oauth_url_encode(app_id) + "&rd=" + oauth_url_encode(redirect);
+}
+
+std::string app_sign_in_return(const boost::http::route_params& route) {
+    const std::string encoded = cookie_value(route, "lake_sign_in_return");
+    if (encoded.empty()) {
+        return {};
+    }
+    const auto decoded = decode_base64url(encoded);
+    if (!decoded) {
+        return {};
+    }
+    const auto parsed = boost::urls::parse_relative_ref(*decoded);
+    if (!parsed || parsed->encoded_path() != "/apps/authorize" || parsed->has_fragment()) {
+        return {};
+    }
+    std::string app_id;
+    std::string redirect;
+    for (const auto& parameter : parsed->params()) {
+        if (parameter.key == "app") {
+            app_id = std::string(parameter.value);
+        } else if (parameter.key == "rd") {
+            redirect = std::string(parameter.value);
+        }
+    }
+    if (app_id.empty() || redirect.empty()) {
+        return {};
+    }
+    return app_authorize_path(app_id, redirect);
+}
+
+std::string app_sign_in_return_cookie(const boost::http::route_params& route,
+                                      std::string_view path) {
+    std::string cookie = "lake_sign_in_return=" + control::identity_crypto::base64url_encode(path) +
+                         "; Path=/; Max-Age=120; HttpOnly; SameSite=Lax";
+    if (request_is_https(route)) {
+        cookie += "; Secure";
+    }
+    return cookie;
+}
+
+std::string clear_app_sign_in_return_cookie(const boost::http::route_params& route) {
+    std::string cookie = "lake_sign_in_return=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax";
+    if (request_is_https(route)) {
+        cookie += "; Secure";
+    }
+    return cookie;
 }
 
 std::string application_redirect_location(const control::Application& application,
@@ -4712,6 +4809,8 @@ struct ApiServer::Impl {
     std::condition_variable work_cv;
     std::chrono::steady_clock::time_point next_timestamp_renewal_check =
         std::chrono::steady_clock::now();
+    std::mutex app_auth_audit_mutex;
+    std::map<std::string, std::chrono::steady_clock::time_point> app_auth_denials;
 
     explicit Impl(ServerOptions opts)
         : options(std::move(opts)), sync_store(options.store_root),
@@ -5065,6 +5164,8 @@ struct ApiServer::Impl {
             "/activity",
             "/sign-up",
             "/sign-in",
+            "/apps/authorize",
+            "/v1/apps/auth",
             "/mfa",
             "/passkeys",
             "/passkey-sign-in",
@@ -5099,6 +5200,9 @@ struct ApiServer::Impl {
         const std::string path(route.url.path());
         const std::string workspace_local = workspace_prefixed_local_path(path);
         if (!workspace_local.empty() && !workspace_path_id(path).empty()) {
+            if (workspace_local == "/v1/apps/auth") {
+                return "/w/:workspace_id/v1/apps/auth";
+            }
             if (workspace_local == "/v1/openapi.json" || workspace_local == "/mcp") {
                 return "/w/:workspace_id" + workspace_local;
             }
@@ -5375,6 +5479,199 @@ struct ApiServer::Impl {
             .instance_kek = context.instance_kek,
         };
         return audit::record(*context.store, event, identity_options).has_value();
+    }
+
+    ApiContext app_auth_audit_context(const boost::http::route_params& route,
+                                      const control::WebApp* app,
+                                      std::string_view user_id = {}) const {
+        ApiContext context;
+        context.store = options.store.get();
+        context.identity_seed = options.identity_seed;
+        context.instance_kek = options.instance_kek;
+        context.authentication_method = "app_forward_auth";
+        context.acting_user_id = std::string(user_id);
+        context.acting_identity = user_id.empty() ? "anonymous" : "user/" + std::string(user_id);
+        context.request_id = route.req.count("x-request-id") == 0
+                                 ? control::new_uuid_v4()
+                                 : std::string(route.req.at("x-request-id"));
+        if (app != nullptr) {
+            context.credential_customer_id = app->customer_id;
+        }
+        return context;
+    }
+
+    void audit_app_auth_denial(const boost::http::route_params& route,
+                               std::string_view host,
+                               std::string_view reason,
+                               const control::WebApp* app = nullptr) {
+        const auto now = std::chrono::steady_clock::now();
+        const std::string key = std::string(host) + "\n" + std::string(reason);
+        {
+            std::lock_guard lock(app_auth_audit_mutex);
+            const auto found = app_auth_denials.find(key);
+            if (found != app_auth_denials.end() && now - found->second < std::chrono::minutes(1)) {
+                return;
+            }
+            app_auth_denials[key] = now;
+            if (app_auth_denials.size() > 1'024) {
+                std::erase_if(app_auth_denials, [&](const auto& entry) {
+                    return now - entry.second >= std::chrono::minutes(1);
+                });
+            }
+        }
+        ApiContext context = app_auth_audit_context(route, app);
+        (void)record_direct_event(context,
+                                  audit::EventDraft{
+                                      .customer_id = app == nullptr ? "" : app->customer_id,
+                                      .kind = "authentication",
+                                      .object = "app/" + std::string(host),
+                                      .action = "forward_auth",
+                                      .outcome = "denied",
+                                      .method = "app_forward_auth",
+                                      .details = {{"reason", reason}},
+                                  });
+    }
+
+    boost::http::route_task send_app_auth_success(boost::http::route_params& route,
+                                                  const control::WebApp& app,
+                                                  std::string_view user_id,
+                                                  std::string_view cookie = {}) {
+        route.res.set("X-Orama-User", user_id);
+        route.res.set("X-Orama-Space", app.workspace_id);
+        if (!cookie.empty()) {
+            route.res.set(boost::http::field::set_cookie, cookie);
+        }
+        return send_text(
+            route, boost::http::status::ok, "", "text/plain; charset=utf-8", "no-store");
+    }
+
+    boost::http::route_task serve_app_forward_auth(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const std::string host = app_request_host(route);
+        const std::string workspace_id = workspace_path_id(std::string(route.url.path()));
+        if (!options.store || host.empty()) {
+            audit_app_auth_denial(route, host, "app_host_missing");
+            co_return co_await send_text(
+                route, http::status::unauthorized, "", "text/plain", "no-store");
+        }
+
+        const std::string session = cookie_value(route, "lake_app_session");
+        if (!session.empty()) {
+            const auto claims = control::verify_web_app_session(options.instance_kek, session);
+            if (claims) {
+                const auto app = options.store->authorize_web_app_session(
+                    host, claims->workspace_id, claims->app_id, claims->user_id);
+                if (app && (workspace_id.empty() || workspace_id == app->workspace_id)) {
+                    co_return co_await send_app_auth_success(route, *app, claims->user_id);
+                }
+            }
+        }
+
+        const std::string code = original_app_code(route);
+        if (!code.empty()) {
+            const auto authorization = options.store->consume_web_app_authorization_code(
+                host, workspace_id, control::identity_crypto::sha256_hex(code));
+            if (authorization) {
+                const auto token = control::issue_web_app_session(options.instance_kek,
+                                                                  authorization->app.id,
+                                                                  authorization->user_id,
+                                                                  authorization->app.workspace_id);
+                if (token) {
+                    const std::string cookie =
+                        "lake_app_session=" + *token + "; Path=/; Secure; HttpOnly; SameSite=Lax";
+                    ApiContext context =
+                        app_auth_audit_context(route, &authorization->app, authorization->user_id);
+                    (void)record_direct_event(context,
+                                              audit::EventDraft{
+                                                  .customer_id = authorization->app.customer_id,
+                                                  .kind = "authentication",
+                                                  .principal = "user/" + authorization->user_id,
+                                                  .object = "app/" + authorization->app.id,
+                                                  .action = "exchange_code",
+                                                  .outcome = "success",
+                                                  .method = "app_forward_auth",
+                                              });
+                    co_return co_await send_app_auth_success(
+                        route, authorization->app, authorization->user_id, cookie);
+                }
+            }
+        }
+
+        const auto app = options.store->resolve_web_app_auth_host(host, workspace_id);
+        audit_app_auth_denial(route,
+                              host,
+                              code.empty() ? "credential_missing_or_invalid" : "code_invalid",
+                              app ? &*app : nullptr);
+        co_return co_await send_text(
+            route, http::status::unauthorized, "", "text/plain", "no-store");
+    }
+
+    boost::http::route_task serve_app_authorize(boost::http::route_params& route) {
+        namespace http = boost::http;
+        const std::string app_id = query_value(route, "app");
+        const std::string redirect_url = query_value(route, "rd");
+        if (app_id.empty() || redirect_url.empty()) {
+            co_return co_await send_text(route,
+                                         http::status::bad_request,
+                                         "app and rd are required",
+                                         "text/plain; charset=utf-8",
+                                         "no-store");
+        }
+        const std::string return_path = app_authorize_path(app_id, redirect_url);
+        const ApiContext context = context_for(route);
+        if (!context.authorized) {
+            const std::string sign_in = "/sign-in?return_to=" + oauth_url_encode(return_path);
+            co_return co_await redirect(
+                route, sign_in, app_sign_in_return_cookie(route, return_path));
+        }
+        if (!options.store || context.acting_user_id.empty()) {
+            co_return co_await send_text(route,
+                                         http::status::forbidden,
+                                         "You do not have access to this app.",
+                                         "text/plain; charset=utf-8",
+                                         "no-store");
+        }
+        const auto app = options.store->authorize_web_app(app_id, context.acting_user_id);
+        if (!app) {
+            const http::status status = app.error().code == "not_found" ? http::status::bad_request
+                                                                        : http::status::forbidden;
+            audit_app_auth_denial(route, app_id, app.error().code);
+            co_return co_await send_text(route,
+                                         status,
+                                         status == http::status::forbidden
+                                             ? "You do not have access to this app."
+                                             : "The requested app does not exist.",
+                                         "text/plain; charset=utf-8",
+                                         "no-store");
+        }
+        const auto parsed = boost::urls::parse_uri(redirect_url);
+        if (!parsed || parsed->scheme_id() != boost::urls::scheme::https ||
+            !parsed->has_authority() || parsed->has_userinfo() || parsed->has_port() ||
+            parsed->has_fragment() || parsed->host() != app->host) {
+            audit_app_auth_denial(route, app->host, "redirect_invalid", &*app);
+            co_return co_await send_text(route,
+                                         http::status::bad_request,
+                                         "rd must be an HTTPS URL on the app host.",
+                                         "text/plain; charset=utf-8",
+                                         "no-store");
+        }
+        const std::string code = control::identity_crypto::random_secret();
+        const auto stored = options.store->create_web_app_authorization_code(
+            control::WebAppAuthorizationCode{app->id,
+                                             context.acting_user_id,
+                                             app->host,
+                                             control::identity_crypto::sha256_hex(code)});
+        if (!stored) {
+            co_return co_await send_text(route,
+                                         http::status::service_unavailable,
+                                         "Lake could not authorize this app.",
+                                         "text/plain; charset=utf-8",
+                                         "no-store");
+        }
+        boost::urls::url destination(*parsed);
+        destination.params().set("__lake_code", code);
+        co_return co_await redirect(
+            route, destination.buffer(), clear_app_sign_in_return_cookie(route));
     }
 
     struct VerifiedAcmeJws {
@@ -6683,8 +6980,12 @@ struct ApiServer::Impl {
     boost::http::route_task serve_sign_in(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.authorized) {
-            return redirect(route,
-                            context.operator_credential || clerk ? "/repositories" : "/sessions");
+            const std::string app_return = app_sign_in_return(route);
+            return redirect(
+                route,
+                app_return.empty()
+                    ? (context.operator_credential || clerk ? "/repositories" : "/sessions")
+                    : app_return);
         }
         if (auto application = application_for_domain(route)) {
             return send_text(route,
@@ -7122,7 +7423,7 @@ struct ApiServer::Impl {
         }
         co_return co_await redirect(
             route,
-            "/repositories",
+            app_sign_in_return(route).empty() ? "/repositories" : app_sign_in_return(route),
             browser_session_cookie(route, result.value.value("secret", "")));
     }
 
@@ -7148,8 +7449,11 @@ struct ApiServer::Impl {
                                          "text/html; charset=utf-8",
                                          "no-store");
         }
+        const std::string app_return = app_sign_in_return(route);
         co_return co_await redirect(
-            route, "/sessions", browser_session_cookie(route, result.value.value("secret", "")));
+            route,
+            app_return.empty() ? "/sessions" : app_return,
+            browser_session_cookie(route, result.value.value("secret", "")));
     }
 
     boost::http::route_task serve_identity_mfa_verify(boost::http::route_params& route) {
@@ -7173,8 +7477,11 @@ struct ApiServer::Impl {
                 "text/html; charset=utf-8",
                 "no-store");
         }
+        const std::string app_return = app_sign_in_return(route);
         co_return co_await redirect(
-            route, "/sessions", browser_session_cookie(route, result.value.value("secret", "")));
+            route,
+            app_return.empty() ? "/sessions" : app_return,
+            browser_session_cookie(route, result.value.value("secret", "")));
     }
 
     boost::http::route_task serve_identity_mfa_enroll(boost::http::route_params& route) {
@@ -7482,7 +7789,9 @@ struct ApiServer::Impl {
         if (request_is_https(route)) {
             cookie += "; Secure";
         }
-        co_return co_await redirect(route, "/repositories", cookie);
+        const std::string app_return = app_sign_in_return(route);
+        co_return co_await redirect(
+            route, app_return.empty() ? "/repositories" : app_return, cookie);
     }
 
     boost::http::route_task serve_oauth_callback(boost::http::route_params& route) {
@@ -7644,6 +7953,8 @@ struct ApiServer::Impl {
             if (auto application = options.store->get_application_by_pool(issued_pool)) {
                 destination = application_redirect_location(*application, application_result);
             }
+        } else if (const std::string app_return = app_sign_in_return(route); !app_return.empty()) {
+            destination = app_return;
         }
         co_return co_await redirect(route, destination, cookie);
     }
@@ -7813,6 +8124,9 @@ struct ApiServer::Impl {
         const std::string selected = workspace_path_id(path);
         const std::string prefixed_local = workspace_prefixed_local_path(path);
         if (workspace_api_path(prefixed_local)) {
+            if (prefixed_local == "/v1/apps/auth") {
+                co_return http::route_next;
+            }
             if (selected.empty() || !options.store) {
                 co_return co_await send_text(route,
                                              http::status::not_found,
@@ -14472,6 +14786,16 @@ bool ApiServer::start() {
     add_route(
         http::method::get, "/sign-in", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/sign-in", impl.serve_sign_in(route));
+        });
+    add_route(http::method::get,
+              "/apps/authorize",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/apps/authorize", impl.serve_app_authorize(route));
+              });
+    add_workspace_api_route(
+        http::method::get, "/v1/apps/auth", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/v1/apps/auth", impl.serve_app_forward_auth(route));
         });
     add_route(http::method::get, "/mfa", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/mfa", impl.serve_mfa(route));
