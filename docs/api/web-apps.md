@@ -88,7 +88,8 @@ nginx.ingress.kubernetes.io/auth-always-set-cookie: "true"
 ```
 
 `GET /v1/apps/auth`, including its `/w/<workspace>/v1/apps/auth` form, resolves a live protected
-app by `X-Forwarded-Host` or `Host`. A valid host-only `lake_app_session` returns 200 with
+app by the host of `X-Original-URL` (ingress-nginx sets `Host` to Lake's Service and sends no
+`X-Forwarded-Host` on the auth subrequest), falling back to `X-Forwarded-Host` or `Host`. A valid host-only `lake_app_session` returns 200 with
 `X-Orama-User` and `X-Orama-Space`. The signed token carries `app_id`, `user_id`, `workspace_id`,
 `iat`, and `exp`; its HMAC-SHA256 key is derived from the instance KEK with HKDF label
 `lake/app-session/v1`, and it expires after 12 hours. Lake rechecks current workspace membership

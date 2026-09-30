@@ -2571,11 +2571,14 @@ TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession)
     ASSERT_TRUE(other_app) << other_app.error().message;
 
     const std::string auth_path = "/w/" + workspace->id + "/v1/apps/auth";
+    // Exactly what ingress-nginx's auth subrequest sends: Host is Lake's Service, there is no
+    // X-Forwarded-Host, and X-Original-URL is absolute ($scheme://$http_host$request_uri).
     const auto app_headers = [&](const std::string& host, const std::string& original_url) {
+        const std::string absolute =
+            original_url.starts_with("http") ? original_url : "http://" + host + original_url;
         return std::vector<std::pair<std::string, std::string>>{
-            {"X-Forwarded-Host", host},
             {"X-Original-Method", "GET"},
-            {"X-Original-URL", original_url},
+            {"X-Original-URL", absolute},
         };
     };
     HttpConnection connection(server_->port());
@@ -3289,9 +3292,9 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
                                                         "HTTP/1.1",
                                                         {},
                                                         {},
-                                                        {{"X-Forwarded-Host", protected_app->host},
-                                                         {"X-Original-Method", "GET"},
-                                                         {"X-Original-URL", "/"}});
+                                                        {{"X-Original-Method", "GET"},
+                                                         {"X-Original-URL",
+                                                          "http://" + protected_app->host + "/"}});
         ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << response;
         EXPECT_EQ(workspace_call_count(response), 0U);
         EXPECT_EQ(caller->call_count(), calls_before);
