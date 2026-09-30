@@ -1,5 +1,7 @@
 #include "lake/control/agent_library.hpp"
 
+#include <charconv>
+
 namespace lake::control {
 
 const LibraryAgent* library_agent(std::string_view key) {
@@ -28,6 +30,35 @@ std::map<std::string, std::string> parse_agent_endpoints(std::string_view text) 
         endpoints[std::string(key)] = std::string(pair.substr(equals + 1));
     }
     return endpoints;
+}
+
+std::expected<std::map<std::string, int>, std::string> parse_agent_leases(std::string_view text) {
+    std::map<std::string, int> leases;
+    if (text.ends_with(',')) {
+        return std::unexpected("expected a library agent key=seconds pair");
+    }
+    while (!text.empty()) {
+        const auto comma = text.find(',');
+        const auto pair = text.substr(0, comma);
+        text = comma == std::string_view::npos ? std::string_view() : text.substr(comma + 1);
+        const auto equals = pair.find('=');
+        const auto key = pair.substr(0, equals);
+        if (equals == std::string_view::npos || !library_agent(key)) {
+            return std::unexpected("expected a library agent key=seconds pair");
+        }
+        const auto value = pair.substr(equals + 1);
+        int seconds = 0;
+        const auto [end, error] =
+            std::from_chars(value.data(), value.data() + value.size(), seconds);
+        if (error != std::errc() || end != value.data() + value.size() || seconds < 60 ||
+            seconds > 3600) {
+            return std::unexpected("agent lease seconds must be an integer from 60 to 3600");
+        }
+        if (!leases.emplace(std::string(key), seconds).second) {
+            return std::unexpected("duplicate agent lease configuration");
+        }
+    }
+    return leases;
 }
 
 nlohmann::json agent_library_json(const std::map<std::string, std::string>& endpoints) {

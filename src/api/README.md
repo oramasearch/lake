@@ -1,5 +1,9 @@
 # API implementation
 
+Agent-task capability calls renew the current claim through the registry. Agent events are
+accepted atomically before workspace publication; only a Running task accepts them, and the
+first terminal write wins. See [agent leases](../../docs/api/agent-bus.md).
+
 Page reads share authentication and customer selection within each GET, and batch independent
 workspace and local reads with `when_all`. Data uses a projected name/database list; dataset
 details own metadata and the bounded sample. `Server-Timing` reports actual outbound calls and

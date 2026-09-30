@@ -34,3 +34,8 @@ expiry cleanup; memory and PostgreSQL implementations preserve the same contract
 `agent_library.hpp` registers ApplicationAgent as `agent-application` and ExperimentsAgent as
 `agent-experiments`, chat-capable services used from their Ship/Train pages and Ask Orama. Each bus
 identity is independent from every other library agent.
+
+Agent claims carry a renewable lease and up to three attempts. The Store interface exposes
+credential-checked renewal and acknowledgement of durable retry notices; the bus pump receives
+the workspace service for publication. `parse_agent_leases` validates per-library durations.
+See [the lease contract](../../../docs/api/agent-bus.md).

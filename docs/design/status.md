@@ -54,6 +54,7 @@ the exact commands and outputs.
 | Server-rendered UI | Yes | Yes | Not assessed by the 2026-09-08 API observations | No | [UI](../ui/README.md) |
 | Ask Orama, Pipelines as agent tools, Discover Opportunities, the Agent Factory | Yes | Yes | No | No | [ask-orama](../api/ask-orama.md), [train-agents](../api/train-agents.md), [discover](../api/discover.md), [agent-factory](../api/agent-factory.md) |
 | Agent launches, schedules and turns (`agent_turn`) | Yes | Yes | No | No | [agent-launches](../api/agent-launches.md) |
+| Renewable agent-task claims and three-attempt recovery (`0042_agent_task_leases`) | Yes | Memory/PostgreSQL regressions; native proof recorded with the PR | No; operator schema and lease configuration handoff required | No | [agent bus](../api/agent-bus.md) |
 | Never-expiring agent keys and tokens (opt-in) | Yes | Yes | No | No | [agents](../api/agents.md#keys-that-never-expire-lake234), [identity](../api/identity.md) |
 | Train → Agents and the Agent Library | Yes | Yes | No | No | [train-agents](../api/train-agents.md) |
 | Agents reach Zetta through lake (`/workspaces/<customer>/zetta/v1/`) | Yes | Yes | No | No | [workspaces](../api/workspaces.md#agents-reach-zetta-through-lake) |

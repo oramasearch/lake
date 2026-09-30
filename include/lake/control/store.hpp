@@ -381,7 +381,7 @@ struct NewAgentCronSchedule {
 };
 // One agent turn run in the background (lake#269): lake writes it, publishes it on the agent bus
 // (docs/api/agent-bus.md) and answers the request at once. `phase` is empty until an agent claims
-// it, then Running, and Succeeded or Failed once the agent (or lake's deadline) finishes it.
+// it, then Running. Expired leases return to waiting; the third expiry finishes it as Failed.
 struct AgentTask {
     std::string id, customer_id, agent, kind, conversation_id;
     std::string workspace_id;
@@ -394,15 +394,19 @@ struct AgentTask {
     nlohmann::json result = nullptr;
     // The agent-events sequence at or before the task's first event (0: unknown), lake#275.
     std::uint64_t events_from = 0;
+    int lease_seconds = 600;
+    int attempts = 1;
+    std::string lease_until;
+    bool retry_notice_pending = false;
 };
 struct AgentTaskStreamScope {
     std::string id, agent, finished_at;
     std::string workspace_id;
 };
-// What lake's bus loop acts on: tasks nobody claimed since they were last published, and tasks
-// past their deadline (pending or running), which it fails.
+// What lake's bus loop acts on: unclaimed tasks to republish, waiting tasks past their deadline,
+// and reclaimed tasks whose retry or final failure notice still needs publication.
 struct StaleAgentTasks {
-    std::vector<AgentTask> unclaimed, overdue;
+    std::vector<AgentTask> unclaimed, overdue, reclaimed;
 };
 
 struct StreamOwner {
@@ -1001,12 +1005,20 @@ public:
                                                              const std::string& kind,
                                                              const std::string& workspace_id) = 0;
     // The task's agent claims it: Running, with the SHA-256 of the credential lake just handed
-    // it and where on agent-events its events will start. Exactly one claim succeeds; another is
-    // a conflict, as is a claim by a different agent.
+    // it and where on agent-events its events will start. Exactly one claim per attempt succeeds;
+    // another is a conflict, as is a claim by a different agent.
     virtual Result<AgentTask> claim_agent_task(const std::string& id,
                                                const std::string& agent,
                                                const std::string& credential_sha256,
-                                               std::uint64_t events_from = 0) = 0;
+                                               std::uint64_t events_from = 0,
+                                               int lease_seconds = 600) = 0;
+    // Activity by the current task credential renews its claim. Other credentials conflict.
+    virtual Result<void> renew_agent_task_lease(const std::string& id,
+                                                const std::string& credential_sha256) = 0;
+    // Retry notices remain pending until their workspace publication succeeds.
+    virtual Result<void> mark_agent_task_notice_published(const std::string& id,
+                                                          int attempts,
+                                                          const std::string& phase) = 0;
     // What the claiming agent reported: Running with a message, or Succeeded / Failed with its
     // answer. Refused for a task that agent has not claimed or that already finished.
     virtual Result<AgentTask> record_agent_task_event(const std::string& id,
@@ -1014,7 +1026,7 @@ public:
                                                       const std::string& phase,
                                                       const std::string& message,
                                                       const nlohmann::json& result) = 0;
-    // Lake's deadline: Failed with a message, claimed or not; a finished task is left alone.
+    // Lake's waiting deadline: fail only an unclaimed task; a concurrent claim is left alone.
     virtual Result<void> fail_agent_task(const std::string& id, const std::string& message) = 0;
     virtual Result<void> mark_agent_task_published(const std::string& id) = 0;
     virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;

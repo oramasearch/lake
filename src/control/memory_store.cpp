@@ -1634,21 +1634,61 @@ Result<AgentTask> InMemoryStore::latest_agent_conversation_task(
 Result<AgentTask> InMemoryStore::claim_agent_task(const std::string& id,
                                                   const std::string& agent,
                                                   const std::string& credential_sha256,
-                                                  std::uint64_t events_from) {
+                                                  std::uint64_t events_from,
+                                                  int lease_seconds) {
+    if (lease_seconds < 60 || lease_seconds > 3600) {
+        return std::unexpected(StoreError{"invalid_input", "agent lease must be 60..3600 seconds"});
+    }
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
     if (found == agent_tasks_.end() || found->desired != "present") {
         return std::unexpected(StoreError{"not_found", "no agent task " + id});
     }
-    if (found->agent != agent || !found->phase.empty()) {
+    if (found->agent != agent || !found->phase.empty() || found->retry_notice_pending) {
         return std::unexpected(StoreError{"conflict", "the task is not waiting for " + agent});
     }
     found->phase = "Running";
     found->credential_sha256 = credential_sha256;
-    found->events_from = events_from;
+    if (found->events_from == 0) {
+        found->events_from = events_from;
+    }
+    found->lease_seconds = lease_seconds;
+    found->lease_until =
+        iso8601_at(std::chrono::system_clock::now() + std::chrono::seconds(lease_seconds));
     found->started_at = utc_now();
     agent_task_clocks_[id].started = std::chrono::steady_clock::now();
+    agent_task_clocks_[id].lease_until =
+        std::chrono::steady_clock::now() + std::chrono::seconds(lease_seconds);
     return *found;
+}
+
+Result<void> InMemoryStore::renew_agent_task_lease(const std::string& id,
+                                                   const std::string& credential_sha256) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found == agent_tasks_.end() || found->phase != "Running" || credential_sha256.empty() ||
+        !constant_time_hex_equal(found->credential_sha256, credential_sha256)) {
+        return std::unexpected(StoreError{"conflict", "the task claim is no longer active"});
+    }
+    const auto lease = std::chrono::seconds(found->lease_seconds);
+    found->lease_until = iso8601_at(std::chrono::system_clock::now() + lease);
+    agent_task_clocks_[id].lease_until = std::chrono::steady_clock::now() + lease;
+    return {};
+}
+
+Result<void> InMemoryStore::mark_agent_task_notice_published(const std::string& id,
+                                                             int attempts,
+                                                             const std::string& phase) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (found != agent_tasks_.end() && found->attempts == attempts && found->phase == phase &&
+        found->retry_notice_pending) {
+        found->retry_notice_pending = false;
+        if (found->phase.empty()) {
+            agent_task_clocks_[id].created = std::chrono::steady_clock::now();
+        }
+    }
+    return {};
 }
 
 Result<AgentTask> InMemoryStore::record_agent_task_event(const std::string& id,
@@ -1667,6 +1707,11 @@ Result<AgentTask> InMemoryStore::record_agent_task_event(const std::string& id,
         found->result = result;
         found->finished_at = utc_now();
         found->credential_sha256.clear(); // a finished task's credential stops
+        found->lease_until.clear();
+    } else {
+        const auto lease = std::chrono::seconds(found->lease_seconds);
+        found->lease_until = iso8601_at(std::chrono::system_clock::now() + lease);
+        agent_task_clocks_[id].lease_until = std::chrono::steady_clock::now() + lease;
     }
     return *found;
 }
@@ -1677,11 +1722,14 @@ Result<void> InMemoryStore::fail_agent_task(const std::string& id, const std::st
     if (found == agent_tasks_.end()) {
         return std::unexpected(StoreError{"not_found", "no agent task " + id});
     }
-    if (found->finished_at.empty()) {
+    const auto waiting = std::chrono::steady_clock::now() - agent_task_clocks_[id].created;
+    if (found->phase.empty() && !found->retry_notice_pending &&
+        waiting >= std::chrono::seconds(found->deadline_seconds)) {
         found->phase = "Failed";
         found->message = message;
         found->finished_at = utc_now();
         found->credential_sha256.clear();
+        found->lease_until.clear();
     }
     return {};
 }
@@ -1696,11 +1744,31 @@ Result<StaleAgentTasks> InMemoryStore::stale_agent_tasks(std::chrono::seconds re
     std::lock_guard lock(mutex_);
     const auto now = std::chrono::steady_clock::now();
     StaleAgentTasks out;
-    for (const AgentTask& task : agent_tasks_) {
+    for (AgentTask& task : agent_tasks_) {
+        TaskClock& clock = agent_task_clocks_[task.id];
+        if (task.desired == "present" && task.phase == "Running" && clock.lease_until < now) {
+            task.credential_sha256.clear();
+            task.lease_until.clear();
+            task.retry_notice_pending = true;
+            task.message = "the agent stopped responding";
+            if (task.attempts >= 3) {
+                task.phase = "Failed";
+                task.finished_at = utc_now();
+            } else {
+                ++task.attempts;
+                task.phase.clear();
+                task.message += "; retrying (attempt " + std::to_string(task.attempts) + " of 3)";
+                clock.created = now;
+                clock.published = now - republish_after;
+            }
+        }
+        if (task.retry_notice_pending) {
+            out.reclaimed.push_back(task);
+            continue;
+        }
         if (!task.finished_at.empty() || task.desired != "present") {
             continue;
         }
-        const TaskClock& clock = agent_task_clocks_[task.id];
         const auto deadline = std::chrono::seconds(task.deadline_seconds);
         if (task.phase.empty()) {
             if (now - clock.created >= deadline) {
@@ -1708,8 +1776,6 @@ Result<StaleAgentTasks> InMemoryStore::stale_agent_tasks(std::chrono::seconds re
             } else if (now - clock.published >= republish_after) {
                 out.unclaimed.push_back(task);
             }
-        } else if (now - clock.started >= deadline) {
-            out.overdue.push_back(task);
         }
     }
     return out;
@@ -1721,6 +1787,13 @@ void InMemoryStore::age_agent_task(const std::string& id, std::chrono::seconds b
     clock.created -= by;
     clock.published -= by;
     clock.started -= by;
+    clock.lease_until -= by;
+    const auto task = std::ranges::find(agent_tasks_, id, &AgentTask::id);
+    if (task != agent_tasks_.end() && !task->lease_until.empty()) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            clock.lease_until - std::chrono::steady_clock::now());
+        task->lease_until = iso8601_at(std::chrono::system_clock::now() + remaining);
+    }
 }
 
 Result<AgentTask> InMemoryStore::get_agent_task(const std::string& id) {
@@ -2980,7 +3053,12 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
                          "lake",
                          "agent_task",
                          task->scopes,
-                         std::nullopt};
+                         std::nullopt,
+                         task->id,
+                         task->customer_id,
+                         "",
+                         "",
+                         task->credential_sha256};
     }
     if (secret.starts_with(agent_schedule_credential_prefix)) {
         const auto parsed = parse_agent_credential(secret, agent_schedule_credential_prefix);

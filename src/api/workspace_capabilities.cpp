@@ -1683,6 +1683,9 @@ json task_json(const control::AgentTask& task) {
              {"kind", task.kind},
              {"status", status},
              {"message", task.message},
+             {"attempts", task.attempts},
+             {"lease_until", task.lease_until},
+             {"lease_seconds", task.lease_seconds},
              {"created_at", task.created_at},
              {"finished_at", task.finished_at},
              {"answer", task.result}};
@@ -3858,11 +3861,20 @@ void register_agent_bus_capabilities(Registry& registry) {
                                            control::identity_crypto::random_secret();
             // Where its events will start on agent-events, so following it never reads the
             // topic's whole history (lake#275).
-            auto task = context.store->claim_agent_task(
-                task_id,
-                input.at("agent"),
-                control::identity_crypto::sha256_hex(credential),
-                1);
+            int lease_seconds = 600;
+            if (context.workspaces) {
+                const auto& leases = context.workspaces->config().agent_lease_seconds;
+                const auto configured = leases.find(input.at("agent").get<std::string>());
+                if (configured != leases.end()) {
+                    lease_seconds = configured->second;
+                }
+            }
+            auto task =
+                context.store->claim_agent_task(task_id,
+                                                input.at("agent"),
+                                                control::identity_crypto::sha256_hex(credential),
+                                                1,
+                                                lease_seconds);
             if (!task) {
                 return ApiResult::failure(task.error().code, task.error().message, "/task_id");
             }
@@ -3877,6 +3889,9 @@ void register_agent_bus_capabilities(Registry& registry) {
                                        {"agent", task->agent},
                                        {"kind", task->kind},
                                        {"deadline_seconds", task->deadline_seconds},
+                                       {"lease_seconds", task->lease_seconds},
+                                       {"lease_until", task->lease_until},
+                                       {"attempts", task->attempts},
                                        {"body", std::move(body)}});
         }});
     registry.add(Capability{
@@ -3932,13 +3947,16 @@ void register_agent_bus_capabilities(Registry& registry) {
             if (!created) {
                 co_return ApiResult::failure(created.error().code, created.error().message);
             }
-            auto published = control::settled(co_await bus.publish("agent-events", event, task_id));
-            if (!published) {
-                co_return ApiResult::failure("store_unavailable", published.error().message);
-            }
+            // Serialize terminal writes in the store before publishing. A losing result must
+            // never appear in the event stream as an accepted answer.
             const auto applied = control::AgentTaskBus::apply(*context.store, event);
             if (!applied) {
                 co_return ApiResult::failure(applied.error().code, applied.error().message);
+            }
+            event["attempts"] = applied->attempts;
+            auto published = control::settled(co_await bus.publish("agent-events", event, task_id));
+            if (!published) {
+                co_return ApiResult::failure("store_unavailable", published.error().message);
             }
             co_return ApiResult::success({{"event_id", *published}});
         }});
@@ -4011,6 +4029,11 @@ void register_agent_bus_capabilities(Registry& registry) {
                              {"message", event.payload.value("message", std::string())}};
                     if (event.payload.contains("result")) {
                         row["result"] = event.payload["result"];
+                    }
+                    for (const char* field : {"attempts", "reclaimed"}) {
+                        if (event.payload.contains(field)) {
+                            row[field] = event.payload[field];
+                        }
                     }
                     events.push_back(std::move(row));
                 }

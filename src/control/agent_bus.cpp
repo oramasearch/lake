@@ -419,31 +419,71 @@ Result<AgentTask> AgentTaskBus::apply(Store& store, const nlohmann::json& event)
                                                           : nlohmann::json());
 }
 
-liquid::runtime::task<ZettaControlResult<std::size_t>>
-AgentTaskBus::pump(std::chrono::milliseconds wait) {
-    std::size_t applied = 0;
-    static_cast<void>(wait);
+liquid::runtime::task<ZettaControlResult<void>>
+AgentTaskBus::publish_reclaim(const AgentTask& task, WorkspaceService* workspaces) {
+    if (!workspaces) {
+        co_return bus_failure<void>("store_unavailable", "task workspace is unavailable");
+    }
+    WorkspaceAgentBus events(workspaces, task.customer_id, task.workspace_id);
+    const auto created = settled(co_await events.create_topic(std::string(agent_events_topic)));
+    if (!created) {
+        co_return bus_failure<void>(created.error().code, created.error().message);
+    }
+    const auto published =
+        settled(co_await events.publish(std::string(agent_events_topic),
+                                        {{"task_id", task.id},
+                                         {"agent", task.agent},
+                                         {"attempts", task.attempts},
+                                         {"type", task.phase == "Failed" ? "failed" : "progress"},
+                                         {"reclaimed", true},
+                                         {"message", task.message}},
+                                        task.id));
+    if (!published) {
+        co_return bus_failure<void>(published.error().code, published.error().message);
+    }
+    const auto marked =
+        store_->mark_agent_task_notice_published(task.id, task.attempts, task.phase);
+    if (!marked) {
+        co_return bus_failure<void>(marked.error().code, marked.error().message);
+    }
+    if (task.phase.empty()) {
+        co_return co_await publish_task(task);
+    }
+    co_return ZettaControlResult<void>{};
+}
 
+liquid::runtime::task<ZettaControlResult<std::size_t>>
+AgentTaskBus::pump(std::chrono::milliseconds wait, WorkspaceService* workspaces) {
+    static_cast<void>(wait);
     const auto now = std::chrono::steady_clock::now();
-    if (now - last_sweep_ >= sweep_every_) {
-        last_sweep_ = now;
-        auto stale = store_->stale_agent_tasks(agent_task_republish_after);
-        if (stale) {
-            for (const AgentTask& task : stale->overdue) {
-                static_cast<void>(store_->fail_agent_task(
-                    task.id,
-                    task.phase.empty()
-                        ? "No agent picked this up within " +
-                              std::to_string(task.deadline_seconds) + " seconds."
-                        : "The agent did not finish within " +
-                              std::to_string(task.deadline_seconds) + " seconds."));
-            }
-            for (const AgentTask& task : stale->unclaimed) {
-                static_cast<void>(co_await publish_task(task));
-            }
+    if (now - last_sweep_ < sweep_every_) {
+        co_return std::size_t{0};
+    }
+    last_sweep_ = now;
+    auto stale = store_->stale_agent_tasks(agent_task_republish_after);
+    if (!stale) {
+        co_return bus_failure<std::size_t>(stale.error().code, stale.error().message);
+    }
+    ZettaControlResult<void> outcome;
+    for (const AgentTask& task : stale->reclaimed) {
+        const auto published = settled(co_await publish_reclaim(task, workspaces));
+        if (!published && outcome) {
+            outcome = published;
         }
     }
-    co_return applied;
+    for (const AgentTask& task : stale->overdue) {
+        static_cast<void>(store_->fail_agent_task(task.id,
+                                                  "No agent picked this up within " +
+                                                      std::to_string(task.deadline_seconds) +
+                                                      " seconds."));
+    }
+    for (const AgentTask& task : stale->unclaimed) {
+        static_cast<void>(co_await publish_task(task));
+    }
+    if (!outcome) {
+        co_return bus_failure<std::size_t>(outcome.error().code, outcome.error().message);
+    }
+    co_return std::size_t{0};
 }
 
 } // namespace lake::control

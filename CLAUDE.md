@@ -25,6 +25,11 @@ Every future deployment image receives OCI revision and creation labels. The bin
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).
 
+Agent tasks now have renewable claim leases, two retries and a terminal failure after three
+expiries. Retry notices reach workspace event streams. Shared bus
+credentials retain first-terminal-write-wins behavior; task-scoped event authentication and
+operator schema/configuration handoff remain follow-ups. See `docs/api/agent-bus.md`.
+
 ## Historical status — superseded 2026-09-08
 
 The following was the prior source-tree status record. Its production claims are retained only as
@@ -339,7 +344,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `app_forward_auth_guard` in the source tree, versioned by content hash).
+  `agent_task_leases_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

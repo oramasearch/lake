@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <expected>
 #include <map>
 #include <string>
 #include <string_view>
@@ -91,6 +92,9 @@ const LibraryAgent* library_agent(std::string_view key);
 // LAKE_AGENT_ENDPOINTS: `key=url` pairs separated by commas, set by the Orama operator for the
 // agents it runs (orama-operator#185). Unknown keys and malformed pairs are ignored.
 std::map<std::string, std::string> parse_agent_endpoints(std::string_view text);
+
+// LAKE_AGENT_LEASE_SECONDS: key=seconds pairs, bounded to 60..3600; omitted keys use 600.
+std::expected<std::map<std::string, int>, std::string> parse_agent_leases(std::string_view text);
 
 // The library as the API and the pages show it: each agent with `deployed` and its status.
 nlohmann::json agent_library_json(const std::map<std::string, std::string>& endpoints);

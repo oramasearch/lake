@@ -279,7 +279,13 @@ public:
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,
-                                       std::uint64_t events_from = 0) override;
+                                       std::uint64_t events_from = 0,
+                                       int lease_seconds = 600) override;
+    Result<void> renew_agent_task_lease(const std::string& id,
+                                        const std::string& credential_sha256) override;
+    Result<void> mark_agent_task_notice_published(const std::string& id,
+                                                  int attempts,
+                                                  const std::string& phase) override;
     Result<AgentTask> record_agent_task_event(const std::string& id,
                                               const std::string& agent,
                                               const std::string& phase,
@@ -557,7 +563,7 @@ private:
     std::vector<AskMessage> ask_messages_;
     std::vector<AgentTask> agent_tasks_;
     struct TaskClock {
-        std::chrono::steady_clock::time_point created, published, started;
+        std::chrono::steady_clock::time_point created, published, started, lease_until;
     };
     std::map<std::string, TaskClock> agent_task_clocks_;
     std::vector<Opportunity> opportunities_;

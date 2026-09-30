@@ -6,14 +6,15 @@
 
 #include <gtest/gtest.h>
 
+#include "audit_test_support.hpp"
 #include "http1/client.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/postgres_store.hpp"
-#include "audit_test_support.hpp"
 #include "postgres_fixture.hpp"
 #include "stream_fixture.hpp"
 
@@ -194,6 +195,8 @@ TEST_F(Streams, TaskCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
         .customer_id = customer, .agent = "agent-project", .kind = "test",
         .workspace_id = workspace->id, .scopes = {"list_streams"}});
     ASSERT_TRUE(task);
+    context.credential_token_hash = lake::control::identity_crypto::sha256_hex("test-claim");
+    ASSERT_TRUE(store->claim_agent_task(task->id, "agent-project", context.credential_token_hash));
     context.session_credential = true;
     context.operator_credential = false;
     context.credential_kind = "agent_task";
