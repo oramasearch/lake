@@ -56,7 +56,7 @@ row deliberately does not change App desired state before the image exists.
 
 ## Schema rollout
 
-`repository_names_guard` is the newest guard. The operator must vendor `db/schema.sql`
+`app_forward_auth_guard` is the newest guard. The operator must vendor `db/schema.sql`
 byte-for-byte and apply it before builds are enabled. The migration is idempotent and adds
 customer/time and purpose-hash indexes. Lake pods do not run migrations.
 

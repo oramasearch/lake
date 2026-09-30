@@ -24,7 +24,9 @@ earlier mode and deletion values, normalizes binding JSON, and removes the super
 The old partial unique indexes are removed before conversion, preserving deleted rows that reuse
 a name or host, then recreated with the new deletion value.
 Migration `0038_workspace_data_plane` adds immutable `workspace_id`, required on create.
-The current deployment guard is `repository_names_guard`; the operator must vendor the schema.
+Migration `0041_app_forward_auth` adds the short-lived, single-use authorization-code table used
+to hand a Lake session to an app host without widening the Lake cookie domain. The current
+deployment guard is `app_forward_auth_guard`; the operator must vendor the schema.
 Workspace assignment and event-client cutover are tracked in
 [orama-operator#216](https://github.com/oramasearch/orama-operator/issues/216).
 
@@ -37,6 +39,11 @@ Workspace assignment and event-client cutover are tracked in
 | `token_hashes_json` | operator; Lake may only clear it for rotation |
 | `phase, url, ready, message, observed_generation` | operator |
 | `updated_at` | both |
+
+`app_authorization_codes` is Lake-owned dispatch state, not workspace data. Lake stores only the
+SHA-256 hash of each random 32-byte code, plus the app, user, host, expiry, and use time. Exchange
+is an atomic consume conditioned on the same live app, host, workspace, and membership; expired
+or spent rows cannot authenticate. The owner loop sweeps expired and spent rows every minute.
 
 `source_repository` is the Lake repository ID; the API refuses a repository outside the app's
 customer. Source tokens additionally require the exact `source_revision`. Generation increases

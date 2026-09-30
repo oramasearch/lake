@@ -7,8 +7,8 @@ server-side shared-bus isolation and migration `0037_streams` with `streams_guar
 active-only repository-name uniqueness, token ancestry and the one-use invalidation of legacy
 API/static tokens. See
 [postgres.md](postgres.md) for the backing store and deployment contract.
-[web-apps.md](web-apps.md) defines the `apps` desired row, operator status fields, notification,
-quotas, namespaces and Secret-reference boundary.
+[web-apps.md](web-apps.md) defines the `apps` desired row, protected-app authorization-code state,
+operator status fields, notification, quotas, namespaces and Secret-reference boundary.
 [builds.md](builds.md) defines the `builds` desired row, operator status loop, cancellation,
 notifications and purpose-hash credential boundary.
 

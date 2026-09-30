@@ -22,8 +22,13 @@ operator rollout before exposing Streams; see `docs/control-plane/streams.md`.
 Migration `0040_active_repository_names` replaces the repository table constraint with the
 partial unique index `repository_name_unique`, which applies only while `deleted_at IS NULL`.
 Deleting a repository therefore releases its customer-scoped name while preserving the tombstone.
-The latest guard is `repository_names_guard`; Apps, services, stores and workspaces already use
-equivalent live-row predicates for their name indexes.
+Apps, services, stores and workspaces already use equivalent live-row predicates for their name
+indexes.
+
+Migration `0041_app_forward_auth` adds Lake-owned, short-lived authorization-code state for the
+protected-app browser handoff. Only SHA-256 code hashes are stored; exchange is single-use and
+expired or spent rows are swept. The latest guard is `app_forward_auth_guard`. See
+`docs/api/web-apps.md` and `docs/control-plane/web-apps.md`.
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.

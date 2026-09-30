@@ -41,6 +41,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <boost/url.hpp>
+
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
@@ -233,6 +235,14 @@ std::string response_body(const std::string& response) {
     return header_end == std::string::npos ? std::string() : response.substr(header_end + 4);
 }
 
+std::string response_cookie_pair(const std::string& response) {
+    std::string cookie = response_header(response, "set-cookie");
+    if (const std::size_t end = cookie.find(';'); end != std::string::npos) {
+        cookie.resize(end);
+    }
+    return cookie;
+}
+
 class HttpConnection {
 public:
     explicit HttpConnection(unsigned short port) : descriptor_(connect_loopback(port)) {}
@@ -253,7 +263,8 @@ public:
                         std::string_view cookie = {},
                         std::string_view version = "HTTP/1.1",
                         std::string_view bearer = {},
-                        std::string_view content_type = "application/x-www-form-urlencoded") {
+                        std::string_view content_type = "application/x-www-form-urlencoded",
+                        const std::vector<std::pair<std::string, std::string>>& headers = {}) {
         std::string selected_path(path);
         std::string selected_body(body);
         const auto page = path.substr(0, path.find('?'));
@@ -278,6 +289,9 @@ public:
         wire += "Content-Length: " + std::to_string(body.size()) + "\r\n";
         if (!cookie.empty()) {
             wire += "Cookie: " + std::string(cookie) + "\r\n";
+        }
+        for (const auto& [name, value] : headers) {
+            wire += name + ": " + value + "\r\n";
         }
         wire += "\r\n";
         wire += body;
@@ -2510,6 +2524,164 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
     ASSERT_TRUE(launches && launches->size() == 1U) << "a first check run starts";
 }
 
+TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession) {
+    const auto issued =
+        store_->sign_in_password({"lake", email_, password_, "", "app-auth-fixture"});
+    ASSERT_TRUE(issued) << issued.error().message;
+    const auto principal = store_->context_for(issued->secret);
+    ASSERT_TRUE(principal);
+
+    const std::string suffix = lake::control::new_uuid_v4();
+    std::string customer_name = "app-auth-" + suffix;
+    std::erase(customer_name, '-');
+    const auto organization =
+        store_->create_organization({"taap:1:ed25519:app-auth-" + suffix, "App auth fixture", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto customer =
+        store_->create_customer({"organization", "", organization->id, customer_name});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto membership = store_->create_membership({organization->id,
+                                                       "",
+                                                       "user",
+                                                       principal->user_id,
+                                                       principal->taap_id,
+                                                       "member",
+                                                       "app-auth-attestation",
+                                                       "app-auth-grantor",
+                                                       "app-auth-request"});
+    ASSERT_TRUE(membership) << membership.error().message;
+    const auto workspace =
+        store_->create_workspace({customer->id, "protected", "prod", principal->taap_id});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+
+    lake::control::NewWebApp app_input;
+    app_input.customer_id = customer->id;
+    app_input.workspace_id = workspace->id;
+    app_input.name = "protected";
+    app_input.mode = "image";
+    app_input.image = "registry.example.test/protected:latest";
+    app_input.port = 8080;
+    app_input.host = "protected-" + customer_name + ".apps.example.test";
+    app_input.auth = "lake";
+    const auto app = store_->create_web_app(app_input);
+    ASSERT_TRUE(app) << app.error().message;
+    app_input.name = "other";
+    app_input.host = "other-" + customer_name + ".apps.example.test";
+    const auto other_app = store_->create_web_app(app_input);
+    ASSERT_TRUE(other_app) << other_app.error().message;
+
+    const std::string auth_path = "/w/" + workspace->id + "/v1/apps/auth";
+    const auto app_headers = [&](const std::string& host, const std::string& original_url) {
+        return std::vector<std::pair<std::string, std::string>>{
+            {"X-Forwarded-Host", host},
+            {"X-Original-Method", "GET"},
+            {"X-Original-URL", original_url},
+        };
+    };
+    HttpConnection connection(server_->port());
+    const std::string missing = connection.request(
+        "GET", auth_path, {}, {}, "HTTP/1.1", {}, {}, app_headers(app->host, "/"));
+    ASSERT_TRUE(missing.starts_with("HTTP/1.1 401")) << missing;
+
+    const std::string redirect_url = "https://" + app->host + "/dashboard?view=recent";
+    const std::string authorize = "/apps/authorize?app=" + lake::api::oauth_url_encode(app->id) +
+                                  "&rd=" + lake::api::oauth_url_encode(redirect_url);
+    const std::string signed_out = connection.request("GET", authorize);
+    ASSERT_TRUE(signed_out.starts_with("HTTP/1.1 302")) << signed_out;
+    EXPECT_TRUE(response_header(signed_out, "location").starts_with("/sign-in?return_to="));
+    const std::string return_cookie = response_cookie_pair(signed_out);
+    EXPECT_TRUE(return_cookie.starts_with("lake_sign_in_return="));
+
+    const std::string signed_in =
+        connection.request("POST",
+                           "/identity/sign-in",
+                           "email=" + lake::api::oauth_url_encode(email_) + "&password=" +
+                               lake::api::oauth_url_encode(password_) + "&device_name=app-auth",
+                           return_cookie);
+    ASSERT_TRUE(signed_in.starts_with("HTTP/1.1 302")) << signed_in;
+    EXPECT_EQ(response_header(signed_in, "location"), authorize);
+    const std::string lake_cookie = response_cookie_pair(signed_in);
+    ASSERT_TRUE(lake_cookie.starts_with("lake_session="));
+
+    const std::string wrong_redirect =
+        connection.request("GET",
+                           "/apps/authorize?app=" + lake::api::oauth_url_encode(app->id) +
+                               "&rd=https%3A%2F%2Fevil.example.test%2F",
+                           {},
+                           lake_cookie);
+    ASSERT_TRUE(wrong_redirect.starts_with("HTTP/1.1 400")) << wrong_redirect;
+
+    const std::string authorized =
+        connection.request("GET", authorize, {}, return_cookie + "; " + lake_cookie);
+    ASSERT_TRUE(authorized.starts_with("HTTP/1.1 302")) << authorized;
+    const std::string handoff = response_header(authorized, "location");
+    const auto handoff_url = boost::urls::parse_uri(handoff);
+    ASSERT_TRUE(handoff_url) << handoff;
+    std::string code;
+    for (const auto& parameter : handoff_url->params()) {
+        if (parameter.key == "__lake_code") {
+            code = std::string(parameter.value);
+        }
+    }
+    ASSERT_FALSE(code.empty());
+    EXPECT_EQ(handoff_url->host(), app->host);
+
+    const std::string exchanged =
+        connection.request("GET",
+                           auth_path,
+                           {},
+                           {},
+                           "HTTP/1.1",
+                           {},
+                           {},
+                           app_headers(app->host, "/dashboard?view=recent&__lake_code=" + code));
+    ASSERT_TRUE(exchanged.starts_with("HTTP/1.1 200")) << exchanged;
+    EXPECT_EQ(response_header(exchanged, "x-orama-user"), principal->user_id);
+    EXPECT_EQ(response_header(exchanged, "x-orama-space"), workspace->id);
+    const std::string app_cookie_header = response_header(exchanged, "set-cookie");
+    EXPECT_TRUE(app_cookie_header.starts_with("lake_app_session="));
+    EXPECT_NE(app_cookie_header.find("; Path=/; Secure; HttpOnly; SameSite=Lax"),
+              std::string::npos);
+    EXPECT_EQ(app_cookie_header.find("Domain="), std::string::npos);
+    const std::string app_cookie = response_cookie_pair(exchanged);
+
+    const std::string reused =
+        connection.request("GET",
+                           auth_path,
+                           {},
+                           {},
+                           "HTTP/1.1",
+                           {},
+                           {},
+                           app_headers(app->host, "/dashboard?__lake_code=" + code));
+    EXPECT_TRUE(reused.starts_with("HTTP/1.1 401")) << reused;
+
+    const std::string wrong_app = connection.request(
+        "GET", auth_path, {}, app_cookie, "HTTP/1.1", {}, {}, app_headers(other_app->host, "/"));
+    EXPECT_TRUE(wrong_app.starts_with("HTTP/1.1 401")) << wrong_app;
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const auto expired_token = lake::control::issue_web_app_session(
+        instance_kek_, app->id, principal->user_id, workspace->id, now - 12 * 60 * 60);
+    ASSERT_TRUE(expired_token) << expired_token.error();
+    const std::string expired = connection.request("GET",
+                                                   auth_path,
+                                                   {},
+                                                   "lake_app_session=" + *expired_token,
+                                                   "HTTP/1.1",
+                                                   {},
+                                                   {},
+                                                   app_headers(app->host, "/"));
+    EXPECT_TRUE(expired.starts_with("HTTP/1.1 401")) << expired;
+
+    ASSERT_TRUE(store_->remove_member(membership->id, "app-auth-grantor"));
+    const std::string removed = connection.request(
+        "GET", auth_path, {}, app_cookie, "HTTP/1.1", {}, {}, app_headers(app->host, "/"));
+    EXPECT_TRUE(removed.starts_with("HTTP/1.1 401")) << removed;
+}
+
 INSTANTIATE_TEST_SUITE_P(HttpServer,
                          HttpResponseIsolation,
                          testing::Combine(testing::Bool(), testing::Bool()),
@@ -3100,6 +3272,36 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         "&topic=topic-0&zetta=workspace";
     const std::string cookie = "lake_session=" + session->secret;
     ASSERT_NO_FATAL_FAILURE(verify_cold_metering(server, customer_id, cookie));
+    const auto protected_app = store->get_web_app(app_id);
+    ASSERT_TRUE(protected_app);
+    const auto app_session = lake::control::issue_web_app_session(
+        instance_kek, app_id, principal->user_id, workspace_id);
+    ASSERT_TRUE(app_session) << app_session.error();
+    std::vector<double> app_auth_times;
+    app_auth_times.reserve(20);
+    for (int sample = 0; sample < 20; ++sample) {
+        HttpConnection connection(server.port());
+        const std::size_t calls_before = caller->call_count();
+        const std::string response = connection.request("GET",
+                                                        "/w/" + workspace_id + "/v1/apps/auth",
+                                                        {},
+                                                        "lake_app_session=" + *app_session,
+                                                        "HTTP/1.1",
+                                                        {},
+                                                        {},
+                                                        {{"X-Forwarded-Host", protected_app->host},
+                                                         {"X-Original-Method", "GET"},
+                                                         {"X-Original-URL", "/"}});
+        ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << response;
+        EXPECT_EQ(workspace_call_count(response), 0U);
+        EXPECT_EQ(caller->call_count(), calls_before);
+        app_auth_times.push_back(total_server_milliseconds(response));
+    }
+    std::ranges::sort(app_auth_times);
+    std::println("PAGE_PERF /w/:workspace_id/v1/apps/auth p95_ms={:.3f} calls=0 rounds=0",
+                 app_auth_times.at(18));
+    EXPECT_LT(app_auth_times.at(18), 100.0);
+
     std::vector<std::tuple<std::string, std::string, std::string>> pages;
     struct WorkspaceCallBudget {
         std::size_t calls = 0;

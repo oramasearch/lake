@@ -26,6 +26,11 @@ back it in both stores. Dispatch includes the task's immutable workspace for inf
 capability inputs may omit it. `WorkspaceService::call` always receives an explicit resolved
 workspace ID.
 
+`web_apps.hpp` defines the protected-app session claims and authorization-code records. `Store`
+exposes host resolution, the one-query cookie authorization check, atomic code exchange, and
+expiry cleanup; memory and PostgreSQL implementations preserve the same contract. See
+`docs/api/web-apps.md`.
+
 `agent_library.hpp` registers ApplicationAgent as `agent-application` and ExperimentsAgent as
 `agent-experiments`, chat-capable services used from their Ship/Train pages and Ask Orama. Each bus
 identity is independent from every other library agent.

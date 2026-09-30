@@ -932,6 +932,19 @@ public:
     // status written by the operator. Acknowledged deletions are removed by the owner loop.
     virtual Result<std::vector<WebApp>> list_web_apps(const std::string& customer_id) = 0;
     virtual Result<WebApp> get_web_app(const std::string& id) = 0;
+    virtual Result<WebApp> resolve_web_app_auth_host(const std::string& host,
+                                                     const std::string& workspace_id) = 0;
+    virtual Result<WebApp> authorize_web_app(const std::string& app_id,
+                                             const std::string& user_id) = 0;
+    virtual Result<WebApp> authorize_web_app_session(const std::string& host,
+                                                     const std::string& workspace_id,
+                                                     const std::string& app_id,
+                                                     const std::string& user_id) = 0;
+    virtual Result<void>
+    create_web_app_authorization_code(const WebAppAuthorizationCode& value) = 0;
+    virtual Result<WebAppAuthorization> consume_web_app_authorization_code(
+        const std::string& host, const std::string& workspace_id, const std::string& code_hash) = 0;
+    virtual Result<void> sweep_web_app_authorization_codes() = 0;
     virtual Result<WebApp> create_web_app(const NewWebApp&) = 0;
     virtual Result<WebApp> update_web_app(const std::string& id, const WebAppPatch&) = 0;
     virtual Result<void> purge_deleted_web_apps() = 0;

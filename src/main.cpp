@@ -399,10 +399,16 @@ int main(int argc, char** argv) {
     }
     auto next_app_cleanup = std::chrono::steady_clock::now();
     while (!stop_requested.load()) {
-        if (app_bus_configured && std::chrono::steady_clock::now() >= next_app_cleanup) {
-            const auto purged = opts.store->purge_deleted_web_apps();
-            if (!purged) {
-                std::println(stderr, "lake: could not remove acknowledged app deletions");
+        if (std::chrono::steady_clock::now() >= next_app_cleanup) {
+            if (app_bus_configured) {
+                const auto purged = opts.store->purge_deleted_web_apps();
+                if (!purged) {
+                    std::println(stderr, "lake: could not remove acknowledged app deletions");
+                }
+            }
+            const auto swept = opts.store->sweep_web_app_authorization_codes();
+            if (!swept) {
+                std::println(stderr, "lake: could not sweep expired app authorization codes");
             }
             next_app_cleanup = std::chrono::steady_clock::now() + std::chrono::seconds(60);
         }
