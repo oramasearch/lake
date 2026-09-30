@@ -79,10 +79,11 @@ capability audit event.
 pushes existing content, enables a quota, proves a new write returns `busy`, and then pulls the
 original bytes unchanged. `WebUi.Metering*` covers the renderer.
 
-`PagePerformance.EveryRegisteredGetPageStaysUnderTheServerBudget` creates four repositories
-with 128 files before starting a new server. Its very first request is Metering, must finish
-below 80 ms, and must report nonzero stored bytes. The same populated page participates in the
-router-derived 20-render p95 proof. See [page performance](../ui/performance.md).
+`PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` creates four repositories
+with 128 files before starting a new server. Its very first request is Metering and must report
+nonzero stored bytes. That cold request is a correctness fixture rather than a scheduler-sensitive
+latency assertion. The same populated page participates in the router-derived 20-render p95 guard.
+See [page performance](../ui/performance.md).
 
 ## Empty personal customers
 

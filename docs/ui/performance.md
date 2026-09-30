@@ -1,8 +1,10 @@
 # Page performance
 
 **Status: implemented 2026-09-29.** Every HTML response carries a `Server-Timing` header, and
-the page regression test enforces a p95 below 80 ms over 20 renders for every GET route that the
-live router identifies as an HTML page.
+the page regression test enforces exact workspace call and sequential-round budgets for every GET
+route that the live router identifies as an HTML page. A p95 below 500 ms over 20 cold-cache
+renders remains only as a guard against pathological stalls. The live budget remains 100 ms and is
+checked from access logs after deployment.
 
 ## Reading `Server-Timing`
 
@@ -61,7 +63,7 @@ global and external links, existing workspace selections, incomplete forms, and 
 Keep these tests and `WebUi.WorkspacePathOwnsNavigationAndEveryFormCarriesTheSelection` when
 changing the rewrite or moving URL generation into individual renderers.
 
-`PagePerformance.EveryRegisteredGetPageStaysUnderTheServerBudget` starts the production HTTP
+`PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` starts the production HTTP
 router and obtains its GET patterns from `ApiServer::get_route_patterns()`. It probes every
 pattern, identifies HTML responses by content type and `Server-Timing`, and measures each page 20
 times. Adding a GET page automatically adds it to the measured set.
@@ -74,6 +76,44 @@ Image-mode app detail rendering accepts its absent source repository (`source: n
 Models and Runs must each make one workspace call; Experiments must make two, concurrently.
 Every HTML response's reported call count must also match the fake workspace's observed count.
 
+Before discovery and every measured render, the fixture invalidates the five-second workspace
+definition cache. Each response must exactly match the following cold call/round budget. Every
+route not listed here has an implicit `0` calls and `0` rounds budget, so a new page cannot start
+workspace work without an explicit review of this table and the test map.
+
+| Route | Calls | Rounds |
+|---|---:|---:|
+| `/w/:workspace_id/ask` | 1 | 1 |
+| `/w/:workspace_id/design/discover` | 1 | 1 |
+| `/w/:workspace_id/design/methodologies` | 1 | 1 |
+| `/w/:workspace_id/design/methodology` | 2 | 1 |
+| `/w/:workspace_id/design/opportunities` | 1 | 1 |
+| `/w/:workspace_id/design/pipeline` | 3 | 1 |
+| `/w/:workspace_id/design/project` | 4 | 2 |
+| `/w/:workspace_id/design/projects` | 1 | 1 |
+| `/w/:workspace_id/design/solution` | 2 | 1 |
+| `/w/:workspace_id/design/solutions` | 1 | 1 |
+| `/w/:workspace_id/ship/app` | 1 | 1 |
+| `/w/:workspace_id/ship/index` | 1 | 1 |
+| `/w/:workspace_id/ship/indexes` | 2 | 1 |
+| `/w/:workspace_id/ship/models` | 1 | 1 |
+| `/w/:workspace_id/train/agent` | 3 | 1 |
+| `/w/:workspace_id/train/agents` | 1 | 1 |
+| `/w/:workspace_id/train/data` | 3 | 1 |
+| `/w/:workspace_id/train/dataset` | 2 | 1 |
+| `/w/:workspace_id/train/experiment` | 2 | 1 |
+| `/w/:workspace_id/train/experiment/run` | 1 | 1 |
+| `/w/:workspace_id/train/experiments` | 2 | 1 |
+| `/w/:workspace_id/train/experiments/compare` | 2 | 1 |
+| `/w/:workspace_id/train/run` | 2 | 1 |
+| `/w/:workspace_id/train/runs` | 1 | 1 |
+| `/w/:workspace_id/train/stream` | 2 | 1 |
+| `/w/:workspace_id/train/streams` | 1 | 1 |
+
+An intentional page-read change updates this table and the test map together. A higher round count
+also requires showing why the reads cannot start concurrently. An extra call or round fails on the
+first affected response, independently of elapsed time.
+
 The fixture uses an ordinary signed-in user and the production PostgreSQL store so that Ask and
 account pages render with a user identity and session lookup is included in the measured time.
 For non-workspace routes that do not return HTML to that user, discovery also tries the operator
@@ -84,8 +124,8 @@ Without it the performance test is reported as skipped, not passed.
 
 The fake workspace waits 30 ms per call and returns 50 projects, 200 runs, 50 models, 20 studies,
 50 topics, and the control store holds 20 apps. The p95 for every discovered page must be below
-80 ms, and no page may exceed two sequential workspace rounds. This gives the live 100 ms
-requirement headroom while allowing independent reads to overlap.
+500 ms. This loose limit detects a stuck or pathologically slow route without turning host
+scheduling into the primary assertion. It is not evidence that the live 100 ms requirement passes.
 
 The test prints one stable evidence row per page:
 
@@ -191,7 +231,8 @@ Startup opens existing repository result indexes before accepting traffic. Stora
 inspect pack metadata without creating an empty store; absent repository storage has no results.
 Usage itself is never cached. The performance fixture creates four repositories containing
 128 files, closes them, starts a new server, and makes Metering its first request. That request
-must finish below 80 ms and report nonzero stored bytes.
+must report nonzero stored bytes. Its elapsed time remains in the evidence output, while the
+router-derived Metering samples carry the same 500 ms p95 guard as every other page.
 
 The fixture now supplies 50 datasets, 21 methodologies, 20 solutions and three generators, not
 empty catalogues. It measures 71 HTML patterns, including populated Metering, all canonical
@@ -229,3 +270,41 @@ Linux-lane helper is absent; no container or image build ran on this host.
 
 These are native regression measurements, not live after-deploy figures. The live access-log
 walk and the removal of Zetta's dataset-summary scan remain separate verification/work items.
+
+## Deterministic budget follow-up
+
+Issue [lake#390](https://github.com/oramasearch/lake/issues/390) replaced the 80 ms synthetic
+regression threshold after unrelated routes repeatedly crossed it on an otherwise idle host. The
+test now makes the controlled quantity primary: the exact number of workspace calls and the exact
+number of sequential rounds in each response's `Server-Timing` header. Cache invalidation before
+every render makes those values independent of route order and cache age. The 500 ms p95 check is
+only a loose guard; the live 100 ms access-log check did not change.
+
+Twenty consecutive static runs passed all 71 routes with 20 renders per route. The one-minute load
+at the start of those runs reached 18.86. The largest p95 was 344.824 ms during the first and
+busiest run; the remaining maxima ranged from 84.832 to 188.488 ms. Every call and round count
+matched its route budget.
+
+After the subsequent upstream rebase, another twenty consecutive static runs passed the same
+71-route matrix. Their starting one-minute loads ranged from 2.18 to 3.73, and their maximum route
+p95s ranged from 101.344 to 136.129 ms. This final-base repeat also matched every call and round
+budget. The final static and shared native suites each reported no failures across 451 tests
+against separate fresh PostgreSQL databases; the performance regression ran in both.
+
+For the mutation check, the Ask handler temporarily repeated its one workspace read after the
+first completed. The test failed during route discovery with:
+
+```text
+Expected equality of these values:
+  workspace_call_count(response)
+    Which is: 2
+  budget.calls
+    Which is: 1
+/w/:workspace_id/ask
+```
+
+The duplicate read was then removed. Reproduce the passing check with a PostgreSQL fixture by
+running `lake-tests` with the filter
+`PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget`; repeat that command twenty
+times for the acceptance proof. A deliberate mutation should use break-on-first-failure so the
+route budget failure remains the relevant output.
