@@ -1538,9 +1538,19 @@ std::string request_host(const boost::http::route_params& route) {
 
 std::string app_request_host(const boost::http::route_params& route) {
     std::string host;
-    if (route.req.count("x-forwarded-host") != 0) {
+    // ingress-nginx's auth subrequest sets Host to Lake's Service and sends no
+    // X-Forwarded-Host; the app host arrives only in X-Original-URL
+    // ($scheme://$http_host$request_uri).
+    if (route.req.count("x-original-url") != 0) {
+        const auto original =
+            boost::urls::parse_uri_reference(std::string_view(route.req.at("x-original-url")));
+        if (original && original->has_authority()) {
+            host = std::string(original->encoded_host());
+        }
+    }
+    if (host.empty() && route.req.count("x-forwarded-host") != 0) {
         host = std::string(route.req.at("x-forwarded-host"));
-    } else if (route.req.count(boost::http::field::host) != 0) {
+    } else if (host.empty() && route.req.count(boost::http::field::host) != 0) {
         host = std::string(route.req.at(boost::http::field::host));
     }
     if (const std::size_t comma = host.find(','); comma != std::string::npos) {
