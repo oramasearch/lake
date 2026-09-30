@@ -31,7 +31,10 @@ When the independently delivered build capabilities are present, the page calls 
 The Apps list checks the Agent Library for the deployed `agent-application` registration. When it
 is available, **Build an App With the ApplicationAgent** starts an `agent_turn` with `agent:
 agent-application` and `kind: app`, redirects with the task id, and follows the background turn.
-The first turn has read tools only.
+The first turn has read tools only: workspace queries and SQL, datasets, services, the
+customer's repositories (`list_repositories`, `get_repository`, tree and files) and apps. The
+repository reads let a confirmed retry find the repository its earlier attempt created instead
+of creating a second one.
 
 If the turn asks a question or has no proposal, the result includes a **Reply** box. Its source
 task ID selects the same ApplicationAgent `app` conversation and supplies the preceding turn to
