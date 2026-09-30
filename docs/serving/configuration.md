@@ -39,6 +39,7 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_OPERATOR_ZETTA_URL`, `LAKE_OPERATOR_ZETTA_TOKEN` | operator Zetta service URL and secret bearer; set together, they enable platform sync and writes | [`../control-plane/platform.md`](../control-plane/platform.md) |
 | `LAKE_LOGS_URL`, `LAKE_LOGS_TOKEN` | Loki-compatible log endpoint and optional secret bearer; enable `environment_logs` and the log pages | [`../api/platform.md`](../api/platform.md) |
 | `LAKE_APPS_WILDCARD` | parent domain required for Ship app hosts; also enables app lifecycle topics on the Lake bus | [`../api/web-apps.md`](../api/web-apps.md) |
+| `LAKE_APPS_RESERVED_NAMES` | comma-separated additional Ship app names to refuse; surrounding whitespace is ignored | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_APPS_PER_CUSTOMER` | maximum live Ship apps per space; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_APP_REPLICAS_PER_CUSTOMER` | maximum aggregate desired Ship app replicas per space; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_PLATFORM_SYNC_SECONDS` | platform poll interval, default 15, must be greater than zero | [`../api/platform.md`](../api/platform.md) |

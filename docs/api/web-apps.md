@@ -53,6 +53,24 @@ Names are DNS labels and hosts must be one label beneath
 `LAKE_APPS_WILDCARD`. `LAKE_APPS_PER_CUSTOMER` and `LAKE_APP_REPLICAS_PER_CUSTOMER` enforce quotas;
 zero means no configured limit.
 
+App names share the wildcard's zone with the platform. Lake refuses `lake`, `www`, `api`, `app`,
+`apps`, `admin`, `mcp`, `docs`, `status`, `mail`, `smtp`, `auth`, `login`, `sso`, `id`, `cdn`,
+`static`, `assets`, `grafana`, `prometheus`, `argocd`, `registry`, `git`, `dev`, `staging`, `prod`,
+and `test`, plus every name that starts with `lake-` or `orama`. Operators add deployment-specific
+names with the comma-separated `LAKE_APPS_RESERVED_NAMES`; surrounding whitespace is ignored.
+`create_app` returns `invalid_input`, `<name> is reserved`, at `/name` before it writes desired
+state. An omitted, null, or empty `host` remains the default `<name>.<LAKE_APPS_WILDCARD>`, so
+`reports` with `LAKE_APPS_WILDCARD=oramadev.net` becomes `reports.oramadev.net`.
+
+ApplicationAgent must propose a non-reserved name and should leave `host` unset unless the person
+asked for a specific address. Its `create_app` tool description identifies platform-host names as
+reserved, and the confirmed turn receives the same validation as every other caller.
+
+The operator owns the separate existing-record check: before publishing DNS, it must refuse a host
+that already has a DNS record it does not own and report the conflict through App status. That
+behavior belongs to the [`LakeApp` controller](https://github.com/oramasearch/orama-operator/issues/193);
+Lake does not probe or replace DNS records.
+
 Changing `auth` to `none` requires `confirm_public: true`. Attaching Zetta grants only its fixed
 read scope. Detaching it clears the operator token hash immediately; service detach removes only
 that service from the normalized binding list. Deploy and rollback events retain their exact
@@ -114,7 +132,8 @@ the App write capabilities itself. See [agent-launches.md](agent-launches.md) an
 
 ## Verification
 
-`WebApps.*` and `PostgresWebApps.*` cover the memory and Postgres stores, purpose restrictions,
-cross-app/customer/revision refusal, private repository reads, read-only workspace calls,
-published/received operator events, rotation, stop/start and deletion cleanup. Full static and
-shared native CTest suites exercise registration, REST/OpenAPI/MCP discovery and auditing.
+`WebApps.*` and `PostgresWebApps.*` cover the memory and Postgres stores, built-in and configured
+reserved-name refusal, direct-zone default hosts, purpose restrictions, cross-app/customer/revision
+refusal, private repository reads, read-only workspace calls, published/received operator events,
+rotation, stop/start and deletion cleanup. Full static and shared native CTest suites exercise
+registration, REST/OpenAPI/MCP discovery and auditing.

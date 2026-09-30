@@ -65,6 +65,8 @@ struct WebApps {
     std::shared_ptr<lake::control::WorkspaceService> workspaces;
     std::shared_ptr<FakeLoki> loki = std::make_shared<FakeLoki>();
     std::shared_ptr<lake::control::PlatformService> platform;
+    std::string apps_wildcard = "apps.example.test";
+    std::string apps_reserved_names;
 
     WebApps() {
         std::filesystem::create_directories(service_dir);
@@ -101,7 +103,8 @@ struct WebApps {
         context.workspaces = workspaces.get();
         context.platform = platform.get();
         context.agent_bus = bus.get();
-        context.apps_wildcard = "apps.example.test";
+        context.apps_wildcard = apps_wildcard;
+        context.apps_reserved_names = apps_reserved_names;
         context.apps_per_customer = app_limit;
         context.app_replicas_per_customer = replica_limit;
         context.authorized = true;
@@ -196,6 +199,54 @@ TEST(WebApps, DesiredStateStatusAndQuotasFollowTheContract) {
     EXPECT_EQ(stopped.value["desired"], "stopped");
     EXPECT_EQ(apps.call("start_app", {{"app_id", id}}).value["desired"], "running");
     EXPECT_TRUE(apps.call("restart_app", {{"app_id", id}}).ok);
+}
+
+TEST(WebApps, ReservedNamesAreRefusedAndOrdinaryNamesUseTheZone) {
+    WebApps apps;
+    apps.apps_wildcard = "oramadev.net";
+    apps.apps_reserved_names = "customer-portal, internal";
+    for (const char* value : {"lake",
+                              "www",
+                              "api",
+                              "app",
+                              "apps",
+                              "admin",
+                              "mcp",
+                              "docs",
+                              "status",
+                              "mail",
+                              "smtp",
+                              "auth",
+                              "login",
+                              "sso",
+                              "id",
+                              "cdn",
+                              "static",
+                              "assets",
+                              "grafana",
+                              "prometheus",
+                              "argocd",
+                              "registry",
+                              "git",
+                              "dev",
+                              "staging",
+                              "prod",
+                              "test",
+                              "lake-worker",
+                              "orama",
+                              "orama-search",
+                              "customer-portal",
+                              "internal"}) {
+        const std::string name = value;
+        const auto refused = apps.create(name);
+        EXPECT_EQ(refused.error.code, "invalid_input") << name;
+        EXPECT_EQ(refused.error.message, name + " is reserved") << name;
+        EXPECT_EQ(refused.error.path, "/name") << name;
+    }
+
+    const auto created = apps.create("reports");
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["host"], "reports.oramadev.net");
 }
 
 TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {

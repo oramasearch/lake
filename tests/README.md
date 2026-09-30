@@ -136,8 +136,9 @@ Postgres suite round-trips the same environment binding and JSON mirror through 
 store.
 
 `test_web_apps.cpp` proves Ship App policy isolation, validation, desired-state generations,
-app/replica quotas, fake-operator status, Secret references, service binding, Loki namespace
-selection, purpose-scoped operator hashes and lifecycle event delivery with the memory store.
+reserved platform and configured names, direct-zone default hosts, app/replica quotas,
+fake-operator status, Secret references, service binding, Loki namespace selection, purpose-scoped
+operator hashes and lifecycle event delivery with the memory store.
 `test_api.cpp` proves successful private repository tree/file reads with a source token.
 `PostgresWebApps.*` proves the production desired row, hash registration/rotation, customer
 locking, `lake_apps` notification, operator status and physical deletion. Both stores exercise

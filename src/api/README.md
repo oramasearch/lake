@@ -66,9 +66,10 @@ User bearers and cookies use the same indexed PostgreSQL resolver; see `docs/api
 
 `web_app_capabilities.cpp` owns Ship App reads and desired-state mutations. The common registry
 keeps REST and MCP customer policy, `x-lake-action`, audit, lifecycle bus events, Loki reads and
-Secret-reference validation identical. Operator hash credentials are restricted in the registry to
-source repository/revision reads, customer workspace reads, or one app's event publication. See
-`docs/api/web-apps.md`.
+Secret-reference validation identical. Creation also applies the built-in and configured reserved
+name policy before deriving the direct-zone host. Operator hash credentials are restricted in the
+registry to source repository/revision reads, customer workspace reads, or one app's event
+publication. See `docs/api/web-apps.md`.
 
 ApplicationAgent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
 turn, repository/App writes only when the reviewed proposal is present. `http_server.cpp` and

@@ -23,6 +23,11 @@ commands are omitted. See
 resolver. Token request JSON cannot supply those fields. Keep HTTP and PostgreSQL types out of
 these public headers.
 
+`ServerOptions::apps_reserved_names` carries the operator's comma-separated additions to the Ship
+App name policy. The HTTP adapter copies it into `ApiContext`; `create_app` combines it with the
+built-in platform names before any desired-state write. See
+[web-apps.md](../../../docs/api/web-apps.md).
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 

@@ -86,6 +86,8 @@ int usage() {
     std::println(
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
     std::println("  LAKE_APPS_WILDCARD is the required parent domain for Ship app hosts");
+    std::println(
+        "  LAKE_APPS_RESERVED_NAMES adds comma-separated names that Ship apps cannot use");
     std::println("  LAKE_APPS_PER_CUSTOMER caps live apps per space (default 0: no limit)");
     std::println(
         "  LAKE_APP_REPLICAS_PER_CUSTOMER caps desired app replicas (default 0: no limit)");
@@ -113,6 +115,7 @@ int main(int argc, char** argv) {
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
+    opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
     opts.internal_url = env_or("LAKE_INTERNAL_URL", "");
