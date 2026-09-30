@@ -58,7 +58,7 @@ using nlohmann::json;
 // The Zetta capabilities lake's pages may call on a customer's workspace (docs/api/workspaces.md).
 // Reads need `read` on the customer, actions `write`. Anything else is refused, so a lake caller
 // can never reach Zetta's administrative surface (sql, users, cloud provisioning) through lake.
-constexpr std::array<std::string_view, 46> workspace_reads = {"server_info",
+constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
                                                               "get_run_metrics",
                                                               "compare_runs",
                                                               "get_study",
@@ -101,6 +101,10 @@ constexpr std::array<std::string_view, 46> workspace_reads = {"server_info",
                                                               // (zetta#1061) and how to
                                                               // featurize for it (zetta#1062).
                                                               "list_methodologies",
+                                                              // Study preflight (zetta#1207): the
+                                                              // same checks as create_study,
+                                                              // storing nothing.
+                                                              "validate_study",
                                                               "analyze_dataset",
                                                               "plan_features",
                                                               // The solutions catalogue
@@ -3415,6 +3419,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                       {"analyze_dataset",
                                        "plan_features",
                                        "list_methodologies",
+                                       "validate_study",
                                        "get_solution"});
                         const json confirmed =
                             body["context"].value("confirmed_proposal", json());
