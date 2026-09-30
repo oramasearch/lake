@@ -282,6 +282,12 @@ int main(int argc, char** argv) {
     lake::control::WorkspaceConfig workspace_config{env_or("LAKE_SERVICE_DIR", "")};
     workspace_config.agent_endpoints =
         lake::control::parse_agent_endpoints(env_or("LAKE_AGENT_ENDPOINTS", ""));
+    auto leases = lake::control::parse_agent_leases(env_or("LAKE_AGENT_LEASE_SECONDS", ""));
+    if (!leases) {
+        std::println(stderr, "lake: LAKE_AGENT_LEASE_SECONDS: {}", leases.error());
+        return 2;
+    }
+    workspace_config.agent_lease_seconds = std::move(*leases);
     if (const std::string model = env_or("LAKE_BASE_AGENT_MODEL", ""); !model.empty()) {
         workspace_config.base_agent_model = model;
     }
@@ -370,7 +376,8 @@ int main(int argc, char** argv) {
     // progress directly; this loop does not read an event topic on the bus.
     std::jthread bus_loop;
     if (opts.agent_bus) {
-        bus_loop = std::jthread([bus = opts.agent_bus](std::stop_token stop) {
+        bus_loop = std::jthread([bus = opts.agent_bus,
+                                 workspaces = opts.workspaces](std::stop_token stop) {
             bool started = false;
             while (!stop.stop_requested()) {
                 if (!started) {
@@ -388,7 +395,8 @@ int main(int argc, char** argv) {
                         continue;
                     }
                 }
-                auto pumped = liquid::runtime::block_on(bus->pump(std::chrono::seconds(5)));
+                auto pumped =
+                    liquid::runtime::block_on(bus->pump(std::chrono::seconds(5), workspaces.get()));
                 if (!pumped || !pumped->has_value()) {
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                 } else if (**pumped == 0) {

@@ -43,6 +43,7 @@ struct WorkspaceConfig {
     // agent in LAKE_AGENT_BUS_DIR, named by its key, which the operator mounts into that agent
     // alone. Never the service token, which user-created agents on agent-runtime also hold.
     std::map<std::string, std::string> agent_bus_tokens;
+    std::map<std::string, int> agent_lease_seconds;
 
     bool configured() const {
         return !service_dir.empty();

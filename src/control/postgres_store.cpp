@@ -5176,7 +5176,10 @@ public:
         "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "''), "
         "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text, "
-        "COALESCE(ts.events_from, 0), COALESCE(t.workspace_id::text, '')";
+        "COALESCE(ts.events_from, 0), COALESCE(t.workspace_id::text, ''), "
+        "COALESCE(ts.lease_seconds, 600), COALESCE(ts.attempts, 1), "
+        "COALESCE(to_char(ts.lease_until AT TIME ZONE 'UTC', "
+        "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), ''), COALESCE(ts.retry_notice_pending, false)";
 
     static Result<AgentTask> one_task(pqxx::work& tx, const std::string& id) {
         const pqxx::result rows = tx.exec_params(
@@ -5213,6 +5216,10 @@ public:
         task.result = nlohmann::json::parse(row[17].as<std::string>(), nullptr, false);
         task.events_from = row[18].as<std::uint64_t>();
         task.workspace_id = row[19].as<std::string>();
+        task.lease_seconds = row[20].as<int>();
+        task.attempts = row[21].as<int>();
+        task.lease_until = row[22].as<std::string>();
+        task.retry_notice_pending = row[23].as<bool>();
         return task;
     }
 
@@ -5317,18 +5324,30 @@ public:
     Result<AgentTask> claim_agent_task(const std::string& id,
                                        const std::string& agent,
                                        const std::string& credential_sha256,
-                                       std::uint64_t events_from) override {
+                                       std::uint64_t events_from,
+                                       int lease_seconds) override {
+        if (lease_seconds < 60 || lease_seconds > 3600) {
+            return std::unexpected(
+                StoreError{"invalid_input", "agent lease must be 60..3600 seconds"});
+        }
         return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
-            // The insert is the claim: the primary key lets exactly one through.
+            // The unique row and conditional update serialize first claims and reclaims.
             const pqxx::result claimed = tx.exec_params(
                 "INSERT INTO agent_task_status (task_id, phase, credential_sha256, started_at, "
-                "events_from) SELECT t.id, 'Running', $3, now(), $4 FROM agent_tasks t WHERE "
+                "events_from, lease_seconds, lease_until) "
+                "SELECT t.id, 'Running', $3, now(), $4, $5::integer, "
+                "now() + make_interval(secs => $5::integer) "
+                "FROM agent_tasks t WHERE "
                 "t.id = $1::uuid AND t.agent = $2 AND t.desired = 'present' ON CONFLICT (task_id) "
-                "DO NOTHING RETURNING task_id",
+                "DO UPDATE SET phase = 'Running', credential_sha256 = EXCLUDED.credential_sha256, "
+                "started_at = now(), updated_at = now(), lease_seconds = EXCLUDED.lease_seconds, "
+                "lease_until = EXCLUDED.lease_until WHERE agent_task_status.phase = '' "
+                "AND NOT agent_task_status.retry_notice_pending RETURNING task_id",
                 id,
                 agent,
                 credential_sha256,
-                static_cast<std::int64_t>(events_from));
+                static_cast<std::int64_t>(events_from),
+                lease_seconds);
             if (claimed.empty()) {
                 if (!one_task(tx, id)) {
                     return std::unexpected(StoreError{"not_found", "no agent task " + id});
@@ -5337,6 +5356,39 @@ public:
                     StoreError{"conflict", "the task is not waiting for " + agent});
             }
             return one_task(tx, id);
+        });
+    }
+
+    Result<void> renew_agent_task_lease(const std::string& id,
+                                        const std::string& credential_sha256) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const auto rows = tx.exec_params(
+                "UPDATE agent_task_status SET lease_until = now() + make_interval(secs => "
+                "lease_seconds), "
+                "updated_at = now() WHERE task_id = $1::uuid AND phase = 'Running' "
+                "AND credential_sha256 = $2 AND credential_sha256 <> '' RETURNING task_id",
+                id,
+                credential_sha256);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "the task claim is no longer active"});
+            }
+            return {};
+        });
+    }
+
+    Result<void> mark_agent_task_notice_published(const std::string& id,
+                                                  int attempts,
+                                                  const std::string& phase) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params(
+                "UPDATE agent_task_status SET retry_notice_pending = false, updated_at = now() "
+                "WHERE task_id = $1::uuid AND attempts = $2 AND phase = $3 AND "
+                "retry_notice_pending",
+                id,
+                attempts,
+                phase);
+            return {};
         });
     }
 
@@ -5351,6 +5403,8 @@ public:
                 "UPDATE agent_task_status ts SET phase = $3, message = $4, result = CASE WHEN $5 "
                 "THEN $6::jsonb ELSE ts.result END, finished_at = CASE WHEN $5 THEN now() ELSE "
                 "NULL END, credential_sha256 = CASE WHEN $5 THEN '' ELSE ts.credential_sha256 END, "
+                "lease_until = CASE WHEN $5 THEN NULL ELSE now() + "
+                "make_interval(secs => ts.lease_seconds) END, "
                 "updated_at = now() FROM agent_tasks t WHERE ts.task_id = t.id AND "
                 "t.id = $1::uuid AND t.agent = $2 AND ts.phase = 'Running' AND ts.finished_at "
                 "IS NULL RETURNING ts.task_id",
@@ -5371,11 +5425,16 @@ public:
     Result<void> fail_agent_task(const std::string& id, const std::string& message) override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
             tx.exec_params(
-                "INSERT INTO agent_task_status (task_id, phase, message, finished_at) VALUES "
-                "($1::uuid, 'Failed', $2, now()) ON CONFLICT (task_id) DO UPDATE SET phase = "
+                "INSERT INTO agent_task_status (task_id, phase, message, finished_at) "
+                "SELECT id, 'Failed', $2, now() FROM agent_tasks WHERE id = $1::uuid "
+                "AND created_at + make_interval(secs => deadline_seconds) <= now() "
+                "ON CONFLICT (task_id) DO UPDATE SET phase = "
                 "'Failed', message = EXCLUDED.message, finished_at = now(), credential_sha256 = "
-                "'', updated_at = now() "
-                "WHERE agent_task_status.finished_at IS NULL",
+                "'', lease_until = NULL, updated_at = now() "
+                "WHERE agent_task_status.phase = '' AND NOT agent_task_status.retry_notice_pending "
+                "AND agent_task_status.updated_at + (SELECT make_interval(secs => "
+                "deadline_seconds) "
+                "FROM agent_tasks WHERE id = $1::uuid) <= now()",
                 id,
                 message);
             return {};
@@ -5391,21 +5450,35 @@ public:
 
     Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) override {
         return with_tx<StaleAgentTasks>([&](pqxx::work& tx) -> Result<StaleAgentTasks> {
+            // This indexed update owns the transition across replicas; no per-task read/write race.
+            tx.exec(
+                "UPDATE agent_task_status SET phase = CASE WHEN attempts < 3 THEN '' ELSE 'Failed' "
+                "END, "
+                "message = CASE WHEN attempts < 3 THEN 'the agent stopped responding; retrying "
+                "(attempt ' "
+                "|| (attempts + 1)::text || ' of 3)' ELSE 'the agent stopped responding' END, "
+                "finished_at = CASE WHEN attempts >= 3 THEN now() ELSE NULL END, "
+                "attempts = LEAST(attempts + 1, 3), lease_until = NULL, credential_sha256 = '', "
+                "retry_notice_pending = true, updated_at = now() "
+                "WHERE phase = 'Running' AND lease_until < now() RETURNING task_id");
             const pqxx::result rows = tx.exec_params(
                 std::string("SELECT ") + task_columns +
-                    ", (ts.task_id IS NULL AND t.created_at + make_interval(secs => "
+                    ", (COALESCE(ts.updated_at, t.created_at) + make_interval(secs => "
                     "t.deadline_seconds) > now()) AS unclaimed FROM agent_tasks t LEFT JOIN "
                     "agent_task_status ts ON ts.task_id = t.id WHERE t.desired = 'present' AND "
-                    "ts.finished_at IS NULL AND ("
-                    "(ts.task_id IS NULL AND (t.created_at + make_interval(secs => "
+                    "(ts.retry_notice_pending OR (COALESCE(ts.phase, '') = '' AND ("
+                    "COALESCE(ts.updated_at, t.created_at) + make_interval(secs => "
                     "t.deadline_seconds) <= now() OR COALESCE(t.published_at, t.created_at) + "
-                    "make_interval(secs => $1) <= now())) OR "
-                    "(ts.task_id IS NOT NULL AND ts.started_at + make_interval(secs => "
-                    "t.deadline_seconds) <= now())) ORDER BY t.created_at LIMIT 200",
+                    "make_interval(secs => $1) <= now()))) ORDER BY t.created_at LIMIT 200",
                 static_cast<int>(republish_after.count()));
             StaleAgentTasks out;
             for (const pqxx::row& row : rows) {
-                (row[19].as<bool>() ? out.unclaimed : out.overdue).push_back(task_from(row));
+                AgentTask task = task_from(row);
+                if (task.retry_notice_pending) {
+                    out.reclaimed.push_back(std::move(task));
+                } else {
+                    (row[24].as<bool>() ? out.unclaimed : out.overdue).push_back(std::move(task));
+                }
             }
             return out;
         });
@@ -5531,7 +5604,12 @@ public:
                 "lake",
                 "agent_task",
                 nlohmann::json::parse(rows[0][1].as<std::string>()).get<std::vector<std::string>>(),
-                std::nullopt};
+                std::nullopt,
+                parsed->first,
+                "",
+                "",
+                "",
+                rows[0][0].as<std::string>()};
         });
     }
 

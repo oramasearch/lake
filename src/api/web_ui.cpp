@@ -2772,7 +2772,9 @@ std::string pipeline_content(const WorkspacePage& page) {
         out += "<section class=\"panel notice\" id=\"proposal\" role=\"status\"><p><strong>The "
                "Project Agent is working on it…</strong> It reads your data and prepares the "
                "edits; nothing changes until you apply them. This page checks again every 3 "
-               "seconds.</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
+               "seconds.</p><p>" +
+               web_ui_escape(json_text(page.data, "project_agent_message")) +
+               "</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
     } else if (page.data.value("project_agent_reply", false)) {
         out +=
             "<section class=\"panel notice\" id=\"proposal\"><h2>Project Agent Question</h2>"
@@ -4224,6 +4226,8 @@ std::string solution_proposal_content(const WorkspacePage& page, const nlohmann:
                "<p><strong>The Project Agent is reading the dataset…</strong> It is proposing "
                "the snapshot boundary, column roles, methodology inputs and policy predicates. "
                "Nothing is created until you confirm. This page checks again every 3 seconds."
+               "</p><p>" +
+               web_ui_escape(json_text(task, "message")) +
                "</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
     }
     if (status == "failed") {
@@ -4506,7 +4510,9 @@ std::string workspace_content(const WorkspacePage& page) {
                    "is designing this project's pipeline…</strong> It reads your data and the "
                    "Opportunity this project came from; the pipeline appears here when it is "
                    "done. You can leave this page. This page checks again every 3 seconds.</p>"
-                   "<meta http-equiv=\"refresh\" content=\"3\"></section>";
+                   "<p>" +
+                   web_ui_escape(json_text(build, "message")) +
+                   "</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
         } else if (graphs.empty() && build_status == "Failed") {
             out += std::format("<p class=\"error\" role=\"alert\">The Project Agent could not "
                                "design this project's pipeline: {} Describe it below instead."
@@ -5804,7 +5810,8 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
             content +=
                 "<section class=\"panel\" aria-live=\"polite\"><h2>ApplicationAgent Is "
                 "Working</h2><p>It keeps working if you leave; this page checks again every 2 "
-                "seconds.</p><meta http-equiv=\"refresh\" content=\"2\"></section>";
+                "seconds.</p><p role=\"status\">" +
+                web_ui_escape(reply) + "</p><meta http-equiv=\"refresh\" content=\"2\"></section>";
         } else if (result.value("kind", std::string()) == "proposal" &&
                    result.value("confirm", false)) {
             const nlohmann::json app = result.value("app", nlohmann::json::object());

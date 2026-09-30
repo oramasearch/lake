@@ -1,5 +1,8 @@
 # Design and status
 
+Agent-task lease recovery is tracked separately from deployment in [status.md](status.md).
+The [agent bus contract](../api/agent-bus.md) documents retries and shared-credential limits.
+
 Train → Experiments implementation, local proof and deployment acceptance are tracked separately
 in [status.md](status.md); see its [API](../api/experiments.md) and [UI](../ui/experiments.md) contracts.
 

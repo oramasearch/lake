@@ -781,9 +781,24 @@ public:
     control::Result<control::AgentTask> claim_agent_task(const std::string& id,
                                                          const std::string& agent,
                                                          const std::string& sha256,
-                                                         std::uint64_t events_from) override {
-        return call("claim_agent_task",
-                    [&] { return store_->claim_agent_task(id, agent, sha256, events_from); });
+                                                         std::uint64_t events_from,
+                                                         int lease_seconds) override {
+        return call("claim_agent_task", [&] {
+            return store_->claim_agent_task(id, agent, sha256, events_from, lease_seconds);
+        });
+    }
+    control::Result<void> renew_agent_task_lease(const std::string& id,
+                                                 const std::string& sha256) override {
+        return call("renew_agent_task_lease", [&]() -> control::Result<void> {
+            return store_->renew_agent_task_lease(id, sha256);
+        });
+    }
+    control::Result<void> mark_agent_task_notice_published(const std::string& id,
+                                                           int attempts,
+                                                           const std::string& phase) override {
+        return call("mark_agent_task_notice_published", [&]() -> control::Result<void> {
+            return store_->mark_agent_task_notice_published(id, attempts, phase);
+        });
     }
     control::Result<control::AgentTask>
     record_agent_task_event(const std::string& id,

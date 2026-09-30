@@ -2420,7 +2420,8 @@ struct AgentRuns {
         return std::move(*completed);
     }
     std::size_t pump() {
-        auto pumped = liquid::runtime::block_on(agent_bus->pump(std::chrono::milliseconds(0)));
+        auto pumped = liquid::runtime::block_on(
+            agent_bus->pump(std::chrono::milliseconds(0), w.service.get()));
         return pumped && *pumped ? **pumped : 0;
     }
 };

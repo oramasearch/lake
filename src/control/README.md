@@ -33,12 +33,18 @@ PostgreSQL session authentication uses a unique public lookup UUID and constant-
 verification of one random bearer. Legacy sessions are invalidated by migration `0022_session_lookup`.
 Password Argon2 policy remains unchanged. See `docs/api/auth.md` and `docs/control-plane/schema.md`.
 
-Agent tasks (lake#269) are claimed with one insert into `agent_task_status`, so exactly one claim
-wins. A finished task keeps its phase and loses its credential digest. `agent_bus.cpp` publishes
+Agent tasks (lake#269, #414) use a conditional upsert into `agent_task_status`, so one initial or
+retry claim wins. Activity renews its lease; an indexed expiry update reclaims at most twice,
+then fails the third attempt. A finished task keeps its phase and loses its credential digest. `agent_bus.cpp` publishes
 tasks with their informational workspace ID on Zetta pub/sub and applies what agents publish;
 `stale_agent_tasks` is what its loop re-publishes or fails. Memory and PostgreSQL stores can also
 select the latest same-kind task in a conversation so a follow-up carries its prior turn. See
 `docs/api/agent-bus.md`.
+
+Pending retry notices survive publication failures and are published into the task workspace
+before dispatch. No HTTP request runs the sweep. Shared bus credentials permit progress from a
+hung old claimant after re-claim; terminal writes are atomic and first-write-wins. The lease
+contract and memory/PostgreSQL proof are in [agent-bus.md](../../docs/api/agent-bus.md).
 
 `web_apps.cpp` defines the Ship App JSON and deterministic namespace contract. Memory and
 PostgreSQL stores enforce live name/host uniqueness and app/replica quotas; desired writes advance

@@ -27,8 +27,14 @@ indexes.
 
 Migration `0041_app_forward_auth` adds Lake-owned, short-lived authorization-code state for the
 protected-app browser handoff. Only SHA-256 code hashes are stored; exchange is single-use and
-expired or spent rows are swept. The latest guard is `app_forward_auth_guard`. See
+expired or spent rows are swept. Its guard is `app_forward_auth_guard`. See
 `docs/api/web-apps.md` and `docs/control-plane/web-apps.md`.
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
+
+Migration `0042_agent_task_leases` adds renewable leases, bounded attempts and pending retry
+notices to `agent_task_status`, with partial indexes for expiry and notice delivery. Legacy
+Running rows receive a lease once. The latest guard is `agent_task_leases_guard`; the operator
+must vendor this schema and update its guard before rollout. The contract, idempotency checks
+and deferred operator configuration are in [agent-bus.md](../docs/api/agent-bus.md).

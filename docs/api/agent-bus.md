@@ -34,21 +34,25 @@ workspaces' events are stored on different Zettas.
    `0032_agent_tasks`, immutable `workspace_id` added by `0038_workspace_data_plane`), publishes it on the agent's topic and answers
    `{task_id, status: pending}` at once.
 2. The agent's service long-polls `receive_agent_tasks`, then calls `claim_agent_task`. **Exactly one
-   claim succeeds.** Lake generates the task's credential, `lat.<task id>.<secret>`, stores only its
+   claim per attempt succeeds.** Lake generates the task's credential, `lat.<task id>.<secret>`, stores only its
    SHA-256 in `agent_task_status`, and answers the task's body with every `"{{credential}}"` in it
    replaced (as `lake_token` and `zetta_token`). The credential acts as the person who asked,
-   with the task's scopes, until the task finishes. Neither call requires the agent to echo the
+   with the task's scopes, until the task finishes or is reclaimed. Claim also sets a renewable
+   lease and returns `lease_seconds`, `lease_until`, and `attempts`. Neither call requires the agent to echo the
    workspace ID from dispatch.
 3. The agent does the work and reports with `publish_agent_event`: `progress` messages while it
    works, then its `result` (its whole answer, `{ok, result, …}`) or `failed`. The workspace ID is
    optional here too.
-4. Lake publishes directly to that workspace and applies accepted progress to `agent_task_status`.
+4. Lake atomically applies the event to `agent_task_status`, then publishes it directly to that
+   workspace. Only a `Running` task accepts events. The first terminal write wins; a concurrent
+   losing result returns `conflict` and is never published as an accepted answer. If publication
+   fails after acceptance, the authoritative task state remains readable through `get_agent_task`.
    A finished task stays finished. Moving remaining task bodies/results out of the control store
    is tracked in the architecture audit; no new PostgreSQL event storage is introduced here.
    `get_agent_task` and the pages read the task from there.
 
 The dispatch recovery loop runs separately from HTTP requests. It republishes unclaimed tasks
-and expires overdue tasks; it never polls a Lake-bus event topic. Task credentials cannot select
+and reclaims expired claims; it never polls a Lake-bus event topic. Task credentials cannot select
 another workspace, even when the same customer owns both workspaces.
 
 Anyone who may read a task can follow it live with `receive_agent_events`. Ask Orama uses it to
@@ -106,8 +110,64 @@ Stage-1 pub/sub is in memory and survives a restart only on a best-effort basis
 So the truth is the store, and every 15 seconds lake's bus loop:
 
 - publishes again a task nobody claimed in the last 60 seconds;
-- fails a task nobody claimed within its deadline (*No agent picked this up within 300 seconds.*),
-  and a claimed one that did not finish within it (*The agent did not finish within …*).
+- fails an initially unclaimed task after its waiting deadline (*No agent picked this up within
+  300 seconds.*); each retry gets a fresh waiting deadline after its notice is published;
+- reclaims a `Running` task whose lease expired, clears its task credential, and increments its
+  attempt from 1 to 2, then 2 to 3. It publishes a workspace `agent-events` progress event with
+  `reclaimed: true`, `attempts: 2` (or 3), and the message
+  **the agent stopped responding; retrying (attempt 2 of 3)**, then republishes its dispatch ID;
+- after the third running attempt expires, marks the task `Failed` and publishes a `failed`
+  event with `attempts: 3` and **the agent stopped responding**. There is no fourth claim.
+
+Migration `0042_agent_task_leases` adds the lease, duration, attempt count and pending-notice flag
+to `agent_task_status`. One indexed `UPDATE ... WHERE phase = 'Running' AND lease_until < now()
+RETURNING task_id` performs expiry transitions atomically across replicas. Retry notices remain
+pending until workspace publication succeeds, including across Lake restarts; claims wait for
+that publication. Publication is at least once, so concurrent sweepers or an interruption between
+publication and acknowledgement can repeat the same attempt's notice. A failed workspace
+publication leaves that notice pending without preventing the rest of the sweep. Lost dispatch is recovered
+by the existing republisher. No per-request sweep or additional page workspace call is added.
+Acknowledgements match both attempt and phase: a delayed acknowledgement of the third-attempt
+retry must never clear the later final-failure notice, which also has attempt number 3.
+Waiting-deadline failures recheck the current waiting clock when applied, so an older sweep
+cannot fail a concurrently claimed task or a newly waiting retry.
+
+The default lease is 600 seconds (10 minutes). Accepted `publish_agent_event` calls, direct
+`record_agent_task_event` progress, and each capability call authenticated with the current task
+credential renew it to `now + lease_seconds`. Terminal events clear the lease. Activity therefore
+allows a turn to run beyond the old fixed running deadline; the deadline now covers waiting only.
+The registry renews before dispatch, checks the current credential hash and rejects a reclaimed
+credential even if its principal was resolved before reclaim. Agents require no heartbeat changes.
+
+Experiments, Apps, Project foundation and pipeline working panels render the same persisted
+message that recovery publishes on `agent-events`; ordinary page refresh reads the existing task
+state without another workspace call. `receive_agent_events` exposes the retained retry notices
+and attempt numbers, and `get_agent_task` includes `attempts`, `lease_until` and `lease_seconds`.
+
+### Re-delivery and the shared-credential limitation
+
+Agents must remain idempotent under re-delivery. Confirmed ApplicationAgent deploy, Project Agent
+confirmation and ExperimentsAgent start turns must reuse the same named objects and avoid
+duplicating effects when an earlier attempt already wrote them. Lease recovery retries the same
+task body, scopes, workspace and confirmation; it does not grant additional authority.
+
+All replicas of one library agent share its bus credential. An event arriving after reclaim and
+before another claim is rejected with `conflict`, as is every event after terminal completion.
+After a new claim, a hung-but-alive old claimant can still post progress or the first terminal
+result using that shared credential. Progress may interleave; **first terminal write wins**.
+Its old task credential cannot make further tool calls. Authenticating event publication with
+task-scoped credentials would close the remaining gap, but requires coordinated agent changes
+and is a follow-up, not part of this change.
+
+### Schema and operator handoff
+
+Apply the idempotent `db/schema.sql` before rolling the new binary. Existing `Running` rows with
+no lease (including a missing start time) receive a default lease once. Reapplying the schema
+preserves existing leases and attempt counters. The operator must vendor these exact bytes into
+`internal/controller/assets/lake-schema.sql` and use guard `agent_task_leases_guard`.
+Operator schema vendoring and `spec.agents.library[].leaseSeconds` validation/environment wiring
+are follow-ups outside this Lake worktree. Until then, the Lake default applies; an operator
+handoff should map each library entry to `LAKE_AGENT_LEASE_SECONDS` below.
 
 ## Pub/sub on lake's API
 
@@ -123,6 +183,7 @@ Streams browses without consuming. App/build events are workspace topics, not bu
 |---|---|
 | `LAKE_DATA_PLANE_URL`, `LAKE_DATA_PLANE_TOKEN` | lake's own Zetta, the bus. It needs an image with pub/sub (zetta `dev` from f8ad170) |
 | `LAKE_AGENT_ENDPOINTS` | the library agents; one `agent-tasks.<agent>` topic each |
+| `LAKE_AGENT_LEASE_SECONDS` | optional comma-separated `key=seconds` pairs, e.g. `agent-project=600,agent-experiments=1200`; omitted agents use 600; integers must be 60–3600 inclusive; malformed, unknown or duplicate entries fail startup |
 | `LAKE_AGENT_BUS_DIR` | the library agents' bus credentials, a file per agent named by its key (mounted from `lake-<name>-agent-bus`) |
 
 Without the bus, a library agent's turn answers `store_unavailable`. A lake run with
@@ -130,6 +191,13 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 `no`.
 
 ## Verify on a deployment
+
+Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL) and
+`AgentLeaseConfig.*`. They age clocks without sleeping, exercise three expiries, credential
+revocation, event/capability renewal, racing terminal writes, retry publication recovery, page
+messages, the indexed migration and schema reapplication. Run full CTest with local PostgreSQL
+in static and shared builds, including `PagePerformance.*`; see [local builds](../build/local.md).
+To change policy, update both stores, config bounds, schema checks and these tests together.
 
 The [#389 regression](https://github.com/oramasearch/lake/issues/389) is covered locally by a fake
 library agent receiving, claiming, publishing progress and publishing its result without a
@@ -147,6 +215,43 @@ ApplicationAgent, confirms the exact proposal, waits for deployment, and request
 prints one line per scenario and exits 1 when one fails. T12 gives ExperimentsAgent a goal,
 confirms its exact study, waits for trials and requests the explanation. Run the relevant scenario
 after a roll of lake, Zetta or an agent.
+
+## Local lease proof (2026-09-30)
+
+Native macOS Release builds used `BUILD_SHARED_LIBS=OFF` in `build` and `ON` in
+`build-shared`, with separate dependency build directories and at most six build jobs.
+The full suites ran one at a time against local PostgreSQL; each database-backed case used
+the repository's isolated database fixture.
+
+```sh
+export TMPDIR="$PWD/.cache/proof-tmp"
+export LAKE_TEST_DB_URI=postgresql://stevesperandeo@127.0.0.1:5432/lake_issue414_proof_20260930
+ctest --test-dir build --output-on-failure -j 1
+ctest --test-dir build-shared --output-on-failure -j 1
+```
+
+```text
+Static:
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) = 352.38 sec
+
+Shared:
+100% tests passed, 0 tests failed out of 476
+Total Test time (real) = 352.20 sec
+```
+
+Each suite registered 477 cases, with one disabled search benchmark and 14 existing skips:
+the optional Liquid CLI browser-to-terminal test, the uninstalled optional Hugging Face client,
+and 12 PostgreSQL UI variants with memory-only status-injection fixtures. All lease regressions
+ran on both stores. The focused lease, agent-run and stream selection passed all 45 cases.
+
+Apps, Experiments, Project and Pipeline stayed below 100 ms p95 in both page-performance runs,
+with unchanged workspace-call budgets. `lake version`, `/v1/server_info` and `/readyz` passed
+the manual binary smoke check. No deployment is claimed.
+
+Linux proof deferred: the provided remote-lane helper was absent. No Docker was used.
+Operator schema/configuration handoff and task-scoped event credentials remain the follow-ups
+described above.
 
 ## Not yet
 

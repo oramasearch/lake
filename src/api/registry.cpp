@@ -341,6 +341,16 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     context.audit_object.clear();
     context.audit_details = nlohmann::json::object();
     CallState state{.capability = std::move(capability)};
+    if (context.authorized && context.credential_kind == "agent_task" &&
+        context.credential_session_id.starts_with("task:") && context.store) {
+        const auto renewed = context.store->renew_agent_task_lease(
+            context.credential_session_id.substr(5), context.credential_token_hash);
+        if (!renewed) {
+            state.result = ApiResult::failure(renewed.error().code, renewed.error().message);
+            state.proceed = false;
+            return state;
+        }
+    }
     const Capability& entry = *state.capability;
     if (input.contains("workspace_id")) {
         context.workspace_id = input.at("workspace_id").is_string()

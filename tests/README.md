@@ -1,5 +1,14 @@
 # Tests
 
+`test_agent_leases.cpp` runs the same claim, activity, expiry, re-claim, three-attempt exhaustion,
+workspace notice recovery and racing-terminal-write cases on memory and PostgreSQL stores.
+It checks Apps/Experiments/Project rendering, legacy migration adoption, schema reapplication,
+the partial expiry index, and duration bounds without clock sleeps. The Streams task-credential
+fixture takes a real claim before making calls. See [agent-bus.md](../docs/api/agent-bus.md).
+
+Lease regressions also cover delayed notice acknowledgements and stale waiting-deadline
+observations: neither may discard the final failure notice or fail a fresh retry.
+
 `PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` discovers HTML pages from the
 production GET router, resets the workspace definition cache before each render, and checks every
 route's exact `Server-Timing` call and sequential-round budget. Unlisted routes must make zero

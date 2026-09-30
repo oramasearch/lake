@@ -155,13 +155,16 @@ public:
     liquid::runtime::task<ZettaControlResult<void>> publish_task(AgentTask task);
     // Re-publishes unclaimed tasks and fails overdue ones. Event publication applies status
     // directly; this loop never reads a shared event topic. Returns zero events applied.
-    liquid::runtime::task<ZettaControlResult<std::size_t>> pump(std::chrono::milliseconds wait);
+    liquid::runtime::task<ZettaControlResult<std::size_t>>
+    pump(std::chrono::milliseconds wait, WorkspaceService* workspaces = nullptr);
 
     // One agent event applied to the store: progress keeps the task running with its message,
     // result and failed finish it. Refused for a task that agent did not claim or that finished.
     static Result<AgentTask> apply(Store& store, const nlohmann::json& event);
 
 private:
+    liquid::runtime::task<ZettaControlResult<void>> publish_reclaim(const AgentTask& task,
+                                                                    WorkspaceService* workspaces);
     std::shared_ptr<Store> store_;
     std::shared_ptr<AgentBus> bus_;
     std::vector<std::string> agents_;
