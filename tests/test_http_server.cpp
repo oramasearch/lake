@@ -2042,6 +2042,10 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     EXPECT_EQ(first_task->kind, "app");
     EXPECT_EQ(first_task->body["context"], nlohmann::json::object());
     EXPECT_EQ(std::ranges::find(first_task->scopes, "create_app"), first_task->scopes.end());
+    // A confirmed retry looks up the repository its earlier attempt created.
+    EXPECT_NE(std::ranges::find(first_task->scopes, "list_repositories"),
+              first_task->scopes.end());
+    EXPECT_NE(std::ranges::find(first_task->scopes, "get_repository"), first_task->scopes.end());
     const std::string agent_location = response_header(agent_started, "location");
     ASSERT_FALSE(agent_location.empty()) << agent_started;
     const std::string working = connection->request("GET", agent_location, "", cookie);

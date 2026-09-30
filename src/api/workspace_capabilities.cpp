@@ -3210,6 +3210,8 @@ void register_agent_run_capabilities(Registry& registry) {
                               "list_datasets",
                               "get_dataset",
                               "list_services",
+                              "list_repositories",
+                              "get_repository",
                               "repository_tree",
                               "repository_file",
                               "list_apps",
