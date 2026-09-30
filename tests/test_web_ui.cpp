@@ -1425,6 +1425,37 @@ TEST(WebUi, ShipAppsShowAFailedAgentTaskInsteadOfDroppingThePage) {
     EXPECT_NE(apps.find("topic=agent-events&amp;task=task-1"), std::string::npos) << apps;
 }
 
+TEST(WebUi, ShipAppsRenderADeployedAppWhoseUrlIsNotKnownYet) {
+    // A deployed App carries "url": null until its rollout reports one. Reading it as a string
+    // threw, which dropped the connection (a 502 at the edge).
+    lake::api::AppsPage list;
+    list.customer_id = "customer-1";
+    list.customers = {{"customer-1", "Personal", true}};
+    list.application_agent = true;
+    list.agent_task = {
+        {"task_id", "task-deployed"},
+        {"status", "succeeded"},
+        {"answer",
+         {{"reply", "The App is deployed."},
+          {"result",
+           {{"confirm", false},
+            {"app",
+             {{"name", "e2e-webhook"},
+              {"host", "e2e-webhook.apps.example.test"},
+              {"url", nullptr},
+              {"rollout", {{"type", "deploy"}, {"sequence", 2}}}}}}}}}};
+    std::string apps;
+    ASSERT_NO_THROW(apps = lake::api::web_ui_apps(list, true));
+    EXPECT_NE(apps.find("The App is deployed."), std::string::npos) << apps;
+    EXPECT_NE(apps.find("href=\"https://e2e-webhook.apps.example.test\""), std::string::npos)
+        << apps;
+
+    list.agent_task["answer"]["reply"] = nullptr;
+    list.agent_task["message"] = "done";
+    ASSERT_NO_THROW(apps = lake::api::web_ui_apps(list, true));
+    EXPECT_NE(apps.find("done"), std::string::npos);
+}
+
 TEST(WebUi, ShipAppsShowAReplyBoxUnderAnAgentQuestion) {
     lake::api::AppsPage list;
     list.customer_id = "customer-1";
