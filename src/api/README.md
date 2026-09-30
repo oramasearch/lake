@@ -7,6 +7,14 @@ their sequential rounds. Startup warms existing repository indexes for Metering 
 caching usage. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
 and [metering](../../docs/api/metering.md).
 
+Solution catalogue details and solution-backed Project pages call the registry's bounded
+`list_runs` read. It filters by project or solution, completes retained summaries through
+concurrent `get_run` calls, and derives the stage and final error line. `http_server.cpp` starts
+the run read with the existing project/catalogue work and reuses it for solution state;
+`web_ui.cpp` renders lifecycle status, active-run refresh, readable policy/experiment/monitor/ROI
+summaries and the collapsed correctness certificate. See
+[`workspaces.md`](../../docs/api/workspaces.md).
+
 `experiment_capabilities.cpp` registers eleven space-scoped study/run operations using the
 closed contracts in `experiment_schemas.hpp`. `web_ui_experiments.cpp` is their pure page renderer;
 embedded, hashed chart assets call only registered capabilities. The page's ExperimentsAgent box

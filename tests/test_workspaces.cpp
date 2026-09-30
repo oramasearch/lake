@@ -526,6 +526,9 @@ TEST(Workspaces, CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer) {
     const auto foreign =
         call(*other_principal, "workspace_status", {{"customer_id", owner_customer}});
     EXPECT_FALSE(foreign.ok) << "another customer's workspace is not readable";
+    const auto foreign_runs =
+        call(*other_principal, "list_runs", {{"customer_id", owner_customer}});
+    EXPECT_FALSE(foreign_runs.ok) << "another customer's runs are not readable";
     const auto foreign_start =
         call(*other_principal, "start_workspace", {{"customer_id", owner_customer}});
     EXPECT_FALSE(foreign_start.ok);
@@ -1510,6 +1513,94 @@ TEST(Workspaces, RunsShowPipelinesByNameAndSayWhyAFailureFailed) {
     EXPECT_EQ(html.find(">r-1</a>"), std::string::npos) << "no raw run ids as the label";
 }
 
+TEST(Workspaces, SolutionProjectShowsRunFeedbackAndReadableOperatingState) {
+    lake::api::WorkspacePage page;
+    page.section = "project";
+    page.customer_id = std::string(customer);
+    page.subject = "retention";
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["get_project"] = {
+        {"name", "retention"},
+        {"description", "Foundation awaiting owner confirmation."},
+        {"graphs", json::array({{{"id", "g-1"}, {"name", "S-1 retention"}}})}};
+    const json runs =
+        json::array({{{"id", "run-failed"},
+                      {"graph", "S-1 retention"},
+                      {"status", "failed"},
+                      {"stage", "M-2 Entity resolution"},
+                      {"error", "M-2 Entity resolution failed: entities need a 64-bit integer key"},
+                      {"created", "2026-09-30T12:00:02Z"}},
+                     {{"id", "run-running"},
+                      {"graph", "S-1 retention"},
+                      {"status", "running"},
+                      {"stage", "M-1 Propensity"},
+                      {"created", "2026-09-30T12:00:01Z"}}});
+    page.data["list_runs"] = {{"runs", runs}};
+    json solution{
+        {"graph", "S-1 retention"},
+        {"graph_id", "g-1"},
+        {"runs", runs},
+        {"sources", {{"missing_policy_predicates", json::array()}}},
+        {"stages",
+         json::array({{{"stage", 1}, {"name", "Propensity"}, {"kind", "model"}},
+                      {{"stage", 2}, {"name", "Entity resolution"}, {"kind", "transform"}}})}};
+    solution["policy"] = {
+        {"id", "policy-1"},
+        {"current_version", 2},
+        {"config",
+         {{"autonomy", "A1"},
+          {"threshold", 0.75},
+          {"tiers",
+           json::array({{{"name", "high"}, {"minimum_score", 0.8}, {"action", "send offer"}}})}}}};
+    solution["experiment"] = {
+        {"allocations",
+         json::array({{{"name", "holdout"}, {"tier", "all"}, {"fraction", 0.1}},
+                      {{"name", "delivery"}, {"tier", "all"}, {"fraction", 0.9}}})}};
+    solution["monitor"] = {
+        {"psi_threshold", 0.2},
+        {"calibration_error_threshold", 0.05},
+        {"guardrails",
+         json::array(
+             {{{"bound", {{"name", "contact rate"}}}, {"value", 0.12}, {"breached", false}}})}};
+    const json checks = json::array(
+        {{{"name", "s1_entity_resolution"},
+          {"status", "fail"},
+          {"reason", "Entity keys are incompatible."}},
+         {{"name", "s4_pipeline"},
+          {"status", "pass"},
+          {"reason", "no bound S-4 Pipeline to validate"}},
+         {{"name", "schema_type"}, {"status", "pass"}, {"reason", "generic stage is valid"}}});
+    const json certificate{{"verdict", "fail"}, {"checks", checks}};
+    solution["roi"] = {
+        {"solution", "S-1"},
+        {"roi_statement",
+         {{"claimable", false}, {"reason", "The holdout has not accumulated enough outcomes."}}},
+        {"correctness_certificate", certificate}};
+    page.data["solution_project"] = std::move(solution);
+
+    const std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<strong>Last run failed at M-2 Entity resolution.</strong>"),
+              std::string::npos);
+    EXPECT_EQ(html.find("Foundation awaiting owner confirmation."), std::string::npos);
+    EXPECT_NE(html.find("M-2 Entity resolution failed: entities need a 64-bit integer key"),
+              std::string::npos);
+    EXPECT_NE(html.find(">running</span>"), std::string::npos);
+    EXPECT_NE(html.find("http-equiv=\"refresh\" content=\"3\""), std::string::npos);
+    EXPECT_NE(html.find("Open full run"), std::string::npos);
+    EXPECT_NE(html.find("Tiers and Thresholds"), std::string::npos);
+    EXPECT_NE(html.find("holdout</td><td>all</td><td>10.0%"), std::string::npos);
+    EXPECT_NE(html.find("Guardrails"), std::string::npos);
+    EXPECT_NE(html.find("The holdout has not accumulated enough outcomes."), std::string::npos);
+    const std::size_t verdict = html.find("<strong>Verdict:</strong>");
+    const std::size_t applicable = html.find("s1_entity_resolution");
+    ASSERT_NE(verdict, std::string::npos);
+    ASSERT_NE(applicable, std::string::npos);
+    EXPECT_LT(verdict, applicable);
+    EXPECT_NE(html.find("<summary>S-1 (1 checks)</summary>"), std::string::npos);
+    EXPECT_NE(html.find("Show all checks (2 not applicable)"), std::string::npos);
+    EXPECT_NE(html.find("<summary>View JSON</summary>"), std::string::npos);
+}
+
 TEST(Workspaces, IndexPageSearchesPublishesAndShowsHowToCallIt) {
     lake::api::WorkspacePage page;
     page.section = "index";
@@ -1709,6 +1800,7 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
         {"edges", json::array()}};
     w.caller->answers["list_runs"] = {{"runs",
                                        json::array({{{"id", "r1"},
+                                                     {"project", "retention"},
                                                      {"graph", "churn"},
                                                      {"status", "succeeded"},
                                                      {"created", "2026-09-26T10:00:00Z"}}})}};
@@ -1728,13 +1820,13 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
     context.acting_identity = principal->taap_id;
 
     const std::vector<std::string> features = {
-        "list_workspaces", "get_workspace", "create_workspace", "update_workspace",
+        "list_workspaces",    "get_workspace",      "create_workspace",     "update_workspace",
         "workspace_status",   "start_workspace",    "delete_workspace",     "workspace_query",
         "workspace_act",      "list_services",      "create_service",       "delete_service",
         "service_connection", "list_service_kinds", "list_store_providers", "list_stores",
         "create_store",       "delete_store",       "store_connection",     "connect_service",
         "search_index",       "edit_pipeline",      "get_pipeline",         "run_pipeline",
-        "create_pipeline",    "start_solution",     "confirm_solution"};
+        "create_pipeline",    "list_runs",          "start_solution",       "confirm_solution"};
     const json openapi = lake::api::openapi_document(registry, "test");
     const auto tools = json::parse(
         *liquid::runtime::block_on(lake::api::mcp_dispatch_async(
@@ -1775,6 +1867,14 @@ TEST(Workspaces, EveryNewFeatureIsInOpenApiAndWorksOverMcp) {
         json::parse(pipeline.at("content").at(0).at("text").get<std::string>()).at("value");
     EXPECT_EQ(value["step_status"]["pull"], "succeeded");
     EXPECT_EQ(value["runs"].size(), 1U);
+
+    const json listed_runs = call("list_runs", {{"project", "retention"}, {"limit", 5}});
+    const json run_value =
+        json::parse(listed_runs.at("content").at(0).at("text").get<std::string>()).at("value");
+    ASSERT_EQ(run_value["runs"].size(), 1U);
+    EXPECT_EQ(run_value["runs"][0]["id"], "r1");
+    EXPECT_EQ(run_value["runs"][0]["status"], "succeeded");
+    EXPECT_EQ(run_value["runs"][0]["stage"], "Completed");
 
     const json blocked = call("run_pipeline", {{"project", "retention"}, {"graph", "churn"}});
     EXPECT_NE(blocked.dump().find("block_deploy"), std::string::npos);

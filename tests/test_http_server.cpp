@@ -1688,14 +1688,27 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
         {"currency", "USD"}, {"investment", 4000.0}, {"incrementality", 0.2}};
     workspace_caller_->answers["list_runs"] = {
         {"runs",
-         nlohmann::json::array({{{"id", "run-1"},
-                                 {"graph", "S-1 CL-1"},
-                                 {"status", "succeeded"},
-                                 {"outputs",
-                                  nlohmann::json::array(
-                                      {{{"name", "solution decisions"},
+         nlohmann::json::array(
+             {{{"id", "run-1"},
+               {"project_name", "churn"},
+               {"graph", "S-1 CL-1"},
+               {"status", "succeeded"},
+               {"outputs",
+                nlohmann::json::array({{{"name", "solution decisions"},
                                         {"ref", "solution_results.decisions_run_1"}}})},
-                                 {"created", "2026-09-28T12:00:00Z"}}})}};
+               {"created", "2026-09-28T12:00:00Z"}}})}};
+    workspace_caller_->answers["get_run"] = {
+        {"id", "run-1"},
+        {"project_name", "churn"},
+        {"graph", "S-1 CL-1"},
+        {"status", "succeeded"},
+        {"created", "2026-09-28T12:00:00Z"},
+        {"logs",
+         nlohmann::json::array({{{"level", "info"},
+                                 {"message", "solution stage succeeded: M-2 Entity Resolution"}}})},
+        {"outputs",
+         nlohmann::json::array(
+             {{{"name", "solution decisions"}, {"ref", "solution_results.decisions_run_1"}}})}};
     workspace_caller_->answers["sql"] = {
         {"rows",
          nlohmann::json::array({{{"id", "decision-1"},
@@ -3099,9 +3112,9 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/design/methodology", {2, 1}},
         {"/w/:workspace_id/design/opportunities", {1, 1}},
         {"/w/:workspace_id/design/pipeline", {3, 1}},
-        {"/w/:workspace_id/design/project", {4, 2}},
+        {"/w/:workspace_id/design/project", {9, 2}},
         {"/w/:workspace_id/design/projects", {1, 1}},
-        {"/w/:workspace_id/design/solution", {2, 1}},
+        {"/w/:workspace_id/design/solution", {3, 1}},
         {"/w/:workspace_id/design/solutions", {1, 1}},
         {"/w/:workspace_id/ship/app", {1, 1}},
         {"/w/:workspace_id/ship/index", {1, 1}},

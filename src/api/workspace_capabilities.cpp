@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <expected>
 #include <map>
 #include <string>
@@ -790,6 +791,79 @@ ApiResult take(std::expected<ApiResult, liquid::error> completed) {
                      : ApiResult::failure("store_error", completed.error().message);
 }
 
+struct RunDetailCompletion {
+    liquid::result<ApiResult> value;
+};
+
+boost::capy::io_task<RunDetailCompletion>
+complete_run_detail(liquid::runtime::task<ApiResult> task) {
+    auto result = co_await std::move(task);
+    co_return boost::capy::io_result<RunDetailCompletion>{{}, {std::move(result)}};
+}
+
+std::string first_line(std::string text) {
+    const std::size_t newline = text.find_first_of("\r\n");
+    if (newline != std::string::npos) {
+        text.erase(newline);
+    }
+    return text;
+}
+
+std::string run_error_line(const json& run) {
+    if (run.contains("error") && run.at("error").is_string()) {
+        return first_line(run.at("error").get<std::string>());
+    }
+    const json logs = run.value("logs", json::array());
+    for (auto entry = logs.rbegin(); entry != logs.rend(); ++entry) {
+        if (entry->value("level", std::string()) == "error") {
+            return first_line(entry->value("message", std::string()));
+        }
+    }
+    return {};
+}
+
+std::string run_stage(const json& run) {
+    const std::string status = run.value("status", std::string());
+    if (status == "queued" || status == "pending") {
+        return "Queued";
+    }
+    std::string stage;
+    constexpr std::string_view started = "solution stage started: ";
+    constexpr std::string_view succeeded = "solution stage succeeded: ";
+    for (const json& entry : run.value("logs", json::array())) {
+        const std::string message = entry.value("message", std::string());
+        if (message.starts_with(started)) {
+            stage = message.substr(started.size());
+        } else if (message.starts_with(succeeded)) {
+            stage = message.substr(succeeded.size());
+        }
+    }
+    if (!stage.empty()) {
+        return stage;
+    }
+    if (status == "succeeded") {
+        return "Completed";
+    }
+    if (status == "failed") {
+        return "Foundation";
+    }
+    return "Preparing foundation";
+}
+
+bool solution_run_matches(const json& run, const std::string& solution) {
+    if (solution.empty()) {
+        return true;
+    }
+    for (const char* key : {"graph", "pipeline_name"}) {
+        const std::string name = run.value(key, std::string());
+        if (name == solution || name.starts_with(solution + " ") ||
+            name.starts_with(solution + "-") || name.starts_with(solution + ":")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 // One validated pipeline edit (docs/design/zetta-parity.md): read the graph, apply the edit with
@@ -1103,6 +1177,95 @@ void register_connect_capabilities(Registry& registry) {
 // create one empty, from n8n or from Python. The catalog of service kinds is readable too.
 void register_parity_capabilities(Registry& registry) {
     const json project_graph{{"project", {{"type", "string"}}}, {"graph", {{"type", "string"}}}};
+    registry.add(Capability{
+        .name = "list_runs",
+        .title = "List runs",
+        .description =
+            "List the latest workspace runs, optionally filtered by project or solution. Each "
+            "row includes status, the stage reached and the last error line. Detailed reads for "
+            "the bounded result are fetched concurrently.",
+        .input_schema = customer_input_schema(
+            {{"project", {{"type", "string"}, {"minLength", 1}}},
+             {"solution", {{"type", "string"}, {"minLength", 1}}},
+             {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 20}}}},
+            json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .authorizes_candidates = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (auto refused = refuse_unless_reader(input, context)) {
+                co_return std::move(*refused);
+            }
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer = input.at("customer_id");
+            const ApiResult listed =
+                take(co_await zetta(context, customer, "list_runs", true, json::object()));
+            if (!listed.ok) {
+                co_return listed;
+            }
+            const std::string project = input.value("project", std::string());
+            const std::string solution = input.value("solution", std::string());
+            json runs = json::array();
+            for (const json& run : listed.value.value("runs", json::array())) {
+                const std::string named_project =
+                    run.value("project_name", run.value("project", std::string()));
+                if ((!project.empty() && named_project != project) ||
+                    !solution_run_matches(run, solution)) {
+                    continue;
+                }
+                runs.push_back(run);
+            }
+            std::sort(runs.begin(), runs.end(), [](const json& left, const json& right) {
+                return left.value("created", std::string()) > right.value("created", std::string());
+            });
+            const std::size_t limit = input.value("limit", std::size_t{5});
+            if (runs.size() > limit) {
+                runs.erase(runs.begin() + static_cast<std::ptrdiff_t>(limit), runs.end());
+            }
+            if (runs.empty()) {
+                co_return ApiResult::success({{"runs", json::array()}});
+            }
+
+            std::vector<ApiContext> contexts(runs.size(), context);
+            std::vector<boost::capy::io_task<RunDetailCompletion>> pending;
+            pending.reserve(runs.size());
+            for (std::size_t index = 0; index < runs.size(); ++index) {
+                pending.push_back(complete_run_detail(
+                    zetta(contexts[index],
+                          customer,
+                          "get_run",
+                          true,
+                          {{"run_id", runs.at(index).value("id", std::string())}})));
+            }
+            auto [wait_error, details] = co_await liquid::runtime::when_all(std::move(pending));
+            if (wait_error) {
+                co_return ApiResult::failure("store_error", wait_error.message());
+            }
+            for (std::size_t index = 0; index < details.size(); ++index) {
+                const ApiResult detail = take(std::move(details[index].value));
+                if (!detail.ok) {
+                    continue;
+                }
+                for (const char* key :
+                     {"project", "graph", "status", "created", "updated", "outputs", "lineage"}) {
+                    if (detail.value.contains(key)) {
+                        runs[index][key] = detail.value.at(key);
+                    }
+                }
+                runs[index]["stage"] = run_stage(detail.value);
+                const std::string error = run_error_line(detail.value);
+                if (!error.empty()) {
+                    runs[index]["error"] = error;
+                }
+            }
+            co_return ApiResult::success({{"runs", std::move(runs)}});
+        }});
     registry.add(Capability{
         .name = "get_pipeline",
         .title = "Get a pipeline",
