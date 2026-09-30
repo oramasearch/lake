@@ -152,8 +152,10 @@ person reviews the files and App settings. Lake starts a later turn with that ex
 ApplicationAgent's App shape maps `auth: public` to Ship App `auth: none`, accepts a missing or null
 host as the generated wildcard host, and represents an operator-managed environment credential as
 `{"NAME":{"secret":"reference"}}`. `deploy_app` accepts the service's `app` key as an alias for
-`app_id`. The full desired-state contract is [web-apps.md](web-apps.md), and the review page is
-[the Ship Apps UI](../ui/apps.md).
+`app_id`. It must propose a non-reserved App name: Lake protects the platform names and prefixes
+listed in [web-apps.md](web-apps.md), plus the operator's `LAKE_APPS_RESERVED_NAMES`, and reports a
+refusal at `/name`. The full desired-state contract is [web-apps.md](web-apps.md), and the review
+page is [the Ship Apps UI](../ui/apps.md).
 
 ## How to verify
 

@@ -86,7 +86,8 @@ Platform sync uses `LAKE_OPERATOR_ZETTA_URL`, secret bearer `LAKE_OPERATOR_ZETTA
 [`docs/api/platform.md`](docs/api/platform.md).
 Metering and quota configuration uses the `LAKE_PRICE_*` and `LAKE_STORAGE_QUOTA_BYTES`
 environment variables documented in [`docs/api/metering.md`](docs/api/metering.md).
-Ship app hosts and quotas use `LAKE_APPS_WILDCARD`, `LAKE_APPS_PER_CUSTOMER`, and
+Ship app hosts, reserved names, and quotas use `LAKE_APPS_WILDCARD`,
+`LAKE_APPS_RESERVED_NAMES`, `LAKE_APPS_PER_CUSTOMER`, and
 `LAKE_APP_REPLICAS_PER_CUSTOMER`; see [`docs/api/web-apps.md`](docs/api/web-apps.md).
 Build targets use the authority from `LAKE_INTERNAL_URL`; see
 [`docs/api/builds.md`](docs/api/builds.md).

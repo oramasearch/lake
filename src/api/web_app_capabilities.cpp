@@ -1,6 +1,7 @@
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <expected>
@@ -90,6 +91,41 @@ bool valid_name(std::string_view name) {
     return std::ranges::all_of(name, [](const unsigned char character) {
         return std::islower(character) || std::isdigit(character) || character == '-';
     });
+}
+
+bool reserved_name(std::string_view name, std::string_view configured) {
+    static constexpr std::array<std::string_view, 27> built_in{
+        "lake",   "www",      "api",    "app",    "apps",    "admin",    "mcp",
+        "docs",   "status",   "mail",   "smtp",   "auth",    "login",    "sso",
+        "id",     "cdn",      "static", "assets", "grafana", "prometheus",
+        "argocd", "registry", "git",    "dev",    "staging", "prod",     "test",
+    };
+    const bool built_in_name = std::ranges::any_of(built_in, [&](std::string_view candidate) {
+        return candidate == name;
+    });
+    if (built_in_name || name.starts_with("lake-") || name.starts_with("orama")) {
+        return true;
+    }
+    while (!configured.empty()) {
+        const std::size_t comma = configured.find(',');
+        std::string_view candidate = configured.substr(0, comma);
+        while (!candidate.empty() &&
+               std::isspace(static_cast<unsigned char>(candidate.front()))) {
+            candidate.remove_prefix(1);
+        }
+        while (!candidate.empty() &&
+               std::isspace(static_cast<unsigned char>(candidate.back()))) {
+            candidate.remove_suffix(1);
+        }
+        if (candidate == name) {
+            return true;
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        configured.remove_prefix(comma + 1);
+    }
+    return false;
 }
 
 bool valid_domain(std::string_view host) {
@@ -477,7 +513,8 @@ void register_web_app_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_app",
         .title = "Create app",
-        .description = "Create runtime or image desired state for the app operator.",
+        .description = "Create runtime or image desired state for the app operator. App names "
+                       "cannot use reserved platform hosts.",
         .input_schema = input_schema(
             {{"name", {{"type", "string"}}},
              {"mode", {{"type", "string"}, {"enum", json::array({"runtime", "image"})}}},
@@ -510,6 +547,9 @@ void register_web_app_capabilities(Registry& registry) {
                     "name must start with a letter and use lowercase letters, digits and '-', at "
                     "most 31 characters",
                     "/name");
+            }
+            if (reserved_name(name, context.apps_reserved_names)) {
+                co_return ApiResult::failure("invalid_input", name + " is reserved", "/name");
             }
             json deployment = input;
             const auto workspace = co_await context.workspaces->state(input.at("customer_id"), input.at("workspace_id"));

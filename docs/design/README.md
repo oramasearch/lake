@@ -21,6 +21,9 @@ The customer landing journey and viewer navigation are recorded in
 Train → Streams is tracked separately from deployment in [status.md](status.md), with its
 [API](../api/streams.md), [UI](../ui/streams.md) and ownership contracts linked there.
 
+Ship Apps direct-zone hosts and reserved-name validation are tracked separately from deployment in
+[status.md](status.md), with the [API contract](../api/web-apps.md) linked there.
+
 Indexed PostgreSQL session authentication and the legacy-session migration are specified in
 [../api/auth.md](../api/auth.md) and recorded separately from deployment in [status.md](status.md).
 
