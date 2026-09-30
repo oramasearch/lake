@@ -5530,7 +5530,10 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
         if (!result.is_object()) {
             result = nlohmann::json::object();
         }
-        const std::string reply = answer.value("reply", page.agent_task.value("message", ""));
+        std::string reply = json_text(answer, "reply");
+        if (reply.empty()) {
+            reply = json_text(page.agent_task, "message");
+        }
         if (page.agent_working) {
             content +=
                 "<section class=\"panel\" aria-live=\"polite\"><h2>ApplicationAgent Is "
@@ -5569,8 +5572,16 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
                 hidden("proposal_sha256", page.proposal_sha256));
         } else {
             const nlohmann::json app = result.value("app", nlohmann::json::object());
-            const std::string url = app.value(
-                "url", app.value("rollout", nlohmann::json::object()).value("url", std::string()));
+            // The deployed App carries "url": null until its rollout reports one, so read
+            // strings only; the App's own host is the fallback link.
+            std::string url = json_text(app, "url");
+            if (url.empty()) {
+                const nlohmann::json rollout = app.value("rollout", nlohmann::json::object());
+                url = rollout.is_object() ? json_text(rollout, "url") : std::string();
+            }
+            if (url.empty() && !json_text(app, "host").empty()) {
+                url = "https://" + json_text(app, "host");
+            }
             content += "<section class=\"panel\"><h2>ApplicationAgent Result</h2><div "
                        "class=\"ask-reply\">" +
                        web_ui_markdown(reply) + "</div>";
