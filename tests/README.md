@@ -3,7 +3,8 @@
 `PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` discovers HTML pages from the
 production GET router, resets the workspace definition cache before each render, and checks every
 route's exact `Server-Timing` call and sequential-round budget. Unlisted routes must make zero
-workspace calls; Project's four calls may use two rounds, and every other listed route uses one.
+workspace calls; Project's bounded run details bring its populated fixture to nine calls in two
+rounds, and Solution uses three calls in one round.
 The loose wall guard is p95 below 500 ms over 20 renders at 30 ms of workspace latency. Its
 populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering case
 with four repositories and 128 files. The first Metering request checks populated-byte correctness;
@@ -15,6 +16,12 @@ It requires `LAKE_TEST_DB_URI`, uses a regular authenticated user, and rejects r
 for canonical `/w/:workspace_id/...` pages and `/workspaces`.
 Non-workspace discovery also tries operator and signed-out profiles to include protected operator
 pages and public sign-in forms.
+
+`Workspaces.SolutionProjectShowsRunFeedbackAndReadableOperatingState` pins a failed run's stage and
+error, an active run's status and three-second refresh, the full-run link, the lifecycle header,
+policy tiers, experiment allocation, monitor guardrails, the ROI reason and verdict-first grouped
+certificate. `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp` calls the direct filtered
+`list_runs` capability and checks its completed status and stage.
 
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
 workspace alias checks, audit, REST/MCP parity and actual calls, hashed assets, navigation and

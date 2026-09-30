@@ -8001,6 +8001,11 @@ struct ApiServer::Impl {
                 input["customer_id"] = customer_id;
                 continue;
             }
+            if (capability == "list_runs" &&
+                (input.contains("project") || input.contains("solution"))) {
+                input["customer_id"] = customer_id;
+                continue;
+            }
             if (capability == "list_agent_library") {
                 continue;
             }
@@ -8413,19 +8418,26 @@ struct ApiServer::Impl {
                 reads = {{"list_solutions", nlohmann::json::object()}};
             } else if (section == "solution") {
                 reads = {{"get_solution", {{"solution", page.subject}}},
-                         {"list_datasets", nlohmann::json::object()}};
+                         {"list_datasets", nlohmann::json::object()},
+                         {"list_runs", {{"solution", page.subject}, {"limit", 5}}}};
             } else if (section == "projects") {
                 reads = {{"list_projects", nlohmann::json::object()}};
             } else if (section == "project") {
                 const std::vector<WorkspaceRead> catalogues{
                     {"list_datasets", nlohmann::json::object()},
                     {"list_methodologies", nlohmann::json::object()}};
+                ApiContext runs_context = context;
                 // Start remote catalogue reads before cached definitions: their synchronous
                 // authorization and audit work can then overlap the catalogue round trip.
-                auto [wait_error, listed, project] = co_await liquid::runtime::when_all(
+                auto [wait_error, listed, project, runs] = co_await liquid::runtime::when_all(
                     liquid::runtime::as_io(workspace_reads(context, page.customer_id, catalogues)),
                     liquid::runtime::as_io(
-                        project_graph_reads(context, page.customer_id, page.subject)));
+                        project_graph_reads(context, page.customer_id, page.subject)),
+                    liquid::runtime::as_io(workspace_call("list_runs",
+                                                          {{"customer_id", page.customer_id},
+                                                           {"project", page.subject},
+                                                           {"limit", 5}},
+                                                          runs_context)));
                 if (wait_error) {
                     page.error = wait_error.message();
                 }
@@ -8450,6 +8462,13 @@ struct ApiServer::Impl {
                     }
                 } else if (page.error.empty()) {
                     page.error = listed.error().message;
+                }
+                if (runs && runs->ok) {
+                    page.data["list_runs"] = std::move(runs->value);
+                } else if (!runs && page.error.empty()) {
+                    page.error = runs.error().message;
+                } else if (runs && page.error.empty()) {
+                    page.error = runs->error.message;
                 }
             } else if (section == "data") {
                 if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
@@ -8639,8 +8658,8 @@ struct ApiServer::Impl {
                         {"foundation", foundation},
                         {"sources", source_roles},
                         {"stages", std::move(stages)}};
-                    const std::array<const char*, 6> state_keys{
-                        "policy", "experiment", "ledger", "monitor", "roi", "list_runs"};
+                    const std::array<const char*, 5> state_keys{
+                        "policy", "experiment", "ledger", "monitor", "roi"};
                     const std::vector<WorkspaceRead> state_reads{
                         {"get_policy",
                          {{"policy_id", foundation.value("policy_id", std::string())}}},
@@ -8653,7 +8672,6 @@ struct ApiServer::Impl {
                          {{"solution",
                            foundation.value("readout_id",
                                             foundation.value("scope", std::string()))}}},
-                        {"list_runs", nlohmann::json::object()},
                     };
                     auto states = co_await workspace_reads(context, page.customer_id, state_reads);
                     if (!states) {
@@ -8668,22 +8686,24 @@ struct ApiServer::Impl {
                                 states->at(state_index).value;
                         }
                     }
-                    const ApiResult& listed_runs = states->at(5);
+                    const nlohmann::json listed_runs =
+                        page.data.value("list_runs", nlohmann::json::object());
+                    nlohmann::json solution_runs = nlohmann::json::array();
                     nlohmann::json latest;
-                    if (listed_runs.ok) {
-                        for (const nlohmann::json& run :
-                             listed_runs.value.value("runs", nlohmann::json::array())) {
-                            const std::string of = run.value("graph", std::string());
-                            if (of != solution_project.value("graph", std::string()) &&
-                                of != solution_project.value("graph_id", std::string())) {
-                                continue;
-                            }
-                            if (latest.is_null() || run.value("created", std::string()) >
-                                                        latest.value("created", std::string())) {
-                                latest = run;
-                            }
+                    for (const nlohmann::json& run :
+                         listed_runs.value("runs", nlohmann::json::array())) {
+                        const std::string of = run.value("graph", std::string());
+                        if (of != solution_project.value("graph", std::string()) &&
+                            of != solution_project.value("graph_id", std::string())) {
+                            continue;
+                        }
+                        solution_runs.push_back(run);
+                        if (latest.is_null() || run.value("created", std::string()) >
+                                                    latest.value("created", std::string())) {
+                            latest = run;
                         }
                     }
+                    solution_project["runs"] = std::move(solution_runs);
                     if (latest.is_object()) {
                         solution_project["run"] = latest;
                         std::string decisions;

@@ -43,6 +43,11 @@ unrelated catalogue responses before starting graph reads. Study details overlap
 and stream details overlap message browsing. Authorization and input validation still apply to
 each capability independently.
 
+Solution and solution-backed Project pages also start one bounded `list_runs` registry read in
+those batches. Its retained `get_run` details start together, so five rows add calls without adding
+one sequential round per row. Project reuses the completed run rows while reading policy,
+experiment, ledger, monitor and ROI in its existing concurrent state batch.
+
 Zetta issue [#1184](https://github.com/oramasearch/zetta/issues/1184) tracks the denormalized names
 and complete run/model/study list records. Zetta issue
 [#1185](https://github.com/oramasearch/zetta/issues/1185) tracks project summaries with graph id,
@@ -89,9 +94,9 @@ workspace work without an explicit review of this table and the test map.
 | `/w/:workspace_id/design/methodology` | 2 | 1 |
 | `/w/:workspace_id/design/opportunities` | 1 | 1 |
 | `/w/:workspace_id/design/pipeline` | 3 | 1 |
-| `/w/:workspace_id/design/project` | 4 | 2 |
+| `/w/:workspace_id/design/project` | 9 | 2 |
 | `/w/:workspace_id/design/projects` | 1 | 1 |
-| `/w/:workspace_id/design/solution` | 2 | 1 |
+| `/w/:workspace_id/design/solution` | 3 | 1 |
 | `/w/:workspace_id/design/solutions` | 1 | 1 |
 | `/w/:workspace_id/ship/app` | 1 | 1 |
 | `/w/:workspace_id/ship/index` | 1 | 1 |

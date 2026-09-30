@@ -24,6 +24,13 @@ and live event behavior are in [`apps.md`](apps.md).
 Train → Streams topic/message CRUD, Live/pause, paging and capability mappings are in
 [`streams.md`](streams.md). Apps, build logs and Runs link into that space's Streams pages.
 
+Design → Solution and solution-backed Project pages show their five latest runs, including status,
+reached stage, first error line and a full run link. Active runs refresh every three seconds. The
+Project status follows the solution lifecycle instead of its creation-time description. Decision
+policy, experiment, monitor and ROI are summarized for reading, retain JSON disclosures, and keep
+unrelated correctness checks collapsed under **Show all**. The capability and page-read contract
+is in [`../api/workspaces.md`](../api/workspaces.md).
+
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed
 self-hosted font URLs, an accessible shared shell, and a persisted light/dark theme control,

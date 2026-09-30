@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <format>
+#include <map>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -3685,6 +3686,263 @@ std::string runs_badge_of(const nlohmann::json& entry) {
     return "<span class=\"badge status-warning\">Not yet</span>";
 }
 
+bool run_is_active(const nlohmann::json& run) {
+    const std::string status = json_text(run, "status");
+    return status == "queued" || status == "pending" || status == "running";
+}
+
+std::string run_status_badge(const std::string& status) {
+    const bool successful = status == "succeeded" || status == "pass" || status == "within bounds";
+    const bool failed = status == "failed" || status == "fail" || status == "attention needed";
+    const bool active =
+        status == "warn" || status == "queued" || status == "pending" || status == "running";
+    const std::string modifier = successful ? " status-success"
+                                 : failed   ? " status-danger"
+                                 : active   ? " status-warning"
+                                            : "";
+    return "<span class=\"badge" + modifier + "\">" +
+           web_ui_escape(status.empty() ? "unknown" : status) + "</span>";
+}
+
+std::string solution_runs_content(const nlohmann::json& listing, const std::string& query) {
+    const nlohmann::json runs = listing.value("runs", nlohmann::json::array());
+    std::string out = "<section class=\"panel\"><h2>Runs</h2>";
+    if (runs.empty()) {
+        return out + "<p>No runs yet.</p></section>";
+    }
+    bool refresh = false;
+    out += "<table><thead><tr><th>Run</th><th>Status</th><th>Stage Reached</th>"
+           "<th>Started</th><th>Error</th><th></th></tr></thead><tbody>";
+    for (const nlohmann::json& run : runs) {
+        const std::string id = json_text(run, "id");
+        const std::string status = json_text(run, "status");
+        refresh = refresh || run_is_active(run);
+        out += std::format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            identifier_markup(id),
+            run_status_badge(status),
+            web_ui_escape(json_text(run, "stage").empty() ? "—" : json_text(run, "stage")),
+            web_ui_escape(when(json_text(run, "created"))),
+            json_text(run, "error").empty()
+                ? std::string("—")
+                : "<span class=\"error\">" + web_ui_escape(json_text(run, "error")) + "</span>",
+            row_link("/train/run?" + query + "&id=" + url_component(id), "Open full run"));
+    }
+    out += "</tbody></table>";
+    if (refresh) {
+        out += "<p class=\"muted\">This page checks again every 3 seconds while a run is "
+               "active.</p><meta http-equiv=\"refresh\" content=\"3\">";
+    }
+    return out + "</section>";
+}
+
+std::string solution_state_summary(const nlohmann::json& solution) {
+    const nlohmann::json runs = solution.value("runs", nlohmann::json::array());
+    if (runs.empty()) {
+        return "<p class=\"sub\"><strong>Created.</strong> The solution is ready to run.</p>";
+    }
+    const nlohmann::json& latest = runs.front();
+    const std::string status = json_text(latest, "status");
+    const std::string stage = json_text(latest, "stage");
+    if (run_is_active(latest)) {
+        return "<p class=\"sub\"><strong>Running.</strong> " +
+               web_ui_escape(stage.empty() ? "Preparing the solution." : "Reached " + stage + ".") +
+               "</p>";
+    }
+    if (status == "failed") {
+        const std::string error = json_text(latest, "error");
+        return "<p class=\"sub error\"><strong>Last run failed" +
+               web_ui_escape(stage.empty() ? std::string() : " at " + stage) + ".</strong>" +
+               (error.empty() ? std::string() : " " + web_ui_escape(error)) + "</p>";
+    }
+    if (status == "succeeded") {
+        return "<p class=\"sub\"><strong>Delivering.</strong> The last run succeeded.</p>";
+    }
+    return "<p class=\"sub\"><strong>Created.</strong> No run has completed yet.</p>";
+}
+
+std::string json_disclosure(const nlohmann::json& value) {
+    return "<details><summary>View JSON</summary><pre>" + web_ui_escape(value.dump(2)) +
+           "</pre></details>";
+}
+
+std::string policy_summary(const nlohmann::json& policy, const nlohmann::json& config) {
+    std::string out =
+        "<dl><dt>Version</dt><dd>" + web_ui_escape(cell_text(policy.value("current_version", 0))) +
+        "</dd><dt>Autonomy</dt><dd>" +
+        web_ui_escape(json_text(config, "autonomy").empty() ? "—" : json_text(config, "autonomy")) +
+        "</dd><dt>Score threshold</dt><dd>" +
+        web_ui_escape(config.contains("threshold") ? cell_text(config["threshold"]) : "—") +
+        "</dd></dl>";
+    const nlohmann::json tiers = config.value("tiers", nlohmann::json::array());
+    if (!tiers.empty()) {
+        out += "<h3>Tiers and Thresholds</h3><table><thead><tr><th>Tier</th><th>Minimum "
+               "Score</th><th>Action</th></tr></thead><tbody>";
+        for (const nlohmann::json& tier : tiers) {
+            out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                               web_ui_escape(json_text(tier, "name")),
+                               web_ui_escape(cell_text(tier.value("minimum_score", 0.0))),
+                               web_ui_escape(json_text(tier, "action")));
+        }
+        out += "</tbody></table>";
+    }
+    return out;
+}
+
+std::string experiment_summary(const nlohmann::json& experiment) {
+    nlohmann::json allocations = experiment.value("allocations", nlohmann::json::array());
+    if (allocations.empty() && experiment.contains("holdout_fraction")) {
+        const double holdout = experiment.value("holdout_fraction", 0.0);
+        allocations = nlohmann::json::array(
+            {{{"name", "holdout"}, {"tier", "all"}, {"fraction", holdout}},
+             {{"name", "delivery"}, {"tier", "all"}, {"fraction", 1.0 - holdout}}});
+    }
+    if (allocations.empty()) {
+        return "<p>No allocations have been configured.</p>";
+    }
+    std::string out = "<table><thead><tr><th>Allocation</th><th>Tier</th><th>Share</th>"
+                      "</tr></thead><tbody>";
+    for (const nlohmann::json& allocation : allocations) {
+        out += std::format("<tr><td>{}</td><td>{}</td><td>{:.1f}%</td></tr>",
+                           web_ui_escape(json_text(allocation, "name")),
+                           web_ui_escape(json_text(allocation, "tier")),
+                           allocation.value("fraction", 0.0) * 100.0);
+    }
+    return out + "</tbody></table>";
+}
+
+std::string monitor_summary(const nlohmann::json& monitor) {
+    const nlohmann::json breaches = monitor.value("breaches", nlohmann::json::array());
+    const bool calibration_breached =
+        monitor.value("calibration", nlohmann::json::object()).value("breached", false);
+    const bool healthy = breaches.empty() && !calibration_breached;
+    std::string out =
+        "<p>" + run_status_badge(healthy ? "within bounds" : "attention needed") +
+        "</p><dl><dt>Input drift threshold</dt><dd>" +
+        web_ui_escape(monitor.contains("psi_threshold") ? cell_text(monitor["psi_threshold"])
+                                                        : "—") +
+        "</dd><dt>Calibration error threshold</dt><dd>" +
+        web_ui_escape(monitor.contains("calibration_error_threshold")
+                          ? cell_text(monitor["calibration_error_threshold"])
+                          : "—") +
+        "</dd></dl>";
+    const nlohmann::json guardrails = monitor.value("guardrails", nlohmann::json::array());
+    if (!guardrails.empty()) {
+        out += "<h3>Guardrails</h3><table><thead><tr><th>Guardrail</th><th>Observed</th>"
+               "<th>Status</th></tr></thead><tbody>";
+        for (const nlohmann::json& guardrail : guardrails) {
+            const nlohmann::json bound = guardrail.value("bound", nlohmann::json::object());
+            out += std::format(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                web_ui_escape(json_text(bound, "name")),
+                web_ui_escape(guardrail.contains("value") ? cell_text(guardrail["value"])
+                                                          : "Not observed"),
+                run_status_badge(guardrail.value("breached", false) ? "failed" : "within bounds"));
+        }
+        out += "</tbody></table>";
+    }
+    return out;
+}
+
+bool certificate_check_applies(const nlohmann::json& check, const std::string& solution) {
+    const std::string status = json_text(check, "status");
+    const std::string reason = json_text(check, "reason");
+    const std::string name = json_text(check, "name");
+    if (status != "pass") {
+        return true;
+    }
+    if (reason.starts_with("no bound ") || reason.starts_with("no step ") ||
+        reason.starts_with("no ML step ") || reason.starts_with("no model step ")) {
+        return false;
+    }
+    std::string prefix;
+    for (const char character : solution) {
+        if (std::isalnum(static_cast<unsigned char>(character))) {
+            prefix += static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        }
+    }
+    return name.find(prefix + "_") != std::string::npos || name.ends_with("/non_empty_graph") ||
+           name == "non_empty_graph";
+}
+
+std::string certificate_check_table(const nlohmann::json& checks) {
+    std::string out = "<table class=\"gate-checks\"><thead><tr><th>Check</th><th>Status</th>"
+                      "<th>Why</th></tr></thead><tbody>";
+    for (const nlohmann::json& check : checks) {
+        out += std::format("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                           web_ui_escape(json_text(check, "name")),
+                           run_status_badge(json_text(check, "status")),
+                           web_ui_escape(json_text(check, "reason")));
+    }
+    return out + "</tbody></table>";
+}
+
+std::string certificate_check_group(const std::string& name) {
+    const std::size_t slash = name.find('/');
+    if (slash != std::string::npos) {
+        return name.substr(0, slash);
+    }
+    const std::size_t underscore = name.find('_');
+    if (underscore > 1 && (name.front() == 's' || name.front() == 'b') &&
+        std::ranges::all_of(name.substr(1, underscore - 1), [](const char character) {
+            return std::isdigit(static_cast<unsigned char>(character));
+        })) {
+        return std::string(1, static_cast<char>(std::toupper(name.front()))) + "-" +
+               name.substr(1, underscore - 1);
+    }
+    return "Pipeline";
+}
+
+std::string correctness_certificate(const nlohmann::json& certificate,
+                                    const std::string& solution) {
+    const std::string verdict = json_text(certificate, "verdict");
+    std::string out = "<h3>Correctness Certificate</h3><p><strong>Verdict:</strong> " +
+                      run_status_badge(verdict) + "</p>";
+    std::map<std::string, nlohmann::json> groups;
+    nlohmann::json hidden = nlohmann::json::array();
+    for (const nlohmann::json& check : certificate.value("checks", nlohmann::json::array())) {
+        if (!certificate_check_applies(check, solution)) {
+            hidden.push_back(check);
+            continue;
+        }
+        const std::string name = json_text(check, "name");
+        groups[certificate_check_group(name)].push_back(check);
+    }
+    for (const auto& [group, checks] : groups) {
+        out += "<details><summary>" + web_ui_escape(group) + " (" + std::to_string(checks.size()) +
+               " checks)</summary>" + certificate_check_table(checks) + "</details>";
+    }
+    if (!hidden.empty()) {
+        out += "<details><summary>Show all checks (" + std::to_string(hidden.size()) +
+               " not applicable)</summary>" + certificate_check_table(hidden) + "</details>";
+    }
+    return out;
+}
+
+std::string roi_summary(const nlohmann::json& readout) {
+    const nlohmann::json statement = readout.value("roi_statement", nlohmann::json::object());
+    const nlohmann::json model = statement.value("model", nlohmann::json::object());
+    std::string out;
+    if (statement.value("claimable", false)) {
+        out = std::format("<p><strong>{:.1f}% return on investment.</strong> Net value {} {} "
+                          "from gross value {} {}.</p>",
+                          statement.value("return_on_investment", 0.0) * 100.0,
+                          web_ui_escape(json_text(model, "currency")),
+                          web_ui_escape(cell_text(statement.value("net_value", 0.0))),
+                          web_ui_escape(json_text(model, "currency")),
+                          web_ui_escape(cell_text(statement.value("gross_value", 0.0))));
+    } else {
+        const std::string reason = json_text(statement, "reason");
+        out = "<p><strong>ROI cannot be claimed yet.</strong> " +
+              web_ui_escape(reason.empty() ? "No measured reason is available." : reason) + "</p>";
+    }
+    if (readout.contains("correctness_certificate")) {
+        out += correctness_certificate(readout["correctness_certificate"],
+                                       json_text(readout, "solution"));
+    }
+    return out;
+}
+
 // Design → Methodologies (lake#291): the engine's methodology registry (zetta#1061).
 std::string methodologies_content(const WorkspacePage& page) {
     const std::string query = customer_query(page.customer_id);
@@ -3833,6 +4091,7 @@ std::string solutions_content(const WorkspacePage& page) {
                 : "<tr><th>Tracked in</th><td>" + web_ui_escape(json_text(solution, "issue")) +
                       "</td></tr>",
             levels.empty() ? std::string() : "<h2>Levels</h2><ul>" + levels + "</ul>");
+        out += solution_runs_content(page.data.value("list_runs", nlohmann::json::object()), query);
         const bool startable = solution.value("runnable", false) || json_text(solution, "status") == "preview";
         if (startable) {
             std::string options;
@@ -4128,32 +4387,34 @@ std::string active_solution_content(const WorkspacePage& page,
     }
     if (!policy.empty()) {
         out += std::format(
-            "<section class=\"panel\"><h2>Decision Policy</h2><pre>{}</pre><details><summary>"
+            "<section class=\"panel\"><h2>Decision Policy</h2>{}{}<details><summary>"
             "Propose a New Policy Version</summary><form class=\"stack\" method=\"post\" action=\""
             "/design/solution/policy\">{}{}{}<label>Configuration (JSON)<textarea name=\"config\" "
             "rows=\"16\" required>{}</textarea></label><label>Reason<input name=\"reason\" "
             "required></label><label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" "
             "required> I approve creating this policy version.</label><button type=\"submit\">"
             "Create policy version</button></form></details></section>",
-            web_ui_escape(policy.dump(2)),
+            policy_summary(policy, config),
+            json_disclosure(policy),
             hidden("customer_id", page.customer_id),
             hidden("project", page.subject),
             hidden("policy_id", json_text(policy, "id")),
             web_ui_escape(config.dump(2)));
     }
     if (solution.contains("experiment")) {
-        out += "<section class=\"panel\"><h2>Experiment and Holdout</h2><pre>" +
-               web_ui_escape(solution["experiment"].dump(2)) + "</pre></section>";
+        out += "<section class=\"panel\"><h2>Experiment and Holdout</h2>" +
+               experiment_summary(solution["experiment"]) +
+               json_disclosure(solution["experiment"]) + "</section>";
     }
     out += solution_decisions_content(page, solution);
     out += solution_ledger_content(page, solution);
     if (solution.contains("monitor")) {
-        out += "<section class=\"panel\"><h2>Monitor</h2><pre>" +
-               web_ui_escape(solution["monitor"].dump(2)) + "</pre></section>";
+        out += "<section class=\"panel\"><h2>Monitor</h2>" + monitor_summary(solution["monitor"]) +
+               json_disclosure(solution["monitor"]) + "</section>";
     }
     if (solution.contains("roi")) {
-        out += "<section class=\"panel\"><h2>ROI Readout</h2><pre>" +
-               web_ui_escape(solution["roi"].dump(2)) + "</pre></section>";
+        out += "<section class=\"panel\"><h2>ROI Readout</h2>" + roi_summary(solution["roi"]) +
+               json_disclosure(solution["roi"]) + "</section>";
     }
     return out;
 }
@@ -4217,19 +4478,24 @@ std::string workspace_content(const WorkspacePage& page) {
             hidden("customer_id", page.customer_id));
     } else if (page.section == "project") {
         const nlohmann::json project = data.value("get_project", nlohmann::json::object());
-        out += std::format("<p class=\"sub\">{}</p>",
-                           web_ui_escape(json_text(project, "description").empty()
-                                             ? "No description."
-                                             : json_text(project, "description")));
         const nlohmann::json graphs = project.value("graphs", nlohmann::json::array());
         const nlohmann::json solution_task = data.value("solution_task", nlohmann::json::object());
         const nlohmann::json solution_project =
             data.value("solution_project", nlohmann::json::object());
         if (!solution_project.empty()) {
+            out += solution_state_summary(solution_project);
+        } else {
+            out += std::format("<p class=\"sub\">{}</p>",
+                               web_ui_escape(json_text(project, "description").empty()
+                                                 ? "No description."
+                                                 : json_text(project, "description")));
+        }
+        if (!solution_project.empty()) {
             out += active_solution_content(page, solution_project, solution_task);
         } else if (!solution_task.empty()) {
             out += solution_proposal_content(page, solution_task);
         }
+        out += solution_runs_content(data.value("list_runs", nlohmann::json::object()), query);
         // Made from an Opportunity: the Project Agent designs the pipeline in the background.
         const nlohmann::json build = data.value("build", nlohmann::json::object());
         const std::string build_status = json_text(build, "status");
