@@ -257,6 +257,31 @@ std::expected<std::pair<json, json>, ApiResult> normalized_app_env(const json& e
     return std::pair{std::move(plain), std::move(secret_refs)};
 }
 
+// A binding names a live service by id or, for agents and people, by its unique name in the
+// customer. The stored binding is always the id.
+std::optional<control::ManagedService>
+bound_service(const std::string& reference, const std::string& customer_id, ApiContext& context) {
+    if (auto service = context.store->get_service(reference);
+        service && service->customer_id == customer_id && service->desired == "present") {
+        return *service;
+    }
+    auto listed = context.store->list_services(customer_id);
+    if (!listed) {
+        return std::nullopt;
+    }
+    std::optional<control::ManagedService> found;
+    for (const control::ManagedService& service : *listed) {
+        if (service.desired != "present" || service.name != reference) {
+            continue;
+        }
+        if (found) {
+            return std::nullopt;  // ambiguous: the caller must use the id
+        }
+        found = service;
+    }
+    return found;
+}
+
 std::expected<json, ApiResult>
 normalized_bindings(const json& value, const std::string& customer_id, ApiContext& context) {
     if (!value.is_object()) {
@@ -286,10 +311,12 @@ normalized_bindings(const json& value, const std::string& customer_id, ApiContex
             return std::unexpected(ApiResult::failure(
                 "invalid_input", "service ids must be strings", "/bindings/services"));
         }
-        auto service = context.store->get_service(service_id.get<std::string>());
-        if (!service || service->customer_id != customer_id || service->desired != "present") {
+        auto service = bound_service(service_id.get<std::string>(), customer_id, context);
+        if (!service) {
             return std::unexpected(ApiResult::failure(
-                "not_found", "no such service in this space", "/bindings/services"));
+                "not_found",
+                "no such service in this space (use a live service's id or unique name)",
+                "/bindings/services"));
         }
         if (std::ranges::find(output["services"], json(service->id)) == output["services"].end()) {
             output["services"].push_back(service->id);
@@ -908,10 +935,12 @@ void register_web_app_capabilities(Registry& registry) {
             if (!app) {
                 co_return app.error();
             }
-            auto service = context.store->get_service(input.at("service_id"));
-            if (!service || service->customer_id != app->customer_id ||
-                service->desired != "present") {
-                co_return ApiResult::failure("not_found", "no such service in this space");
+            auto service =
+                bound_service(input.at("service_id").get<std::string>(), app->customer_id, context);
+            if (!service) {
+                co_return ApiResult::failure(
+                    "not_found",
+                    "no such service in this space (use a live service's id or unique name)");
             }
             json services = app->bindings.value("services", json::array());
             if (std::ranges::find(services, json(service->id)) == services.end()) {
