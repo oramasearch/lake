@@ -49,14 +49,14 @@ contract and memory/PostgreSQL proof are in [agent-bus.md](../../docs/api/agent-
 `web_apps.cpp` defines the Ship App JSON and deterministic namespace contract. Memory and
 PostgreSQL stores enforce live name/host uniqueness and app/replica quotas; desired writes advance
 generation and PostgreSQL notifies `lake_apps`. The operator writes token hashes only; Lake checks
-purpose, current binding and target, and purges rows after Deleted acknowledgement. See
-`docs/control-plane/web-apps.md`.
+purpose, current binding and target, including the exact app repository for pull tokens, and purges
+rows after Deleted acknowledgement. See `docs/control-plane/web-apps.md`.
 
 Protected-app forward authentication derives its signing key with `lake/app-session/v1` and
 keeps one-use authorization-code hashes in control-plane storage. Both stores check the app host,
 workspace, membership, expiry, and use state; PostgreSQL consumes a code atomically. See
 `docs/api/web-apps.md` and `docs/control-plane/web-apps.md`.
 
-`builds.cpp` defines build JSON plus source, push and event token purposes. Memory and PostgreSQL
-stores insert queued rows, retain operator observations and notify `lake_builds` on create/cancel.
-See `docs/control-plane/builds.md`.
+`builds.cpp` defines build JSON, its successful public digest reference, plus source, push and event
+token purposes. Memory and PostgreSQL stores insert queued rows, retain operator observations and
+notify `lake_builds` on create/cancel. See `docs/control-plane/builds.md`.

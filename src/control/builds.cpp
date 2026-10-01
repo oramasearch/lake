@@ -41,7 +41,30 @@ std::vector<std::string> build_token_scopes(std::string_view purpose) {
     return {};
 }
 
-nlohmann::json build_json(const Build& build) {
+namespace {
+
+nlohmann::json public_image(const Build& build, std::string_view public_host) {
+    if (build.phase != "Succeeded" || build.digest.empty() || public_host.empty()) {
+        return nullptr;
+    }
+    const std::size_t path = build.target.find('/');
+    const std::size_t tag = build.target.rfind(':');
+    if (path == std::string::npos || tag == std::string::npos || tag <= path + 1) {
+        return nullptr;
+    }
+    while (public_host.ends_with('/')) {
+        public_host.remove_suffix(1);
+    }
+    if (public_host.empty()) {
+        return nullptr;
+    }
+    const std::string repository = build.target.substr(path + 1, tag - path - 1);
+    return std::string(public_host) + "/" + repository + "@" + build.digest;
+}
+
+} // namespace
+
+nlohmann::json build_json(const Build& build, std::string_view public_host) {
     return {
         {"id", build.id},
         {"customer_id", build.customer_id},
@@ -55,6 +78,7 @@ nlohmann::json build_json(const Build& build) {
         {"desired", build.desired},
         {"phase", build.phase},
         {"digest", build.digest.empty() ? nlohmann::json(nullptr) : nlohmann::json(build.digest)},
+        {"image", public_image(build, public_host)},
         {"size", build.size},
         {"message", build.message},
         {"created_at", build.created_at},

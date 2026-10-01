@@ -108,4 +108,8 @@ those actions through the canonical experiment capabilities.
 cancellation and retained Zetta progress. Build source and event credentials are rechecked against
 the current row on every call. App builds require `LAKE_APPS_RUNTIME_IMAGE`, use it through the
 generated Dockerfile's `APP_RUNTIME_IMAGE` argument, and never fall back to an unqualified image.
+Successful build JSON replaces the internal tagged target with the public host and immutable
+digest. Pending builds keep rendering their internal target until that public image exists. The
+HTTP registry adapter accepts Basic user `app` only for a current pull hash and only for that app's
+exact image repository.
 See `docs/api/builds.md`.

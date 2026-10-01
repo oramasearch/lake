@@ -15,7 +15,7 @@ The contract states:
 > app's own `app.toml`, so the operator passes `APP_ENTRYPOINT` only when set.
 >
 > `token_hashes_json` (jsonb, written by the **operator**):
-> `{"source": "<sha256 hex>", "zetta": "<sha256 hex>|null", "events": "<sha256 hex>"}`.
+> `{"source": "<sha256 hex>", "zetta": "<sha256 hex>|null", "events": "<sha256 hex>", "pull": "<sha256 hex>"}`.
 
 Migration `0034_web_apps` creates `apps`. Migration `0035_web_apps_operator_contract` upgrades
 earlier rows and adds the two agreed columns with defaults `''` and `'{}'::jsonb`. It converts the
@@ -68,10 +68,10 @@ secret environment configuration remains represented by references.
 > No plaintext token is ever stored in lake's database.
 >
 > It stores them in Secret `app-tokens` in the app's namespace, mounts them into the pod
-> (`APP_TOKEN`, `/var/run/orama/bindings/zetta`) and into its own publisher, and writes their
-> **SHA-256 hashes** to `token_hashes_json`.
+> (`APP_TOKEN`, `/var/run/orama/bindings/zetta`) and into its own publisher, places the pull token
+> in the app's image-pull Secret, and writes their **SHA-256 hashes** to `token_hashes_json`.
 
-Lake hashes every presented bearer and matches an indexed purpose hash. It exposes no token
+Lake hashes every presented credential and matches a purpose hash. It exposes no token
 minting or credential-resolution capability. The registry rechecks the current row, hash, purpose
 and target for every call, including MCP calls sharing a context. Matching hashes grant only:
 
@@ -80,13 +80,15 @@ and target for every call, including MCP calls sharing a context. Matching hashe
 | `source` | `repository_tree`, `repository_file` | app repository and exact revision, owned by the app customer |
 | `zetta` | `workspace_query`, `workspace_sql` | app customer and workspace with the `read` binding; existing read allow-list and SQL validation apply |
 | `events` | `publish_app_event` | app ID and workspace, topic `app-events.<app>` |
+| `pull` | OCI manifest and blob `GET`/`HEAD` through Basic user `app` | exact `<space>/<app name>` repository |
 
-All other capabilities, including public registry capabilities, are refused for app credentials.
-Ambiguous hashes are refused. Hash changes invalidate the old token on the next authentication or
-registry call. Clearing hashes revokes access until the operator registers replacement hashes;
-the operator owns generation and delivery of replacements. Unbinding revokes Zetta access even
-before the operator clears its hash. Source and Zetta access stop at deletion intent. Deletion also
-drops the workspace event topic; later publication is refused so teardown cannot recreate it.
+All other capabilities and registry targets are refused for app credentials. The pull token cannot
+read another app or a cache repository and cannot write registry content. Ambiguous hashes are
+refused. Hash changes invalidate the old token on the next authentication or registry call.
+Clearing hashes revokes access until the operator registers replacement hashes; the operator owns
+generation and delivery of replacements. Unbinding revokes Zetta access even before the operator
+clears its hash. Source, Zetta and pull access stop at deletion intent. Deletion also drops the
+workspace event topic; later publication is refused so teardown cannot recreate it.
 
 ## Lifecycle and events
 

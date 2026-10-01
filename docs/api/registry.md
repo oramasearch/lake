@@ -47,6 +47,11 @@ A customer account token attenuated to `registry_pull` may read private images o
 identity may read; the operator can deliver that credential as an `imagePullSecret`. Anonymous
 requests to tenant paths are refused. The administrator bearer remains valid across repositories.
 
+An app pull token is accepted only as HTTP Basic user `app`, with the token as its password. Lake
+re-hashes it against the current app row and allows manifest and blob `GET`/`HEAD` only for the
+exact `<space>/<app name>` repository. Other apps, cache repositories, upload starts, blob writes,
+and manifest publication receive OCI `403 DENIED`. Rotation or app deletion revokes it.
+
 ## Protocol routes
 
 | Protocol | Routes |
@@ -78,6 +83,9 @@ client, not a container CLI. It uploads a config and two distinct binary layers,
 image manifest, pulls the manifest and both layers, and compares every returned byte.
 `RegistryProtocols.BuildPushCredentialIsLimitedToItsCustomerPrefix` proves Basic authentication,
 private reads, and the cross-space `403 DENIED` boundary.
+`RegistryProtocols.AppPullCredentialReadsOnlyItsOwnImage` publishes an image through the real
+adapter, reads its manifest and blob with Basic user `app`, and refuses another app, the cache
+repository, writes, a different Basic username, and bearer use.
 
 `RegistryProtocols.NpmPublishesAndInstallsWithTheRealClient` runs the host `npm` binary to publish
 and then install a fixture package through Lake. If npm is unavailable, the same test exercises

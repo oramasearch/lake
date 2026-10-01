@@ -6133,8 +6133,10 @@ std::string web_ui_app(const AppPage& page, WebUiViewer viewer) {
                    "</thead><tbody>";
         for (const nlohmann::json& build : page.builds) {
             const std::string build_id = build.value("id", build.value("build_id", std::string()));
-            const std::string built_image =
-                build.value("image", build.value("target", std::string()));
+            std::string built_image = json_text(build, "image");
+            if (built_image.empty()) {
+                built_image = build.value("target", std::string());
+            }
             std::string build_log;
             const nlohmann::json logs = build.value("logs", nlohmann::json::object());
             for (const nlohmann::json& entry : logs.value(

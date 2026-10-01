@@ -577,10 +577,15 @@ std::string bearer_of(const boost::http::route_params& route) {
     return std::string(header_value.substr(7));
 }
 
-std::string registry_token_of(const boost::http::route_params& route) {
+struct RegistryCredential {
+    std::string username;
+    std::string token;
+};
+
+RegistryCredential registry_credential_of(const boost::http::route_params& route) {
     const std::string bearer = bearer_of(route);
     if (!bearer.empty()) {
-        return bearer;
+        return {.token = bearer};
     }
     if (route.req.count(boost::http::field::authorization) == 0) {
         return {};
@@ -594,10 +599,19 @@ std::string registry_token_of(const boost::http::route_params& route) {
         return {};
     }
     const std::string credential(reinterpret_cast<const char*>(decoded->data()), decoded->size());
-    if (!credential.starts_with("lake:")) {
+    const std::size_t separator = credential.find(':');
+    if (separator == std::string::npos) {
         return {};
     }
-    return credential.substr(5);
+    const std::string username = credential.substr(0, separator);
+    if (username != "lake" && username != "app") {
+        return {};
+    }
+    return {username, credential.substr(separator + 1)};
+}
+
+std::string registry_token_of(const boost::http::route_params& route) {
+    return registry_credential_of(route).token;
 }
 
 bool constant_time_equal(std::string_view a, std::string_view b) {
@@ -13025,21 +13039,25 @@ struct ApiServer::Impl {
         if (!write && repository.find('/') == std::string_view::npos) {
             return RegistryAccess::Allowed;
         }
-        const std::string token = registry_token_of(route);
-        if (token.empty()) {
+        const RegistryCredential credential = registry_credential_of(route);
+        if (credential.token.empty()) {
             return RegistryAccess::Missing;
         }
-        if (!options.admin_token.empty() && constant_time_equal(token, options.admin_token)) {
+        if (!options.admin_token.empty() &&
+            constant_time_equal(credential.token, options.admin_token)) {
             return RegistryAccess::Allowed;
         }
         if (!options.store) {
             return RegistryAccess::Denied;
         }
-        const auto principal = options.store->context_for(token);
+        const auto principal = options.store->context_for(credential.token);
         if (!principal) {
             return RegistryAccess::Denied;
         }
         if (principal->kind == "build_push") {
+            if (!credential.username.empty() && credential.username != "lake") {
+                return RegistryAccess::Denied;
+            }
             const auto customer = options.store->get_customer(principal->workload_customer_id);
             if (!customer) {
                 return RegistryAccess::Denied;
@@ -13047,6 +13065,21 @@ struct ApiServer::Impl {
             const std::string prefix = customer->name + "/";
             return repository.starts_with(prefix) ? RegistryAccess::Allowed
                                                   : RegistryAccess::Denied;
+        }
+        if (principal->kind == "app_pull") {
+            if (write || credential.username != "app") {
+                return RegistryAccess::Denied;
+            }
+            const auto app = options.store->get_web_app(principal->workload_id);
+            const auto customer = options.store->get_customer(principal->workload_customer_id);
+            if (!app || !customer || app->customer_id != customer->id) {
+                return RegistryAccess::Denied;
+            }
+            return repository == customer->name + "/" + app->name ? RegistryAccess::Allowed
+                                                                  : RegistryAccess::Denied;
+        }
+        if (credential.username == "app") {
+            return RegistryAccess::Denied;
         }
         if (write || principal->taap_id.empty() ||
             (std::ranges::find(principal->scopes, "*") == principal->scopes.end() &&

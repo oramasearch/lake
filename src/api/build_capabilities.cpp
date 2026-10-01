@@ -368,7 +368,8 @@ void register_build_capabilities(Registry& registry) {
                                     return build.error();
                                 }
                                 build_audit(context, "build.read", *build);
-                                return ApiResult::success(control::build_json(*build));
+                                return ApiResult::success(
+                                    control::build_json(*build, context.public_host));
                             }});
     registry.add(Capability{
         .name = "list_builds",
@@ -410,7 +411,7 @@ void register_build_capabilities(Registry& registry) {
                 if (build.workspace_id != input.at("workspace_id").get<std::string>()) {
                     continue;
                 }
-                items.push_back(control::build_json(build));
+                items.push_back(control::build_json(build, context.public_host));
             }
             context.audit_kind = "build.list";
             return ApiResult::success({{"builds", std::move(items)}});
@@ -435,7 +436,8 @@ void register_build_capabilities(Registry& registry) {
                            return store_failure(cancelled.error());
                        }
                        build_audit(context, "build.cancel", *cancelled);
-                       return ApiResult::success(control::build_json(*cancelled));
+                       return ApiResult::success(
+                           control::build_json(*cancelled, context.public_host));
                    }});
     registry.add(Capability{
         .name = "publish_build_event",

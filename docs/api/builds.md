@@ -16,7 +16,7 @@ window. Reads never recreate a reaped topic. The operator must pass the ID expli
 |---|---|---|
 | `build_image` | customer, repository, revision, optional context/Dockerfile/build args, target `name:tag` | queued build ID |
 | `build_app` | customer, App ID, optional `source {repository, revision, path?}` (required once the App runs a built image, since that deploy drops its stored source) | queued image build `FROM` the configured app-runtime image (`LAKE_APPS_RUNTIME_IMAGE`); the app's `APP_DEPS` are installed into `/app/.venv` with the base image's system pip (as root, globbing off), then the image runs as uid 10001 |
-| `get_build`, `list_builds` | customer and optional build ID | desired state, phase, digest, size and timestamps |
+| `get_build`, `list_builds` | customer and optional build ID | desired state, phase, digest, public pull image, size and timestamps |
 | `cancel_build` | customer and build ID | desired state becomes `cancelled` |
 | `publish_build_event` | build ID plus phase/log/done/error fields | retained event ID |
 | `receive_build_events` | customer, build ID, optional one-based sequence and wait | ordered events and next cursor |
@@ -67,11 +67,16 @@ The authority omits the scheme's default port (`http://lake-prod.lake.svc:80` gi
 exactly, and the builder marks that host plain HTTP; a reference spelled `host:80` never matched,
 so pushes went out over HTTPS and failed.
 
-The install/pull form replaces the internal authority with the configured public Lake origin:
+Before success, build JSON reports `image: null`. After the operator reports `Succeeded` with a
+digest, `get_build` and `list_builds` replace the internal authority and mutable tag with the
+configured `LAKE_PUBLIC_HOST` and immutable digest:
 
 ```text
-<public Lake host>/<customer handle>/<name>:<tag>
+<LAKE_PUBLIC_HOST>/<customer handle>/<name>@<digest>
 ```
+
+The stored `target` remains the tagged in-cluster push reference. ApplicationAgent and Ship → Apps
+deploy the returned `image`, so Kubernetes nodes pull through the public Lake host.
 
 Builders push blobs and the registry cache over the in-cluster Service named by
 `LAKE_INTERNAL_URL`. Container layers exceed the public Ingress request-body limit, while the
@@ -112,10 +117,11 @@ Run `Builds.*`, `PostgresBuilds.*`, `RegistryProtocols.*` and the HTTP server su
 suites. The build tests exercise asynchronous row creation, runtime-image configuration, missing
 configuration, fake operator feedback, cancellation, credential rotation and retained events. The
 HTTP test supplies the runtime image through real `ServerOptions` and checks the queued build row.
-The registry tests prove Basic and Bearer acceptance, 403 `DENIED` outside the space prefix, a
-layer larger than 64 MiB through the real server, ranged patches followed by an empty final put,
-and configured-limit errors without invoking a container engine. The HTTP suite separately proves
-that an oversized non-registry JSON body remains rejected.
+The registry tests prove Basic and Bearer build-push acceptance, app Basic pull access to only its
+exact repository, 403 `DENIED` outside each credential boundary, a layer larger than 64 MiB through
+the real server, ranged patches followed by an empty final put, and configured-limit errors
+without invoking a container engine. The HTTP suite separately proves that an oversized
+non-registry JSON body remains rejected.
 
 Keep capability JSON in `src/api/build_capabilities.cpp`, native registry translation in the one
 HTTP adapter, and durable ownership in `docs/control-plane/builds.md`.

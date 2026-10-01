@@ -51,6 +51,6 @@ struct BuildStatus {
 
 std::optional<std::string> build_token_purpose(const Build& build, std::string_view digest);
 std::vector<std::string> build_token_scopes(std::string_view purpose);
-nlohmann::json build_json(const Build& build);
+nlohmann::json build_json(const Build& build, std::string_view public_host = {});
 
 } // namespace lake::control
