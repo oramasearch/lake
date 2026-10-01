@@ -278,6 +278,10 @@ void register_build_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = customer_object,
         .handler = [](const json& input, ApiContext& context) {
+            if (context.apps_runtime_image.empty()) {
+                return ApiResult::failure("store_unavailable",
+                                          "LAKE_APPS_RUNTIME_IMAGE is not configured");
+            }
             auto app = context.store->get_web_app(input.at("app"));
             if (!app || app->customer_id != input.at("customer_id").get<std::string>() ||
                 app->workspace_id != input.at("workspace_id").get<std::string>() ||
@@ -290,11 +294,13 @@ void register_build_capabilities(Registry& registry) {
                     "conflict", "only a source-backed runtime app can be built as an image");
             }
             json arguments = json::object();
+            arguments["APP_RUNTIME_IMAGE"] = context.apps_runtime_image;
             if (app->env.contains("APP_DEPS") && app->env.at("APP_DEPS").is_string()) {
                 arguments["APP_DEPS"] = app->env.at("APP_DEPS");
             }
             const std::string dockerfile =
-                "inline:FROM app-runtime\nARG APP_DEPS=\"\"\nRUN if [ -n \"$APP_DEPS\" ]; then "
+                "inline:ARG APP_RUNTIME_IMAGE\nFROM ${APP_RUNTIME_IMAGE}\nARG APP_DEPS=\"\"\nRUN "
+                "if [ -n \"$APP_DEPS\" ]; then "
                 "python -m pip install --no-cache-dir $APP_DEPS; fi\nCOPY . /app\n";
             const std::string target = app->name + ":build-" + control::new_uuid_v4().substr(0, 8);
             auto build = create_build(input,

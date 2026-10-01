@@ -48,11 +48,14 @@ object of string values and Lake accepts the builder allow-list `PYTHON_VERSION`
 `APP_RUNTIME_IMAGE`. `context` and a path-valued `dockerfile` are repository-relative and cannot
 traverse `..` or `.git`; a generated Dockerfile is stored as `inline:<contents>`.
 
-`build_app` takes a runtime App's repository, revision and source path. It queues an image target
-named for the App. When `APP_DEPS` is present in the App environment, the generated
-`FROM app-runtime` Dockerfile installs those dependencies before copying the application. A
-successful image remains an ordinary build result that can be supplied to `deploy_app`; the build
-row deliberately does not change App desired state before the image exists.
+`build_app` takes a runtime App's repository, revision and source path. It requires
+`LAKE_APPS_RUNTIME_IMAGE`, supplied by the operator from `spec.apps.runtimeImage`, and queues an
+image target named for the App. The generated Dockerfile declares `ARG APP_RUNTIME_IMAGE` before
+`FROM ${APP_RUNTIME_IMAGE}` and the row records the configured value in `build_args_json`. When
+`APP_DEPS` is present in the App environment, the Dockerfile installs those dependencies before
+copying the application. A successful image remains an ordinary build result that can be supplied
+to `deploy_app`; the build row deliberately does not change App desired state before the image
+exists. Missing runtime-image configuration returns `store_unavailable` before a row is created.
 
 ## Schema rollout
 

@@ -82,8 +82,8 @@ phase 1, lake#196), with their capabilities and the Train → Data → Storage p
 [`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, direct-zone hosts,
 platform-reserved names, deployment, lifecycle, authentication, environment, attach/detach
 bindings, logs and events. It is separate from identity [applications](apps.md).
-[`builds.md`](builds.md) defines asynchronous in-cluster image builds, cancellation, status,
-retained progress and build-scoped credentials.
+[`builds.md`](builds.md) defines asynchronous in-cluster image builds, configured Ship App runtime
+bases, cancellation, status, retained progress and build-scoped credentials.
 
 ## Operational routes
 

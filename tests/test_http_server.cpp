@@ -587,6 +587,7 @@ protected:
         options.metering.transfer_out_gib_micros = 1000;
         options.metering.compute_second_micros = 1000;
         options.apps_wildcard = "apps.example.test";
+        options.apps_runtime_image = "oramasearch/app-runtime:20260930";
         options.internal_url = "http://lake-prod.lake.svc:80";
         options.apps_per_customer = 10;
         options.app_replicas_per_customer = 20;
@@ -2264,6 +2265,12 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
                             "application/json");
     EXPECT_NE(built.find("\"ok\":true"), std::string::npos) << built.substr(0, 400);
     EXPECT_NE(built.find("lake-prod.lake.svc:80"), std::string::npos) << built.substr(0, 400);
+    const nlohmann::json built_body = nlohmann::json::parse(response_body(built));
+    const auto queued_build = store_->get_build(built_body.at("value").at("build_id"));
+    ASSERT_TRUE(queued_build) << queued_build.error().message;
+    EXPECT_TRUE(queued_build->dockerfile.starts_with(
+        "inline:ARG APP_RUNTIME_IMAGE\nFROM ${APP_RUNTIME_IMAGE}\n"));
+    EXPECT_EQ(queued_build->build_args.at("APP_RUNTIME_IMAGE"), "oramasearch/app-runtime:20260930");
 
     auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
     if (memory != nullptr) {

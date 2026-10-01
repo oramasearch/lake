@@ -36,6 +36,7 @@ struct Builds {
     std::string customer_id;
     std::string customer_name;
     std::string repository_id;
+    std::string apps_runtime_image = "oramasearch/app-runtime:20260930";
     std::unique_ptr<lake::test::StreamWorkspace> workspace;
     lake::api::Registry registry;
     std::shared_ptr<lake::control::MemoryAgentBus> raw_bus =
@@ -68,6 +69,7 @@ struct Builds {
         context.agent_bus = bus.get();
         context.workspaces = workspace->service.get();
         context.internal_url = "http://lake-prod.prod.svc:80";
+        context.apps_runtime_image = apps_runtime_image;
         context.authorized = true;
         context.session_credential = true;
         context.acting_user_id = principal.user_id;
@@ -240,6 +242,14 @@ TEST(Builds, AppBuildGeneratesAnAppRuntimeDockerfileAndAllowedDependencies) {
     app.env = {{"APP_DEPS", "fastapi uvicorn"}};
     const auto stored = builds.store->create_web_app(app);
     ASSERT_TRUE(stored) << stored.error().message;
+
+    builds.apps_runtime_image.clear();
+    const auto unavailable = builds.call("build_app", {{"app", stored->id}});
+    EXPECT_FALSE(unavailable.ok);
+    EXPECT_EQ(unavailable.error.code, "store_unavailable");
+    EXPECT_EQ(unavailable.error.message, "LAKE_APPS_RUNTIME_IMAGE is not configured");
+
+    builds.apps_runtime_image = "oramasearch/app-runtime:20260930";
     const auto queued = builds.call("build_app", {{"app", stored->id}});
     ASSERT_TRUE(queued.ok) << queued.error.message;
     const auto build = builds.store->get_build(queued.value.at("build_id"));
@@ -247,8 +257,11 @@ TEST(Builds, AppBuildGeneratesAnAppRuntimeDockerfileAndAllowedDependencies) {
     EXPECT_EQ(build->repository, builds.repository_id);
     EXPECT_EQ(build->revision, "release");
     EXPECT_EQ(build->context, "web");
-    EXPECT_TRUE(build->dockerfile.starts_with("inline:FROM app-runtime\n"));
-    EXPECT_EQ(build->build_args, json({{"APP_DEPS", "fastapi uvicorn"}}));
+    EXPECT_TRUE(
+        build->dockerfile.starts_with("inline:ARG APP_RUNTIME_IMAGE\nFROM ${APP_RUNTIME_IMAGE}\n"));
+    EXPECT_EQ(build->build_args,
+              json({{"APP_DEPS", "fastapi uvicorn"},
+                    {"APP_RUNTIME_IMAGE", "oramasearch/app-runtime:20260930"}}));
     EXPECT_TRUE(build->target.contains("/" + builds.customer_name + "/reports:build-"));
 }
 

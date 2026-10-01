@@ -101,4 +101,6 @@ ExperimentsAgent turns use the workspace adapter and grant raw study operations 
 those actions through the canonical experiment capabilities.
 `build_capabilities.cpp` owns customer-scoped build creation, app image builds, status,
 cancellation and retained Zetta progress. Build source and event credentials are rechecked against
-the current row on every call. See `docs/api/builds.md`.
+the current row on every call. App builds require `LAKE_APPS_RUNTIME_IMAGE`, use it through the
+generated Dockerfile's `APP_RUNTIME_IMAGE` argument, and never fall back to an unqualified image.
+See `docs/api/builds.md`.

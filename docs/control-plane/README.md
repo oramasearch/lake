@@ -9,8 +9,8 @@ API/static tokens. See
 [postgres.md](postgres.md) for the backing store and deployment contract.
 [web-apps.md](web-apps.md) defines the `apps` desired row, protected-app authorization-code state,
 operator status fields, notification, quotas, namespaces and Secret-reference boundary.
-[builds.md](builds.md) defines the `builds` desired row, operator status loop, cancellation,
-notifications and purpose-hash credential boundary.
+[builds.md](builds.md) defines the `builds` desired row, configured Ship App runtime base, operator
+status loop, cancellation, notifications and purpose-hash credential boundary.
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.

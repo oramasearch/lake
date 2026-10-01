@@ -27,6 +27,12 @@ that customer. A build ID belonging to another customer is reported as absent af
 authorized the requested customer. Every call uses the signed registry audit path; credential
 hashes and plaintext credentials are excluded from capability output and audit details.
 
+`build_app` requires `LAKE_APPS_RUNTIME_IMAGE`, which the operator sets from the Lake's
+`spec.apps.runtimeImage`. Lake stores a generated Dockerfile beginning with
+`ARG APP_RUNTIME_IMAGE` and `FROM ${APP_RUNTIME_IMAGE}`, and stores the configured value in the
+build row's `APP_RUNTIME_IMAGE` argument. An absent setting returns `store_unavailable` naming
+`LAKE_APPS_RUNTIME_IMAGE`; Lake does not substitute an unqualified image name.
+
 ## Source and progress contract
 
 The source credential may call:
@@ -83,10 +89,12 @@ and append phase and log events without giving the browser bus credentials.
 
 ## Verify and change
 
-Run `Builds.*`, `PostgresBuilds.*` and `RegistryProtocols.*` in both native suites. The build tests
-exercise asynchronous row creation, fake operator feedback, cancellation, credential rotation and
-retained events. The registry tests prove Basic and Bearer acceptance and 403 `DENIED` outside the
-space prefix without invoking a container engine.
+Run `Builds.*`, `PostgresBuilds.*`, `RegistryProtocols.*` and the HTTP server suite in both native
+suites. The build tests exercise asynchronous row creation, runtime-image configuration, missing
+configuration, fake operator feedback, cancellation, credential rotation and retained events. The
+HTTP test supplies the runtime image through real `ServerOptions` and checks the queued build row.
+The registry tests prove Basic and Bearer acceptance and 403 `DENIED` outside the space prefix
+without invoking a container engine.
 
 Keep capability JSON in `src/api/build_capabilities.cpp`, native registry translation in the one
 HTTP adapter, and durable ownership in `docs/control-plane/builds.md`.
