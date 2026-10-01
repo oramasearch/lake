@@ -298,10 +298,14 @@ void register_build_capabilities(Registry& registry) {
             if (app->env.contains("APP_DEPS") && app->env.at("APP_DEPS").is_string()) {
                 arguments["APP_DEPS"] = app->env.at("APP_DEPS");
             }
+            // app-runtime's /app/.venv is built by uv (no pip) and owned by root, while the image
+            // runs as uid 10001: install with the base image's system pip into that venv as root,
+            // with globbing off so extras such as psycopg[binary] stay literal.
             const std::string dockerfile =
-                "inline:ARG APP_RUNTIME_IMAGE\nFROM ${APP_RUNTIME_IMAGE}\nARG APP_DEPS=\"\"\nRUN "
-                "if [ -n \"$APP_DEPS\" ]; then "
-                "python -m pip install --no-cache-dir $APP_DEPS; fi\nCOPY . /app\n";
+                "inline:ARG APP_RUNTIME_IMAGE\nFROM ${APP_RUNTIME_IMAGE}\nARG APP_DEPS=\"\"\n"
+                "USER root\nRUN set -f; if [ -n \"$APP_DEPS\" ]; then "
+                "/usr/local/bin/python -m pip --python /app/.venv/bin/python install "
+                "--no-cache-dir $APP_DEPS; fi\nUSER 10001\nCOPY . /app\n";
             const std::string target = app->name + ":build-" + control::new_uuid_v4().substr(0, 8);
             auto build = create_build(input,
                                       context,
