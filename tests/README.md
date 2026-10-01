@@ -28,8 +28,9 @@ pages and public sign-in forms.
 
 `Workspaces.SolutionProjectShowsRunFeedbackAndReadableOperatingState` pins a failed run's stage and
 error, an active run's status and three-second refresh, the full-run link, the lifecycle header,
-policy tiers, experiment allocation, monitor guardrails, the ROI reason and verdict-first grouped
-certificate. `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp` calls the direct filtered
+policy tiers, the engine's `balance.allocations` shape, scope-filtered ledger counts and actions,
+held and pending A1 rows, the no-holdout-outcomes ROI reason, monitor guardrails and the
+verdict-first grouped certificate. `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp` calls the direct filtered
 `list_runs` capability and checks its completed status and stage.
 
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,

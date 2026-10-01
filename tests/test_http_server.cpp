@@ -1681,26 +1681,70 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
         {"id", "policy-1"},
         {"versions", nlohmann::json::array({{{"version", 1}, {"config", {{"threshold", 0.8}}}}})}};
     workspace_caller_->answers["get_experiment"] = {
-        {"holdout_fraction", 0.1}, {"balanced", true}, {"exemptions", nlohmann::json::array()}};
+        {"allocations", nullptr},
+        {"sizes", {{"assignments", 1676}, {"holdout_assignments", 165}}},
+        {"balance",
+         {{"balanced", true},
+          {"allocations",
+           nlohmann::json::array({{{"name", "project-1/S-1 CL-1/holdout"},
+                                   {"tier", "holdout"},
+                                   {"configured_fraction", 0.1},
+                                   {"assignments", 165},
+                                   {"expected", 167.6},
+                                   {"balanced", true}},
+                                  {{"name", "project-1/S-1 CL-1/csm_task"},
+                                   {"tier", "treatment"},
+                                   {"configured_fraction", 0.45},
+                                   {"assignments", 754},
+                                   {"expected", 754.2},
+                                   {"balanced", true}},
+                                  {{"name", "project-1/S-1 CL-1/retention_journey"},
+                                   {"tier", "treatment"},
+                                   {"configured_fraction", 0.45},
+                                   {"assignments", 757},
+                                   {"expected", 754.2},
+                                   {"balanced", true}}})}}}};
     workspace_caller_->answers["list_ledger"] = {
         {"entries",
          nlohmann::json::array({{{"id", "action-1"},
                                  {"kind", "action"},
                                  {"subject", "account-17"},
-                                 {"decision", "decision-1"},
+                                 {"score", 0.91},
+                                 {"decision", "allowed"},
                                  {"action", "send_offer"},
+                                 {"model_version", "run:model-v7"},
+                                 {"policy_version", "policy-1:1"},
+                                 {"cell", "project-1/S-1 CL-1/csm_task"},
                                  {"currency", "USD"},
                                  {"recorded_at", "2026-09-28T12:00:00Z"}},
+                                {{"id", "action-pending"},
+                                 {"kind", "action"},
+                                 {"subject", "account-18"},
+                                 {"score", 0.89},
+                                 {"decision", "decision-1"},
+                                 {"action", "no_contact"},
+                                 {"model_version", "run:model-v7"},
+                                 {"policy_version", "1"},
+                                 {"cell", "project-1/S-1 CL-1/retention_journey"},
+                                 {"currency", "USD"},
+                                 {"recorded_at", "2026-09-28T11:59:00Z"}},
                                 {{"id", "other-action"},
                                  {"kind", "action"},
                                  {"subject", "other-project-account"},
                                  {"decision", "other-decision"},
                                  {"action", "send_offer"},
+                                 {"cell", "project-2/S-1 CL-1/csm_task"},
                                  {"currency", "USD"},
                                  {"recorded_at", "2026-09-28T12:00:00Z"}}})}};
     workspace_caller_->answers["get_monitor"] = {{"status", "within_bounds"}};
     workspace_caller_->answers["get_roi_readout"] = {
-        {"currency", "USD"}, {"investment", 4000.0}, {"incrementality", 0.2}};
+        {"solution", "S-1"},
+        {"incrementality",
+         {{"claimable", false},
+          {"reason", "Incrementality cannot be claimed: no holdout outcomes are available."}}},
+        {"roi_statement",
+         {{"claimable", false},
+          {"reason", "Incrementality cannot be claimed: no holdout outcomes are available."}}}};
     workspace_caller_->answers["list_runs"] = {
         {"runs",
          nlohmann::json::array(
@@ -1730,6 +1774,8 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
                                  {"entity_id", "account-17"},
                                  {"tier", "high"},
                                  {"action", "send_offer"},
+                                 {"cell", "project-1/S-1 CL-1/retention_journey"},
+                                 {"score", 0.89},
                                  {"autonomy", "A1"},
                                  {"status", "pending_approval"}}})}};
     const std::string project = connection->request(
@@ -1739,11 +1785,16 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
     EXPECT_NE(project.find("Experiment and Holdout"), std::string::npos);
     EXPECT_NE(project.find("Actions and A1 Queue"), std::string::npos);
     EXPECT_NE(project.find("Approve A1"), std::string::npos);
-    EXPECT_NE(project.find("Delivered and Held Actions"), std::string::npos);
+    EXPECT_NE(project.find("Latest Actions"), std::string::npos);
+    EXPECT_NE(project.find("<strong>1,676 assignments.</strong> 165 holdout assignments."),
+              std::string::npos);
     EXPECT_EQ(project.find("other-project-account"), std::string::npos);
     EXPECT_NE(project.find("Monitor"), std::string::npos);
     EXPECT_NE(project.find("ROI Readout"), std::string::npos);
-    EXPECT_NE(project.find("action=\"/w/" + connection->workspace_id + "/design/solution/run\""), std::string::npos);
+    EXPECT_NE(project.find("Incrementality cannot be claimed: no holdout outcomes are available."),
+              std::string::npos);
+    EXPECT_NE(project.find("action=\"/w/" + connection->workspace_id + "/design/solution/run\""),
+              std::string::npos);
 
     workspace_caller_->answers["run_solution"] = {
         {"run_id", "run-2"}, {"status", "queued"}, {"engine", "native"}, {"preview", false}};

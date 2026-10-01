@@ -14,6 +14,10 @@ The [sync protocol](sync.md) also backs the repository page's configured-origin 
 instructions. The [private-instance proof](../deployment/private-install.md) executes those
 instructions against the existing registry operations.
 
+The [workspace contract](workspaces.md) records how solution-backed Project pages consume
+`get_experiment.balance.allocations`, scope-filtered `list_ledger` actions, bounded pending A1
+decision rows and the ROI reason without adding a workspace read.
+
 **Shape.** lake exposes JSON capabilities three ways, the way Zetta does: REST under `/v1`, an
 OpenAPI 3.1 document at `GET /v1/openapi.json`, and MCP at `POST /mcp`. One capability registry
 (`include/lake/api/registry.hpp`) is the single source all three read: a capability is a name,
