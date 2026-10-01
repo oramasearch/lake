@@ -265,6 +265,40 @@ TEST(Builds, AppBuildGeneratesAnAppRuntimeDockerfileAndAllowedDependencies) {
     EXPECT_TRUE(build->target.contains("/" + builds.customer_name + "/reports:build-"));
 }
 
+TEST(Builds, AppBuildTakesAnExplicitSourceWhenTheAppRunsAnImage) {
+    // Deploying a built image switches the App to image mode and drops its stored source; a rebuild
+    // after a code change names the source (live 2026-10-01: e2e-notes could not be rebuilt).
+    Builds builds;
+    lake::control::NewWebApp app;
+    app.customer_id = builds.customer_id;
+    app.workspace_id = builds.workspace->id;
+    app.name = "notes";
+    app.mode = "image";
+    app.image = "registry.example.test/notes@sha256:" + std::string(64, 'a');
+    app.framework = "fastapi";
+    app.port = 8080;
+    app.host = "notes.apps.example.test";
+    app.env = {{"APP_DEPS", "psycopg[binary]"}};
+    const auto stored = builds.store->create_web_app(app);
+    ASSERT_TRUE(stored) << stored.error().message;
+    builds.apps_runtime_image = "oramasearch/app-runtime:20261001";
+
+    const auto missing = builds.call("build_app", {{"app", stored->id}});
+    EXPECT_FALSE(missing.ok);
+    EXPECT_EQ(missing.error.code, "conflict");
+
+    const auto queued = builds.call(
+        "build_app",
+        {{"app", stored->id},
+         {"source", {{"repository", builds.repository_id}, {"revision", "v2"}, {"path", "apps/notes"}}}});
+    ASSERT_TRUE(queued.ok) << queued.error.message;
+    const auto build = builds.store->get_build(queued.value.at("build_id"));
+    ASSERT_TRUE(build) << build.error().message;
+    EXPECT_EQ(build->repository, builds.repository_id);
+    EXPECT_EQ(build->revision, "v2");
+    EXPECT_EQ(build->context, "apps/notes");
+}
+
 TEST(Builds, InputsRefuseForeignRepositoriesUnsafePathsAndDisallowedArguments) {
     Builds builds;
     const auto foreign = builds.store->list_customers(2, builds.other.user_id);
