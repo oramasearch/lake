@@ -3791,8 +3791,27 @@ std::string policy_summary(const nlohmann::json& policy, const nlohmann::json& c
     return out;
 }
 
+std::string count_text(std::uint64_t count) {
+    std::string out = std::to_string(count);
+    for (std::size_t position = out.size(); position > 3; position -= 3) {
+        out.insert(position - 3, ",");
+    }
+    return out;
+}
+
 std::string experiment_summary(const nlohmann::json& experiment) {
-    nlohmann::json allocations = experiment.value("allocations", nlohmann::json::array());
+    const nlohmann::json balance =
+        experiment.contains("balance") && experiment["balance"].is_object()
+            ? experiment["balance"]
+            : nlohmann::json::object();
+    nlohmann::json allocations = balance.value("allocations", nlohmann::json::array());
+    if (!allocations.is_array()) {
+        allocations = nlohmann::json::array();
+    }
+    if (allocations.empty() && experiment.contains("allocations") &&
+        experiment["allocations"].is_array()) {
+        allocations = experiment["allocations"];
+    }
     if (allocations.empty() && experiment.contains("holdout_fraction")) {
         const double holdout = experiment.value("holdout_fraction", 0.0);
         allocations = nlohmann::json::array(
@@ -3802,13 +3821,31 @@ std::string experiment_summary(const nlohmann::json& experiment) {
     if (allocations.empty()) {
         return "<p>No allocations have been configured.</p>";
     }
-    std::string out = "<table><thead><tr><th>Allocation</th><th>Tier</th><th>Share</th>"
-                      "</tr></thead><tbody>";
+    std::string out;
+    if (experiment.contains("sizes") && experiment["sizes"].is_object()) {
+        const nlohmann::json& sizes = experiment["sizes"];
+        out += "<p><strong>" + count_text(sizes.value("assignments", std::uint64_t{0})) +
+               " assignments.</strong> " +
+               count_text(sizes.value("holdout_assignments", std::uint64_t{0})) +
+               " holdout assignments.</p>";
+    }
+    out += "<table><thead><tr><th>Allocation</th><th>Tier</th><th>Share</th>"
+           "<th>Assignments</th><th>Expected</th><th>Balanced</th></tr></thead><tbody>";
     for (const nlohmann::json& allocation : allocations) {
-        out += std::format("<tr><td>{}</td><td>{}</td><td>{:.1f}%</td></tr>",
-                           web_ui_escape(json_text(allocation, "name")),
-                           web_ui_escape(json_text(allocation, "tier")),
-                           allocation.value("fraction", 0.0) * 100.0);
+        const double fraction =
+            allocation.value("configured_fraction", allocation.value("fraction", 0.0));
+        out += std::format(
+            "<tr><td>{}</td><td>{}</td><td>{:.1f}%</td><td>{}</td><td>{}</td><td>{}</td>"
+            "</tr>",
+            web_ui_escape(json_text(allocation, "name")),
+            web_ui_escape(json_text(allocation, "tier")),
+            fraction * 100.0,
+            web_ui_escape(allocation.contains("assignments")
+                              ? count_text(allocation["assignments"].get<std::uint64_t>())
+                              : "—"),
+            web_ui_escape(allocation.contains("expected") ? cell_text(allocation["expected"])
+                                                          : "—"),
+            allocation.value("balanced", false) ? "Yes" : "No");
     }
     return out + "</tbody></table>";
 }
@@ -3934,7 +3971,11 @@ std::string roi_summary(const nlohmann::json& readout) {
                           web_ui_escape(json_text(model, "currency")),
                           web_ui_escape(cell_text(statement.value("gross_value", 0.0))));
     } else {
-        const std::string reason = json_text(statement, "reason");
+        std::string reason = json_text(statement, "reason");
+        if (reason.empty() && readout.contains("incrementality") &&
+            readout["incrementality"].is_object()) {
+            reason = json_text(readout["incrementality"], "reason");
+        }
         out = "<p><strong>ROI cannot be claimed yet.</strong> " +
               web_ui_escape(reason.empty() ? "No measured reason is available." : reason) + "</p>";
     }
@@ -4271,82 +4312,220 @@ std::string solution_proposal_content(const WorkspacePage& page, const nlohmann:
         web_ui_escape(proposal.dump(2)));
 }
 
-std::string solution_decisions_content(const WorkspacePage& page, const nlohmann::json& solution) {
-    const nlohmann::json decisions = solution.value("decisions", nlohmann::json::array());
-    std::string rows;
-    for (const nlohmann::json& decision : decisions) {
-        const std::string status = json_text(decision, "status");
-        std::string approval = "—";
-        if (json_text(decision, "autonomy") == "A1" && status == "pending_approval") {
-            approval = std::format(
-                "<form method=\"post\" action=\"/design/solution/approve\">{}{}{}"
-                "<input type=\"hidden\" name=\"confirm\" value=\"yes\"><button type=\"submit\">"
-                "Approve A1</button></form>",
-                hidden("customer_id", page.customer_id),
-                hidden("project", page.subject),
-                hidden("decision_id", json_text(decision, "id")));
-        }
-        rows += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                            web_ui_escape(json_text(decision, "entity_id")),
-                            web_ui_escape(json_text(decision, "tier")),
-                            web_ui_escape(json_text(decision, "action")),
-                            web_ui_escape(json_text(decision, "autonomy") + " · " + status),
-                            approval);
-    }
-    if (rows.empty()) {
-        return "<section class=\"panel\"><h2>Actions and A1 Queue</h2><p>No decisions have been "
-               "produced yet. "
-               "Run the solution to populate delivered, held and approval-pending actions.</p>"
-               "</section>";
-    }
-    return "<section class=\"panel\"><h2>Actions and A1 "
-           "Queue</h2><table><thead><tr><th>Entity</th><th>Tier"
-           "</th><th>Action</th><th>Governance</th><th></th></tr></thead><tbody>" +
-           rows +
-           "</tbody></table><p class=\"sub\">Approvals change the decision state; they do not "
-           "silently deliver an action.</p></section>";
+bool solution_cell(const std::string& cell, const std::string& scope) {
+    return !scope.empty() &&
+           (cell == scope ||
+            (cell.starts_with(scope) && cell.size() > scope.size() && cell[scope.size()] == '/'));
 }
 
-std::string solution_ledger_content(const WorkspacePage& page, const nlohmann::json& solution) {
-    const nlohmann::json entries = solution.value("ledger", nlohmann::json::object())
-                                       .value("entries", nlohmann::json::array());
-    std::set<std::string> decision_ids;
-    for (const nlohmann::json& decision : solution.value("decisions", nlohmann::json::array())) {
-        decision_ids.insert(json_text(decision, "id"));
+std::vector<const nlohmann::json*> solution_ledger_entries(const nlohmann::json& solution) {
+    const nlohmann::json foundation = solution.value("foundation", nlohmann::json::object());
+    const std::string scope = json_text(foundation, "scope");
+    std::vector<const nlohmann::json*> scoped;
+    if (!solution.contains("ledger") || !solution["ledger"].is_object() ||
+        !solution["ledger"].contains("entries") || !solution["ledger"]["entries"].is_array()) {
+        return scoped;
     }
-    std::string rows;
+    const nlohmann::json& entries = solution["ledger"]["entries"];
     for (const nlohmann::json& entry : entries) {
         if (json_text(entry, "kind") != "action" ||
-            !decision_ids.contains(json_text(entry, "decision"))) {
+            !solution_cell(json_text(entry, "cell"), scope)) {
             continue;
         }
-        const std::string action = json_text(entry, "action");
-        std::string outcome = "—";
-        if (action != "no_contact") {
-            outcome = std::format(
-                "<details><summary>Record outcome</summary><form class=\"stack\" method=\"post\" "
-                "action=\"/design/solution/outcome\">{}{}{}<label>Outcome<input name=\"outcome\" "
-                "required></label><label>Value<input name=\"value\" type=\"number\" step=\"any\" "
-                "required></label><label>Currency<input name=\"currency\" required value=\"{}\">"
-                "</label><label>Occurred at<input name=\"occurred_at\" required placeholder=\""
-                "2026-09-28T12:00:00Z\"></label><button type=\"submit\">Record</button></form>"
-                "</details>",
-                hidden("customer_id", page.customer_id),
-                hidden("project", page.subject),
-                hidden("action_id", json_text(entry, "id")),
-                web_ui_escape(json_text(entry, "currency")));
-        }
-        rows += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                            web_ui_escape(json_text(entry, "subject")),
-                            web_ui_escape(action),
-                            web_ui_escape(json_text(entry, "recorded_at")),
-                            outcome);
+        scoped.push_back(&entry);
     }
-    return rows.empty()
-               ? std::string()
-               : "<section class=\"panel\"><h2>Delivered and Held Actions</h2><table><thead><tr>"
-                 "<th>Entity</th><th>Action</th><th>Recorded</th><th></th></tr></thead><tbody>" +
-                     rows + "</tbody></table></section>";
+    std::ranges::sort(scoped, [](const nlohmann::json* left, const nlohmann::json* right) {
+        return json_text(*left, "recorded_at") > json_text(*right, "recorded_at");
+    });
+    return scoped;
+}
+
+std::string outcome_form(const WorkspacePage& page, const nlohmann::json& entry) {
+    return std::format(
+        "<details><summary>Record outcome</summary><form class=\"stack\" method=\"post\" "
+        "action=\"/design/solution/outcome\">{}{}{}<label>Outcome<input name=\"outcome\" "
+        "required></label><label>Value<input name=\"value\" type=\"number\" step=\"any\" "
+        "required></label><label>Currency<input name=\"currency\" required value=\"{}\">"
+        "</label><label>Occurred at<input name=\"occurred_at\" required placeholder=\""
+        "2026-09-28T12:00:00Z\"></label><button type=\"submit\">Record</button></form>"
+        "</details>",
+        hidden("customer_id", page.customer_id),
+        hidden("project", page.subject),
+        hidden("action_id", json_text(entry, "id")),
+        web_ui_escape(json_text(entry, "currency")));
+}
+
+std::string approval_form(const WorkspacePage& page, const nlohmann::json& decision) {
+    return std::format(
+        "<form method=\"post\" action=\"/design/solution/approve\">{}{}{}"
+        "<input type=\"hidden\" name=\"confirm\" value=\"yes\"><button type=\"submit\">"
+        "Approve A1</button></form>",
+        hidden("customer_id", page.customer_id),
+        hidden("project", page.subject),
+        hidden("decision_id", json_text(decision, "id")));
+}
+
+using DecisionLookup = std::map<std::string, const nlohmann::json*>;
+
+DecisionLookup decision_lookup(const nlohmann::json& decisions) {
+    std::map<std::string, const nlohmann::json*> decisions_by_id;
+    if (decisions.is_array()) {
+        for (const nlohmann::json& decision : decisions) {
+            decisions_by_id[json_text(decision, "id")] = &decision;
+        }
+    }
+    return decisions_by_id;
+}
+
+struct SolutionActionCounts {
+    std::size_t decisions = 0;
+    std::size_t actions = 0;
+    std::size_t held = 0;
+};
+
+SolutionActionCounts solution_action_counts(const std::vector<const nlohmann::json*>& entries) {
+    SolutionActionCounts counts;
+    for (const nlohmann::json* entry : entries) {
+        const std::string action = json_text(*entry, "action");
+        if (action == "publish_driver_report") {
+            continue;
+        }
+        ++counts.decisions;
+        if (action == "no_contact") {
+            ++counts.held;
+        } else {
+            ++counts.actions;
+        }
+    }
+    return counts;
+}
+
+std::string latest_actions_content(const WorkspacePage& page,
+                                   const std::vector<const nlohmann::json*>& entries) {
+    std::string action_rows;
+    std::size_t shown_actions = 0;
+    for (const nlohmann::json* entry : entries) {
+        const std::string action = json_text(*entry, "action");
+        if (action == "no_contact" || action == "publish_driver_report") {
+            continue;
+        }
+        action_rows += std::format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}<br>{}</td><td>{}</td><td>{}"
+            "</td></tr>",
+            web_ui_escape(json_text(*entry, "subject")),
+            web_ui_escape(action),
+            web_ui_escape(json_text(*entry, "cell")),
+            web_ui_escape(entry->contains("score") ? cell_text(entry->at("score")) : "—"),
+            web_ui_escape(json_text(*entry, "model_version")),
+            web_ui_escape(json_text(*entry, "policy_version")),
+            web_ui_escape(json_text(*entry, "recorded_at")),
+            outcome_form(page, *entry));
+        if (++shown_actions == 10) {
+            break;
+        }
+    }
+    if (action_rows.empty()) {
+        return "<h3>Latest Actions</h3><p>No delivered actions are recorded for this "
+               "solution.</p>";
+    }
+    return "<h3>Latest Actions</h3><table><thead><tr><th>Entity</th><th>Action</th>"
+           "<th>Cell</th><th>Score</th><th>Model / Policy</th><th>Recorded</th><th></th>"
+           "</tr></thead><tbody>" +
+           action_rows + "</tbody></table>";
+}
+
+bool pending_a1(const nlohmann::json& decision) {
+    return json_text(decision, "autonomy") == "A1" &&
+           json_text(decision, "status") == "pending_approval";
+}
+
+std::string
+queue_row(const WorkspacePage& page, const nlohmann::json* entry, const nlohmann::json* decision) {
+    const bool pending = decision != nullptr && pending_a1(*decision);
+    const std::string subject =
+        entry == nullptr ? json_text(*decision, "entity_id") : json_text(*entry, "subject");
+    const std::string proposed =
+        decision == nullptr ? "no_contact" : json_text(*decision, "action");
+    const std::string cell =
+        entry == nullptr ? json_text(*decision, "cell") : json_text(*entry, "cell");
+    const nlohmann::json* scored = entry == nullptr ? decision : entry;
+    const std::string score = scored->contains("score") ? cell_text(scored->at("score")) : "—";
+    const std::string governance = pending ? "A1 · pending approval" : "Held · no action delivered";
+    const std::string controls = pending ? approval_form(page, *decision) : "—";
+    return std::format(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+        web_ui_escape(subject),
+        web_ui_escape(proposed),
+        web_ui_escape(cell),
+        web_ui_escape(score),
+        web_ui_escape(governance),
+        controls);
+}
+
+std::string a1_queue_content(const WorkspacePage& page,
+                             const std::vector<const nlohmann::json*>& entries,
+                             const DecisionLookup& decisions_by_id) {
+    std::map<std::string, const nlohmann::json*> held_by_decision;
+    for (const nlohmann::json* entry : entries) {
+        if (json_text(*entry, "action") == "no_contact") {
+            held_by_decision[json_text(*entry, "decision")] = entry;
+        }
+    }
+
+    std::string queue_rows;
+    std::size_t shown_queue = 0;
+    for (const auto& [id, decision] : decisions_by_id) {
+        if (!pending_a1(*decision)) {
+            continue;
+        }
+        const auto held = held_by_decision.find(id);
+        queue_rows +=
+            queue_row(page, held == held_by_decision.end() ? nullptr : held->second, decision);
+        if (++shown_queue == 10) {
+            break;
+        }
+    }
+    for (const nlohmann::json* entry : entries) {
+        if (shown_queue == 10 || json_text(*entry, "action") != "no_contact") {
+            continue;
+        }
+        const auto decision = decisions_by_id.find(json_text(*entry, "decision"));
+        if (decision != decisions_by_id.end() && pending_a1(*decision->second)) {
+            continue;
+        }
+        queue_rows +=
+            queue_row(page, entry, decision == decisions_by_id.end() ? nullptr : decision->second);
+        ++shown_queue;
+    }
+    if (queue_rows.empty()) {
+        return "<h3>A1 Queue</h3><p>No held or approval-pending decisions are recorded for this "
+               "solution.</p>";
+    }
+    return "<h3>A1 Queue</h3><table><thead><tr><th>Entity</th><th>Proposed Action</th>"
+           "<th>Cell</th><th>Score</th><th>Governance</th><th></th></tr></thead><tbody>" +
+           queue_rows + "</tbody></table>";
+}
+
+std::string solution_decisions_content(const WorkspacePage& page, const nlohmann::json& solution) {
+    const std::vector<const nlohmann::json*> entries = solution_ledger_entries(solution);
+    const nlohmann::json decisions = solution.value("decisions", nlohmann::json::array());
+    const DecisionLookup decisions_by_id = decision_lookup(decisions);
+    const SolutionActionCounts counts = solution_action_counts(entries);
+    if (counts.decisions == 0 && decisions_by_id.empty()) {
+        return "<section class=\"panel\"><h2>Actions and A1 Queue</h2><p>No decisions have been "
+               "produced yet. Run the solution to populate delivered, held and approval-pending "
+               "actions.</p></section>";
+    }
+    std::string out =
+        "<section class=\"panel\"><h2>Actions and A1 Queue</h2><h3>Decision and Action "
+        "Counts</h3><dl><dt>Decisions</dt><dd>" +
+        count_text(counts.decisions) + "</dd><dt>Actions</dt><dd>" + count_text(counts.actions) +
+        "</dd><dt>Held</dt><dd>" + count_text(counts.held) + "</dd></dl>";
+    out += latest_actions_content(page, entries);
+    out += a1_queue_content(page, entries, decisions_by_id);
+    return out +
+           "<p class=\"sub\">Approvals change the decision state; they do not silently deliver "
+           "an action.</p></section>";
 }
 
 std::string active_solution_content(const WorkspacePage& page,
@@ -4411,7 +4590,6 @@ std::string active_solution_content(const WorkspacePage& page,
                json_disclosure(solution["experiment"]) + "</section>";
     }
     out += solution_decisions_content(page, solution);
-    out += solution_ledger_content(page, solution);
     if (solution.contains("monitor")) {
         out += "<section class=\"panel\"><h2>Monitor</h2>" + monitor_summary(solution["monitor"]) +
                json_disclosure(solution["monitor"]) + "</section>";

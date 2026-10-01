@@ -27,9 +27,12 @@ Train → Streams topic/message CRUD, Live/pause, paging and capability mappings
 Design → Solution and solution-backed Project pages show their five latest runs, including status,
 reached stage, first error line and a full run link. Active runs refresh every three seconds. The
 Project status follows the solution lifecycle instead of its creation-time description. Decision
-policy, experiment, monitor and ROI are summarized for reading, retain JSON disclosures, and keep
-unrelated correctness checks collapsed under **Show all**. The capability and page-read contract
-is in [`../api/workspaces.md`](../api/workspaces.md).
+policy, experiment, actions, A1 queue, monitor and ROI are summarized for reading, retain JSON
+disclosures, and keep unrelated correctness checks collapsed under **Show all**. Experiment rows
+show the engine's balanced allocation counts. Action counts and latest actions include only ledger
+cells below the foundation scope; held entries and pending A1 approvals stay visible. An
+unclaimable ROI states the engine's reason on the summary line. The capability and page-read
+contract is in [`../api/workspaces.md`](../api/workspaces.md).
 
 **What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
 `src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed

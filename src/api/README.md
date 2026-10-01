@@ -17,7 +17,10 @@ Solution catalogue details and solution-backed Project pages call the registry's
 concurrent `get_run` calls, and derives the stage and final error line. `http_server.cpp` starts
 the run read with the existing project/catalogue work and reuses it for solution state;
 `web_ui.cpp` renders lifecycle status, active-run refresh, readable policy/experiment/monitor/ROI
-summaries and the collapsed correctness certificate. See
+summaries and the collapsed correctness certificate. Experiment allocations come from
+`balance.allocations`; scoped `list_ledger` action entries supply decision/action/held counts and
+latest actions, while the bounded decision rows supply pending A1 approval controls. The five
+operating-state reads remain concurrent. See
 [`workspaces.md`](../../docs/api/workspaces.md).
 
 `experiment_capabilities.cpp` registers eleven space-scoped study/run operations using the

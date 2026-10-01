@@ -1539,6 +1539,7 @@ TEST(Workspaces, SolutionProjectShowsRunFeedbackAndReadableOperatingState) {
     json solution{
         {"graph", "S-1 retention"},
         {"graph_id", "g-1"},
+        {"foundation", {{"scope", "project-1/S-1 retention"}}},
         {"runs", runs},
         {"sources", {{"missing_policy_predicates", json::array()}}},
         {"stages",
@@ -1553,9 +1554,114 @@ TEST(Workspaces, SolutionProjectShowsRunFeedbackAndReadableOperatingState) {
           {"tiers",
            json::array({{{"name", "high"}, {"minimum_score", 0.8}, {"action", "send offer"}}})}}}};
     solution["experiment"] = {
-        {"allocations",
-         json::array({{{"name", "holdout"}, {"tier", "all"}, {"fraction", 0.1}},
-                      {{"name", "delivery"}, {"tier", "all"}, {"fraction", 0.9}}})}};
+        {"allocations", nullptr},
+        {"sizes", {{"assignments", 1676}, {"holdout_assignments", 165}}},
+        {"balance",
+         {{"balanced", true},
+          {"allocations",
+           json::array({{{"name", "project-1/S-1 retention/holdout"},
+                         {"tier", "holdout"},
+                         {"configured_fraction", 0.1},
+                         {"assignments", 165},
+                         {"expected", 167.6},
+                         {"balanced", true}},
+                        {{"name", "project-1/S-1 retention/csm_task"},
+                         {"tier", "treatment"},
+                         {"configured_fraction", 0.45},
+                         {"assignments", 754},
+                         {"expected", 754.2},
+                         {"balanced", true}},
+                        {{"name", "project-1/S-1 retention/retention_journey"},
+                         {"tier", "treatment"},
+                         {"configured_fraction", 0.45},
+                         {"assignments", 757},
+                         {"expected", 754.2},
+                         {"balanced", true}}})}}}};
+    solution["ledger"] = {{"entries",
+                           json::array({{{"id", "action-1"},
+                                         {"kind", "action"},
+                                         {"subject", "c00190"},
+                                         {"score_id", "score-1"},
+                                         {"score", 0.91},
+                                         {"decision", "allowed"},
+                                         {"action", "csm_task"},
+                                         {"actor_kind", "agent"},
+                                         {"actor", "solution-agent"},
+                                         {"model_version", "run:model-v7"},
+                                         {"policy_version", "policy-1:2"},
+                                         {"agent_version", "solution-foundation-v1"},
+                                         {"cell", "project-1/S-1 retention/csm_task"},
+                                         {"cost", 2.0},
+                                         {"currency", "USD"},
+                                         {"score_at", "2026-09-30T13:59:57Z"},
+                                         {"decision_at", "2026-09-30T13:59:58Z"},
+                                         {"action_at", "2026-09-30T13:59:59Z"},
+                                         {"recorded_at", "2026-09-30T14:00:00Z"}},
+                                        {{"id", "action-2"},
+                                         {"kind", "action"},
+                                         {"subject", "c00191"},
+                                         {"score_id", "decision-pending"},
+                                         {"score", 0.88},
+                                         {"decision", "decision-pending"},
+                                         {"action", "no_contact"},
+                                         {"actor_kind", "agent"},
+                                         {"actor", "solution-agent"},
+                                         {"model_version", "run:model-v7"},
+                                         {"policy_version", "2"},
+                                         {"agent_version", "solution-foundation-v1"},
+                                         {"cell", "project-1/S-1 retention/retention_journey"},
+                                         {"cost", 3.0},
+                                         {"currency", "USD"},
+                                         {"score_at", "2026-09-30T12:59:57Z"},
+                                         {"decision_at", "2026-09-30T12:59:58Z"},
+                                         {"action_at", "2026-09-30T12:59:59Z"},
+                                         {"recorded_at", "2026-09-30T13:00:00Z"}},
+                                        {{"id", "action-3"},
+                                         {"kind", "action"},
+                                         {"subject", "c00192"},
+                                         {"score_id", "decision-held"},
+                                         {"score", 0.84},
+                                         {"decision", "decision-held"},
+                                         {"action", "no_contact"},
+                                         {"actor_kind", "agent"},
+                                         {"actor", "solution-agent"},
+                                         {"model_version", "run:model-v7"},
+                                         {"policy_version", "2"},
+                                         {"agent_version", "solution-foundation-v1"},
+                                         {"cell", "project-1/S-1 retention/holdout"},
+                                         {"cost", 0.0},
+                                         {"currency", "USD"},
+                                         {"score_at", "2026-09-30T11:59:57Z"},
+                                         {"decision_at", "2026-09-30T11:59:58Z"},
+                                         {"action_at", "2026-09-30T11:59:59Z"},
+                                         {"recorded_at", "2026-09-30T12:00:00Z"}},
+                                        {{"id", "other-action"},
+                                         {"kind", "action"},
+                                         {"subject", "other-project-account"},
+                                         {"score", 0.99},
+                                         {"decision", "allowed"},
+                                         {"action", "csm_task"},
+                                         {"model_version", "other-model"},
+                                         {"policy_version", "other-policy"},
+                                         {"cell", "project-2/S-1 retention/csm_task"},
+                                         {"currency", "USD"},
+                                         {"recorded_at", "2026-09-30T15:00:00Z"}}})}};
+    solution["decisions"] = json::array({{{"id", "decision-pending"},
+                                          {"entity_id", "c00191"},
+                                          {"score", 0.88},
+                                          {"tier", "high"},
+                                          {"cell", "project-1/S-1 retention/retention_journey"},
+                                          {"action", "retention_journey"},
+                                          {"autonomy", "A1"},
+                                          {"status", "pending_approval"}},
+                                         {{"id", "decision-held"},
+                                          {"entity_id", "c00192"},
+                                          {"score", 0.84},
+                                          {"tier", "high"},
+                                          {"cell", "project-1/S-1 retention/holdout"},
+                                          {"action", "retention_journey"},
+                                          {"autonomy", "A1"},
+                                          {"status", "blocked"}}});
     solution["monitor"] = {
         {"psi_threshold", 0.2},
         {"calibration_error_threshold", 0.05},
@@ -1574,7 +1680,8 @@ TEST(Workspaces, SolutionProjectShowsRunFeedbackAndReadableOperatingState) {
     solution["roi"] = {
         {"solution", "S-1"},
         {"roi_statement",
-         {{"claimable", false}, {"reason", "The holdout has not accumulated enough outcomes."}}},
+         {{"claimable", false},
+          {"reason", "Incrementality cannot be claimed: no holdout outcomes are available."}}},
         {"correctness_certificate", certificate}};
     page.data["solution_project"] = std::move(solution);
 
@@ -1588,9 +1695,26 @@ TEST(Workspaces, SolutionProjectShowsRunFeedbackAndReadableOperatingState) {
     EXPECT_NE(html.find("http-equiv=\"refresh\" content=\"3\""), std::string::npos);
     EXPECT_NE(html.find("Open full run"), std::string::npos);
     EXPECT_NE(html.find("Tiers and Thresholds"), std::string::npos);
-    EXPECT_NE(html.find("holdout</td><td>all</td><td>10.0%"), std::string::npos);
+    EXPECT_EQ(html.find("No allocations have been configured."), std::string::npos);
+    EXPECT_NE(html.find("<strong>1,676 assignments.</strong> 165 holdout assignments."),
+              std::string::npos);
+    EXPECT_NE(html.find("csm_task</td><td>treatment</td><td>45.0%</td><td>754</td><td>754.2"
+                        "</td><td>Yes"),
+              std::string::npos);
+    EXPECT_NE(html.find("<dt>Decisions</dt><dd>3</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Actions</dt><dd>1</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Held</dt><dd>2</dd>"), std::string::npos);
+    EXPECT_NE(html.find("c00190"), std::string::npos);
+    EXPECT_NE(html.find("run:model-v7"), std::string::npos);
+    EXPECT_NE(html.find("policy-1:2"), std::string::npos);
+    EXPECT_NE(html.find("A1 · pending approval"), std::string::npos);
+    EXPECT_NE(html.find("Approve A1"), std::string::npos);
+    EXPECT_NE(html.find("Held · no action delivered"), std::string::npos);
+    EXPECT_EQ(html.find("other-project-account"), std::string::npos);
+    EXPECT_EQ(html.find("No decisions have been produced yet."), std::string::npos);
     EXPECT_NE(html.find("Guardrails"), std::string::npos);
-    EXPECT_NE(html.find("The holdout has not accumulated enough outcomes."), std::string::npos);
+    EXPECT_NE(html.find("Incrementality cannot be claimed: no holdout outcomes are available."),
+              std::string::npos);
     const std::size_t verdict = html.find("<strong>Verdict:</strong>");
     const std::size_t applicable = html.find("s1_entity_resolution");
     ASSERT_NE(verdict, std::string::npos);
