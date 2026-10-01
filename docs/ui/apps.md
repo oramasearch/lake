@@ -45,7 +45,7 @@ A successful proposal renders the agent's reply, App settings, and every propose
 confirmation form carries the SHA-256 of the exact stored proposal. Lake reloads the task for the
 same customer, verifies that it is a succeeded ApplicationAgent `app` task and that the digest is
 unchanged, then starts a second turn with the proposal at `context.confirmed_proposal`. Only that
-turn receives repository writes plus `create_app` and `deploy_app`. A changed digest, another kind
+turn receives repository writes plus `create_app`, `deploy_app`, and the build chain (`build_app`, `get_build`, `receive_build_events`, `build_logs`) for apps whose dependencies need a built image. A changed digest, another kind
 of task, or a proposal that did not request confirmation is refused. A deployed result shows its
 URL.
 

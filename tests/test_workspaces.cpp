@@ -3175,7 +3175,8 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(first->body["context"], json::object());
     EXPECT_EQ(r.bus->events("agent-tasks.agent-application").size(), 1U);
     for (const std::string_view capability :
-         {"create_repository", "commit_repository_files", "create_app", "deploy_app"}) {
+         {"create_repository", "commit_repository_files", "create_app", "deploy_app",
+          "build_app", "get_build", "receive_build_events", "build_logs"}) {
         EXPECT_EQ(std::ranges::find(first->scopes, capability), first->scopes.end()) << capability;
     }
     for (const std::string_view capability :
@@ -3227,7 +3228,8 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     ASSERT_TRUE(second);
     EXPECT_EQ(second->body["context"]["confirmed_proposal"], proposal);
     for (const std::string_view capability :
-         {"create_repository", "commit_repository_files", "create_app", "deploy_app"}) {
+         {"create_repository", "commit_repository_files", "create_app", "deploy_app",
+          "build_app", "get_build", "receive_build_events", "build_logs"}) {
         EXPECT_NE(std::ranges::find(second->scopes, capability), second->scopes.end())
             << capability;
     }

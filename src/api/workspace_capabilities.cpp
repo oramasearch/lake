@@ -3398,6 +3398,12 @@ void register_agent_run_capabilities(Registry& registry) {
                         scopes.push_back("create_repository");
                         scopes.push_back("commit_repository_files");
                         scopes.push_back("create_app");
+                        // Apps whose dependencies are outside app-runtime's baked set are built
+                        // first (build_app), then deployed with the built image.
+                        scopes.push_back("build_app");
+                        scopes.push_back("get_build");
+                        scopes.push_back("receive_build_events");
+                        scopes.push_back("build_logs");
                         scopes.push_back("deploy_app");
                     }
                 } else if (agent == "agent-experiments") {
