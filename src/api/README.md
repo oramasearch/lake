@@ -46,6 +46,11 @@ missing configuration suppresses commands. Existing registry sync operations imp
 push. See [forge.md](../../docs/ui/forge.md) and the native
 [private-install proof](../../docs/deployment/private-install.md).
 
+OCI blob upload patches and final puts stream request buffers into the upload file. The adapter
+checks the configured completed-blob limit and `Content-Range`, hashes the completed file without
+loading it into memory, and leaves the common 64 MiB body limit on every other route. See
+[the HTTP contract](../../docs/serving/http.md) and [image builds](../../docs/api/builds.md).
+
 The single capability registry defines REST, OpenAPI and MCP behavior. `create_token` validates
 issuer scopes, lifetime and static authority in `capabilities.cpp`. The common HTTP context
 carries authenticated session metadata; adapters do not decide delegation policy. Application

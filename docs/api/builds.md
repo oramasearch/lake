@@ -78,6 +78,20 @@ Builders push blobs and the registry cache over the in-cluster Service named by
 Service reaches the same Lake registry without that proxy. The cache is
 `<internal authority>/<space>/cache/<name>` and uses the build's same scoped credential.
 
+Lake admits OCI `PATCH` and final `PUT` upload requests up to
+`LAKE_MAX_REGISTRY_BLOB_BYTES`, which defaults to 4 GiB. The adapter appends each incoming buffer
+to the upload file instead of retaining the layer in memory. `PATCH` accepts the Distribution
+`Content-Range: START-END` form (and the equivalent `bytes START-END/TOTAL` form), requires the
+start to equal the current upload size, and verifies that the declared range matches the bytes
+received. The final `PUT` may append its own body or be empty after one or more patches. Completion
+hashes the upload from disk, checks the requested digest, and then publishes the file as the blob.
+
+An upload that would exceed the configured limit returns HTTP 413 with OCI code
+`BLOB_UPLOAD_INVALID` and names the byte limit. Invalid ranges and interrupted reads leave the
+previous completed prefix available for retry. The larger parser allowance does not apply to
+capability JSON, forms, model or dataset uploads, drive uploads, MCP, or other request bodies;
+those retain the 64 MiB adapter limit described in [the HTTP contract](../serving/http.md).
+
 Build images are private to their space. OCI push credentials may read and write only below their
 own `<space>/` prefix. Customer pull credentials may read only that space. Existing legacy
 published packages remain anonymous reads. Registry routes preserve one-, two- and three-part OCI
@@ -98,8 +112,10 @@ Run `Builds.*`, `PostgresBuilds.*`, `RegistryProtocols.*` and the HTTP server su
 suites. The build tests exercise asynchronous row creation, runtime-image configuration, missing
 configuration, fake operator feedback, cancellation, credential rotation and retained events. The
 HTTP test supplies the runtime image through real `ServerOptions` and checks the queued build row.
-The registry tests prove Basic and Bearer acceptance and 403 `DENIED` outside the space prefix
-without invoking a container engine.
+The registry tests prove Basic and Bearer acceptance, 403 `DENIED` outside the space prefix, a
+layer larger than 64 MiB through the real server, ranged patches followed by an empty final put,
+and configured-limit errors without invoking a container engine. The HTTP suite separately proves
+that an oversized non-registry JSON body remains rejected.
 
 Keep capability JSON in `src/api/build_capabilities.cpp`, native registry translation in the one
 HTTP adapter, and durable ownership in `docs/control-plane/builds.md`.

@@ -46,6 +46,7 @@ out) and are the unit-tested surface.
 | `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, explained conflict comparison, effective access, and scoped links; create, upload, rename, move, delete, restore, conflict resolution, and sharing mutations use POST under `/drive/` |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`../api/models.md`](../api/models.md) |
 | `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
+| `/v2/*`, native npm and Python package paths, `/buildid/*` | OCI Distribution and package/debug registries; OCI blob upload patches and final puts use the streamed registry limit below; see [`../api/registry.md`](../api/registry.md) |
 | `GET /v1/<read>`, `POST /v1/<action>`; the same below `/w/<workspace_id>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `POST /v1/repositories/<repository-id>/sync/{find-missing,push,pull,chunks}` | streaming liquid push, pull, missing-object negotiation, and chunk upload with bounded streaming request and response bodies, through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results; see [`../api/sync.md`](../api/sync.md) |
 | `GET /v1/repositories/<repository-id>/sync/chunks/<digest>` | ranged liquid chunk reads with `offset` and `length` query parameters |
@@ -56,6 +57,25 @@ out) and are the unit-tested surface.
 | `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
 | `POST /mcp`, `/w/<workspace_id>/mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call`; the same registry as tools |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
+
+## Request body limits
+
+Beast2 exposes one parser limit for the whole server, not a parser handle to individual route
+handlers. Lake therefore sets that parser ceiling to the larger of 64 MiB and
+`LAKE_MAX_REGISTRY_BLOB_BYTES`, then enforces the effective limit in each body consumer.
+
+| Route class | Effective limit and handling |
+|---|---|
+| OCI blob upload `PATCH` and final `PUT`, for every supported repository-name shape | `LAKE_MAX_REGISTRY_BLOB_BYTES` for the completed upload, 4 GiB by default. Incoming buffers append directly to the upload file. `Content-Range` must begin at the stored offset and cover the bytes received. |
+| REST capability JSON and MCP JSON-RPC | 64 MiB. JSON sinks count bytes before parsing; oversized capability input returns HTTP 413 with `size_invalid` and the byte limit. |
+| Forms and other string bodies | 64 MiB. The common string reader counts bytes while receiving them. |
+| Liquid sync, model and dataset publication, drive uploads, packages, debug artifacts, SCIM and other specialized adapters | 64 MiB or a smaller route-specific bound. Their bounded buffers and parsers remain in force. |
+
+OCI limit failures return HTTP 413 with `BLOB_UPLOAD_INVALID` and the configured byte count.
+Transport and storage failures distinguish reading the request from appending the upload. A failed
+chunk is truncated back to its size before that request, so retry starts at a stable offset.
+Digest verification reads the completed file incrementally before the upload is moved into blob
+storage.
 
 ## Workspace API prefix
 

@@ -139,6 +139,9 @@ Registry scenario coverage starts Lake on loopback with process-unique storage. 
 client pushes and pulls a two-layer OCI image byte-for-byte; the installed `npm` and `pip3` clients
 publish or install native fixture packages with protocol fallbacks when either binary is absent;
 and the debuginfod paths return a CMake-built executable, debug information, and source exactly.
+The same fixture uploads a generated layer larger than 64 MiB through the real server, proves
+ranged patches followed by an empty final put, checks the configured registry limit and response,
+and verifies that an oversized capability JSON request still receives HTTP 413 at 64 MiB.
 The transparency scenario exports a self-contained bundle, verifies it with liquid from an
 in-memory source that has no network transport, and rejects conflicting equal-size checkpoint
 views retained under one log identity.

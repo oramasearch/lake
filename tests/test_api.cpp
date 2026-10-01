@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -789,14 +790,16 @@ http_get(unsigned short port, std::string_view path, std::string_view authorizat
     return response;
 }
 
-std::string http_request(unsigned short port,
-                         std::string_view method,
-                         std::string_view path,
-                         std::string_view body,
-                         std::string_view content_type,
-                         std::string_view cookie = {},
-                         std::string_view authorization = {},
-                         std::string_view host = "localhost") {
+std::string http_request(
+    unsigned short port,
+    std::string_view method,
+    std::string_view path,
+    std::string_view body,
+    std::string_view content_type,
+    std::string_view cookie = {},
+    std::string_view authorization = {},
+    std::string_view host = "localhost",
+    std::initializer_list<std::pair<std::string_view, std::string_view>> extra_headers = {}) {
     const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0)
         return {};
@@ -816,15 +819,13 @@ std::string http_request(unsigned short port,
         request += "Cookie: " + std::string(cookie) + "\r\n";
     if (!authorization.empty())
         request += "Authorization: " + std::string(authorization) + "\r\n";
-    request += "\r\n" + std::string(body);
-    std::size_t sent = 0;
-    while (sent < request.size()) {
-        const ssize_t count = ::send(socket_fd, request.data() + sent, request.size() - sent, 0);
-        if (count <= 0) {
-            ::close(socket_fd);
-            return {};
-        }
-        sent += static_cast<std::size_t>(count);
+    for (const auto& [name, value] : extra_headers) {
+        request += std::string(name) + ": " + std::string(value) + "\r\n";
+    }
+    request += "\r\n";
+    if (!send_socket_bytes(socket_fd, request) || !send_socket_bytes(socket_fd, body)) {
+        ::close(socket_fd);
+        return {};
     }
     std::string response;
     char buffer[4096];
@@ -1039,6 +1040,157 @@ TEST(RegistryProtocols, OciClientPushesAndPullsTwoLayersByteIdentical) {
                                                       "",
                                                       "application/octet-stream");
     EXPECT_NE(cross_repository.find(" 404 "), std::string::npos) << cross_repository;
+    server.stop();
+}
+
+TEST(RegistryProtocols, OciUploadStreamsBodiesLargerThanTheGeneralRequestLimit) {
+    TemporarySyncRoot temporary;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "large-oci-upload-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = temporary.path().string();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string authorization = "Bearer registry-admin";
+    const std::string contents(64 * 1024 * 1024 + 4096, 'L');
+    const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
+
+    const std::string started = http_request(server.port(),
+                                             "POST",
+                                             "/v2/large-layer/blobs/uploads/",
+                                             "",
+                                             "application/octet-stream",
+                                             {},
+                                             authorization);
+    ASSERT_NE(started.find(" 202 "), std::string::npos) << started;
+    const std::string location = response_header(started, "Location");
+    ASSERT_FALSE(location.empty()) << started;
+    const std::string completed = http_request(server.port(),
+                                               "PUT",
+                                               location + "?digest=" + digest,
+                                               contents,
+                                               "application/octet-stream",
+                                               {},
+                                               authorization);
+    EXPECT_NE(completed.find(" 201 "), std::string::npos) << completed;
+    EXPECT_EQ(response_header(completed, "Docker-Content-Digest"), digest);
+    server.stop();
+}
+
+TEST(RegistryProtocols, OciUploadHonoursChunkRangesBeforeAnEmptyFinalPut) {
+    TemporarySyncRoot temporary;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "chunked-oci-upload-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = temporary.path().string();
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string authorization = "Bearer registry-admin";
+    const std::string contents = "chunk-onechunk-two";
+    const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
+    const std::string started = http_request(server.port(),
+                                             "POST",
+                                             "/v2/chunked-layer/blobs/uploads/",
+                                             "",
+                                             "application/octet-stream",
+                                             {},
+                                             authorization);
+    ASSERT_NE(started.find(" 202 "), std::string::npos) << started;
+    const std::string location = response_header(started, "Location");
+    ASSERT_FALSE(location.empty()) << started;
+
+    const std::string first = http_request(server.port(),
+                                           "PATCH",
+                                           location,
+                                           "chunk-one",
+                                           "application/octet-stream",
+                                           {},
+                                           authorization,
+                                           "localhost",
+                                           {{"Content-Range", "0-8"}});
+    EXPECT_NE(first.find(" 202 "), std::string::npos) << first;
+    EXPECT_EQ(response_header(first, "Range"), "0-8");
+    const std::string second = http_request(server.port(),
+                                            "PATCH",
+                                            location,
+                                            "chunk-two",
+                                            "application/octet-stream",
+                                            {},
+                                            authorization,
+                                            "localhost",
+                                            {{"Content-Range", "9-17"}});
+    EXPECT_NE(second.find(" 202 "), std::string::npos) << second;
+    EXPECT_EQ(response_header(second, "Range"), "0-17");
+    const std::string completed = http_request(server.port(),
+                                               "PUT",
+                                               location + "?digest=" + digest,
+                                               "",
+                                               "application/octet-stream",
+                                               {},
+                                               authorization);
+    EXPECT_NE(completed.find(" 201 "), std::string::npos) << completed;
+    EXPECT_EQ(response_header(completed, "Docker-Content-Digest"), digest);
+    server.stop();
+}
+
+TEST(RegistryProtocols, OciUploadLimitReturnsARegistrySizeError) {
+    TemporarySyncRoot temporary;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "bounded-oci-upload-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = temporary.path().string();
+    options.max_registry_blob_bytes = 8;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string authorization = "Bearer registry-admin";
+    const std::string started = http_request(server.port(),
+                                             "POST",
+                                             "/v2/bounded-layer/blobs/uploads/",
+                                             "",
+                                             "application/octet-stream",
+                                             {},
+                                             authorization);
+    ASSERT_NE(started.find(" 202 "), std::string::npos) << started;
+    const std::string location = response_header(started, "Location");
+    ASSERT_FALSE(location.empty()) << started;
+    const std::string refused = http_request(server.port(),
+                                             "PUT",
+                                             location + "?digest=sha256:" + std::string(64, '0'),
+                                             "nine-byte",
+                                             "application/octet-stream",
+                                             {},
+                                             authorization);
+    EXPECT_NE(refused.find(" 413 "), std::string::npos) << refused;
+    EXPECT_EQ(response_json(refused)["errors"][0]["code"], "BLOB_UPLOAD_INVALID");
+    EXPECT_NE(response_json(refused)["errors"][0]["message"].get<std::string>().find("8 bytes"),
+              std::string::npos);
+    server.stop();
+}
+
+TEST(HttpServer, NonRegistryJsonBodyLargerThan64MiBIsRejected) {
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "bounded-json-test";
+    options.admin_token = "admin";
+    options.instance_kek = "bounded-json-instance-kek";
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    std::string body = R"({"padding":")";
+    body.append(64 * 1024 * 1024, 'J');
+    body += R"("})";
+
+    const std::string refused = http_request(
+        server.port(), "POST", "/v1/create_customer", body, "application/json", {}, "Bearer admin");
+    EXPECT_NE(refused.find(" 413 "), std::string::npos) << refused;
+    EXPECT_EQ(response_json(refused)["error"]["code"], "size_invalid");
+    EXPECT_NE(response_json(refused)["error"]["message"].get<std::string>().find("67108864"),
+              std::string::npos);
     server.stop();
 }
 
