@@ -554,3 +554,28 @@ TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
     EXPECT_FALSE(apps.store->get_web_app(id));
     EXPECT_TRUE(apps.store->get_web_app(second.value.at("id")));
 }
+
+
+TEST(WebApps, ServiceBindingsAcceptAUniqueServiceName) {
+    // Agents and people name the service; lake stores its id (live 2026-09-30: the
+    // ApplicationAgent bound `e2e-notes-db` by name and create_app answered not_found).
+    WebApps apps;
+    const auto created = apps.create();
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("id");
+    const auto bound = apps.call("create_service_and_bind_to_app",
+                                 {{"app_id", id}, {"kind", "postgres"}, {"name", "orders"}});
+    ASSERT_TRUE(bound.ok) << bound.error.message;
+    const std::string service_id = bound.value["service"]["id"];
+    ASSERT_TRUE(apps.call("unbind_service_from_app", {{"app_id", id}, {"service_id", service_id}})
+                    .ok);
+
+    const auto by_name =
+        apps.call("bind_service_to_app", {{"app_id", id}, {"service_id", "orders"}});
+    ASSERT_TRUE(by_name.ok) << by_name.error.message;
+    ASSERT_EQ(by_name.value["bindings"]["services"].size(), 1U);
+    EXPECT_EQ(by_name.value["bindings"]["services"][0], service_id);
+    EXPECT_EQ(apps.call("bind_service_to_app", {{"app_id", id}, {"service_id", "no-such-db"}})
+                  .error.code,
+              "not_found");
+}

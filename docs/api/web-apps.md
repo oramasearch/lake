@@ -40,6 +40,9 @@ The agreed runtime and binding values are:
 > `bindings_json` is exactly
 > `{"zetta": {"scopes": ["read"]} | null, "services": ["<service_id>", ...]}`.
 
+`create_app`, `update_app` and `bind_service_to_app` accept a live service's id or its unique name
+in the customer; the stored binding is always the id. An ambiguous or unknown name is `not_found`.
+
 Runtime input uses `source: {repository, revision, path?, entrypoint?}`. Repository is a Lake
 repository ID in the customer. Path defaults to `.`; entrypoint defaults to empty so app-runtime
 reads the app's `app.toml`. Image mode uses `image`. Deploy and rollback accept the same source or
