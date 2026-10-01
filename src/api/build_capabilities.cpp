@@ -124,10 +124,13 @@ bool valid_source_path(std::string_view path, bool allow_inline = false) {
 
 std::expected<std::string, ApiResult> registry_authority(const ApiContext& context) {
     std::string value = context.internal_url;
+    std::string_view default_port;
     if (value.starts_with("http://")) {
         value.erase(0, 7);
+        default_port = ":80";
     } else if (value.starts_with("https://")) {
         value.erase(0, 8);
+        default_port = ":443";
     } else {
         return std::unexpected(ApiResult::failure(
             "store_unavailable", "LAKE_INTERNAL_URL must be an HTTP(S) in-cluster Service URL"));
@@ -141,6 +144,12 @@ std::expected<std::string, ApiResult> registry_authority(const ApiContext& conte
         })) {
         return std::unexpected(ApiResult::failure(
             "store_unavailable", "LAKE_INTERNAL_URL must contain only the Service authority"));
+    }
+    // An image reference's registry host is matched exactly by BuildKit's registry config (the
+    // builder marks the in-cluster host plain HTTP), and a reference never spells its scheme's
+    // default port: lake-prod.lake.svc:80 would never match, and BuildKit pushed over HTTPS.
+    if (value.ends_with(default_port)) {
+        value.resize(value.size() - default_port.size());
     }
     return value;
 }

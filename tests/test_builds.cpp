@@ -121,7 +121,7 @@ TEST(Builds, DesiredRowStatusAndCancellationFollowTheOperatorContract) {
     const std::string id = created.value.at("build_id");
     const auto row = builds.store->get_build(id);
     ASSERT_TRUE(row) << row.error().message;
-    EXPECT_EQ(row->target, "lake-prod.prod.svc:80/" + builds.customer_name + "/service:v1");
+    EXPECT_EQ(row->target, "lake-prod.prod.svc/" + builds.customer_name + "/service:v1");
     EXPECT_EQ(row->desired, "queued");
     EXPECT_EQ(row->phase, "Queued");
     EXPECT_EQ(row->build_args, json({{"PYTHON_VERSION", "3.13"}}));

@@ -2264,7 +2264,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
                             "",
                             "application/json");
     EXPECT_NE(built.find("\"ok\":true"), std::string::npos) << built.substr(0, 400);
-    EXPECT_NE(built.find("lake-prod.lake.svc:80"), std::string::npos) << built.substr(0, 400);
+    EXPECT_NE(built.find("\"target\":\"lake-prod.lake.svc/"), std::string::npos) << built.substr(0, 400);
     const nlohmann::json built_body = nlohmann::json::parse(response_body(built));
     const auto queued_build = store_->get_build(built_body.at("value").at("build_id"));
     ASSERT_TRUE(queued_build) << queued_build.error().message;

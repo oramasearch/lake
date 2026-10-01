@@ -62,6 +62,11 @@ The customer supplies only `name:tag`. Lake expands it to:
 <LAKE_INTERNAL_URL authority>/<customer handle>/<name>:<tag>
 ```
 
+The authority omits the scheme's default port (`http://lake-prod.lake.svc:80` gives
+`lake-prod.lake.svc`). BuildKit matches its registry configuration against the reference's host
+exactly, and the builder marks that host plain HTTP; a reference spelled `host:80` never matched,
+so pushes went out over HTTPS and failed.
+
 The install/pull form replaces the internal authority with the configured public Lake origin:
 
 ```text
