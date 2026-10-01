@@ -587,6 +587,7 @@ protected:
         options.metering.transfer_out_gib_micros = 1000;
         options.metering.compute_second_micros = 1000;
         options.apps_wildcard = "apps.example.test";
+        options.internal_url = "http://lake-prod.lake.svc:80";
         options.apps_per_customer = 10;
         options.app_replicas_per_customer = 20;
         workspace_dir_ = lake::test::fixture_path("http-services-" + lake::control::new_uuid_v4());
@@ -2197,6 +2198,22 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     ASSERT_NE(app_at, std::string::npos) << location;
     const std::string app_id = location.substr(app_at + 7);
 
+    // Builds take their registry authority from LAKE_INTERNAL_URL via the server options; a context
+    // that never received it answered every build_app with store_unavailable (live 2026-09-30).
+    const std::string built =
+        connection->request("POST",
+                            "/v1/build_app",
+                            nlohmann::json{{"customer_id", customer_id},
+                                           {"workspace_id", connection->workspace_id},
+                                           {"app", app_id}}
+                                .dump(),
+                            cookie,
+                            "HTTP/1.1",
+                            "",
+                            "application/json");
+    EXPECT_NE(built.find("\"ok\":true"), std::string::npos) << built.substr(0, 400);
+    EXPECT_NE(built.find("lake-prod.lake.svc:80"), std::string::npos) << built.substr(0, 400);
+
     auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
     if (memory != nullptr) {
         ASSERT_TRUE(memory->set_web_app_status(
@@ -2223,7 +2240,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     EXPECT_NE(page.find("<h1>customer-portal</h1>"), std::string::npos);
     EXPECT_NE(page.find("Revision is ready"), std::string::npos);
     EXPECT_NE(page.find("id=\"app-live-events\""), std::string::npos);
-    EXPECT_NE(page.find("No builds yet"), std::string::npos);
+    EXPECT_NE(page.find("customer-portal:build-"), std::string::npos);
     EXPECT_NE(page.find("action=\"/w/" + connection->workspace_id + "/ship/app/build\""), std::string::npos);
     EXPECT_NE(page.find("action=\"/w/" + connection->workspace_id + "/ship/app/restart\""), std::string::npos);
     EXPECT_NE(page.find("action=\"/w/" + connection->workspace_id + "/ship/app/service/create\""), std::string::npos);

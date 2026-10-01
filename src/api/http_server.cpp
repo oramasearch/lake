@@ -5295,6 +5295,8 @@ struct ApiServer::Impl {
         ctx.agent_caller = options.agent_caller.get();
         ctx.agent_bus = options.agent_bus.get();
         ctx.apps_wildcard = options.apps_wildcard;
+        // Build registry targets use the in-cluster authority (LAKE_INTERNAL_URL).
+        ctx.internal_url = options.internal_url;
         ctx.apps_reserved_names = options.apps_reserved_names;
         ctx.apps_per_customer = options.apps_per_customer;
         ctx.app_replicas_per_customer = options.app_replicas_per_customer;
