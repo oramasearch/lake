@@ -66,6 +66,8 @@ struct ServerOptions {
     std::shared_ptr<control::AgentTaskBus> agent_bus;
     // Ship Apps wildcard, reserved names and per-space quotas. Zero quotas mean no limit.
     std::string apps_wildcard;
+    // Runtime base image for source-backed Ship App builds (LAKE_APPS_RUNTIME_IMAGE).
+    std::string apps_runtime_image;
     std::string apps_reserved_names;
     std::size_t apps_per_customer = 0;
     std::size_t app_replicas_per_customer = 0;

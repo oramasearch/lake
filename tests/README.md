@@ -165,9 +165,10 @@ workspace-prefixed forward-auth route with no Zetta calls and a 100 ms p95 bound
 `PostgresWebApps.*` proves the production desired row, hash registration/rotation, customer
 locking, `lake_apps` notification, operator status and physical deletion. Both stores exercise
 cross-app/customer/revision refusal and reject other capabilities.
-`test_builds.cpp` proves asynchronous build intent, fake operator status, cancellation, generated
-App Dockerfiles, purpose-scoped hashes and retained events in memory. `PostgresBuilds.*` proves the
-same row shape, `lake_builds` notifications and credential revocation in Postgres.
+`test_builds.cpp` proves asynchronous build intent, fake operator status, cancellation, configured
+App runtime-image arguments, missing-setting refusal, generated App Dockerfiles, purpose-scoped
+hashes and retained events in memory. `PostgresBuilds.*` proves the same row shape, `lake_builds`
+notifications and credential revocation in Postgres.
 `RegistryProtocols.BuildPushCredentialIsLimitedToItsCustomerPrefix` pins the private OCI boundary;
 the Web UI renderer check pins repository/App actions and live build followers.
 Authorization assertions use well-formed input; malformed authenticated calls separately assert
@@ -175,7 +176,8 @@ Authorization assertions use well-formed input; malformed authenticated calls se
 `HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` creates a repository
 app through the form routes, replies to an ApplicationAgent question in the same conversation,
 rejects a changed proposal digest, confirms the stored proposal, renders its deployed URL and the
-operating page, publishes a deploy event, and uses restart through its POST adapter. `AgentRuns`
+operating page, queues an app build from the runtime image supplied through real `ServerOptions`,
+publishes a deploy event, and uses restart through its POST adapter. `AgentRuns`
 proves app tasks use their own topic and credential, Ask Orama delegates to them, and App writes are
 absent before confirmation but usable after it. Memory variants add fake operator Ready status;
 renderer coverage verifies question replies, secret masking, rollback inputs, and live app/build

@@ -28,6 +28,10 @@ App name policy. The HTTP adapter copies it into `ApiContext`; `create_app` comb
 built-in platform names before any desired-state write. See
 [web-apps.md](../../../docs/api/web-apps.md).
 
+`ServerOptions::apps_runtime_image` carries `LAKE_APPS_RUNTIME_IMAGE`. The HTTP adapter copies it
+into `ApiContext`, and `build_app` records it as the generated Dockerfile's
+`APP_RUNTIME_IMAGE` build argument. See [builds.md](../../../docs/api/builds.md).
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 
