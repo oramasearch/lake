@@ -15,7 +15,7 @@ window. Reads never recreate a reaped topic. The operator must pass the ID expli
 | Capability | Input | Result |
 |---|---|---|
 | `build_image` | customer, repository, revision, optional context/Dockerfile/build args, target `name:tag` | queued build ID |
-| `build_app` | customer and App ID | queued image build `FROM` the configured app-runtime image (`LAKE_APPS_RUNTIME_IMAGE`); the app's `APP_DEPS` are installed into `/app/.venv` with the base image's system pip (as root, globbing off), then the image runs as uid 10001 |
+| `build_app` | customer, App ID, optional `source {repository, revision, path?}` (required once the App runs a built image, since that deploy drops its stored source) | queued image build `FROM` the configured app-runtime image (`LAKE_APPS_RUNTIME_IMAGE`); the app's `APP_DEPS` are installed into `/app/.venv` with the base image's system pip (as root, globbing off), then the image runs as uid 10001 |
 | `get_build`, `list_builds` | customer and optional build ID | desired state, phase, digest, size and timestamps |
 | `cancel_build` | customer and build ID | desired state becomes `cancelled` |
 | `publish_build_event` | build ID plus phase/log/done/error fields | retained event ID |

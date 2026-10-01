@@ -279,8 +279,19 @@ void register_build_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "build_app",
         .title = "Build app image",
-        .description = "Queue an app-runtime image build for one source-backed Ship app.",
-        .input_schema = input_schema({{"app", {{"type", "string"}}}}, json::array({"app"})),
+        .description = "Queue an app-runtime image build for one Ship app, from its stored "
+                       "source or an explicit source (repository, revision, optional path).",
+        .input_schema = input_schema(
+            {{"app", {{"type", "string"}}},
+             {"source",
+              {{"type", "object"},
+               {"properties",
+                {{"repository", {{"type", "string"}}},
+                 {"revision", {{"type", "string"}}},
+                 {"path", {{"type", "string"}}}}},
+               {"required", json::array({"repository", "revision"})},
+               {"additionalProperties", false}}}},
+            json::array({"app"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -297,10 +308,21 @@ void register_build_capabilities(Registry& registry) {
                 app->desired == "deleted") {
                 return ApiResult::failure("not_found", "no such app in this space");
             }
-            if (app->mode != "runtime" || app->source_repository.empty() ||
-                app->source_revision.empty()) {
+            // Deploying a built image switches the App to image mode and drops its stored source,
+            // so a rebuild after a code change names the source explicitly. create_build checks
+            // that the repository is live and owned by the customer.
+            std::string repository = app->source_repository;
+            std::string revision = app->source_revision;
+            std::string path = app->source_path;
+            if (const auto source = input.find("source"); source != input.end()) {
+                repository = source->at("repository").get<std::string>();
+                revision = source->at("revision").get<std::string>();
+                path = source->value("path", std::string());
+            }
+            if (repository.empty() || revision.empty()) {
                 return ApiResult::failure(
-                    "conflict", "only a source-backed runtime app can be built as an image");
+                    "conflict",
+                    "this app has no stored source; pass source {repository, revision, path}");
             }
             json arguments = json::object();
             arguments["APP_RUNTIME_IMAGE"] = context.apps_runtime_image;
@@ -318,9 +340,9 @@ void register_build_capabilities(Registry& registry) {
             const std::string target = app->name + ":build-" + control::new_uuid_v4().substr(0, 8);
             auto build = create_build(input,
                                       context,
-                                      app->source_repository,
-                                      app->source_revision,
-                                      app->source_path.empty() ? "." : app->source_path,
+                                      repository,
+                                      revision,
+                                      path.empty() ? "." : path,
                                       dockerfile,
                                       target,
                                       arguments);
