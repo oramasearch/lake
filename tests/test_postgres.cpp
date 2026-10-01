@@ -868,7 +868,8 @@ TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract)
     EXPECT_FALSE(store->context_for("operator-source"));
     const json hashes{{"source", lake::control::identity_crypto::sha256_hex("operator-source")},
                       {"zetta", lake::control::identity_crypto::sha256_hex("operator-zetta")},
-                      {"events", lake::control::identity_crypto::sha256_hex("operator-events")}};
+                      {"events", lake::control::identity_crypto::sha256_hex("operator-events")},
+                      {"pull", lake::control::identity_crypto::sha256_hex("operator-pull")}};
     const auto write_hashes = [&](const json& values) {
         pqxx::connection connection(uri);
         pqxx::work tx(connection);
@@ -903,7 +904,7 @@ TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract)
         EXPECT_TRUE(result);
         return *result;
     };
-    for (const std::string purpose : {"source", "zetta", "events"}) {
+    for (const std::string purpose : {"source", "zetta", "events", "pull"}) {
         const auto principal = store->context_for("operator-" + purpose);
         ASSERT_TRUE(principal) << principal.error().message;
         EXPECT_EQ(principal->kind, "app_" + purpose);

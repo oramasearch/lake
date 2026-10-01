@@ -6427,7 +6427,8 @@ public:
                                    " FROM apps a WHERE a.phase <> 'Deleted' AND "
                                    "(a.token_hashes_json->>'source' = $1 OR "
                                    "a.token_hashes_json->>'zetta' = $1 OR "
-                                   "a.token_hashes_json->>'events' = $1)",
+                                   "a.token_hashes_json->>'events' = $1 OR "
+                                   "a.token_hashes_json->>'pull' = $1)",
                                digest);
             if (rows.size() != 1) {
                 return std::unexpected(StoreError{"not_found", "app token is not active"});

@@ -122,14 +122,17 @@ rate-limited denials, but does not audit each successful cookie check.
 >
 > source → `repository_tree`/`repository_file` on that repository only;
 > zetta → `workspace_query`/`workspace_sql` reads on that customer only;
-> events → `publish_app_event` for that app only.
+> events → `publish_app_event` for that app only;
+> pull → OCI manifest and blob `GET`/`HEAD` for `<space>/<app name>` only.
 
 The operator holds tokens in Secret `app-tokens` and writes SHA-256 hex hashes to
 `token_hashes_json`. Lake issues and returns no app tokens. Source calls must also name the app's
 exact revision. Zetta calls retain the workspace read allow-list and read-only SQL checks. Every
-other capability or target is refused. New hashes invalidate prior tokens; unbinding or deletion
-revokes workload access. Events remain available during teardown until the operator reports
-`Deleted`.
+other capability or target is refused. The registry accepts the pull token only as HTTP Basic user
+`app`, with the token as the password. It cannot read another app or `<space>/cache/...`, and it
+cannot start uploads or publish manifests. New hashes invalidate prior tokens; unbinding or
+deletion revokes workload access. Events remain available during teardown until the operator
+reports `Deleted`.
 
 Protected calls without authentication and well-formed calls with a wrong-purpose token return
 `unauthorized`. Malformed input on an authenticated call returns `invalid_input`; input validation

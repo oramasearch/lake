@@ -74,7 +74,8 @@ fidelity report.
 environment/domain mutations, and Loki-compatible log reads.
 
 [`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
-routes and their exact-byte integration coverage.
+routes, build-push credentials, exact-repository app pull credentials, and exact-byte integration
+coverage.
 OCI blob `PATCH` and final `PUT` requests are the only routes admitted above the general 64 MiB
 request-body limit. They stream to disk up to `LAKE_MAX_REGISTRY_BLOB_BYTES`, validate chunk
 ranges, and verify the digest from the completed file; [`builds.md`](builds.md) and
@@ -85,9 +86,11 @@ a customer's stores (buckets, filesystems, network filesystems and volumes; a cl
 phase 1, lake#196), with their capabilities and the Train → Data → Storage panel.
 [`web-apps.md`](web-apps.md) defines customer-scoped Ship app creation, direct-zone hosts,
 platform-reserved names, deployment, lifecycle, authentication, environment, attach/detach
-bindings, logs and events. It is separate from identity [applications](apps.md).
+bindings, logs, events and the read-only app registry pull token. It is separate from identity
+[applications](apps.md).
 [`builds.md`](builds.md) defines asynchronous in-cluster image builds, configured Ship App runtime
-bases, cancellation, status, retained progress and build-scoped credentials.
+bases, cancellation, status, public digest pull references, retained progress and build-scoped
+credentials.
 
 ## Operational routes
 

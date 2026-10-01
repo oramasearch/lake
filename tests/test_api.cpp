@@ -1277,6 +1277,150 @@ TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
     server.stop();
 }
 
+TEST(RegistryProtocols, AppPullCredentialReadsOnlyItsOwnImage) {
+    TemporarySyncRoot temporary;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user(
+        {"taap:1:ed25519:app-pull-owner", "app-pull-owner@example.test", "App pull owner"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "apps", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto app = store->create_web_app({.customer_id = customer->id,
+                                            .workspace_id = workspace->id,
+                                            .name = "reports",
+                                            .mode = "image",
+                                            .image = "lake.example.test/tenant-one/reports:v1",
+                                            .framework = "container",
+                                            .port = 8080,
+                                            .host = "reports.apps.example.test"});
+    ASSERT_TRUE(app) << app.error().message;
+    const auto other_app = store->create_web_app({.customer_id = customer->id,
+                                                  .workspace_id = workspace->id,
+                                                  .name = "other",
+                                                  .mode = "image",
+                                                  .image = "lake.example.test/tenant-one/other:v1",
+                                                  .framework = "container",
+                                                  .port = 8080,
+                                                  .host = "other.apps.example.test"});
+    ASSERT_TRUE(other_app) << other_app.error().message;
+    ASSERT_TRUE(store->set_web_app_token_hashes(
+        app->id, {{"pull", lake::control::identity_crypto::sha256_hex("app-pull-token")}}));
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "app-pull-oci-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = temporary.path().string();
+    options.store = store;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string admin = "Bearer registry-admin";
+    const std::string config = R"({"architecture":"arm64","os":"darwin"})";
+    const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(config);
+    const std::string started = http_request(server.port(),
+                                             "POST",
+                                             "/v2/tenant-one/reports/blobs/uploads/",
+                                             "",
+                                             "application/octet-stream",
+                                             {},
+                                             admin);
+    ASSERT_NE(started.find(" 202 "), std::string::npos) << started;
+    const std::string completed =
+        http_request(server.port(),
+                     "PUT",
+                     response_header(started, "Location") + "?digest=" + digest,
+                     config,
+                     "application/octet-stream",
+                     {},
+                     admin);
+    ASSERT_NE(completed.find(" 201 "), std::string::npos) << completed;
+    const json manifest{{"schemaVersion", 2},
+                        {"mediaType", "application/vnd.oci.image.manifest.v1+json"},
+                        {"config",
+                         {{"mediaType", "application/vnd.oci.image.config.v1+json"},
+                          {"digest", digest},
+                          {"size", config.size()}}},
+                        {"layers", json::array()}};
+    const std::string published = http_request(server.port(),
+                                               "PUT",
+                                               "/v2/tenant-one/reports/manifests/latest",
+                                               manifest.dump(),
+                                               "application/vnd.oci.image.manifest.v1+json",
+                                               {},
+                                               admin);
+    ASSERT_NE(published.find(" 201 "), std::string::npos) << published;
+
+    const std::string basic = "Basic YXBwOmFwcC1wdWxsLXRva2Vu";
+    const std::string own_manifest = http_request(server.port(),
+                                                  "GET",
+                                                  "/v2/tenant-one/reports/manifests/latest",
+                                                  "",
+                                                  "application/json",
+                                                  {},
+                                                  basic);
+    EXPECT_NE(own_manifest.find(" 200 "), std::string::npos) << own_manifest;
+    const std::string own_head = http_request(server.port(),
+                                              "HEAD",
+                                              "/v2/tenant-one/reports/manifests/latest",
+                                              "",
+                                              "application/json",
+                                              {},
+                                              basic);
+    EXPECT_NE(own_head.find(" 200 "), std::string::npos) << own_head;
+    const std::string own_blob = http_request(server.port(),
+                                              "GET",
+                                              "/v2/tenant-one/reports/blobs/" + digest,
+                                              "",
+                                              "application/octet-stream",
+                                              {},
+                                              basic);
+    EXPECT_EQ(response_body(own_blob), config);
+    const std::string other = http_request(server.port(),
+                                           "GET",
+                                           "/v2/tenant-one/other/manifests/latest",
+                                           "",
+                                           "application/json",
+                                           {},
+                                           basic);
+    EXPECT_NE(other.find(" 403 "), std::string::npos) << other;
+    const std::string cache = http_request(server.port(),
+                                           "GET",
+                                           "/v2/tenant-one/cache/reports/manifests/latest",
+                                           "",
+                                           "application/json",
+                                           {},
+                                           basic);
+    EXPECT_NE(cache.find(" 403 "), std::string::npos) << cache;
+    const std::string push = http_request(server.port(),
+                                          "POST",
+                                          "/v2/tenant-one/reports/blobs/uploads/",
+                                          "",
+                                          "application/octet-stream",
+                                          {},
+                                          basic);
+    EXPECT_NE(push.find(" 403 "), std::string::npos) << push;
+    const std::string wrong_username = http_request(server.port(),
+                                                    "GET",
+                                                    "/v2/tenant-one/reports/manifests/latest",
+                                                    "",
+                                                    "application/json",
+                                                    {},
+                                                    "Basic bGFrZTphcHAtcHVsbC10b2tlbg==");
+    EXPECT_NE(wrong_username.find(" 403 "), std::string::npos) << wrong_username;
+    const std::string bearer = http_request(server.port(),
+                                            "GET",
+                                            "/v2/tenant-one/reports/manifests/latest",
+                                            "",
+                                            "application/json",
+                                            {},
+                                            "Bearer app-pull-token");
+    EXPECT_NE(bearer.find(" 403 "), std::string::npos) << bearer;
+    server.stop();
+}
+
 TEST(RegistryProtocols, NpmPublishesAndInstallsWithTheRealClient) {
     TemporarySyncRoot temporary;
     ServerOptions options;

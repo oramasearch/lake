@@ -69,6 +69,7 @@ struct Builds {
         context.agent_bus = bus.get();
         context.workspaces = workspace->service.get();
         context.internal_url = "http://lake-prod.prod.svc:80";
+        context.public_host = "lake.example.test";
         context.apps_runtime_image = apps_runtime_image;
         context.authorized = true;
         context.session_credential = true;
@@ -153,6 +154,30 @@ TEST(Builds, DesiredRowStatusAndCancellationFollowTheOperatorContract) {
     EXPECT_EQ(builds.call("cancel_build", {{"build_id", id}}).error.code, "conflict");
     ASSERT_TRUE(builds.store->set_build_status(id, {.phase = "Cancelled", .message = "cancelled"}));
     EXPECT_EQ(builds.store->get_build(id)->phase, "Cancelled");
+}
+
+TEST(Builds, SucceededBuildReportsThePublicDigestReference) {
+    Builds builds;
+    const auto created = builds.create();
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value.at("build_id");
+    const std::string digest = "sha256:" + std::string(64, 'a');
+
+    const auto queued = builds.call("get_build", {{"build_id", id}});
+    ASSERT_TRUE(queued.ok) << queued.error.message;
+    EXPECT_TRUE(queued.value["image"].is_null());
+
+    ASSERT_TRUE(builds.store->set_build_status(
+        id, {.phase = "Succeeded", .digest = digest, .size = 42, .message = "image pushed"}));
+    const std::string expected = "lake.example.test/" + builds.customer_name + "/service@" + digest;
+    const auto succeeded = builds.call("get_build", {{"build_id", id}});
+    ASSERT_TRUE(succeeded.ok) << succeeded.error.message;
+    EXPECT_EQ(succeeded.value["image"], expected);
+
+    const auto listed = builds.call("list_builds");
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["builds"].size(), 1U);
+    EXPECT_EQ(listed.value["builds"][0]["image"], expected);
 }
 
 TEST(Builds, OperatorTokensArePurposeAndBuildScopedAndEventsAreRetained) {

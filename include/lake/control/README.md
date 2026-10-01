@@ -31,6 +31,9 @@ exposes host resolution, the one-query cookie authorization check, atomic code e
 expiry cleanup; memory and PostgreSQL implementations preserve the same contract. See
 `docs/api/web-apps.md`.
 
+`builds.hpp` exposes build JSON with a null image before success and a public-host digest reference
+after success. App token purposes include the hash-only, exact-repository registry pull credential.
+
 `agent_library.hpp` registers ApplicationAgent as `agent-application` and ExperimentsAgent as
 `agent-experiments`, chat-capable services used from their Ship/Train pages and Ask Orama. Each bus
 identity is independent from every other library agent.

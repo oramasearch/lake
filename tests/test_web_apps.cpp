@@ -434,10 +434,11 @@ TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
 
     const json hashes{{"source", lake::control::identity_crypto::sha256_hex("operator-source")},
                       {"zetta", lake::control::identity_crypto::sha256_hex("operator-zetta")},
-                      {"events", lake::control::identity_crypto::sha256_hex("operator-events")}};
+                      {"events", lake::control::identity_crypto::sha256_hex("operator-events")},
+                      {"pull", lake::control::identity_crypto::sha256_hex("operator-pull")}};
     ASSERT_TRUE(apps.store->set_web_app_token_hashes(id, hashes));
     ASSERT_FALSE(apps.store->context_for("unknown"));
-    for (const std::string purpose : {"source", "zetta", "events"}) {
+    for (const std::string purpose : {"source", "zetta", "events", "pull"}) {
         const auto principal = apps.store->context_for("operator-" + purpose);
         ASSERT_TRUE(principal) << principal.error().message;
         EXPECT_EQ(principal->kind, "app_" + purpose);
@@ -545,6 +546,7 @@ TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
     ASSERT_TRUE(apps.call("delete_app", {{"app_id", id}, {"confirm", "reports"}}).ok);
     EXPECT_FALSE(apps.store->context_for("operator-source"));
     EXPECT_FALSE(apps.store->context_for("operator-zetta"));
+    EXPECT_FALSE(apps.store->context_for("operator-pull"));
     EXPECT_TRUE(apps.store->context_for("operator-events"));
     ASSERT_TRUE(apps.store->purge_deleted_web_apps());
     EXPECT_TRUE(apps.store->get_web_app(id));

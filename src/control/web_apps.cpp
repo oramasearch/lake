@@ -44,7 +44,7 @@ std::optional<std::string> web_app_token_purpose(const WebApp& app, std::string_
         return std::nullopt;
     }
     std::optional<std::string> matched;
-    for (const std::string purpose : {"source", "zetta", "events"}) {
+    for (const std::string purpose : {"source", "zetta", "events", "pull"}) {
         const auto hash = app.token_hashes.find(purpose);
         if (hash == app.token_hashes.end() || !hash->is_string()) {
             continue;
@@ -82,6 +82,9 @@ std::vector<std::string> web_app_token_scopes(std::string_view purpose) {
     }
     if (purpose == "events") {
         return {"publish_app_event"};
+    }
+    if (purpose == "pull") {
+        return {"registry_pull"};
     }
     return {};
 }
