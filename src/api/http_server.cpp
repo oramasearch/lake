@@ -614,8 +614,14 @@ bool constant_time_equal(std::string_view a, std::string_view b) {
 // JSON, which form bodies are not).
 struct StringBodySink {
     std::string data;
+    std::size_t limit = maximum_sync_body_size;
+
     template <boost::capy::ConstBufferSequence CB>
     boost::capy::immediate<boost::capy::io_result<std::size_t>> write_some(const CB& buffers) {
+        const std::size_t incoming = boost::capy::buffer_size(buffers);
+        if (data.size() > limit || incoming > limit - data.size()) {
+            return {{std::make_error_code(std::errc::file_too_large), 0}};
+        }
         std::size_t total = 0;
         for (auto it = boost::capy::begin(buffers); it != boost::capy::end(buffers); ++it) {
             const boost::capy::const_buffer buffer(*it);
@@ -633,8 +639,43 @@ struct StringBodySink {
     }
 };
 
-boost::capy::io_task<std::string> read_string_body(boost::http::route_params& route) {
-    StringBodySink sink;
+struct JsonBodySink {
+    boost::http::json_sink parser;
+    std::size_t size = 0;
+    std::size_t limit = maximum_sync_body_size;
+
+    template <boost::capy::ConstBufferSequence CB>
+    boost::capy::immediate<boost::capy::io_result<std::size_t>> write_some(const CB& buffers) {
+        return write(buffers);
+    }
+
+    template <boost::capy::ConstBufferSequence CB>
+    boost::capy::immediate<boost::capy::io_result<std::size_t>> write(const CB& buffers) {
+        const std::size_t incoming = boost::capy::buffer_size(buffers);
+        if (size > limit || incoming > limit - size) {
+            return {{std::make_error_code(std::errc::file_too_large), 0}};
+        }
+        auto [error, written] = parser.write(buffers).await_resume();
+        size += written;
+        return {{error, written}};
+    }
+
+    boost::capy::immediate<boost::capy::io_result<>> write_eof() {
+        return parser.write_eof();
+    }
+
+    boost::json::value release() {
+        return parser.release();
+    }
+};
+
+bool body_is_too_large(const std::error_code& error) {
+    return error == std::errc::file_too_large || error.message() == "body too large";
+}
+
+boost::capy::io_task<std::string> read_string_body(boost::http::route_params& route,
+                                                   std::size_t limit = maximum_sync_body_size) {
+    StringBodySink sink{.limit = limit};
     auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
     static_cast<void>(bytes_read);
     if (read_error) {
@@ -858,8 +899,25 @@ public:
         return id;
     }
 
-    ArtifactResult<std::size_t> append_upload(std::string_view id,
-                                              std::span<const std::byte> bytes) {
+    ArtifactResult<std::uint64_t> upload_size(std::string_view id) const {
+        if (!available()) {
+            return std::unexpected("artifact storage is not configured (LAKE_STORE_ROOT)");
+        }
+        if (!safe_component(id)) {
+            return std::unexpected("OCI upload identifier is invalid");
+        }
+        std::unique_lock lock(mutex_);
+        std::error_code error;
+        const std::uintmax_t size = std::filesystem::file_size(upload_path(id), error);
+        if (error) {
+            return std::unexpected("could not inspect OCI upload: " + error.message());
+        }
+        return static_cast<std::uint64_t>(size);
+    }
+
+    ArtifactResult<std::uint64_t> append_upload(std::string_view id,
+                                                std::span<const std::byte> bytes,
+                                                std::uint64_t expected_offset) {
         if (!available()) {
             return std::unexpected("artifact storage is not configured (LAKE_STORE_ROOT)");
         }
@@ -873,6 +931,13 @@ public:
         if (error) {
             return std::unexpected("could not create OCI upload directory: " + error.message());
         }
+        const std::uintmax_t current_size = std::filesystem::file_size(path, error);
+        if (error) {
+            return std::unexpected("could not inspect OCI upload: " + error.message());
+        }
+        if (current_size != expected_offset) {
+            return std::unexpected("OCI upload offset changed while appending");
+        }
         std::ofstream output(path, std::ios::binary | std::ios::app);
         if (!output) {
             return std::unexpected("could not open OCI upload");
@@ -883,28 +948,51 @@ public:
         if (!output) {
             return std::unexpected("could not append OCI upload");
         }
-        return static_cast<std::size_t>(std::filesystem::file_size(path, error));
+        const std::uintmax_t completed_size = std::filesystem::file_size(path, error);
+        if (error) {
+            return std::unexpected("could not inspect appended OCI upload: " + error.message());
+        }
+        return static_cast<std::uint64_t>(completed_size);
+    }
+
+    ArtifactResult<void> truncate_upload(std::string_view id, std::uint64_t size) {
+        if (!safe_component(id)) {
+            return std::unexpected("OCI upload identifier is invalid");
+        }
+        std::unique_lock lock(mutex_);
+        std::error_code error;
+        std::filesystem::resize_file(upload_path(id), size, error);
+        if (error) {
+            return std::unexpected("could not restore OCI upload after a failed request: " +
+                                   error.message());
+        }
+        return {};
     }
 
     ArtifactResult<std::string> finish_upload(std::string_view id, std::string_view digest) {
         if (!safe_component(id) || !valid_digest(digest)) {
             return std::unexpected("OCI upload or digest is invalid");
         }
-        const auto uploaded = read(upload_path(id));
-        if (!uploaded) {
-            return std::unexpected(uploaded.error());
+        std::unique_lock lock(mutex_);
+        const std::filesystem::path upload = upload_path(id);
+        const auto actual = sha256_file(upload);
+        if (!actual) {
+            return std::unexpected(actual.error());
         }
-        const std::string actual = sha256_digest(*uploaded);
-        if (actual != digest) {
+        if (*actual != digest) {
             return std::unexpected("uploaded bytes do not match the requested digest");
         }
-        const auto saved = write(blob_path(digest), *uploaded);
-        if (!saved) {
-            return std::unexpected(saved.error());
+        const std::filesystem::path blob = blob_path(digest);
+        std::error_code error;
+        std::filesystem::create_directories(blob.parent_path(), error);
+        if (error) {
+            return std::unexpected("could not create OCI blob directory: " + error.message());
         }
-        std::error_code ignored;
-        std::filesystem::remove(upload_path(id), ignored);
-        return actual;
+        std::filesystem::rename(upload, blob, error);
+        if (error) {
+            return std::unexpected("could not publish OCI blob: " + error.message());
+        }
+        return *actual;
     }
 
     ArtifactResult<StoredArtifact> blob(std::string_view digest) const {
@@ -1210,6 +1298,41 @@ private:
         return output;
     }
 
+    static ArtifactResult<std::string> sha256_file(const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            return std::unexpected("could not open OCI upload for digest verification");
+        }
+        std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(),
+                                                                        &EVP_MD_CTX_free);
+        if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) {
+            return std::unexpected("could not initialize OCI upload digest verification");
+        }
+        std::array<char, 64 * 1024> buffer{};
+        while (input) {
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize read = input.gcount();
+            if (read > 0 &&
+                EVP_DigestUpdate(context.get(), buffer.data(), static_cast<std::size_t>(read)) !=
+                    1) {
+                return std::unexpected("could not update OCI upload digest verification");
+            }
+        }
+        if (input.bad()) {
+            return std::unexpected("could not read OCI upload for digest verification");
+        }
+        std::array<unsigned char, 32> digest{};
+        unsigned int size = 0;
+        if (EVP_DigestFinal_ex(context.get(), digest.data(), &size) != 1 || size != digest.size()) {
+            return std::unexpected("could not finish OCI upload digest verification");
+        }
+        std::string output = "sha256:";
+        for (const unsigned char byte : digest) {
+            output += std::format("{:02x}", byte);
+        }
+        return output;
+    }
+
     static ArtifactResult<std::vector<std::string>>
     manifest_references(const nlohmann::json& manifest) {
         std::vector<std::string> output;
@@ -1358,6 +1481,44 @@ private:
 
     std::filesystem::path root_;
     mutable std::mutex mutex_;
+};
+
+struct OciUploadSink {
+    ArtifactRegistry& artifacts;
+    std::string upload;
+    std::uint64_t offset;
+    std::uint64_t limit;
+    std::string storage_error;
+
+    template <boost::capy::ConstBufferSequence CB>
+    boost::capy::immediate<boost::capy::io_result<std::size_t>> write_some(const CB& buffers) {
+        return write(buffers);
+    }
+
+    template <boost::capy::ConstBufferSequence CB>
+    boost::capy::immediate<boost::capy::io_result<std::size_t>> write(const CB& buffers) {
+        const std::size_t incoming = boost::capy::buffer_size(buffers);
+        if (offset > limit || incoming > limit - offset) {
+            return {{std::make_error_code(std::errc::file_too_large), 0}};
+        }
+        std::size_t written = 0;
+        for (auto it = boost::capy::begin(buffers); it != boost::capy::end(buffers); ++it) {
+            const boost::capy::const_buffer buffer(*it);
+            const auto appended = artifacts.append_upload(
+                upload, {static_cast<const std::byte*>(buffer.data()), buffer.size()}, offset);
+            if (!appended) {
+                storage_error = appended.error();
+                return {{std::make_error_code(std::errc::io_error), written}};
+            }
+            offset = *appended;
+            written += buffer.size();
+        }
+        return {{{}, written}};
+    }
+
+    boost::capy::immediate<boost::capy::io_result<>> write_eof() {
+        return {{}};
+    }
 };
 
 std::string disposition_parameter(std::string_view disposition, std::string_view name) {
@@ -1688,6 +1849,40 @@ std::optional<std::uint64_t> decimal_value(std::string_view value) {
         return std::nullopt;
     }
     return output;
+}
+
+struct OciContentRange {
+    std::uint64_t start;
+    std::uint64_t end;
+
+    [[nodiscard]] std::uint64_t size() const {
+        return end - start + 1;
+    }
+};
+
+std::expected<std::optional<OciContentRange>, std::string>
+oci_content_range(const boost::http::route_params& route) {
+    if (route.req.count("Content-Range") == 0) {
+        return std::optional<OciContentRange>{};
+    }
+    std::string_view value = route.req.at("Content-Range");
+    if (value.starts_with("bytes ")) {
+        value.remove_prefix(6);
+    }
+    if (const std::size_t slash = value.find('/'); slash != std::string_view::npos) {
+        value = value.substr(0, slash);
+    }
+    const std::size_t dash = value.find('-');
+    if (dash == std::string_view::npos || value.find('-', dash + 1) != std::string_view::npos) {
+        return std::unexpected("Content-Range must be START-END for an OCI upload chunk");
+    }
+    const auto start = decimal_value(value.substr(0, dash));
+    const auto end = decimal_value(value.substr(dash + 1));
+    if (!start || !end || *end < *start ||
+        (*start == 0 && *end == std::numeric_limits<std::uint64_t>::max())) {
+        return std::unexpected("Content-Range is invalid for an OCI upload chunk");
+    }
+    return std::optional<OciContentRange>{{*start, *end}};
 }
 
 std::uint64_t query_page_limit(const boost::http::route_params& route) {
@@ -6884,7 +7079,7 @@ struct ApiServer::Impl {
         }
         nlohmann::json input = {{"pool_id", application->pool_id}};
         if (capability == "sign_in_passkey") {
-            http::json_sink sink;
+            JsonBodySink sink;
             auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
             if (read_error || bytes_read == 0) {
                 co_return co_await send_text(route,
@@ -12895,14 +13090,17 @@ struct ApiServer::Impl {
     boost::http::route_task registry_error(boost::http::route_params& route,
                                            boost::http::status status,
                                            std::string message,
-                                           bool oci = false) {
+                                           bool oci = false,
+                                           std::string_view oci_code = {}) {
         nlohmann::json body;
         if (oci) {
+            const std::string code =
+                oci_code.empty()
+                    ? (status == boost::http::status::not_found ? "BLOB_UNKNOWN" : "DENIED")
+                    : std::string(oci_code);
             body = {{"errors",
                      nlohmann::json::array(
-                         {{{"code",
-                            status == boost::http::status::not_found ? "BLOB_UNKNOWN" : "DENIED"},
-                           {"message", std::move(message)}}})}};
+                         {{{"code", std::move(code)}, {"message", std::move(message)}}})}};
         } else {
             body = {{"ok", false}, {"error", std::move(message)}};
         }
@@ -12940,32 +13138,96 @@ struct ApiServer::Impl {
         if (access != RegistryAccess::Allowed) {
             co_return co_await registry_auth_error(route, access);
         }
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return co_await registry_error(
-                route, boost::http::status::bad_request, "could not read OCI upload", true);
-        }
-        const std::span<const char> characters(body.data(), body.size());
-        const auto appended =
-            artifacts.append_upload(route_value(route, "upload"), std::as_bytes(characters));
-        if (!appended) {
-            co_return co_await registry_error(
-                route, boost::http::status::bad_request, appended.error(), true);
-        }
         const std::string upload = route_value(route, "upload");
+        const auto initial_size = artifacts.upload_size(upload);
+        if (!initial_size) {
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              initial_size.error(),
+                                              true,
+                                              "BLOB_UPLOAD_INVALID");
+        }
+        if (*initial_size > options.max_registry_blob_bytes) {
+            co_return co_await registry_error(
+                route,
+                boost::http::status::payload_too_large,
+                "OCI upload exceeds LAKE_MAX_REGISTRY_BLOB_BYTES limit of " +
+                    std::to_string(options.max_registry_blob_bytes) + " bytes",
+                true,
+                "BLOB_UPLOAD_INVALID");
+        }
+        const auto content_range = oci_content_range(route);
+        if (!content_range) {
+            co_return co_await registry_error(route,
+                                              boost::http::status::range_not_satisfiable,
+                                              content_range.error(),
+                                              true,
+                                              "BLOB_UPLOAD_INVALID");
+        }
+        if (*content_range && (*content_range)->start != *initial_size) {
+            co_return co_await registry_error(
+                route,
+                boost::http::status::range_not_satisfiable,
+                "Content-Range starts at " + std::to_string((*content_range)->start) +
+                    " but the OCI upload is at " + std::to_string(*initial_size),
+                true,
+                "BLOB_UPLOAD_INVALID");
+        }
+        OciUploadSink sink{artifacts, upload, *initial_size, options.max_registry_blob_bytes, {}};
+        auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
+        if (read_error) {
+            const auto restored = artifacts.truncate_upload(upload, *initial_size);
+            if (body_is_too_large(read_error)) {
+                co_return co_await registry_error(
+                    route,
+                    boost::http::status::payload_too_large,
+                    "OCI upload exceeds LAKE_MAX_REGISTRY_BLOB_BYTES limit of " +
+                        std::to_string(options.max_registry_blob_bytes) + " bytes",
+                    true,
+                    "BLOB_UPLOAD_INVALID");
+            }
+            std::string message = sink.storage_error.empty()
+                                      ? "could not read OCI upload body: " + read_error.message()
+                                      : "could not store OCI upload body: " + sink.storage_error;
+            if (!restored) {
+                message += "; " + restored.error();
+            }
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              std::move(message),
+                                              true,
+                                              "BLOB_UPLOAD_INVALID");
+        }
+        if (*content_range && bytes_read != (*content_range)->size()) {
+            const auto restored = artifacts.truncate_upload(upload, *initial_size);
+            std::string message =
+                "Content-Range describes " + std::to_string((*content_range)->size()) +
+                " bytes but the OCI upload chunk contained " + std::to_string(bytes_read);
+            if (!restored) {
+                message += "; " + restored.error();
+            }
+            co_return co_await registry_error(route,
+                                              boost::http::status::range_not_satisfiable,
+                                              std::move(message),
+                                              true,
+                                              "BLOB_UPLOAD_INVALID");
+        }
         if (!finish) {
             route.res.set(boost::http::field::location,
                           "/v2/" + repository + "/blobs/uploads/" + upload);
             route.res.set("Docker-Upload-UUID", upload);
             route.res.set(boost::http::field::range,
-                          *appended == 0 ? "0-0" : "0-" + std::to_string(*appended - 1));
+                          sink.offset == 0 ? "0-0" : "0-" + std::to_string(sink.offset - 1));
             co_return co_await send_text(
                 route, boost::http::status::accepted, {}, "application/octet-stream", "no-store");
         }
         const auto completed = artifacts.finish_upload(upload, query_value(route, "digest"));
         if (!completed) {
-            co_return co_await registry_error(
-                route, boost::http::status::bad_request, completed.error(), true);
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              completed.error(),
+                                              true,
+                                              "BLOB_UPLOAD_INVALID");
         }
         route.res.set(boost::http::field::location,
                       "/v2/" + repository + "/blobs/" + std::string(*completed));
@@ -14075,7 +14337,7 @@ struct ApiServer::Impl {
         } else {
             capability = users ? "scim_upsert_user" : "scim_upsert_group";
             success_status = http::status::created;
-            http::json_sink sink;
+            JsonBodySink sink;
             auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
@@ -14117,7 +14379,7 @@ struct ApiServer::Impl {
             success_status = http::status::no_content;
         } else {
             capability = users ? "scim_patch_user" : "scim_patch_group";
-            http::json_sink sink;
+            JsonBodySink sink;
             auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
             if (read_error || bytes_read == 0) {
                 co_return co_await send_scim(
@@ -14241,7 +14503,7 @@ struct ApiServer::Impl {
                     input[std::string(parameter.key)] = std::string(parameter.value);
                 }
             } else {
-                http::json_sink sink;
+                JsonBodySink sink;
                 auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
                 if (read_error) {
                     status = http::status::bad_request;
@@ -14293,11 +14555,17 @@ struct ApiServer::Impl {
                 query.emplace_back(parameter.key, parameter.value);
             input = rest_input_from_query(*capability, query);
         } else {
-            http::json_sink sink;
+            JsonBodySink sink;
             auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
             if (read_error) {
-                status = http::status::bad_request;
-                body = error_body("invalid_input", "could not read the request body as JSON");
+                status = body_is_too_large(read_error) ? http::status::payload_too_large
+                                                       : http::status::bad_request;
+                body =
+                    body_is_too_large(read_error)
+                        ? error_body("size_invalid", "request body exceeds the 67108864 byte limit")
+                        : error_body("invalid_input",
+                                     "could not read the request body as JSON: " +
+                                         read_error.message());
             } else if (bytes_read > 0) {
                 input = to_nlohmann(sink.release());
                 if (input.is_discarded()) {
@@ -14342,11 +14610,19 @@ struct ApiServer::Impl {
         namespace http = boost::http;
         std::string body;
         http::status status = http::status::ok;
-        http::json_sink sink;
+        JsonBodySink sink;
         auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
         nlohmann::json request;
-        if (read_error || bytes_read == 0 ||
-            (request = to_nlohmann(sink.release())).is_discarded()) {
+        if (body_is_too_large(read_error)) {
+            status = http::status::payload_too_large;
+            body = nlohmann::json{{"jsonrpc", "2.0"},
+                                  {"id", nullptr},
+                                  {"error",
+                                   {{"code", -32700},
+                                    {"message", "request body exceeds the 67108864 byte limit"}}}}
+                       .dump();
+        } else if (read_error || bytes_read == 0 ||
+                   (request = to_nlohmann(sink.release())).is_discarded()) {
             status = http::status::bad_request;
             body = nlohmann::json{{"jsonrpc", "2.0"},
                                   {"id", nullptr},
@@ -15864,7 +16140,8 @@ bool ApiServer::start() {
     });
 
     auto parser_options = http::parser_config{true};
-    parser_options.body_limit = maximum_sync_body_size;
+    parser_options.body_limit =
+        std::max<std::uint64_t>(maximum_sync_body_size, impl.options.max_registry_blob_bytes);
     impl.server = std::make_unique<beast2::http_server>(
         impl.io_context,
         static_cast<std::size_t>(impl.options.worker_coroutines),

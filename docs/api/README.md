@@ -75,6 +75,10 @@ environment/domain mutations, and Loki-compatible log reads.
 
 [`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
 routes and their exact-byte integration coverage.
+OCI blob `PATCH` and final `PUT` requests are the only routes admitted above the general 64 MiB
+request-body limit. They stream to disk up to `LAKE_MAX_REGISTRY_BLOB_BYTES`, validate chunk
+ranges, and verify the digest from the completed file; [`builds.md`](builds.md) and
+[`../serving/http.md`](../serving/http.md) own the operational contract.
 
 [`services.md`](services.md) defines a customer's managed services, and [`storage.md`](storage.md)
 a customer's stores (buckets, filesystems, network filesystems and volumes; a cluster volume in

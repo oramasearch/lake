@@ -62,6 +62,7 @@ int usage() {
                  "(default $LAKE_ADMIN_TOKEN)");
     std::println("  LAKE_REPLICATION_TOKEN bearer presented to peer lake instances "
                  "(default $LAKE_ADMIN_TOKEN)");
+    std::println("  LAKE_MAX_REGISTRY_BLOB_BYTES caps streamed OCI blobs (default 4294967296)");
     std::println("  --identity-seed base64 Ed25519 seed for lake's TAAP identity "
                  "(default $LAKE_IDENTITY_SEED)");
     std::println("  --instance-kek key-encryption key for a generated identity "
@@ -109,6 +110,8 @@ int main(int argc, char** argv) {
     std::string control_db = env_or("LAKE_CONTROL_DB_URI", "");
     opts.admin_token = env_or("LAKE_ADMIN_TOKEN", "");
     opts.replication_token = env_or("LAKE_REPLICATION_TOKEN", "");
+    opts.max_registry_blob_bytes =
+        env_u64("LAKE_MAX_REGISTRY_BLOB_BYTES", opts.max_registry_blob_bytes);
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");

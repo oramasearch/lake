@@ -32,6 +32,10 @@ built-in platform names before any desired-state write. See
 into `ApiContext`, and `build_app` records it as the generated Dockerfile's
 `APP_RUNTIME_IMAGE` build argument. See [builds.md](../../../docs/api/builds.md).
 
+`ServerOptions::max_registry_blob_bytes` carries `LAKE_MAX_REGISTRY_BLOB_BYTES`. It raises the
+server parser ceiling for OCI upload traffic only; body sinks retain the 64 MiB general limit.
+See [the HTTP body-limit contract](../../../docs/serving/http.md).
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 

@@ -40,6 +40,9 @@ struct ServerOptions {
     unsigned short port = 4900; // 0 = pick an ephemeral port
     int worker_coroutines = 32;
     std::string node_name = "lake";
+    // Maximum completed OCI blob size. The HTTP parser admits this much so registry upload
+    // handlers can stream it; every other request body retains the 64 MiB adapter limit.
+    std::uint64_t max_registry_blob_bytes = std::uint64_t{4} * 1024 * 1024 * 1024;
     // Public hostname used in OAuth callbacks, as the WebAuthn RP ID, and as
     // the HTTPS repository-command origin when external_origin is unset.
     std::string public_host;
