@@ -8779,7 +8779,9 @@ struct ApiServer::Impl {
 
     static std::vector<WorkspaceRead> initial_workspace_reads(const WorkspacePage& page) {
         if (page.section == "runs") {
-            return {{"list_runs", nlohmann::json::object()}};
+            // Studies name their trial runs (lake#449).
+            return {{"list_runs", nlohmann::json::object()},
+                    {"list_studies", nlohmann::json::object()}};
         }
         if (page.section == "agents") {
             return {{"list_agents", nlohmann::json::object()},
@@ -9045,7 +9047,8 @@ struct ApiServer::Impl {
                         const auto& capability = reads[index].first;
                         if (result.ok) {
                             page.data[capability] = result.value;
-                        } else if (page.error.empty() && capability != "list_agent_library") {
+                        } else if (page.error.empty() && capability != "list_agent_library" &&
+                                   capability != "list_studies") {
                             page.error = result.error.message;
                         }
                     }
@@ -9232,9 +9235,12 @@ struct ApiServer::Impl {
                 // The report is requested once the run has finished: asking a running run for
                 // its report makes the deployed Zetta drop the connection.
                 reads = {{"get_run", {{"run_id", page.subject}}},
-                         {"list_traces", {{"limit", 500}}}};
+                         {"list_traces", {{"limit", 500}}},
+                         {"list_studies", nlohmann::json::object()}};
             } else if (section == "models") {
-                reads = {{"list_models", nlohmann::json::object()}};
+                // Studies name their models and say which one each promoted (lake#449).
+                reads = {{"list_models", nlohmann::json::object()},
+                         {"list_studies", nlohmann::json::object()}};
             } else if (section == "dataset") {
                 const std::string database = query_value(route, "database");
                 const std::string selected_database = database.empty() ? "datasets" : database;
@@ -9332,7 +9338,7 @@ struct ApiServer::Impl {
                                            (capability == "get_run" && status != "running" &&
                                             status != "queued" && status != "pending");
                     } else if (page.error.empty() && capability != "list_methodologies" &&
-                               capability != "list_solutions" &&
+                               capability != "list_solutions" && capability != "list_studies" &&
                                !(section == "agent" && (capability == "list_projects" ||
                                    capability == "list_agent_launches" ||
                                    capability == "list_agent_schedules")) &&
@@ -11081,6 +11087,26 @@ struct ApiServer::Impl {
                     page.analysis = analysis.value;
                 } else {
                     page.error = analysis.error.message;
+                }
+                // The latest eight trials' curves are in the page itself (lake#449), so they show
+                // before, and without, the live refresh. A trial whose curves cannot be read is
+                // left out rather than failing the page.
+                std::vector<WorkspaceRead> curves;
+                const nlohmann::json trials = page.data.value("trials", nlohmann::json::array());
+                const std::size_t first = trials.size() > 8 ? trials.size() - 8 : 0;
+                for (std::size_t index = first; index < trials.size(); ++index) {
+                    const std::string run = trials[index].value("run", std::string());
+                    if (!run.empty()) {
+                        curves.push_back({"get_run_metrics",
+                                          {{"customer_id", page.customer_id}, {"run", run}}});
+                    }
+                }
+                if (const auto read = co_await page_reads(context, std::move(curves)); read) {
+                    for (const ApiResult& metrics : *read) {
+                        if (metrics.ok) {
+                            page.trial_metrics.push_back(metrics.value);
+                        }
+                    }
                 }
             }
         }

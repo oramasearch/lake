@@ -101,7 +101,7 @@ workspace work without an explicit review of this table and the test map.
 | `/w/:workspace_id/ship/app` | 1 | 1 |
 | `/w/:workspace_id/ship/index` | 1 | 1 |
 | `/w/:workspace_id/ship/indexes` | 2 | 1 |
-| `/w/:workspace_id/ship/models` | 1 | 1 |
+| `/w/:workspace_id/ship/models` | 2 | 1 |
 | `/w/:workspace_id/train/agent` | 3 | 1 |
 | `/w/:workspace_id/train/agents` | 1 | 1 |
 | `/w/:workspace_id/train/data` | 3 | 1 |
@@ -110,10 +110,15 @@ workspace work without an explicit review of this table and the test map.
 | `/w/:workspace_id/train/experiment/run` | 1 | 1 |
 | `/w/:workspace_id/train/experiments` | 2 | 1 |
 | `/w/:workspace_id/train/experiments/compare` | 2 | 1 |
-| `/w/:workspace_id/train/run` | 2 | 1 |
-| `/w/:workspace_id/train/runs` | 1 | 1 |
+| `/w/:workspace_id/train/run` | 3 | 1 |
+| `/w/:workspace_id/train/runs` | 2 | 1 |
 | `/w/:workspace_id/train/stream` | 2 | 1 |
 | `/w/:workspace_id/train/streams` | 1 | 1 |
+
+Train → Runs, a run page and Ship → Models each add a concurrent `list_studies` read, so a study's
+trial runs and models are named by their study (lake#449). A study page with trials reads up to
+eight trials' `get_run_metrics` in a second round, after the study names them; the fixture's study
+has none, so its budget stays at one round.
 
 An intentional page-read change updates this table and the test map together. A higher round count
 also requires showing why the reads cannot start concurrently. An extra call or round fails on the

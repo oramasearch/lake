@@ -14,7 +14,7 @@ SHA-256:
 3421f0033bae76860e165efab33d4bbbcc2d8fc1a4a708ef4f6742eef434ab47  LICENSE.uPlot
 ```
 
-`experiments.js` is Lake's capability client, accessible chart controls, transformations and live
+`experiments.js` is Lake's capability client (its errors prefix Zetta's field `path`), accessible chart controls, transformations and live
 poll controller. `experiments.css` consumes Lake's design tokens. CMake embeds all four served
 files and their content hashes; no network dependency or runtime asset directory is needed.
 

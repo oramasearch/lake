@@ -116,7 +116,8 @@ Task proxy(ApiContext& context, const json& input, std::string name, json args) 
     const auto result = control::settled(co_await call_workspace(
         context, input.at("customer_id"), name, workspace_uses_get(name), std::move(args)));
     if (!result) {
-        co_return ApiResult::failure(result.error().code, result.error().message);
+        // Zetta names the field at fault (zetta#1217); a caller repairs that field, not a guess.
+        co_return ApiResult::failure(result.error().code, result.error().message, result.error().path);
     }
     co_return ApiResult::success(*result);
 }
@@ -266,9 +267,25 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     args.erase("customer_id");
     args.erase("workspace_id");
     args.erase("confirm");
-    if (name == "start_study" && args.at("objective").at("validation_split") == "test") {
-        co_return ApiResult::failure("invalid_input", "model selection requires a validation split",
-                                    "/objective/validation_split");
+    if (name == "start_study") {
+        // from_defaults lets Zetta fill a missing objective (held_out_auc, maximize, the
+        // validation split) and budgets field by field (zetta#1217). Without it both are required.
+        if (!args.value("from_defaults", false)) {
+            for (const char* field : {"objective", "budgets"}) {
+                if (!args.contains(field)) {
+                    co_return ApiResult::failure("invalid_input",
+                        std::string(field) + " is required; set from_defaults: true to fill a "
+                        "missing objective (held_out_auc, maximize, validation split) and budgets",
+                        std::string("/") + field);
+                }
+            }
+        }
+        if (args.contains("objective") &&
+            args.at("objective").value("validation_split", "") == "test") {
+            co_return ApiResult::failure("invalid_input",
+                                        "model selection requires a validation split",
+                                        "/objective/validation_split");
+        }
     }
     auto result = completed(co_await proxy(context, input, upstream, std::move(args)));
     if (name == "get_run_metrics" && result.ok && result.value.contains("metrics_suppressed")) {
@@ -347,8 +364,13 @@ void register_experiment_capabilities(Registry& registry) {
         {"runs"}, comparison());
     auto properties = study_spec().at("properties");
     properties["from_defaults"] = flag();
-    add(registry, "start_study", "create_study", properties,
-        {"name", "methodology", "objective", "budgets"}, study(), "write");
+    // Zetta fills objective and budgets field by field when from_defaults is set, so each of them
+    // and each of their fields is optional here; the handler requires both without it.
+    for (const char* field : {"objective", "budgets"}) {
+        properties[field]["required"] = json::array();
+    }
+    add(registry, "start_study", "create_study", properties, {"name", "methodology"}, study(),
+        "write");
     add(registry, "stop_study", "stop_study", {{"study", identifier()}}, {"study"},
         object({{"study", identifier()}, {"status", choice({"stopped"})}, {"reason", text()}},
         {"study", "status", "reason"}), "write");

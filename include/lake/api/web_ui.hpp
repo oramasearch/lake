@@ -264,6 +264,8 @@ struct ExperimentsPage {
     std::vector<std::string> runs;
     nlohmann::json data = nlohmann::json::object();
     nlohmann::json analysis = nlohmann::json::object();
+    // Study mode: get_run_metrics for the latest trials, oldest first.
+    nlohmann::json trial_metrics = nlohmann::json::array();
     nlohmann::json agent_task = nlohmann::json::object();
     std::string proposal_sha256;
     bool can_write = false;
