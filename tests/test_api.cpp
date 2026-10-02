@@ -51,6 +51,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/zetta_workspace.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
 #include "temporary_directory.hpp"
@@ -77,6 +78,12 @@ struct Surface {
     }
     ApiResult call(const std::string& name, json input = json::object()) {
         ctx.request_id.clear();
+        const auto capability = registry.find(name);
+        if (capability && capability->async_handler) {
+            auto completed = liquid::runtime::block_on(registry.call_async(name, input, ctx));
+            return completed ? std::move(*completed)
+                             : ApiResult::failure("store_error", completed.error().message);
+        }
         return registry.call(name, input, ctx);
     }
 };
@@ -363,6 +370,148 @@ TEST(Metering, CapabilityReportsExactStorageAndIdempotentBuildCompute) {
     const ApiResult second = surface.call("metering_usage", input);
     ASSERT_TRUE(second.ok) << second.error.message;
     EXPECT_EQ(second.value.at("items").front().at("compute_seconds"), 2);
+
+    // Without a registry or workspaces the report names what it could not measure rather than
+    // presenting a partial total as complete.
+    const json& summary = second.value.at("summary");
+    EXPECT_EQ(summary.at("storage").at("repositories_bytes"), 123);
+    EXPECT_TRUE(summary.at("storage").at("images_bytes").is_null());
+    EXPECT_EQ(summary.at("storage").at("total_bytes"), 123);
+    EXPECT_EQ(summary.at("compute").at("repository_build_seconds"), 2);
+    EXPECT_TRUE(summary.at("priced"));
+    const std::string not_measured = summary.at("not_measured").dump();
+    EXPECT_NE(not_measured.find("Container images"), std::string::npos);
+    EXPECT_NE(not_measured.find("no workspaces"), std::string::npos);
+}
+
+namespace {
+
+// A workspace Zetta answering list_datasets and list_runs with fixed records.
+struct UsageWorkspaceCaller final : lake::control::WorkspaceCaller {
+    std::mutex mutex; // concurrent workspace reads may complete on different threads
+    std::vector<std::string> capabilities;
+    liquid::runtime::task<lake::control::ZettaControlResult<json>>
+    call(std::string, std::string, std::string capability, bool, json) override {
+        {
+            std::lock_guard lock(mutex);
+            capabilities.push_back(capability);
+        }
+        if (capability == "list_datasets") {
+            co_return json{{"datasets",
+                            json::array({{{"name", "accounts"}, {"size_bytes", 12'000}},
+                                         {{"name", "events"}, {"size_bytes", 3'000}}})}};
+        }
+        if (capability == "list_runs") {
+            co_return json{
+                {"runs",
+                 json::array({// A training run of 90.5 seconds, rounded up to 91.
+                              {{"id", "run-1"},
+                               {"status", "succeeded"},
+                               {"created", "2026-09-04T00:00:00.000Z"},
+                               {"updated", "2026-09-04T00:01:30.500Z"}},
+                              {{"id", "run-2"},
+                               {"status", "failed"},
+                               {"created", "2026-09-05T10:00:00.000Z"},
+                               {"updated", "2026-09-05T10:00:09.000Z"}},
+                              // No usable timestamps: counted as nothing, never as a guess.
+                              {{"id", "run-3"}, {"status", "pending"}, {"created", ""}}})}};
+        }
+        co_return lake::control::ZettaControlResult<json>(
+            std::unexpected(lake::control::ZettaControlError{"not_found", capability}));
+    }
+};
+
+} // namespace
+
+TEST(Metering, UsageIncludesWorkspaceDataImagesAndComputeOutsideRepositories) {
+    const std::filesystem::path directory =
+        lake::test::fixture_path("metering-workspaces-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(directory);
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    auto store = std::shared_ptr<lake::control::Store>(&surface.store, [](auto*) {});
+    auto caller = std::make_shared<UsageWorkspaceCaller>();
+    lake::control::WorkspaceService workspaces(
+        lake::control::WorkspaceConfig{directory.string(), 5}, store, caller);
+    surface.ctx.workspaces = &workspaces;
+    std::string measured_space;
+    surface.ctx.registry_space_bytes = [&measured_space](const std::string& space) {
+        measured_space = space;
+        return std::optional<std::uint64_t>{4'096};
+    };
+
+    const ApiResult user =
+        surface.call("create_user", {{"email", "usage@example.com"}, {"display_name", "Usage"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer = surface.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", user.value.at("id")}, {"name", "usage"}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const std::string customer_id = customer.value.at("id");
+    const auto requested = liquid::runtime::block_on(workspaces.request(customer_id));
+    ASSERT_TRUE(requested && *requested);
+    ASSERT_TRUE(surface.store.set_service_status(
+        (*requested)->service_id, "Ready", "", "http://usage-workspace.test:4800"));
+    const auto service = surface.store.get_service((*requested)->service_id);
+    ASSERT_TRUE(service);
+    std::ofstream(directory / (service->slug + ".json"))
+        << json{{"kind", "zetta"}, {"token", "usage-token"}}.dump();
+    // A second workspace that is not running is reported as unmeasured, not as zero.
+    const auto stopped = surface.store.create_workspace({customer_id, "stopped", "dev", ""});
+    ASSERT_TRUE(stopped);
+
+    const auto repository = surface.store.create_repository({customer_id, "app", "", "private"});
+    ASSERT_TRUE(repository);
+    const auto build = surface.store.create_build({.customer_id = customer_id,
+                                                   .workspace_id = (*requested)->workspace_id,
+                                                   .repository = repository->id,
+                                                   .revision = "main",
+                                                   .target = "registry/usage/app:v1"});
+    ASSERT_TRUE(build);
+    ASSERT_TRUE(surface.store.set_build_status(build->id, {.phase = "Succeeded"}));
+    const auto queued = surface.store.create_build({.customer_id = customer_id,
+                                                    .workspace_id = (*requested)->workspace_id,
+                                                    .repository = repository->id,
+                                                    .revision = "main",
+                                                    .target = "registry/usage/app:v2"});
+    ASSERT_TRUE(queued);
+
+    const ApiResult usage = surface.call("metering_usage", {{"customer_id", customer_id}});
+    ASSERT_TRUE(usage.ok) << usage.error.message;
+    EXPECT_EQ(measured_space, "usage");
+    const json& summary = usage.value.at("summary");
+    EXPECT_EQ(summary.at("storage").at("repositories_bytes"), 123);
+    EXPECT_EQ(summary.at("storage").at("images_bytes"), 4'096);
+    EXPECT_EQ(summary.at("storage").at("workspace_data_bytes"), 15'000);
+    EXPECT_EQ(summary.at("storage").at("total_bytes"), 123 + 4'096 + 15'000);
+    EXPECT_EQ(summary.at("compute").at("workspace_run_seconds"), 91 + 9);
+    EXPECT_EQ(summary.at("compute").at("workspace_runs"), 2);
+    EXPECT_EQ(summary.at("compute").at("image_builds"), 1) << "only finished builds count";
+    EXPECT_FALSE(summary.at("priced"));
+    ASSERT_EQ(summary.at("workspaces").size(), 2U);
+    std::size_t measured = 0;
+    for (const json& workspace : summary.at("workspaces")) {
+        if (workspace.at("measured")) {
+            ++measured;
+            EXPECT_EQ(workspace.at("datasets"), 2);
+        }
+    }
+    EXPECT_EQ(measured, 1U);
+    const std::string not_measured = summary.at("not_measured").dump();
+    EXPECT_NE(not_measured.find("Workspace stopped"), std::string::npos) << not_measured;
+    EXPECT_NE(not_measured.find("Model files"), std::string::npos);
+    EXPECT_EQ(std::ranges::count(caller->capabilities, "list_datasets"), 1);
+    EXPECT_EQ(std::ranges::count(caller->capabilities, "list_runs"), 1);
+
+    // The window applies to when a run finished.
+    const ApiResult windowed = surface.call("metering_usage",
+                                            {{"customer_id", customer_id},
+                                             {"from", "2026-09-05T00:00:00Z"},
+                                             {"to", "2026-09-05T10:00:00Z"}});
+    ASSERT_TRUE(windowed.ok) << windowed.error.message;
+    EXPECT_EQ(windowed.value.at("summary").at("compute").at("workspace_run_seconds"), 9);
+    std::filesystem::remove_all(directory);
 }
 
 TEST(Metering, CustomerQuotaCapabilityOverridesTheProcessDefault) {
@@ -1274,6 +1423,103 @@ TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
                                                   {},
                                                   "Bearer " + pull->secret);
     EXPECT_NE(foreign_pull.find(" 403 "), std::string::npos) << foreign_pull;
+    server.stop();
+}
+
+TEST(RegistryProtocols, UsageCountsEachImageDigestOnceForItsSpace) {
+    TemporarySyncRoot temporary;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user(
+        {"taap:1:ed25519:registry-usage", "registry-usage@example.test", "Registry usage"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "usage-oci-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "registry-test-instance-kek";
+    options.store_root = temporary.path().string();
+    options.store = store;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string authorization = "Bearer registry-admin";
+
+    const auto push_blob = [&](const std::string& repository, const std::string& contents) {
+        const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
+        const std::string started = http_request(server.port(),
+                                                 "POST",
+                                                 "/v2/" + repository + "/blobs/uploads/",
+                                                 "",
+                                                 "application/octet-stream",
+                                                 {},
+                                                 authorization);
+        EXPECT_NE(started.find(" 202 "), std::string::npos) << started;
+        const std::string completed =
+            http_request(server.port(),
+                         "PUT",
+                         response_header(started, "Location") + "?digest=" + digest,
+                         contents,
+                         "application/octet-stream",
+                         {},
+                         authorization);
+        EXPECT_NE(completed.find(" 201 "), std::string::npos) << completed;
+        return digest;
+    };
+    const auto publish = [&](const std::string& repository,
+                             const std::string& tag,
+                             const std::string& config,
+                             const std::vector<std::string>& layers) {
+        json manifest{{"schemaVersion", 2},
+                      {"mediaType", "application/vnd.oci.image.manifest.v1+json"},
+                      {"config",
+                       {{"mediaType", "application/vnd.oci.image.config.v1+json"},
+                        {"digest", push_blob(repository, config)},
+                        {"size", config.size()}}},
+                      {"layers", json::array()}};
+        for (const std::string& layer : layers) {
+            manifest["layers"].push_back({{"mediaType", "application/vnd.oci.image.layer.v1.tar"},
+                                          {"digest", push_blob(repository, layer)},
+                                          {"size", layer.size()}});
+        }
+        const std::string text = manifest.dump();
+        const std::string published = http_request(server.port(),
+                                                   "PUT",
+                                                   "/v2/" + repository + "/manifests/" + tag,
+                                                   text,
+                                                   "application/vnd.oci.image.manifest.v1+json",
+                                                   {},
+                                                   authorization);
+        EXPECT_NE(published.find(" 201 "), std::string::npos) << published;
+        return text.size();
+    };
+
+    const std::string config = R"({"architecture":"amd64","os":"linux"})";
+    const std::string base_layer(1000, 'b');
+    const std::string app_layer(300, 'a');
+    // Two tags of one image and a cache image sharing its base layer: every digest once.
+    const std::size_t manifest_size =
+        publish("tenant-one/service", "v1", config, {base_layer, app_layer});
+    EXPECT_EQ(publish("tenant-one/service", "v2", config, {base_layer, app_layer}), manifest_size);
+    const std::string cache_config = R"({"cache":true})";
+    const std::size_t cache_manifest =
+        publish("tenant-one/cache/service", "buildcache", cache_config, {base_layer});
+    // Another space's image never counts toward this one.
+    publish("tenant-two/other", "v1", R"({"other":true})", {std::string(5000, 'x')});
+
+    const std::string response = http_request(server.port(),
+                                              "GET",
+                                              "/v1/metering_usage?customer_id=" + customer->id,
+                                              "",
+                                              "application/json",
+                                              {},
+                                              authorization);
+    const json body = json::parse(response_body(response));
+    ASSERT_TRUE(body.at("ok")) << body;
+    EXPECT_EQ(body.at("value").at("summary").at("storage").at("images_bytes"),
+              manifest_size + config.size() + base_layer.size() + app_layer.size() +
+                  cache_manifest + cache_config.size());
     server.stop();
 }
 

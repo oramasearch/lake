@@ -238,6 +238,8 @@ Usage itself is never cached. The performance fixture creates four repositories 
 128 files, closes them, starts a new server, and makes Metering its first request. That request
 must report nonzero stored bytes. Its elapsed time remains in the evidence output, while the
 router-derived Metering samples carry the same 500 ms p95 guard as every other page.
+Since lake#444 the Usage page (`/metering`) also reads each workspace's `list_datasets` and
+`list_runs` concurrently, so its budget is two calls in one round for the fixture's one workspace.
 
 The fixture now supplies 50 datasets, 21 methodologies, 20 solutions and three generators, not
 empty catalogues. It measures 71 HTML patterns, including populated Metering, all canonical

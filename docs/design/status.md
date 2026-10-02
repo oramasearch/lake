@@ -46,7 +46,7 @@ the exact commands and outputs.
 | Repositories and sync | Yes | Yes, including Postgres cases | Public routes listed in observed OpenAPI | No | [repositories](../api/repositories.md), [sync](../api/sync.md) |
 | Forge and export | Yes | Yes, including PostgreSQL review scenario | Public routes listed in observed OpenAPI | No | [forge](../api/forge.md), [export](../api/export.md) |
 | Search | Yes | Yes | Public route listed in observed OpenAPI | No | [search](../api/search.md) |
-| Platform and metering | Yes | Yes | Public routes listed in observed OpenAPI | No | [platform](../api/platform.md), [metering](../api/metering.md) |
+| Platform and metering (usage summary across images and workspaces, lake#444, local only) | Yes | Yes | Public routes listed in observed OpenAPI | No | [platform](../api/platform.md), [metering](../api/metering.md) |
 | Secrets, encryption, PKI, and recovery | Yes | Yes, including PostgreSQL identity exit | Public routes listed in observed OpenAPI | No | [secrets](../api/secrets.md), [PKI](../api/pki.md) |
 | Drive and models | Yes | Yes, including PostgreSQL drive scenario | Public routes listed in observed OpenAPI | No | [drive](../api/drive.md), [models](../api/models.md) |
 | Transparency and replication | Yes | Yes | Configuration and public routes listed in observed OpenAPI | `transparency_log_configuration` | [transparency](../api/transparency.md), [replication](../api/replication.md) |

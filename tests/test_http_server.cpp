@@ -3411,7 +3411,9 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/train/run", {2, 1}},
         {"/w/:workspace_id/train/runs", {1, 1}},
         {"/w/:workspace_id/train/stream", {2, 1}},
-        {"/w/:workspace_id/train/streams", {1, 1}}};
+        {"/w/:workspace_id/train/streams", {1, 1}},
+        // Usage reads each workspace's datasets and runs together.
+        {"/metering", {2, 1}}};
     const auto workspace_call_budget = [&workspace_call_budgets](const std::string& pattern) {
         const auto found = workspace_call_budgets.find(pattern);
         return found == workspace_call_budgets.end() ? WorkspaceCallBudget{} : found->second;

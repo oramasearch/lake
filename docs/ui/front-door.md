@@ -43,7 +43,7 @@ the homepage and forms do not confer additional access.
 |---|---|---|
 | Signed out or invalid credential | Home, Public repositories | Sign in, Create account |
 | Ordinary account | Home, Repositories, Shared with me, Search · **Design:** Projects · **Train:** Data, Runs · **Ship:** Models, Search indexes, Packages, Deployments · **Organization:** Organizations, Secrets, Usage (opens on the account's own space), Activity (`/activity`, the account's own audit events via `my_audit`) · **Developer:** API | **Account** menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
-| Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Metering, Secrets, Audit · **Developer:** API | Sign out |
+| Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Usage, Secrets, Audit · **Developer:** API | Sign out |
 
 **Design, Train and Ship** run on the customer's own Zetta workspace; see
 [`../api/workspaces.md`](../api/workspaces.md). Their pages live under `/design`, `/train` and
@@ -68,7 +68,7 @@ Inside a repository, the first tab is **Files** (the drive view) for signed-in v
 **Code**. The tab formerly labelled Platform is **Deployments**.
 
 Before 2026-09-08, every viewer saw Home, Repositories, Shared with me, Search, Customers, Organizations,
-Applications, Metering, Secrets, Audit, and API, plus an implementation label in the sidebar footer.
+Applications, Usage, Secrets, Audit, and API, plus an implementation label in the sidebar footer.
 The footer is removed. The public repository list is filtered by the existing registry policy.
 
 Repository tabs also omit Platform and Webhooks for anonymous readers. Protection requires the

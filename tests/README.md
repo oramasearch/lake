@@ -17,7 +17,8 @@ rounds, and Solution uses three calls in one round.
 The loose wall guard is p95 below 500 ms over 20 renders at 30 ms of workspace latency. Its
 populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering case
 with four repositories and 128 files. The first Metering request checks populated-byte correctness;
-the measured Metering route receives the same p95 guard as every other page. `Workspaces.Registry*` and
+the measured Metering route receives the same p95 guard as every other page and a budget of two
+workspace calls in one round (its usage summary reads datasets and runs). `Workspaces.Registry*` and
 `Workspaces.PipelineDefinitionCache*` cover expiry, change invalidation, input isolation,
 readiness/credential changes, errors and stale in-flight replies. Run with PostgreSQL in both
 native builds; [performance.md](../docs/ui/performance.md) explains the evidence rows.
