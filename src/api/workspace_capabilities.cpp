@@ -227,6 +227,76 @@ void set_audit(ApiContext& context, std::string kind, const json& input, std::st
     }
 }
 
+// The graph a Project Agent compile check stores: one per project and methodology, named so it
+// is never the pipeline the person is changing (lake#438).
+std::string project_agent_check_graph(const json& arguments) {
+    for (const char* key : {"methodology", "solution"}) {
+        if (const auto found = arguments.find(key);
+            found != arguments.end() && found->is_string() && !found->get<std::string>().empty()) {
+            return std::string(project_agent_check_prefix) + " " + found->get<std::string>();
+        }
+    }
+    return std::string(project_agent_check_prefix);
+}
+
+// The compile check a Project Agent change proposal runs (lake#438). Zetta's compile_intent
+// compiles the project's captured intent into the methodology's engine-owned graph and stores it,
+// so lake confines the call: the project is the one the person asked about, the stored graph is
+// lake's own check graph (never the pipeline being changed), the arguments are only those
+// compile_intent takes (the agent's free-text `intent` is not one), and a repeat check reads the
+// check graph back instead of compiling again.
+liquid::runtime::task<ApiResult> project_agent_compile_check(ApiContext& context,
+                                                             const json& input,
+                                                             const control::AgentTask& task) {
+    const json handed = task.body.is_object() ? task.body.value("context", json::object())
+                                              : json::object();
+    // A change request names its project; a build turn ("build:<project>") designs one.
+    std::string project =
+        handed.is_object() ? handed.value("project", std::string()) : std::string();
+    if (project.empty() && task.kind.starts_with("build:")) {
+        project = task.kind.substr(6);
+    }
+    if (project.empty()) {
+        co_return ApiResult::failure(
+            "unauthorized", "this Project Agent turn has no project to compile a check for");
+    }
+    const json asked = input.value("input", json::object());
+    json arguments{{"project", project}};
+    for (const char* key : {"methodology", "solution"}) {
+        if (const auto found = asked.find(key);
+            found != asked.end() && found->is_string() && !found->get<std::string>().empty()) {
+            arguments[key] = *found;
+        }
+    }
+    if (const auto hints = asked.find("hints"); hints != asked.end() && hints->is_object()) {
+        arguments["hints"] = *hints;
+    }
+    const std::string graph = project_agent_check_graph(arguments);
+    arguments["name"] = graph;
+    const std::string customer = input.at("customer_id");
+    auto compiled = co_await call_workspace(context, customer, "compile_intent", false, arguments);
+    if (!compiled) {
+        co_return ApiResult::failure("store_unavailable", compiled.error().message);
+    }
+    if (*compiled) {
+        json value = std::move(**compiled);
+        co_return ApiResult::success(value.is_object() ? std::move(value)
+                                                       : json{{"value", std::move(value)}});
+    }
+    const control::ZettaControlError refused = compiled->error();
+    // A collision means an earlier check already stored this methodology's graph.
+    if (refused.code == "engine_error") {
+        auto stored = co_await call_workspace(
+            context, customer, "get_graph", true, {{"project", project}, {"graph", graph}});
+        if (stored && *stored && (**stored).is_object()) {
+            json value = std::move(**stored);
+            value["project"] = project;
+            co_return ApiResult::success(std::move(value));
+        }
+    }
+    co_return ApiResult::failure(refused.code, refused.message);
+}
+
 void register_workspace_call(Registry& registry, bool read) {
     registry.add(Capability{
         .name = read ? "workspace_query" : "workspace_act",
@@ -256,12 +326,22 @@ void register_workspace_call(Registry& registry, bool read) {
                                              "/capability");
             }
             const auto agent_task = calling_agent_task(context);
-            if (agent_task && agent_task->agent == "agent-experiments" &&
+            // An agent turn acts only through the workspace actions its credential names
+            // (lake#438): `workspace_act` alone never opens the whole allow-list to an agent. The
+            // ExperimentsAgent's reads are named per turn as well.
+            if (agent_task && (!read || agent_task->agent == "agent-experiments") &&
                 !has_scope(context, capability)) {
+                const control::LibraryAgent* library = control::library_agent(agent_task->agent);
                 co_return ApiResult::failure(
-                    "unauthorized", "this ExperimentsAgent turn does not grant " + capability);
+                    "unauthorized",
+                    "this " + (library ? std::string(library->name) : agent_task->agent) +
+                        " turn does not grant " + capability);
             }
             set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
+            if (!read && agent_task && agent_task->agent == "agent-project" &&
+                capability == "compile_intent") {
+                co_return co_await project_agent_compile_check(context, input, *agent_task);
+            }
             const std::map<std::string, std::string> study_actions = {
                 {"create_study", "start_study"}, {"stop_study", "stop_study"},
                 {"stop_trial", "stop_experiment_trial"}, {"promote_trial", "promote_trial"}};
@@ -2182,7 +2262,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     if (!read.ok) {
         co_return read;
     }
-    const json graphs = read.value.value("graphs", json::array());
+    // The Project Agent's compile check graphs are never the project's pipeline (lake#438).
+    const json graphs = without_project_agent_checks(read.value.value("graphs", json::array()));
     if (graphs.empty()) {
         co_return called(co_await compile_pipeline(context,
                                                    task.customer_id,
@@ -3510,6 +3591,19 @@ void register_agent_run_capabilities(Registry& registry) {
                         }
                         handed["pipeline"] = std::move(*graph);
                     }
+                    // A change proposal is checked against the methodology's compiled graph
+                    // (lake#438). The turn may run that one action, confined by
+                    // project_agent_compile_check to lake's check graph on this project; every
+                    // other workspace action stays refused, and the edits themselves are applied
+                    // only by the person.
+                    // A build turn ("build:<project>") gets the same confined check: the graph
+                    // it stores is skipped by settle_build's pick of the project's pipeline.
+                    if ((handed.value("project", std::string()) != "" &&
+                         handed.value("graph", std::string()) != "") ||
+                        task_kind.starts_with("build:")) {
+                        scopes.push_back("workspace_act");
+                        scopes.push_back("compile_intent");
+                    }
                 } else if (agent == "agent-eval-generator" || agent == "agent-autosuggest-corpus" ||
                            agent == "agent-project-corpus") {
                     body["request"] = message;
@@ -3630,6 +3724,28 @@ void register_agent_run_capabilities(Registry& registry) {
                 : ApiResult::failure("engine_error",
                                      answer.value("error", std::string("the agent failed")));
         }});
+}
+
+bool is_project_agent_check_graph(const nlohmann::json& graph) {
+    if (!graph.is_object()) {
+        return false;
+    }
+    const auto name = graph.find("name");
+    return name != graph.end() && name->is_string() &&
+           name->get<std::string>().starts_with(project_agent_check_prefix);
+}
+
+nlohmann::json without_project_agent_checks(const nlohmann::json& graphs) {
+    if (!graphs.is_array()) {
+        return graphs;
+    }
+    nlohmann::json kept = nlohmann::json::array();
+    for (const nlohmann::json& graph : graphs) {
+        if (!is_project_agent_check_graph(graph)) {
+            kept.push_back(graph);
+        }
+    }
+    return kept;
 }
 
 bool workspace_read_allowed(std::string_view capability) {

@@ -1964,6 +1964,35 @@ std::string customer_query(std::string_view customer_id) {
     return "customer_id=" + url_component(customer_id);
 }
 
+// A Project Agent problem or failure as one plain sentence (lake#438): an agent reports what a
+// workspace call answered verbatim ("compile_intent did not succeed: compile_intent FAILED: 403
+// {...}"), and the page shows what failed without the status code or JSON body.
+std::string plain_agent_failure(std::string text) {
+    auto at = text.find(" did not succeed");
+    if (at == std::string::npos) {
+        at = text.find(" FAILED:");
+    }
+    if (at != std::string::npos) {
+        std::string call = text.substr(0, at);
+        if (const auto space = call.rfind(' '); space != std::string::npos) {
+            call = call.substr(space + 1);
+        }
+        return "The Project Agent's " + call + " check did not succeed on your workspace.";
+    }
+    std::size_t cut = std::min(text.find('{'), text.find('['));
+    if (cut != std::string::npos) {
+        text.resize(cut);
+    }
+    while (!text.empty() && (text.back() == ' ' || text.back() == ':' || text.back() == ',' ||
+                             text.back() == '\n' || text.back() == '.')) {
+        text.pop_back();
+    }
+    if (text.empty()) {
+        return "The Project Agent's check did not succeed on your workspace.";
+    }
+    return text + ".";
+}
+
 std::string hidden(std::string_view name, std::string_view value) {
     return std::format("<input type=\"hidden\" name=\"{}\" value=\"{}\">",
                        web_ui_escape(name),
@@ -2719,8 +2748,12 @@ std::string pipeline_content(const WorkspacePage& page) {
         for (const nlohmann::json& step : proposal.value("steps", nlohmann::json::array())) {
             steps += "<li>" + web_ui_escape(cell_text(step)) + "</li>";
         }
+        std::set<std::string> said;
         for (const nlohmann::json& problem : proposal.value("problems", nlohmann::json::array())) {
-            problems += "<li>" + web_ui_escape(cell_text(problem)) + "</li>";
+            if (std::string plain = plain_agent_failure(cell_text(problem));
+                said.insert(plain).second) {
+                problems += "<li>" + web_ui_escape(plain) + "</li>";
+            }
         }
         const nlohmann::json run = proposal.value("run", nlohmann::json::object());
         std::string settings;
@@ -2747,8 +2780,11 @@ std::string pipeline_content(const WorkspacePage& page) {
             steps.empty() ? std::string("<p>No edits to the graph.</p>")
                           : "<h3>Edits</h3><ol>" + steps + "</ol>",
             settings.empty() ? std::string() : "<h3>Run settings</h3><ul>" + settings + "</ul>",
-            problems.empty() ? std::string()
-                             : "<h3>Why it cannot be applied</h3><ul>" + problems + "</ul>",
+            problems.empty()
+                ? std::string()
+                : "<h3>Why it cannot be applied</h3><ul>" + problems +
+                      "</ul><p>Ask the Project Agent again below, or change the steps by "
+                      "hand.</p>",
             drawn && !drawn->steps.empty()
                 ? "<h3>After</h3><div class=\"pipeline-canvas\">" +
                       pl::render_svg(*drawn, {}, "", base + "&step=") + "</div>"
@@ -2774,7 +2810,11 @@ std::string pipeline_content(const WorkspacePage& page) {
                "edits; nothing changes until you apply them. This page checks again every 3 "
                "seconds.</p><p>" +
                web_ui_escape(json_text(page.data, "project_agent_message")) +
-               "</p><meta http-equiv=\"refresh\" content=\"3\"></section>";
+               // Under HTML's navigation rules a refresh to this page's own URL, which ends in
+               // #proposal, is a fragment navigation rather than a reload, so the page kept saying
+               // "working" (lake#438). Reload it; the declarative refresh remains without scripts.
+               "</p><script>setTimeout(()=>location.reload(),3000);</script><noscript><meta "
+               "http-equiv=\"refresh\" content=\"3\"></noscript></section>";
     } else if (page.data.value("project_agent_reply", false)) {
         out +=
             "<section class=\"panel notice\" id=\"proposal\"><h2>Project Agent Question</h2>"
@@ -2789,7 +2829,8 @@ std::string pipeline_content(const WorkspacePage& page) {
     } else if (!json_text(page.data, "project_agent_error").empty()) {
         out += "<p class=\"error\" role=\"alert\" id=\"proposal\">The Project Agent did not propose "
                "a change: " +
-               web_ui_escape(json_text(page.data, "project_agent_error")) + "</p>";
+               web_ui_escape(plain_agent_failure(json_text(page.data, "project_agent_error"))) +
+               " Ask it again below with more detail, or change the steps by hand.</p>";
     }
 
     // Ask the Project Agent for a change instead of editing by hand (lake#249).
@@ -4671,7 +4712,9 @@ std::string workspace_content(const WorkspacePage& page) {
             hidden("customer_id", page.customer_id));
     } else if (page.section == "project") {
         const nlohmann::json project = data.value("get_project", nlohmann::json::object());
-        const nlohmann::json graphs = project.value("graphs", nlohmann::json::array());
+        // The Project Agent's compile check graphs are not the project's pipelines (lake#438).
+        const nlohmann::json graphs =
+            without_project_agent_checks(project.value("graphs", nlohmann::json::array()));
         const nlohmann::json solution_task = data.value("solution_task", nlohmann::json::object());
         const nlohmann::json solution_project =
             data.value("solution_project", nlohmann::json::object());

@@ -8610,7 +8610,11 @@ struct ApiServer::Impl {
              {"input", {{"name", name}}}},
             context));
         std::vector<WorkspaceRead> reads;
-        if (project.ok) {
+        if (project.ok && project.value.is_object()) {
+            // The Project Agent's compile check graphs are lake's, not pipelines (lake#438).
+            if (const auto listed = project.value.find("graphs"); listed != project.value.end()) {
+                *listed = without_project_agent_checks(*listed);
+            }
             for (const auto& graph : project.value.value("graphs", nlohmann::json::array())) {
                 reads.push_back({"get_graph",
                                  {{"project", name},
@@ -9130,7 +9134,8 @@ struct ApiServer::Impl {
                         continue;
                     }
                     const std::string project = entry.value("name", std::string());
-                    for (const auto& graph : entry.value("graphs", nlohmann::json::array())) {
+                    for (const auto& graph : without_project_agent_checks(
+                             entry.value("graphs", nlohmann::json::array()))) {
                         if (graph.value("approval", std::string()) == "approved") {
                             approved.push_back({{"project", project},
                                                 {"graph", graph.value("name", std::string())}});

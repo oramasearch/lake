@@ -116,6 +116,11 @@ turn, repository/App writes only when the reviewed proposal is present. `http_se
 ExperimentsAgent turns use the workspace adapter and grant raw study operations by turn kind;
 `create_study` and `promote_trial` appear only with their reviewed confirmation. The adapter sends
 those actions through the canonical experiment capabilities.
+Project Agent pipeline change and build turns also carry `workspace_act` and `compile_intent`;
+the `workspace_act` handler refuses any action an agent turn's credential does not name and
+confines the Project Agent's compile check to lake's check graph on the turn's project (lake#438).
+`without_project_agent_checks` hides those check graphs from every pipeline list and from the
+pick after a build.
 `build_capabilities.cpp` owns customer-scoped build creation, app image builds, status,
 cancellation and retained Zetta progress. Build source and event credentials are rechecked against
 the current row on every call. App builds require `LAKE_APPS_RUNTIME_IMAGE`, use it through the

@@ -113,7 +113,11 @@ std::string agent_panel(const ExperimentsPage& page) {
                "Working</h2><p>It keeps working if you leave; this page checks again every 2 "
                "seconds.</p><p role=\"status\">" +
                web_ui_escape(page.agent_task.value("message", std::string())) +
-               "</p><meta http-equiv=\"refresh\" content=\"2\"></section>";
+               // The review URL ends in #experiment-proposal, and a declarative refresh to it
+               // is a fragment navigation, never a reload (lake#438). Reload it; the declarative
+               // refresh remains without scripts.
+               "</p><script>setTimeout(()=>location.reload(),2000);</script><noscript><meta "
+               "http-equiv=\"refresh\" content=\"2\"></noscript></section>";
     }
     if (result.value("kind", std::string()) == "proposal" &&
         result.value("confirm", false) && result.value("study", json()).is_object()) {
