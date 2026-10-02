@@ -3007,8 +3007,6 @@ std::string pipeline_content(const WorkspacePage& page) {
     return out + "</section>";
 }
 
-// One search index (#187): what it covers, a search box, publish and unpublish, and how to call it
-// from outside with a key scoped to search_index.
 // The workspace a copy-ready external call names: the page's own, so the call works as pasted.
 // Every data-plane capability requires `workspace_id` (lake#439); a page rendered without one
 // shows a placeholder the reader replaces rather than a call that is refused.
@@ -3016,6 +3014,8 @@ std::string example_workspace(const WorkspacePage& page) {
     return page.workspace_id.empty() ? std::string("<workspace id>") : page.workspace_id;
 }
 
+// One search index (#187): what it covers, a search box, publish and unpublish, and how to call it
+// from outside with a key scoped to search_index.
 std::string index_content(const WorkspacePage& page) {
     const std::string query = customer_query(page.customer_id);
     const nlohmann::json index = page.data.value("get_index", nlohmann::json::object());
