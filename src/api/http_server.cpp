@@ -78,6 +78,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
+#include "route_guard.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/callers.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -14779,17 +14780,32 @@ bool ApiServer::start() {
     }
 
     CatalogRouter router(impl.get_routes);
-    const auto add_route = [&router](auto method, auto path, auto handler) {
-        const std::string original(path);
-        if (workspace_page_path(original)) {
-            router.add(method, "/w/:workspace_id" + original, decltype(handler)(handler));
-        }
-        router.add(method, original, std::move(handler));
+    // Every handler is guarded: an exception it throws is logged with the route and request id
+    // and answered 500, never a dropped connection (lake#440).
+    const auto guarded = [&impl](std::string pattern, auto handler) {
+        return guard_route(std::move(pattern),
+                           std::move(handler),
+                           [&impl](http::route_params& route, const RouteFailure& failure) {
+                               const auto timing = request_timing(route);
+                               impl.record_request(route,
+                                                   failure.route,
+                                                   timing ? timing->started
+                                                          : std::chrono::steady_clock::now());
+                           });
     };
-    const auto add_workspace_api_route = [&router](auto method, auto path, auto handler) {
+    const auto add_route = [&router, &guarded](auto method, auto path, auto handler) {
         const std::string original(path);
-        router.add(method, "/w/:workspace_id" + original, decltype(handler)(handler));
-        router.add(method, original, std::move(handler));
+        auto guarded_handler = guarded(original, std::move(handler));
+        if (workspace_page_path(original)) {
+            router.add(method, "/w/:workspace_id" + original, decltype(guarded_handler)(guarded_handler));
+        }
+        router.add(method, original, std::move(guarded_handler));
+    };
+    const auto add_workspace_api_route = [&router, &guarded](auto method, auto path, auto handler) {
+        const std::string original(path);
+        auto guarded_handler = guarded(original, std::move(handler));
+        router.add(method, "/w/:workspace_id" + original, decltype(guarded_handler)(guarded_handler));
+        router.add(method, original, std::move(guarded_handler));
     };
     router.use([&impl, cors = http::cors()](http::route_params& route) -> http::route_task {
         // Beast2 reuses this response across requests and client connections.
@@ -14806,7 +14822,7 @@ bool ApiServer::start() {
         }
         co_return result;
     });
-    router.use([&impl](http::route_params& route) -> http::route_task {
+    router.use(guarded("workspace", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.workspace_route(route);
         if (result.what() != http::route_what::next) {
             const auto timing = request_timing(route);
@@ -14815,7 +14831,7 @@ bool ApiServer::start() {
             impl.record_request(route, impl.route_pattern_for(route), start);
         }
         co_return result;
-    });
+    }));
     add_route(http::method::get, "/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/", impl.serve_web_root(route));
     });
@@ -16168,9 +16184,9 @@ bool ApiServer::start() {
         http::method::put, "/:package", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/:package", impl.serve_npm_metadata(route));
         });
-    router.use([&impl](http::route_params& route) -> http::route_task {
+    router.use(guarded("unmatched", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "unmatched", impl.serve_not_found(route));
-    });
+    }));
 
     auto parser_options = http::parser_config{true};
     parser_options.body_limit =

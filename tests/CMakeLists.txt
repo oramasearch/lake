@@ -41,7 +41,8 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
   test_token_attenuation.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest)
-target_include_directories(lake-tests PRIVATE "${LAKE_LIQUID_SOURCE_DIR}/src")
+# src/ for the Beast2 adapter's private headers (api/route_guard.hpp).
+target_include_directories(lake-tests PRIVATE "${LAKE_LIQUID_SOURCE_DIR}/src" "${PROJECT_SOURCE_DIR}/src")
 target_compile_definitions(lake-tests PRIVATE
   LAKE_TEST_PYTHON="${Python3_EXECUTABLE}"
   LAKE_TEST_NODE="${LAKE_NODE_EXECUTABLE}"

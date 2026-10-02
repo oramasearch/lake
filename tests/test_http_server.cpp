@@ -55,6 +55,13 @@
 #include "temporary_directory.hpp"
 #include "stream_fixture.hpp"
 #include "lake/api/web_ui.hpp"
+#include "api/route_guard.hpp"
+
+#include <boost/beast2/http_server.hpp>
+#include <boost/corosio/endpoint.hpp>
+#include <boost/corosio/io_context.hpp>
+#include <boost/corosio/ipv4_address.hpp>
+#include <boost/http/server/router.hpp>
 
 namespace {
 
@@ -2086,6 +2093,35 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
     EXPECT_NE(std::get<2>(*retrieved).dump().find("\"table\":\"at_risk_1\""), std::string::npos);
 }
 
+// lake#440: Ship > Packages dropped the connection when the space had a build with no digest yet.
+TEST_P(HttpResponseIsolation, ShipPackagesListsABuildThatHasNoDigestYet) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customers_response =
+        connection->request("GET", "/v1/list_customers", "", cookie);
+    const nlohmann::json customers = nlohmann::json::parse(response_body(customers_response));
+    const std::string customer_id = customers["value"]["items"][0]["id"];
+    select_workspace(*connection, customer_id);
+    const auto repository = store_->create_repository({customer_id, "scoring", "", "private"});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto queued = store_->create_build({.customer_id = customer_id,
+                                              .workspace_id = connection->workspace_id,
+                                              .repository = repository->id,
+                                              .revision = "main",
+                                              .target = "lake.example.test/acme/scoring:v3"});
+    ASSERT_TRUE(queued) << queued.error().message;
+    ASSERT_TRUE(queued->digest.empty());
+
+    const std::string page =
+        connection->request("GET", "/ship/packages?customer_id=" + customer_id, "", cookie);
+    ASSERT_TRUE(page.starts_with("HTTP/1.1 200")) << page.substr(0, 300);
+    EXPECT_NE(page.find("data-build-id=\"" + queued->id + "\""), std::string::npos);
+    EXPECT_NE(page.find("<code>lake.example.test/acme/scoring:v3</code>"), std::string::npos);
+}
+
 TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     auto connection = connect();
     const std::string sign_in = connection->request(
@@ -2797,6 +2833,149 @@ TEST(HttpServer, ResponseResetPreservesCurrentProtocolAndCors) {
     EXPECT_EQ(response_header(healthy, "connection"), "keep-alive");
     EXPECT_EQ(response_header(healthy, "access-control-allow-origin"), "*");
     EXPECT_TRUE(response_header(healthy, "access-control-allow-methods").empty());
+}
+
+// lake#440: a handler that throws is answered 500 and logged with its route and request id; the
+// connection stays open for the next request.
+class ThrowingRoutes {
+public:
+    ThrowingRoutes() {
+        namespace http = boost::http;
+        http::router<http::route_params> router;
+        const auto observe = [this](http::route_params&, const lake::api::RouteFailure& failure) {
+            std::lock_guard lock(mutex_);
+            failures_.push_back(failure);
+        };
+        // Throws while the handler is called, before any task exists.
+        router.add(http::method::get,
+                   "/throws-now",
+                   lake::api::guard_route(
+                       "/throws-now",
+                       [](http::route_params&) -> http::route_task {
+                           throw std::runtime_error("renderer failed before its task");
+                       },
+                       observe));
+        // Throws inside the handler's task, as a renderer exception does.
+        router.add(http::method::get,
+                   "/throws-later",
+                   lake::api::guard_route(
+                       "/throws-later",
+                       [](http::route_params& route) -> http::route_task {
+                           route.res.set("X-Partial", "set before the throw");
+                           const nlohmann::json row{{"digest", nullptr}};
+                           // Throws: the key is present and null, not a string.
+                           route.res.set("X-Digest", row.value("digest", std::string()));
+                           co_return http::route_done;
+                       },
+                       observe));
+        router.add(http::method::get,
+                   "/fine",
+                   lake::api::guard_route(
+                       "/fine",
+                       [](http::route_params& route) -> http::route_task {
+                           route.status(http::status::ok);
+                           route.res.set(http::field::content_type, "text/plain");
+                           route.res.set_payload_size(2);
+                           auto [error] = co_await route.send("ok");
+                           if (error) {
+                               co_return http::route_error(error);
+                           }
+                           co_return http::route_done;
+                       },
+                       observe));
+        server_ = std::make_unique<boost::beast2::http_server>(
+            io_context_,
+            1,
+            std::move(router),
+            http::make_parser_config(http::parser_config{true}),
+            http::make_serializer_config(http::serializer_config()));
+        if (server_->bind(boost::corosio::endpoint(boost::corosio::ipv4_address("127.0.0.1"), 0))) {
+            return;
+        }
+        port_ = server_->local_endpoint().port();
+        server_->start();
+        thread_ = std::thread([this] { io_context_.run(); });
+    }
+
+    ~ThrowingRoutes() {
+        if (server_) {
+            server_->stop();
+        }
+        io_context_.stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    [[nodiscard]] unsigned short port() const {
+        return port_;
+    }
+
+    [[nodiscard]] std::vector<lake::api::RouteFailure> failures() const {
+        std::lock_guard lock(mutex_);
+        return failures_;
+    }
+
+private:
+    boost::corosio::io_context io_context_;
+    std::unique_ptr<boost::beast2::http_server> server_;
+    std::thread thread_;
+    unsigned short port_ = 0;
+    mutable std::mutex mutex_;
+    std::vector<lake::api::RouteFailure> failures_;
+};
+
+TEST(HttpServer, AHandlerThatThrowsIsAnswered500AndLogged) {
+    ThrowingRoutes routes;
+    ASSERT_NE(routes.port(), 0);
+    HttpConnection connection(routes.port());
+
+    const std::string page = connection.request(
+        "GET", "/throws-now", {}, {}, "HTTP/1.1", {}, "text/plain",
+        {{"Accept", "text/html,application/xhtml+xml"}});
+    ASSERT_TRUE(page.starts_with("HTTP/1.1 500")) << page.substr(0, 300);
+    EXPECT_EQ(response_header(page, "content-type"), "text/html; charset=utf-8");
+    const std::string generated_id = response_header(page, "x-request-id");
+    EXPECT_FALSE(generated_id.empty());
+    EXPECT_NE(page.find("We Could Not Load This Page"), std::string::npos);
+    EXPECT_NE(page.find("Request id: " + generated_id), std::string::npos);
+    EXPECT_EQ(page.find("renderer failed"), std::string::npos);
+
+    // Same connection: the failure did not drop it.
+    const std::string api = connection.request(
+        "GET", "/throws-later", {}, {}, "HTTP/1.1", {}, "text/plain",
+        {{"Accept", "application/json"}, {"X-Request-Id", "request-440"}});
+    ASSERT_TRUE(api.starts_with("HTTP/1.1 500")) << api.substr(0, 300);
+    EXPECT_EQ(response_header(api, "content-type"), "application/json; charset=utf-8");
+    EXPECT_EQ(response_header(api, "x-request-id"), "request-440");
+    EXPECT_TRUE(response_header(api, "x-partial").empty());
+    const nlohmann::json envelope = nlohmann::json::parse(response_body(api));
+    EXPECT_EQ(envelope["ok"], false);
+    EXPECT_EQ(envelope["error"]["code"], "internal_error");
+    EXPECT_NE(envelope["error"]["message"].get<std::string>().find("request-440"),
+              std::string::npos);
+
+    const std::string fine = connection.request("GET", "/fine");
+    ASSERT_TRUE(fine.starts_with("HTTP/1.1 200")) << fine.substr(0, 300);
+    EXPECT_EQ(response_body(fine), "ok");
+
+    const auto failures = routes.failures();
+    ASSERT_EQ(failures.size(), 2U);
+    EXPECT_EQ(failures[0].route, "/throws-now");
+    EXPECT_EQ(failures[0].method, "GET");
+    EXPECT_EQ(failures[0].request_id, generated_id);
+    EXPECT_EQ(failures[0].message, "renderer failed before its task");
+    EXPECT_EQ(failures[1].route, "/throws-later");
+    EXPECT_EQ(failures[1].path, "/throws-later");
+    EXPECT_EQ(failures[1].request_id, "request-440");
+    EXPECT_NE(failures[1].message.find("type must be string"), std::string::npos);
+
+    const nlohmann::json line = nlohmann::json::parse(lake::api::route_failure_log_line(failures[1]));
+    EXPECT_EQ(line["level"], "error");
+    EXPECT_EQ(line["event"], "handler_exception");
+    EXPECT_EQ(line["route"], "/throws-later");
+    EXPECT_EQ(line["request_id"], "request-440");
+    EXPECT_EQ(line["error"], failures[1].message);
 }
 
 TEST(HttpServer, ClerkReplacesTheBrowserSignInPagesWhenConfigured) {

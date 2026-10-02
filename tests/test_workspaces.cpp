@@ -22,6 +22,7 @@
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/builds.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -1150,6 +1151,31 @@ TEST(Workspaces, PackagesPageListsTheRegistriesWithInstallCommands) {
                   .find("no registry storage configured"),
               std::string::npos);
     EXPECT_NE(lake::api::web_ui_home(true).find("href=\"/ship/packages\""), std::string::npos);
+}
+
+// lake#440: a queued build has no image yet, so its digest is null; the page threw on it and the
+// connection dropped (a 502 at the edge).
+TEST(Workspaces, PackagesPageRendersABuildThatHasNoDigestYet) {
+    lake::control::Build queued;
+    queued.id = "build-queued";
+    queued.target = "lake.example.test/acme/scoring:v3";
+    queued.phase = "Queued";
+    lake::control::Build built = queued;
+    built.id = "build-done";
+    built.phase = "Succeeded";
+    built.digest = "sha256:abc";
+    const json builds = json::array(
+        {lake::control::build_json(queued, "lake.example.test"),
+         lake::control::build_json(built, "lake.example.test")});
+    ASSERT_TRUE(builds[0]["digest"].is_null());
+    const json catalog{{"oci", json::array({{{"name", nullptr}, {"versions", nullptr}}})}};
+    std::string html;
+    ASSERT_NO_THROW(html = lake::api::web_ui_packages(
+                        catalog, true, "https://lake.example.test", true, builds, "customer-1"));
+    EXPECT_NE(html.find("data-build-id=\"build-queued\""), std::string::npos);
+    EXPECT_NE(html.find("<code>lake.example.test/acme/scoring:v3</code>"), std::string::npos);
+    EXPECT_NE(html.find(">Queued</td><td><code></code>"), std::string::npos);
+    EXPECT_NE(html.find("<code>sha256:abc</code>"), std::string::npos);
 }
 
 TEST(Workspaces, EditPipelineReadsValidatesAndSavesTheWholeGraph) {

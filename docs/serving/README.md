@@ -1,7 +1,7 @@
 # Serving contracts
 
-[http.md](http.md) defines the Beast2 server, route inventory, response rules, and per-route body
-limits. OCI blob uploads stream to storage under the configurable registry limit; all other body
+[http.md](http.md) defines the Beast2 server, route inventory, response rules, per-route body
+limits, and the `500` answer and `handler_exception` log line for a handler that throws. OCI blob uploads stream to storage under the configurable registry limit; all other body
 readers retain the 64 MiB ceiling or a smaller route-specific bound.
 
 [configuration.md](configuration.md) lists every command-line flag and environment variable with

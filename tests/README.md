@@ -101,6 +101,12 @@ case. Postgres fixtures generate valid Liquid identity documents. The contract a
 are in [`../docs/serving/http.md`](../docs/serving/http.md).
 `HttpServer.ResponseResetPreservesCurrentProtocolAndCors` checks preflight header isolation and
 the current response's HTTP version, connection policy, status and CORS headers on a reused socket.
+`HttpServer.AHandlerThatThrowsIsAnswered500AndLogged` runs `guard_route` handlers on a Beast2
+server and checks the HTML and JSON `500` answers, the request id, the logged route and message,
+and that the connection then serves a `200`. `lake-tests` adds `src/` to its include path for this
+private header. `HttpServer/HttpResponseIsolation.ShipPackagesListsABuildThatHasNoDigestYet/*` and
+`Workspaces.PackagesPageRendersABuildThatHasNoDigestYet` cover the Ship → Packages page with a
+queued build whose digest is null (lake#440).
 
 Web UI string tests cover the content-hashed stylesheet link shared by the standard and hosted
 page heads, SHA-256 URL changes for different stylesheet bytes, content-hashed font references,

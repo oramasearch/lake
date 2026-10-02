@@ -56,6 +56,12 @@ issuer scopes, lifetime and static authority in `capabilities.cpp`. The common H
 carries authenticated session metadata; adapters do not decide delegation policy. Application
 sign-in results may include a JWT; API-token issuance retains only its derived session bearer.
 
+`route_guard.hpp` wraps every route handler registered by `http_server.cpp`: an exception is
+logged with the route and request id and answered 500 (HTML or the JSON envelope), never a
+dropped connection. It names Boost.HTTP types, so it stays in `src/api/` rather than `include/`.
+Renderers read optional JSON fields with `json_text`, which treats a null as empty; `value(key,
+std::string())` throws on a present null. See [handler exceptions](../../docs/serving/http.md#handler-exceptions).
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 
