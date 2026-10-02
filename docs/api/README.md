@@ -3,7 +3,8 @@
 [experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
 and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
 plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from
-the solutions holdout `get_experiment` operation.
+the solutions holdout `get_experiment` operation. `start_study` leaves a missing objective and
+budgets to Zetta under `from_defaults`, and every experiment error keeps Zetta's `path`.
 
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
 with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.

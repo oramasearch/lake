@@ -18,6 +18,8 @@ Rules for writing them:
 - Keep Ship's ApplicationAgent steps explicit about reviewing the exact proposal before any write.
 - Keep Train's ExperimentsAgent steps explicit about editing and confirming the exact study before
   it starts.
+- Name held-out metrics as the run report does (`held_out_auc`, …), and lead a run's report with
+  its held-out score.
 - A new page is a new `.md` here **and** its slug in `GUIDE_FILES`; the first line is `# <Title>`.
 - Every REST/MCP example is complete and runs as pasted: it carries every required field, including
   `customer_id` and `workspace_id` (as `<customer id>` and `<workspace id>`). Write it as JSON next

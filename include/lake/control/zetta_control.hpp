@@ -63,6 +63,8 @@ inline constexpr std::array<std::string_view, 11> domain_columns = {
 struct ZettaControlError {
     std::string code;
     std::string message;
+    // The JSON pointer of the input field at fault, when the engine names one (zetta#1217).
+    std::string path = {};
 };
 
 template <class T> using ZettaControlResult = std::expected<T, ZettaControlError>;

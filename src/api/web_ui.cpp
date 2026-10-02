@@ -2574,8 +2574,96 @@ std::string object_table(const nlohmann::json& rows) {
 
 // get_run_report as a reader wants it: what the model learned from, what it leans on, who is at
 // risk, and what not to believe — the raw document stays one click away.
+// The score a reader looks for first (lake#449): the held-out figure and how many rows it was
+// measured on, with any caveat on it beside it, then the model's other figures.
+std::string run_report_score(const nlohmann::json& report) {
+    const auto found = report.find("model");
+    if (found == report.end() || !found->is_object()) {
+        return {};
+    }
+    const nlohmann::json& model = *found;
+    const auto number = [&](std::string_view key) -> std::optional<double> {
+        const auto value = model.find(std::string(key));
+        return value != model.end() && value->is_number() ? std::optional(value->get<double>())
+                                                          : std::nullopt;
+    };
+    // The caveats Zetta attaches to a figure: present, but not to be read as a result.
+    const auto caveat = [&](std::string_view field) {
+        std::string why;
+        for (const nlohmann::json& item : report.value("caveats", nlohmann::json::array())) {
+            if (item.is_object() && json_text(item, "field") == field) {
+                why += (why.empty() ? "" : " ") + json_text(item, "why") + ".";
+            }
+        }
+        return why;
+    };
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 5> held_out{{
+        {"held_out_auc", "AUC"},
+        {"held_out_log_loss", "log loss"},
+        {"held_out_accuracy", "accuracy"},
+        {"held_out_rmse", "RMSE"},
+        {"held_out_mae", "MAE"},
+    }};
+    std::string out = "<h3>Score</h3>";
+    const std::optional<double> rows = number("held_out_rows");
+    const std::string size =
+        rows ? std::format(" on {:.0f} rows the model did not see", *rows)
+             : std::string(" on rows the model did not see");
+    std::string lead;
+    for (const auto& [key, label] : held_out) {
+        const auto value = number(key);
+        if (!value) {
+            continue;
+        }
+        const std::string why = caveat(key);
+        if (lead.empty()) {
+            lead = std::format("<p>Held-out {} <strong>{:.3f}</strong>{}"
+                               "</p>",
+                               label,
+                               *value,
+                               web_ui_escape(size));
+            if (!why.empty()) {
+                lead += "<p class=\"notice status-warning\" role=\"status\"><span class=\"badge "
+                        "status-warning\">do not quote</span> " +
+                        web_ui_escape(why) + "</p>";
+            }
+        } else {
+            lead += std::format("<p class=\"sub\">Held-out {} {:.3f}{}</p>",
+                                label,
+                                *value,
+                                why.empty() ? std::string() : " — " + web_ui_escape(why));
+        }
+    }
+    if (lead.empty()) {
+        const auto in_sample = number("in_sample_auc");
+        lead = in_sample
+                   ? std::format("<p>No held-out score. In-sample AUC "
+                                 "{:.3f} was measured on the rows the model learned from and "
+                                 "flatters it; it is not a result.</p>",
+                                 *in_sample)
+                   : std::string("<p>No held-out score was measured for "
+                                 "this run.</p>");
+    }
+    out += lead;
+    std::string figures;
+    for (const auto& [key, value] : model.items()) {
+        if (value.is_number() && key != "held_out_rows") {
+            figures += "<dt>" + web_ui_escape(key) + "</dt><dd>" + web_ui_escape(cell_text(value)) +
+                       "</dd>";
+        }
+    }
+    if (rows) {
+        figures += std::format("<dt>held_out_rows</dt><dd>{:.0f}</dd>", *rows);
+    }
+    if (!figures.empty()) {
+        out += "<details><summary>Every figure the model records</summary><dl>" + figures +
+               "</dl></details>";
+    }
+    return out;
+}
+
 std::string run_report_panel(const nlohmann::json& report) {
-    std::string out = "<section class=\"panel\"><h2>Report</h2>";
+    std::string out = "<section class=\"panel\"><h2>Report</h2>" + run_report_score(report);
     if (const auto dataset = report.find("dataset");
         dataset != report.end() && dataset->is_object()) {
         out += "<h3>What It Learned From</h3><dl>";
@@ -2732,6 +2820,58 @@ nlohmann::json graph_called(const nlohmann::json& data, const std::string& id) {
         data.value("names", nlohmann::json::object()).value("graphs", nlohmann::json::object());
     return graphs.contains(id) ? graphs[id] : nlohmann::json::object();
 }
+// Which study each trial run and trial model belongs to, and which models a study promoted
+// (lake#449), from list_studies. A dataset-level study names no project or pipeline, so its runs
+// and models are named by their study.
+struct StudyRefs {
+    std::map<std::string, nlohmann::json> by_run;
+    std::map<std::string, nlohmann::json> by_model;
+    std::set<std::string> promoted;
+};
+StudyRefs study_refs(const nlohmann::json& data) {
+    StudyRefs refs;
+    for (const nlohmann::json& study : data.value("list_studies", nlohmann::json::object())
+                                           .value("studies", nlohmann::json::array())) {
+        if (!study.is_object()) {
+            continue;
+        }
+        const nlohmann::json spec = study.value("spec", nlohmann::json::object());
+        const std::string name = json_text(study, "name").empty() ? json_text(spec, "name")
+                                                                  : json_text(study, "name");
+        const nlohmann::json ref{{"id", json_text(study, "id")}, {"name", name}};
+        for (const nlohmann::json& trial : study.value("trials", nlohmann::json::array())) {
+            if (!trial.is_object()) {
+                continue;
+            }
+            nlohmann::json entry = ref;
+            entry["number"] = trial.value("number", nlohmann::json());
+            if (const std::string run = json_text(trial, "run"); !run.empty()) {
+                refs.by_run[run] = entry;
+            }
+            if (const std::string model = json_text(trial, "model"); !model.empty()) {
+                refs.by_model[model] = entry;
+            }
+        }
+        if (const std::string promoted = json_text(study, "promoted_model"); !promoted.empty()) {
+            refs.promoted.insert(promoted);
+            refs.by_model.try_emplace(promoted, ref);
+        }
+    }
+    return refs;
+}
+// "study <name>" as a link to the study page.
+std::string study_link(const std::string& query, const nlohmann::json& ref) {
+    const std::string name = json_text(ref, "name");
+    return "study " + row_link("/train/experiment?" + query + "&study=" +
+                                   url_component(json_text(ref, "id")),
+                               name.empty() ? json_text(ref, "id") : name);
+}
+// A trial run as "Trial N of study <name>".
+std::string trial_subject(const std::string& query, const nlohmann::json& ref) {
+    const nlohmann::json number = ref.value("number", nlohmann::json());
+    return (number.is_number() ? "Trial " + number.dump() + " of " : std::string("A trial of ")) +
+           study_link(query, ref);
+}
 // A pipeline and its project as links, or "a deleted project" when lake no longer has it.
 std::string run_subject(const std::string& query, const nlohmann::json& data,
                         const std::string& graph_id, const std::string& project_id,
@@ -2747,6 +2887,17 @@ std::string run_subject(const std::string& query, const nlohmann::json& data,
         return "<span class=\"muted\">a pipeline of a deleted project</span>";
     }
     const std::string project = json_text(graph, "project");
+    // A run of no named pipeline or project (lake#449): say so rather than print a bare "in".
+    if (json_text(graph, "name").empty() && project.empty()) {
+        return "<span class=\"muted\">a run outside any pipeline</span>";
+    }
+    if (project.empty()) {
+        return web_ui_escape(json_text(graph, "name"));
+    }
+    if (json_text(graph, "name").empty()) {
+        return "<span class=\"muted\">a run</span> <span class=\"muted\">in</span> " +
+               row_link("/design/project?" + query + "&name=" + url_component(project), project);
+    }
     return row_link("/design/pipeline?" + query + "&project=" + url_component(project) +
                         "&graph=" + url_component(json_text(graph, "name")),
                     json_text(graph, "name")) +
@@ -5369,18 +5520,22 @@ std::string workspace_content(const WorkspacePage& page) {
         } else {
             out += "<table><thead><tr><th>Pipeline</th><th>Status</th><th>Started</th><th></th>"
                    "</tr></thead><tbody>";
+            const StudyRefs studies = study_refs(data);
             for (const nlohmann::json& run : runs) {
                 const std::string id = json_text(run, "id");
                 const std::string status = json_text(run, "status");
+                const auto trial = studies.by_run.find(id);
                 out += std::format(
                     "<tr><td>{}</td><td><span class=\"badge{}\">{}</span></td><td>{}</td><td>{}"
                     "</td></tr>",
-                    run_subject(query,
-                                data,
-                                json_text(run, "graph"),
-                                json_text(run, "project"),
-                                json_text(run, "pipeline_name"),
-                                json_text(run, "project_name")),
+                    trial != studies.by_run.end()
+                        ? trial_subject(query, trial->second)
+                        : run_subject(query,
+                                      data,
+                                      json_text(run, "graph"),
+                                      json_text(run, "project"),
+                                      json_text(run, "pipeline_name"),
+                                      json_text(run, "project_name")),
                     status == "succeeded" ? " status-success"
                     : status == "failed"  ? " status-danger"
                                           : "",
@@ -5401,7 +5556,15 @@ std::string workspace_content(const WorkspacePage& page) {
         const std::string status = json_text(run, "status");
         out += std::format("<p>Status: <span class=\"badge\">{}</span></p>",
                            web_ui_escape(status.empty() ? "unknown" : status));
-        if (!json_text(run, "graph").empty()) {
+        const StudyRefs studies = study_refs(data);
+        if (const auto trial = studies.by_run.find(json_text(run, "id"));
+            trial != studies.by_run.end()) {
+            out += "<p class=\"sub\">" + trial_subject(query, trial->second) +
+                   (json_text(run, "created").empty()
+                        ? std::string()
+                        : " · started " + web_ui_escape(when(json_text(run, "created")))) +
+                   "</p>";
+        } else if (!json_text(run, "graph").empty()) {
             out += "<p class=\"sub\">" +
                    run_subject(query,
                                data,
@@ -5454,8 +5617,17 @@ std::string workspace_content(const WorkspacePage& page) {
             out += "<table><thead><tr><th>Model</th><th>Project</th><th>Trained</th><th>Score</th>"
                    "<th>Published</th><th></th></tr></thead><tbody>";
             std::string calls;
+            const StudyRefs studies = study_refs(data);
             for (const nlohmann::json& model : models) {
                 const std::string id = json_text(model, "id");
+                const nlohmann::json* study = nullptr;
+                if (const auto found = studies.by_model.find(id); found != studies.by_model.end()) {
+                    study = &found->second;
+                } else if (const auto run = studies.by_run.find(json_text(model, "run"));
+                           run != studies.by_run.end()) {
+                    study = &run->second;
+                }
+                const bool promoted = studies.promoted.contains(id);
                 const nlohmann::json detail = details.value(id, model);
                 const bool published = detail.value("exposed", false);
                 const nlohmann::json metrics = detail.value("metrics", nlohmann::json::object());
@@ -5478,17 +5650,30 @@ std::string workspace_content(const WorkspacePage& page) {
                     json_text(model, "project_name").empty()
                         ? project_called(data, json_text(model, "project"))
                         : json_text(model, "project_name");
+                // A study's model names its study (lake#449); a dataset-level study has no project.
+                std::string where;
+                if (!project.empty()) {
+                    where = row_link("/design/project?" + query + "&name=" + url_component(project),
+                                     project);
+                }
+                if (study) {
+                    where += (where.empty() ? std::string() : std::string("<br><small>")) +
+                             trial_subject(query, *study) + (where.empty() ? "" : "</small>");
+                }
+                if (where.empty()) {
+                    where = json_text(model, "project").empty()
+                                ? std::string("<span class=\"muted\">no project</span>")
+                                : std::string("<span class=\"muted\">a deleted project</span>");
+                }
                 out += std::format(
-                    "<tr><td><strong>{}</strong><br><small class=\"muted\"><code>{}</code></small>"
+                    "<tr><td><strong>{}</strong>{}<br><small class=\"muted\"><code>{}</code></small>"
                     "</td><td>{}</td><td>{}</td><td>{}</td><td><span class=\"badge{}\">{}</span></td>"
                     "<td><form class=\"inline\" method=\"post\" action=\"/ship/models/publish\">{}{}"
                     "{}<button type=\"submit\"{}>{}</button></form></td></tr>",
                     web_ui_escape(json_text(model, "name")),
+                    promoted ? " <span class=\"badge status-success\">promoted</span>" : "",
                     web_ui_escape(id.substr(0, 8)),
-                    project.empty() ? std::string("<span class=\"muted\">a deleted project</span>")
-                                    : row_link("/design/project?" + query + "&name=" +
-                                                   url_component(project),
-                                               project),
+                    where,
                     web_ui_escape(when(json_text(model, "created"))),
                     score,
                     published ? " status-success" : "",

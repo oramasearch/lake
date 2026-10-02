@@ -84,7 +84,7 @@ Initial proposal request (`POST /v1/agent_turn`; MCP tool `agent_turn`):
 object is sent in a second `agent_turn`:
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Confirm and start the reviewed study proposal.","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"study":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"validation.auc","direction":"maximize","validation_split":"validation"},"budgets":{"max_trials":4,"max_parallel_trials":1,"max_wall_time_ms":60000,"cost_cap":5}},"explanations":{"objective":"Use validation AUC."}}}}
+{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Confirm and start the reviewed study proposal.","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"study":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"budgets":{"max_trials":4,"max_parallel_trials":1,"max_wall_time_ms":60000,"cost_cap":5}},"explanations":{"objective":"Use held-out AUC."}}}}
 ```
 ```json
 {"task_id":"confirmed-task-id","status":"pending"}
@@ -200,8 +200,23 @@ additional Lake confirmation field. An explicit typed `search_space` may replace
 defaults. Budgets, conditional parameters, samplers, pruners and released DP metrics follow the
 engine contract. A `test` validation split is rejected before the workspace call.
 
+`name` and `methodology` are always required. With `from_defaults: true`, Zetta fills the
+methodology's search space and a missing objective (`held_out_auc`, `maximize`, the `validation`
+split) and budgets (10 trials, 2 in parallel, 10 minutes, no cost cap), field by field, so
+`objective`, `budgets` and each of their fields may be omitted. Without it, Lake refuses a missing
+`objective` or `budgets` at `/objective` or `/budgets` before the workspace call (lake#463).
+
+Objective metrics are named by the run report's keys: `held_out_auc`, `held_out_log_loss`,
+`held_out_accuracy`, `held_out_rmse`, `held_out_mae`. Zetta accepts older spellings
+(`validation.auc`, `ROC-AUC`, `auc`, `log loss`, …) as aliases and stores the canonical name
+([zetta#1217](https://github.com/oramasearch/zetta/issues/1217)).
+
+Every experiment capability passes a Zetta error's `path` through unchanged, so
+`{"ok":false,"error":{"code":"invalid_input","message":"required; set from_defaults: true …","path":"/objective"}}`
+names the field to repair.
+
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"validation.auc","direction":"maximize","validation_split":"validation"},"from_defaults":true,"sampler":"tpe","pruner":"asha","budgets":{"max_trials":10,"max_wall_time_ms":60000,"max_parallel_trials":1,"cost_cap":5},"seed":1138,"confirm":true}
+{"customer_id":"space-id","workspace_id":"workspace-id","name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"from_defaults":true,"sampler":"tpe","pruner":"asha","budgets":{"max_trials":10,"max_wall_time_ms":60000,"max_parallel_trials":1,"cost_cap":5},"seed":1138,"confirm":true}
 ```
 
 Its response is the complete Study returned by `get_experiment_study`, with the resolved `spec`,
@@ -209,7 +224,7 @@ new `id`, `status:"running"`, initially empty `trials`, zero `spent_cost`, times
 `stop_reason` and `promoted_model`.
 
 ```json
-{"id":"study-id","spec":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"validation.auc","direction":"maximize","validation_split":"validation"},"search_space":[{"name":"learning_rate","kind":"float","minimum":0.01,"maximum":0.3,"step":0,"log":true,"choices":[],"condition_parameter":"","condition_values":[]}],"sampler":"tpe","pruner":"asha","budgets":{"max_trials":10,"max_wall_time_ms":60000,"max_parallel_trials":1,"cost_cap":5},"seed":1138,"differential_privacy":false,"released_metrics":[]},"status":"running","created":"2026-09-28T18:20:00Z","updated":"2026-09-28T18:20:00Z","trials":[],"spent_cost":0,"stop_reason":"","promoted_model":""}
+{"id":"study-id","spec":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"search_space":[{"name":"learning_rate","kind":"float","minimum":0.01,"maximum":0.3,"step":0,"log":true,"choices":[],"condition_parameter":"","condition_values":[]}],"sampler":"tpe","pruner":"asha","budgets":{"max_trials":10,"max_wall_time_ms":60000,"max_parallel_trials":1,"cost_cap":5},"seed":1138,"differential_privacy":false,"released_metrics":[]},"status":"running","created":"2026-09-28T18:20:00Z","updated":"2026-09-28T18:20:00Z","trials":[],"spent_cost":0,"stop_reason":"","promoted_model":""}
 ```
 
 `stop_study` (MCP: `stop_study`) cooperatively stops a study and its active trials.

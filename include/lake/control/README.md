@@ -24,7 +24,8 @@ with a Zetta implementation and an in-memory one for tests. `AgentTaskBus` is la
 `Store::claim_agent_task`, `record_agent_task_event`, `fail_agent_task` and `stale_agent_tasks`
 back it in both stores. Dispatch includes the task's immutable workspace for information; agent
 capability inputs may omit it. `WorkspaceService::call` always receives an explicit resolved
-workspace ID.
+workspace ID. `ZettaControlError` carries `code`, `message` and, when Zetta names the field at
+fault, its JSON-pointer `path`.
 
 `web_apps.hpp` defines the protected-app session claims and authorization-code records. `Store`
 exposes host resolution, the one-query cookie authorization check, atomic code exchange, and

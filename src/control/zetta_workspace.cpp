@@ -181,9 +181,12 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     }
     if (!body.value("ok", false)) {
         const nlohmann::json error = body.value("error", nlohmann::json::object());
-        co_return workspace_failure<nlohmann::json>(
+        const nlohmann::json path = error.is_object() ? error.value("path", nlohmann::json())
+                                                      : nlohmann::json();
+        co_return ZettaControlResult<nlohmann::json>(std::unexpected(ZettaControlError{
             error.value("code", std::string("store_error")),
-            error.value("message", "the workspace refused " + capability));
+            error.value("message", "the workspace refused " + capability),
+            path.is_string() ? path.get<std::string>() : std::string()}));
     }
     co_return ZettaControlResult<nlohmann::json>(body.value("value", nlohmann::json::object()));
 }

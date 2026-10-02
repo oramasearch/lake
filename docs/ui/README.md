@@ -7,7 +7,8 @@ populated cold-start fixtures are in
 
 Train → Experiments' ExperimentsAgent questions, conversation replies, proposals, studies, run
 charts, comparison, local chart assets, accessibility and control-to-capability mappings are in
-[experiments.md](experiments.md).
+[experiments.md](experiments.md). It also covers canonical held-out metric names and the study
+page's server-rendered analysis tables and trial curves.
 
 Repository clone/push instructions use the configured external origin and a valid first checkout.
 See [forge.md](forge.md) and the [private-instance runbook](../deployment/private-install.md).
