@@ -347,6 +347,35 @@ TEST(Clerk, SignInPageMountsClerkAndExchangesTheLakeTemplateToken) {
     EXPECT_NE(sign_up.find("Create Your Account"), std::string::npos);
 }
 
+// Under Clerk, sign-up is restricted: the visitor home page must not offer an account the
+// sign-up page then refuses (lake#448). Both say the same sentence about invitations.
+TEST(Clerk, VisitorsAreNotOfferedAnAccountTheSignUpPageRefuses) {
+    const auto config = lake::api::clerk_config("pk_test_" + base64("example-123.clerk.accounts.dev$"));
+    ASSERT_TRUE(config);
+    const std::string note(lake::api::web_ui_invitation_note);
+    const std::string sign_up = lake::api::web_ui_clerk_sign_in(*config, "sign-up", "", false);
+    EXPECT_NE(sign_up.find(note), std::string::npos);
+
+    lake::api::WebUiViewer visitor;
+    visitor.clerk = true;
+    const std::string home = lake::api::web_ui_home(visitor);
+    EXPECT_EQ(home.find("href=\"/sign-up\""), std::string::npos)
+        << "neither the actions nor the top bar link sign-up";
+    EXPECT_EQ(home.find("Create account"), std::string::npos);
+    EXPECT_NE(home.find(note), std::string::npos);
+    EXPECT_NE(home.find("href=\"/sign-in\""), std::string::npos);
+    EXPECT_NE(lake::api::web_ui_docs("concepts", visitor)->find("href=\"/sign-in\""),
+              std::string::npos);
+    EXPECT_EQ(lake::api::web_ui_docs("concepts", visitor)->find("href=\"/sign-up\""),
+              std::string::npos)
+        << "every page's top bar follows the same rule";
+
+    visitor.clerk = false;
+    EXPECT_NE(lake::api::web_ui_home(visitor).find("href=\"/sign-up\">Create account"),
+              std::string::npos)
+        << "without Clerk, password sign-up is open";
+}
+
 TEST(Clerk, AccountMenuOmitsLakePasskeysUnderClerk) {
     lake::api::WebUiViewer viewer{true};
     EXPECT_NE(lake::api::web_ui_home(viewer).find("href=\"/passkeys\""), std::string::npos);

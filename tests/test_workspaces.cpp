@@ -219,6 +219,59 @@ TEST(Workspaces, DesiredStateCapabilitiesUseWorkspaceIdentityAndTypedDeletion) {
     EXPECT_FALSE(call("update_workspace", {{"workspace_id", id}, {"desired", "running"}}).ok);
 }
 
+// A space holds many workspaces and every workspace call names one (lake#448): start_workspace
+// answers the id of the space's first workspace beside the others, and no description or guide
+// tells a reader there is one workspace per space.
+TEST(Workspaces, StartWorkspaceAnswersItsIdBesideTheSpacesOtherWorkspaces) {
+    Workspaces w;
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    lake::api::ApiContext context;
+    context.store = w.store.get();
+    context.workspaces = w.service.get();
+    context.authorized = true;
+    context.acting_identity = "admin";
+    const auto call = [&](const std::string& name, json input) {
+        input["customer_id"] = w.customer_id;
+        return *liquid::runtime::block_on(registry.call_async(name, input, context));
+    };
+    const auto research = call("create_workspace", {{"name", "Research"}, {"environment", "dev"}});
+    ASSERT_TRUE(research.ok) << research.error.message;
+    const auto started = call("start_workspace", json::object());
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const std::string first = started.value.at("workspace_id");
+    EXPECT_FALSE(first.empty());
+    EXPECT_NE(first, research.value.at("id").get<std::string>());
+    EXPECT_EQ(call("start_workspace", json::object()).value.at("workspace_id"), first)
+        << "repeating it is harmless";
+    EXPECT_EQ(call("list_workspaces", json::object()).value.at("workspaces").size(), 2U);
+    EXPECT_TRUE(call("workspace_status", {{"workspace_id", first}}).ok);
+
+    const auto start = registry.find("start_workspace");
+    ASSERT_TRUE(start);
+    EXPECT_NE(start->description.find("`workspace_id`"), std::string::npos);
+    EXPECT_NE(start->description.find("create_workspace"), std::string::npos);
+    for (const auto& capability : registry.list()) {
+        for (const std::string_view singular :
+             {"the customer's Zetta workspace", "workspace per customer", "once per space"}) {
+            EXPECT_EQ(capability->description.find(singular), std::string::npos)
+                << capability->name << ": " << singular;
+        }
+    }
+    for (const std::string& text : {lake::api::agent_docs::llms_txt(registry, "https://lake.example"),
+                                     lake::api::agent_docs::llms_full_txt(registry, "https://lake.example"),
+                                     lake::api::agent_docs::skill_md(registry, "https://lake.example")}) {
+        EXPECT_EQ(text.find("workspace per customer"), std::string::npos);
+        EXPECT_EQ(text.find("once per space"), std::string::npos);
+    }
+    for (const auto& page : lake::api::web_ui_guide()) {
+        if (page.slug == "concepts") {
+            EXPECT_NE(page.markdown.find("A space can have many"), std::string::npos);
+            EXPECT_NE(page.markdown.find("`workspace_id`"), std::string::npos);
+        }
+    }
+}
+
 TEST(Workspaces, DeletingTheWorkspaceWithdrawsItAndARestartGetsANewSlug) {
     Workspaces w;
     auto refused = w.run(w.service->withdraw(w.customer_id));

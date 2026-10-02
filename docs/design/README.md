@@ -8,8 +8,9 @@ in [status.md](status.md); see its [API](../api/experiments.md) and [UI](../ui/e
 
 [overview.md](overview.md) describes Lake’s place in the product; [status.md](status.md) uses the
 implemented, exercised locally, deployed, and exercised-in-deployment vocabulary. The dated
-[production record](../deployment/production-2026-09-08.md) is the source for current deployment
-facts. Token attenuation and ancestor revocation are part of the identity status and contract in
+[2026-10-01 record](../deployment/dev-2026-10-01.md) of the dev deployment is the source for
+current deployment facts, and `tools/docs/check-status.py` fails when the page calls a
+capability undeployed that the newest observed OpenAPI lists (lake#448). Token attenuation and ancestor revocation are part of the identity status and contract in
 [../api/identity.md](../api/identity.md).
 
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity

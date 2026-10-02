@@ -1,5 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
+
 #include "lake/api/drive.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/version.hpp"
@@ -420,6 +425,40 @@ TEST(WebUi, HomeSaysDesignTrainAndShip) {
     EXPECT_NE(html.find("<header class=\"topbar\""), std::string::npos);
     EXPECT_NE(html.find("<main id=\"main-content\""), std::string::npos);
     expect_theme_scripts(html);
+}
+
+// docs/ui/front-door.md quotes the homepage in bold under "Landing copy"; every quoted phrase must
+// appear on one of the rendered variants (visitor without and with Clerk, signed-in account), so
+// the spec cannot describe a homepage that no longer exists (lake#448).
+TEST(WebUi, FrontDoorDocQuotesTheRenderedHomePage) {
+    std::ifstream file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "docs/ui/front-door.md");
+    ASSERT_TRUE(file);
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    const std::string doc = buffer.str();
+    const auto start = doc.find("## Landing copy");
+    ASSERT_NE(start, std::string::npos);
+    const auto end = doc.find("\n## ", start + 1);
+    const std::string section = doc.substr(start, end - start);
+    const auto collapse = [](std::string text) {
+        return std::regex_replace(text, std::regex(R"(\s+)"), " ");
+    };
+    lake::api::WebUiViewer clerk_visitor;
+    clerk_visitor.clerk = true;
+    const std::string rendered = collapse(lake::api::web_ui_home() +
+                                          lake::api::web_ui_home(clerk_visitor) +
+                                          lake::api::web_ui_home(true));
+    std::size_t quoted = 0;
+    const std::regex bold(R"(\*\*([^*]+)\*\*)");
+    for (auto match = std::sregex_iterator(section.begin(), section.end(), bold);
+         match != std::sregex_iterator();
+         ++match) {
+        const std::string phrase = collapse((*match)[1].str());
+        ++quoted;
+        EXPECT_NE(rendered.find(phrase), std::string::npos)
+            << "front-door.md quotes \"" << phrase << "\", which the homepage does not render";
+    }
+    EXPECT_GE(quoted, 10U) << "the Landing copy section quotes the homepage";
 }
 
 TEST(WebUi, EveryPageHeadUsesTheSharedStylesheetLink) {

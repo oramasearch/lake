@@ -703,8 +703,11 @@ std::string session_control(const WebUiViewer& viewer) {
         "<form class=\"inline\" method=\"post\" action=\"/logout\"><button "
         "type=\"submit\">Sign out</button></form>";
     if (!viewer.signed_in) {
-        return "<span class=\"session\"><a href=\"/sign-in\">Sign in</a><a "
-               "href=\"/sign-up\">Create account</a></span>";
+        // Under Clerk, accounts are added by invitation (docs/api/clerk.md), so a visitor is
+        // offered Sign in only; /sign-up keeps serving the invited.
+        return viewer.clerk ? "<span class=\"session\"><a href=\"/sign-in\">Sign in</a></span>"
+                            : "<span class=\"session\"><a href=\"/sign-in\">Sign in</a><a "
+                              "href=\"/sign-up\">Create account</a></span>";
     }
     if (viewer.administrator) {
         return std::format("<span class=\"session\">{}</span>", sign_out);
@@ -1380,6 +1383,11 @@ std::string web_ui_home(WebUiViewer viewer) {
         content += "<p class=\"actions\"><a class=\"button button-primary\" href=\"/docs\">"
                    "Getting started</a> <a class=\"button\" href=\"/train/data\">Load your data</a>"
                    "</p>";
+    } else if (viewer.clerk) {
+        content += std::format("<p class=\"actions\"><a class=\"button button-primary\" "
+                               "href=\"/sign-in\">Sign in</a> <a class=\"button\" "
+                               "href=\"/docs\">Read the docs</a></p><p class=\"muted\">{}</p>",
+                               web_ui_invitation_note);
     } else {
         content += "<p class=\"actions\"><a class=\"button button-primary\" "
                    "href=\"/sign-up\">Create account</a> <a class=\"button\" "
@@ -1421,9 +1429,9 @@ std::string web_ui_clerk_sign_in(const ClerkConfig& clerk,
     std::string content = std::format(
         "<p class=\"eyebrow\">lake by Orama</p><h1>{}</h1><p class=\"sub\">{}</p>",
         sign_up ? "Create Your Account" : "Sign In",
-        sign_up ? "Accounts are added by invitation while lake is in development. Ask the "
-                  "person who invited you, or sign in if you already have access."
-                : "Sign in with the email address you were invited with.");
+        sign_up ? std::string(web_ui_invitation_note) +
+                      " Ask the person who invited you, or sign in if you already have access."
+                : std::string("Sign in with the email address you were invited with."));
     if (!error.empty()) {
         content += std::format("<p class=\"error\" role=\"alert\">{}</p>", web_ui_escape(error));
     }

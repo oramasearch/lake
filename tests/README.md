@@ -299,3 +299,9 @@ pickers and grouped under Results, and typed columns. See
 `AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop` cover lake#442 in memory;
 `PostgresAgentLaunches` covers the `0043_agent_launch_workspaces` routing trigger, workspace
 filters and the start-timeout withdrawal. See [agent-launches.md](../docs/api/agent-launches.md).
+`test_docs_status.cpp` runs `tools/docs/check-status.py` on `docs/design/status.md` against the
+newest snapshot in `docs/deployment/observed/` and the in-tree registry's OpenAPI, and proves the
+script refuses each contradiction it looks for (lake#448). `WebUi.FrontDoorDocQuotesTheRenderedHomePage`
+holds `docs/ui/front-door.md` to the rendered homepage, and
+`Clerk.VisitorsAreNotOfferedAnAccountTheSignUpPageRefuses` keeps the homepage and `/sign-up`
+agreeing under Clerk.

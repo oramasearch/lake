@@ -11,7 +11,10 @@ Rules for writing them:
 
 - Write for a customer who has never seen lake. Every step names where to click, then the REST call
   and the MCP tool for the same step.
-- Describe what runs today. A capability that is planned is not in the Docs.
+- Describe what runs today. A capability that is planned is not in the Docs. `concepts.md` says
+  when it was last checked against the running service; change that date when you check it again.
+  `Workspaces.StartWorkspaceAnswersItsIdBesideTheSpacesOtherWorkspaces` keeps it saying a space has
+  many workspaces.
 - Keep Ship's ApplicationAgent steps explicit about reviewing the exact proposal before any write.
 - Keep Train's ExperimentsAgent steps explicit about editing and confirming the exact study before
   it starts.

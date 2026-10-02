@@ -61,7 +61,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `create_workspace` | action | `write` | Requires `customer_id`, `name`, `environment`; atomically creates workspace and primary service desired state |
 | `update_workspace` | action | `write` | Requires `customer_id`, `workspace_id`; optional name, environment, desired (`running` or `stopped`); changes increment generation, status fields are refused |
 | `delete_workspace` | action | `admin` | Requires `customer_id`, `workspace_id`, `confirm` equal to the workspace name; sets desired `deleted` |
-| `start_workspace` | action | `write` | Legacy idempotent creation of the named `workspace` in `prod`; uses the same contract table, never implicit data-plane routing |
+| `start_workspace` | action | `write` | Idempotent creation of the space's first workspace, named `workspace`, in `prod`; answers its state with its `workspace_id`. It uses the same contract table and never routes data implicitly: later calls name a workspace, and `create_workspace` adds more |
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{customer_id, workspace_id, model, rows, top_k?}`; checks the model is published (`get_model`), then Zetta's `score`; answers rows ranked by risk with their drivers. Ship → Models shows each published model's `curl` |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value; null clears), rename), or `edits`: a list applied in order as one save, all or nothing (how a Project Agent proposal is applied). Every step keeps its `attributes` (source, table, target, algo) through every edit. It reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
 | `workspace_sql` | read | `read` | One read-only query (`statement` starting SELECT or WITH, at most a trailing semicolon, optional `database`) through Zetta's `sql`; DDL, writes, users and several statements are refused before anything reaches the workspace. The workspace speaks Zetta's SQL subset — one `WHERE` comparison, `GROUP BY` one key with `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, `ORDER BY`, `LIMIT`, `OFFSET` (zetta#1039), no joins or expressions — and the description says so, because agents write their queries from it. Audit kind `workspace.sql` |
@@ -260,10 +260,19 @@ while `kubectl -n lake get oramazettacluster` loses `<lake>-<workspace>`.
 
 ## Known limits
 
-- A workspace cannot be suspended, only deleted. The workspace counts toward the customer's
-  service limit and the Lake's `spec.services.maxServices` ([`services.md`](services.md)).
+Status: checked on 2026-10-01 against the dev cluster (lake `36679e1`, workspace Zetta
+`dev-13979173`) during the UX review recorded in liquid-bridge `docs/reviews/lake-ux/2026-10-01.md`.
+
+- A workspace is stopped with `update_workspace` (`desired: "stopped"`), which withdraws its
+  primary Zetta service as [the contract](../control-plane/workspaces.md) describes, or deleted
+  with typed confirmation. It counts toward the customer's service limit and the Lake's
+  `spec.services.maxServices` ([`services.md`](services.md)).
 - Upload and project deletion need a workspace image with Zetta's `upload_dataset` and
-  `delete_project` (zetta PRs #1012 and #1013); an older image answers them with an error.
-- A published model or index is reachable inside the workspace only; lake does not route to it.
-- Workspace reads time out after 15 seconds and actions after 60. Run reports do not load on the
-  current workspace image: `get_run_report` never answers (https://github.com/oramasearch/zetta/issues/1007).
+  `delete_project` (zetta PRs #1012 and #1013, both merged); an older image answers them with an
+  error. The dev cluster's image has them: an upload loaded 400 rows during the review.
+- A published model or index is callable from outside lake through lake, not by Zetta's own
+  address: `POST /v1/predict` and `GET /v1/search_index` (or the MCP tools of the same names)
+  with a lake key and the `workspace_id`. The review called a published model this way from
+  outside the cluster. Unpublishing stops those calls.
+- Workspace reads time out after 15 seconds and actions after 60. Run reports load:
+  `get_run_report` answers since https://github.com/oramasearch/zetta/issues/1007 was fixed.
