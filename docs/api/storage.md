@@ -33,7 +33,11 @@ workspace is ready: stores do not need the workspace.
   `-`, starting with a letter, at most 31 characters) and a size in GiB (1–100, default 10). A store
   is private: nothing on the page or in the API makes one public in phase 1.
 
-Form routes, each carrying `customer_id`: `POST /train/data/store-create` (`store`, `name`,
+A store belongs to the workspace it was created in (lake#465, migration `0044_store_workspaces`):
+the panel lists the current workspace's stores, and the operator places each store in its
+workspace's namespace.
+
+Form routes under the workspace's `/w/<id>/` path, each carrying `customer_id`: `POST /train/data/store-create` (`store`, `name`,
 `size_gi`), `POST /train/data/store-delete` (`store_id`, `confirm`), and
 `POST /train/data/store-connection` (`store_id`). A failure returns to the Data page with the
 reason.
@@ -41,18 +45,21 @@ reason.
 ## Capabilities
 
 All are in lake's registry (REST, OpenAPI, MCP; the *Storage* group in `llms.txt`, the skill and the
-MCP page) and authorized on the customer's policy object.
+MCP page) and authorized on the customer's policy object. Every capability except
+`list_store_providers` also requires `workspace_id`, supplied by the `/w/<id>/` URL or an agent
+task's workspace when the input leaves it out, and must name a live workspace of the space. A store
+of another workspace is `not_found`.
 
 | Capability | Kind | Action on the customer | What it does |
 |---|---|---|---|
 | `list_store_providers` | read | `read` (checked by the handler, as every `list_` capability) | `{providers: [{type, provider, label, available, unavailable_reason?}]}`, the provider table `control::store_providers` in order: the available pair first |
-| `list_stores` | read | `read` (checked by the handler) | `{stores: [...]}`, oldest first; each store carries `id, customer_id, type, provider, name, slug, size_gi, region, public, desired, generation, phase, message, endpoint, observed_generation, created_at, connected` and never a credential. A withdrawn store the operator has marked `Deleted` is history and is left out |
-| `create_store` | action | `write` | `{type, provider, name, size_gi?, region?}`; `size_gi` 1–100 (default 10). A pair that is not in the table, or not available, is `invalid_input` naming the reason; a live name is `conflict`. The slug is `st-` and the first 12 hex digits of the id, never reused |
+| `list_stores` | read | `read` (checked by the handler) | `{stores: [...]}`, oldest first; each store carries `id, customer_id, workspace_id, type, provider, name, slug, size_gi, region, public, desired, generation, phase, message, endpoint, observed_generation, created_at, connected` and never a credential. A withdrawn store the operator has marked `Deleted` is history and is left out |
+| `create_store` | action | `write` | `{type, provider, name, size_gi?, region?}`, recorded in the workspace; `size_gi` 1–100 (default 10). A pair that is not in the table, or not available, is `invalid_input` naming the reason; a live name is `conflict`. The slug is `st-` and the first 12 hex digits of the id, never reused |
 | `delete_store` | action | `admin` | `{store_id, confirm}`, `confirm` equal to the store's name; marks it absent and bumps its generation |
 | `store_connection` | action | `admin` | A Ready store's connection: what the operator wrote to `<slug>.json` beside the services' connections. Refused (`workspace_not_ready`) before Ready, while the connection is still reaching lake, and for a withdrawn store |
 
-Audit kinds: `store.create`, `store.delete`, `store.connection`, each with the customer, store id,
-type, provider and name. The Postgres store sends `NOTIFY lake_services, '<store id>'` in the
+Audit kinds: `store.create`, `store.delete`, `store.connection`, each with the customer, workspace,
+store id, type, provider and name. The Postgres store sends `NOTIFY lake_services, '<store id>'` in the
 transaction of every create and withdrawal, so the operator reconciles at once.
 
 The worked flow *Create a volume* in `llms.txt` and the skill: `list_store_providers` →
@@ -83,8 +90,14 @@ ctest --test-dir build -R 'Stor'
 - `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp`: the five capabilities in OpenAPI and as
   MCP tools, a volume created over MCP.
 - `PostgresStores.CreateListWithdrawAndNotifyFollowTheContract`: the store against a real database
-  — `spec` as `{size_gi, region, public}`, conflict, withdrawal, a `LISTEN lake_services` connection
-  receiving each id, and `store_status` joined in with `Deleted` history hidden.
+  — the routing trigger refusing a store without a workspace, the workspace filter, `spec` as
+  `{size_gi, region, public}`, conflict, withdrawal, a `LISTEN lake_services` connection receiving
+  each id, and `store_status` joined in with `Deleted` history hidden.
+- `PostgresStores.MigrationAssignsTheSoleWorkspaceAndRecordsTheRest`: migration 0044 run twice over
+  stores without a workspace — the sole workspace assigned, a two-workspace space recorded as
+  `needs_selection`, and the workspace immutable afterwards.
+- `OperatorContract.*`: the operator's own SQL against lake's schema (see
+  [`../control-plane/storage.md`](../control-plane/storage.md#verify)).
 
 On a deployment with the operator's store reconciler: on Train → Data, create a volume, see it
 Ready with *Show connection*, and delete it by typing its name.

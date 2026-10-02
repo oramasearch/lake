@@ -154,3 +154,5 @@ waiting launch's reason through `launch_json`, and checks a `create_agent` or `u
 definition before it reaches Zetta, which would drop unknown fields such as `content`. Zetta's
 `invalid_argument` is reported as `invalid_input`. `web_ui.cpp` shows a run lake timed out as
 Failed, with its reason (lake#442). See `docs/api/agent-launches.md`.
+The store capabilities (`list_stores`, `create_store`, `delete_store`, `store_connection`) take
+the workspace and see only its stores (lake#465). See `docs/api/storage.md`.

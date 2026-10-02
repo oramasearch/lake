@@ -321,6 +321,9 @@ struct ManagedStore {
     std::string created_by_taap_id, created_at, updated_at;
     std::string phase, message, endpoint; // empty until the operator reports
     std::int64_t observed_generation = 0;
+    // The workspace the store belongs to (migration 0044, lake#465); the operator places it in
+    // that workspace's namespace, and lake lists a workspace's own stores only.
+    std::string workspace_id;
 };
 // A launch credential is `lal.<launch id>.<secret>`, a schedule's `las.<schedule id>.<secret>`:
 // the Orama operator generates it for the pod and writes its SHA-256 into the status row it owns
@@ -462,6 +465,7 @@ struct NewManagedStore {
     int size_gi = 10;
     std::string region;
     bool is_public = false;
+    std::string workspace_id; // required by the routing trigger (migration 0044)
 };
 // One valid type × provider pair and whether this lake offers it. Order: what is available first,
 // then by type. The schema's store_type_check and store_provider_check list the same keys.
@@ -1003,8 +1007,10 @@ public:
     virtual Result<Build> create_build(const NewBuild&) = 0;
     virtual Result<Build> cancel_build(const std::string& id) = 0;
     // Stores (docs/control-plane/storage.md). Lists the customer's stores, oldest first, leaving
-    // out deleted ones the operator has finished with.
-    virtual Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) = 0;
+    // out deleted ones the operator has finished with; an empty workspace_id lists every
+    // workspace's.
+    virtual Result<std::vector<ManagedStore>>
+    list_stores(const std::string& customer_id, const std::string& workspace_id = {}) = 0;
     virtual Result<ManagedStore> get_store(const std::string& id) = 0;
     // Creates a store; a live name is a conflict. The provider table is the caller's to check.
     virtual Result<ManagedStore> create_store(const NewManagedStore&) = 0;

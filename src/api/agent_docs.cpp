@@ -332,7 +332,7 @@ const std::vector<Flow>& flows() {
           {"connect_service", "make it a Train → Data connection of your workspace"}}},
         {"Create a volume",
          "A store is a bucket, filesystem, network filesystem or volume lake provisions for your "
-         "space; today a cluster volume.",
+         "workspace; today a cluster volume.",
          {{"list_store_providers", "every type and provider, and which are available"},
           {"create_store",
            "`type: \"volume\"`, `provider: \"cluster\"`, a `name`; optional `size_gi`"},

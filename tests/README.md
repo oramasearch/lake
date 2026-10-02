@@ -305,3 +305,9 @@ script refuses each contradiction it looks for (lake#448). `WebUi.FrontDoorDocQu
 holds `docs/ui/front-door.md` to the rendered homepage, and
 `Clerk.VisitorsAreNotOfferedAnAccountTheSignUpPageRefuses` keeps the homepage and `/sign-up`
 agreeing under Clerk.
+`OperatorContract.EveryStatementTheOperatorRunsPreparesAgainstTheSchema` and
+`OperatorContract.RowsLakeWritesAppearInTheOperatorsPolls` (`test_operator_contract.cpp`, in
+`lake-postgres-tests`) run a copy of every statement in orama-operator's
+`internal/controller/lake_*_pgx.go` against a fresh schema: a column the operator selects that lake
+lacks (lake#442, lake#465) fails here. `PostgresStores.MigrationAssignsTheSoleWorkspaceAndRecordsTheRest`
+covers `0044_store_workspaces`. See [storage.md](../docs/control-plane/storage.md).

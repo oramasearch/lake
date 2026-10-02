@@ -1276,11 +1276,13 @@ Result<void> InMemoryStore::set_build_status(const std::string& id, BuildStatus 
     return {};
 }
 
-Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& customer_id) {
+Result<std::vector<ManagedStore>> InMemoryStore::list_stores(const std::string& customer_id,
+                                                             const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedStore> stores;
     for (const ManagedStore& store : stores_) {
         if (store.customer_id == customer_id &&
+            (workspace_id.empty() || store.workspace_id == workspace_id) &&
             !(store.desired == "absent" && store.phase == "Deleted")) {
             stores.push_back(store);
         }
@@ -1323,6 +1325,7 @@ Result<ManagedStore> InMemoryStore::create_store(const NewManagedStore& in) {
     store.is_public = in.is_public;
     store.desired = "present";
     store.created_by_taap_id = in.created_by_taap_id;
+    store.workspace_id = in.workspace_id;
     store.created_at = store.updated_at = now_iso8601();
     stores_.push_back(store);
     return store;

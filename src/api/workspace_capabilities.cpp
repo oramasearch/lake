@@ -834,6 +834,7 @@ void register_service_capabilities(Registry& registry) {
 void store_audit(ApiContext& context, std::string kind, const control::ManagedStore& store) {
     context.audit_kind = std::move(kind);
     context.audit_details = {{"customer_id", store.customer_id},
+                             {"workspace_id", store.workspace_id},
                              {"store_id", store.id},
                              {"store_type", store.type},
                              {"store_provider", store.provider},
@@ -918,10 +919,10 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_stores",
         .title = "List stores",
-        .description = "The customer's stores (buckets, filesystems, network filesystems and "
+        .description = "The workspace's stores (buckets, filesystems, network filesystems and "
                        "volumes) with the operator's phase, message and endpoint. Never includes "
                        "credentials.",
-        .input_schema = control_input_schema(json::object(), json::array()),
+        .input_schema = customer_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         .object = "customer",
@@ -936,7 +937,9 @@ void register_store_capabilities(Registry& registry) {
             if (!context.workspaces) {
                 co_return unavailable();
             }
-            const auto listed = context.workspaces->stores(input.at("customer_id"));
+            // Only this workspace's stores: the operator places each in its workspace's namespace.
+            const auto listed =
+                context.workspaces->stores(input.at("customer_id"), input.at("workspace_id"));
             if (!listed) {
                 co_return store_failure(listed.error());
             }
@@ -953,11 +956,11 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_store",
         .title = "Create a store",
-        .description = "Ask the operator for a new store: a `type` and `provider` pair that "
-                       "list_store_providers reports available (today volume on cluster), a "
-                       "`name`, and optionally `size_gi` 1-100 (default 10) and `region`. Private "
-                       "by default.",
-        .input_schema = control_input_schema(
+        .description = "Ask the operator for a new store in this workspace: a `type` and "
+                       "`provider` pair that list_store_providers reports available (today volume "
+                       "on cluster), a `name` unique in the space, and optionally `size_gi` 1-100 "
+                       "(default 10) and `region`. Private by default.",
+        .input_schema = customer_input_schema(
             {{"type", {{"type", "string"}, {"enum", store_types_enum()}}},
              {"provider", {{"type", "string"}, {"enum", store_providers_enum()}}},
              {"name", {{"type", "string"}}},
@@ -976,6 +979,7 @@ void register_store_capabilities(Registry& registry) {
             }
             control::NewManagedStore store;
             store.customer_id = input.at("customer_id");
+            store.workspace_id = input.at("workspace_id");
             store.type = input.at("type");
             store.provider = input.at("provider");
             store.name = input.at("name");
@@ -1002,9 +1006,9 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "delete_store",
         .title = "Delete a store",
-        .description = "Delete one of the customer's stores. The operator removes it and its "
+        .description = "Delete one of this workspace's stores. The operator removes it and its "
                        "data, which cannot be recovered. `confirm` must be the store's name.",
-        .input_schema = control_input_schema(
+        .input_schema = customer_input_schema(
             {{"store_id", {{"type", "string"}}}, {"confirm", {{"type", "string"}}}},
             json::array({"store_id", "confirm"})),
         .output_schema = {{"type", "object"}},
@@ -1017,8 +1021,8 @@ void register_store_capabilities(Registry& registry) {
             if (!context.workspaces) {
                 co_return unavailable();
             }
-            const auto found =
-                context.workspaces->store(input.at("customer_id"), input.at("store_id"));
+            const auto found = context.workspaces->store(
+                input.at("customer_id"), input.at("store_id"), input.at("workspace_id"));
             if (!found) {
                 co_return store_failure(found.error());
             }
@@ -1028,7 +1032,8 @@ void register_store_capabilities(Registry& registry) {
             }
             store_audit(context, "store.delete", *found);
             const auto deleted =
-                context.workspaces->delete_store(input.at("customer_id"), input.at("store_id"));
+                context.workspaces->delete_store(
+                    input.at("customer_id"), input.at("store_id"), input.at("workspace_id"));
             if (!deleted) {
                 co_return store_failure(deleted.error());
             }
@@ -1037,11 +1042,11 @@ void register_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "store_connection",
         .title = "Store connection",
-        .description = "How to reach a Ready store: what the operator delivered for its type and "
-                       "provider (for a cluster volume, the claim, namespace, size and storage "
-                       "class). Audited.",
+        .description = "How to reach one of this workspace's Ready stores: what the operator "
+                       "delivered for its type and provider (for a cluster volume, the claim, "
+                       "namespace, size and storage class). Audited.",
         .input_schema =
-            control_input_schema({{"store_id", {{"type", "string"}}}}, json::array({"store_id"})),
+            customer_input_schema({{"store_id", {{"type", "string"}}}}, json::array({"store_id"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "customer",
@@ -1052,8 +1057,8 @@ void register_store_capabilities(Registry& registry) {
             if (!context.workspaces) {
                 co_return unavailable();
             }
-            const auto found =
-                context.workspaces->store(input.at("customer_id"), input.at("store_id"));
+            const auto found = context.workspaces->store(
+                input.at("customer_id"), input.at("store_id"), input.at("workspace_id"));
             if (!found) {
                 co_return store_failure(found.error());
             }

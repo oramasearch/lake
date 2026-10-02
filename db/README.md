@@ -47,3 +47,12 @@ are older than five minutes are withdrawn with a reason. New rows go through
 `enforce_workspace_routing`. The latest guard is `agent_launch_workspaces_guard`; the operator
 must vendor this schema and update its guard before rollout. See
 [agent-launches.md](../docs/api/agent-launches.md).
+
+Migration `0044_store_workspaces` adds `workspace_id` to `stores`, the column the operator's
+`listStoresSQL` has joined on since orama-operator ef005a4 (lake#465). Existing stores are
+assigned to the space's only live workspace and recorded in `workspace_assignments`; a space with
+several or none is recorded as `needs_selection`. New stores go through
+`enforce_workspace_routing` (trigger `store_workspace_routing`). The latest guard is
+`store_workspaces_guard`; the operator must vendor this schema and update its guard before
+rollout. `tests/test_operator_contract.cpp` runs the operator's statements against this schema.
+See [storage.md](../docs/control-plane/storage.md).

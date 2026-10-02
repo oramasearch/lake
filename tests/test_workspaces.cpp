@@ -743,6 +743,8 @@ TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
     ASSERT_TRUE(owner_principal);
     ASSERT_TRUE(other_principal);
     const std::string owner = w.customer_id;
+    // Stores belong to a workspace (lake#465); it need not be ready.
+    ASSERT_TRUE(store.create_workspace({owner, "home", "prod", ""}));
 
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
@@ -866,6 +868,45 @@ TEST(Workspaces, StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName) {
         call(*owner_principal, "store_connection", {{"customer_id", owner}, {"store_id", store_id}})
             .ok)
         << "a deleting store is not handed out";
+
+    // lake#465: a store belongs to the workspace it was created in. The operator places it in
+    // that workspace's namespace; another workspace of the same space neither lists nor reaches it.
+    const std::string home = w.workspace_id();
+    EXPECT_EQ(created.value["workspace_id"], home);
+    EXPECT_EQ(store.get_store(store_id)->workspace_id, home);
+    const auto second = store.create_workspace({owner, "second", "prod", ""});
+    ASSERT_TRUE(second) << second.error().message;
+    const auto at_home = call(
+        *owner_principal, "list_stores", {{"customer_id", owner}, {"workspace_id", home}});
+    ASSERT_TRUE(at_home.ok) << at_home.error.message;
+    EXPECT_EQ(at_home.value["stores"].size(), 1U);
+    const auto elsewhere = call(
+        *owner_principal, "list_stores", {{"customer_id", owner}, {"workspace_id", second->id}});
+    ASSERT_TRUE(elsewhere.ok) << elsewhere.error.message;
+    EXPECT_TRUE(elsewhere.value["stores"].empty());
+    const auto stray = call(*owner_principal,
+                            "store_connection",
+                            {{"customer_id", owner}, {"workspace_id", second->id},
+                             {"store_id", store_id}});
+    ASSERT_FALSE(stray.ok);
+    EXPECT_EQ(stray.error.code, "not_found");
+    const auto created_elsewhere = call(*owner_principal,
+                                        "create_store",
+                                        {{"customer_id", owner},
+                                         {"workspace_id", second->id},
+                                         {"type", "volume"},
+                                         {"provider", "cluster"},
+                                         {"name", "scratch"}});
+    ASSERT_TRUE(created_elsewhere.ok) << created_elsewhere.error.message;
+    EXPECT_EQ(created_elsewhere.value["workspace_id"], second->id);
+    EXPECT_FALSE(call(*owner_principal,
+                      "delete_store",
+                      {{"customer_id", owner},
+                       {"workspace_id", home},
+                       {"store_id", created_elsewhere.value["id"]},
+                       {"confirm", "scratch"}})
+                     .ok)
+        << "a store is deleted only from its own workspace";
 }
 
 TEST(Workspaces, DataPageShowsStorageWithTypedDeleteAndRefreshesWhileChanging) {
