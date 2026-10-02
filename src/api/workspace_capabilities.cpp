@@ -398,13 +398,84 @@ liquid::runtime::task<DatasetWriteCheck> check_dataset_write(ApiContext& context
     co_return check;
 }
 
+// Zetta keeps a Python agent's `definition` as a loose object and reads only the keys it knows,
+// so `files: [{path, content}]` (for `contents`) was stored as an empty file without a word
+// (lake#442). Lake checks the shape before create_agent or update_agent reaches the workspace.
+std::optional<ApiResult> agent_definition_refusal(const json& arguments) {
+    const auto definition = arguments.find("definition");
+    if (definition == arguments.end()) {
+        return std::nullopt;
+    }
+    const std::string at = "/input/definition";
+    const std::string shape =
+        "definition is {source: \"zetta\", instructions, entrypoint, files: [{path, contents}]} "
+        "or {source: \"lake\", repository_id, revision, entrypoint}";
+    if (!definition->is_object()) {
+        return ApiResult::failure("invalid_input", shape, at);
+    }
+    constexpr std::array<std::string_view, 6> fields = {
+        "source", "instructions", "files", "entrypoint", "repository_id", "revision"};
+    for (const auto& [key, value] : definition->items()) {
+        if (std::ranges::find(fields, key) == fields.end()) {
+            return ApiResult::failure("invalid_input",
+                                      "definition has no field '" + key + "'; " + shape,
+                                      at + "/" + key);
+        }
+        if (key != "files" && !value.is_string()) {
+            return ApiResult::failure(
+                "invalid_input", "definition." + key + " is a string", at + "/" + key);
+        }
+    }
+    const auto files = definition->find("files");
+    if (files == definition->end()) {
+        return std::nullopt;
+    }
+    if (!files->is_array()) {
+        return ApiResult::failure(
+            "invalid_input",
+            "definition.files is a list of {path, contents}, one entry per file",
+            at + "/files");
+    }
+    for (std::size_t index = 0; index < files->size(); ++index) {
+        const json& file = (*files)[index];
+        const std::string here = at + "/files/" + std::to_string(index);
+        if (!file.is_object()) {
+            return ApiResult::failure(
+                "invalid_input", "each file is {path, contents}: the path and the file's text", here);
+        }
+        for (const auto& [key, value] : file.items()) {
+            if (key != "path" && key != "contents") {
+                return ApiResult::failure(
+                    "invalid_input",
+                    "a file has no field '" + key +
+                        "'; each file is {path, contents}, and contents holds the file's text",
+                    here + "/" + key);
+            }
+            if (!value.is_string()) {
+                return ApiResult::failure("invalid_input", key + " is a string", here + "/" + key);
+            }
+        }
+        if (file.value("path", std::string()).empty()) {
+            return ApiResult::failure("invalid_input", "each file names its path", here + "/path");
+        }
+        if (!file.contains("contents")) {
+            return ApiResult::failure(
+                "invalid_input", "each file carries its text in contents", here + "/contents");
+        }
+    }
+    return std::nullopt;
+}
+
 void register_workspace_call(Registry& registry, bool read) {
     registry.add(Capability{
         .name = read ? "workspace_query" : "workspace_act",
         .title = read ? "Query a workspace" : "Act in a workspace",
         .description =
             read ? "Call one of the allowed read capabilities on the customer's Zetta workspace."
-                 : "Call one of the allowed actions on the customer's Zetta workspace.",
+                 : "Call one of the allowed actions on the customer's Zetta workspace. A Python "
+                   "agent's create_agent or update_agent definition is {source: zetta, "
+                   "instructions, entrypoint, files: [{path, contents}]} or {source: lake, "
+                   "repository_id, revision, entrypoint}; lake refuses any other field.",
         .input_schema = customer_input_schema(
             {{"capability", {{"type", "string"}}}, {"input", {{"type", "object"}}}},
             json::array({"capability"})),
@@ -442,6 +513,11 @@ void register_workspace_call(Registry& registry, bool read) {
             if (!read && agent_task && agent_task->agent == "agent-project" &&
                 capability == "compile_intent") {
                 co_return co_await project_agent_compile_check(context, input, *agent_task);
+            }
+            if (capability == "create_agent" || capability == "update_agent") {
+                if (auto refused = agent_definition_refusal(input.value("input", json::object()))) {
+                    co_return *refused;
+                }
             }
             const std::map<std::string, std::string> study_actions = {
                 {"create_study", "start_study"}, {"stop_study", "stop_study"},
@@ -494,7 +570,12 @@ void register_workspace_call(Registry& registry, bool read) {
                         path = "/input/" + message.substr(at + 10, end - at - 10);
                     }
                 }
-                co_return ApiResult::failure(called->error().code, message, path);
+                // Zetta says invalid_argument; lake's documented code for the same is
+                // invalid_input (lake#442).
+                const std::string code = called->error().code == "invalid_argument"
+                                             ? std::string("invalid_input")
+                                             : called->error().code;
+                co_return ApiResult::failure(code, message, path);
             }
             json value = std::move(**called);
             if (capability == "list_datasets") {
@@ -1860,9 +1941,15 @@ ZettaAnswer answered(std::expected<ZettaAnswer, liquid::error> completed) {
     return std::move(*completed);
 }
 
+// A launch as callers see it. Until the Orama operator reports, `phase` and `message` say why the
+// run is waiting, and a run it never started reads Failed with the reason (lake#442);
+// `operator_phase` is what the operator itself wrote, empty until it reports.
 json launch_json(const control::AgentLaunch& launch) {
+    const control::AgentLaunchProgress progress = control::agent_launch_progress(
+        launch, std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
     return {{"id", launch.id},
             {"customer_id", launch.customer_id},
+            {"workspace_id", launch.workspace_id},
             {"agent_id", launch.agent_id},
             {"agent_name", launch.agent_name},
             {"mode", launch.mode},
@@ -1870,8 +1957,10 @@ json launch_json(const control::AgentLaunch& launch) {
             {"input", launch.input},
             {"slug", launch.slug},
             {"desired", launch.desired},
-            {"phase", launch.phase},
-            {"message", launch.message},
+            {"phase", progress.phase},
+            {"message", progress.message},
+            {"operator_phase", launch.phase},
+            {"stop_reason", launch.stop_reason},
             {"exit_code", launch.exit_code ? json(*launch.exit_code) : json(nullptr)},
             {"result", launch.result},
             {"created_at", launch.created_at},
@@ -1985,6 +2074,7 @@ json opportunity_json(const control::Opportunity& row) {
 json schedule_json(const control::AgentCronSchedule& schedule) {
     return {{"id", schedule.id},
             {"customer_id", schedule.customer_id},
+            {"workspace_id", schedule.workspace_id},
             {"agent_id", schedule.agent_id},
             {"agent_name", schedule.agent_name},
             {"cron", schedule.cron},
@@ -3162,7 +3252,8 @@ void register_agent_run_capabilities(Registry& registry) {
                                         .input = input.value("input", json(nullptr)),
                                         .scopes = control::agent_launch_scopes,
                                         .created_by_user_id = context.acting_user_id,
-                                        .created_by_taap_id = context.acting_identity});
+                                        .created_by_taap_id = context.acting_identity,
+                                        .workspace_id = input.at("workspace_id")});
             if (!launched) {
                 co_return ApiResult::failure(launched.error().code, launched.error().message);
             }
@@ -3190,14 +3281,18 @@ void register_agent_run_capabilities(Registry& registry) {
                 return *refused;
             }
             const std::string customer_id = input.at("customer_id");
+            const std::string workspace_id = input.at("workspace_id");
             const std::string agent_id = input.value("agent_id", std::string());
             const int limit = input.value("limit", 50);
-            auto listed = context.store->list_agent_launches(customer_id, agent_id, limit);
+            // Only this workspace's runs: another workspace's agents are not in this Zetta.
+            auto listed =
+                context.store->list_agent_launches(customer_id, agent_id, limit, workspace_id);
             if (!listed) {
                 return ApiResult::failure(listed.error().code, listed.error().message);
             }
             // The runs the schedules' CronJobs started sit beside the launches, newest first.
-            auto scheduled = context.store->list_agent_cron_runs(customer_id, agent_id, limit);
+            auto scheduled =
+                context.store->list_agent_cron_runs(customer_id, agent_id, limit, workspace_id);
             if (!scheduled) {
                 return ApiResult::failure(scheduled.error().code, scheduled.error().message);
             }
@@ -3233,8 +3328,9 @@ void register_agent_run_capabilities(Registry& registry) {
             }
             const std::string customer_id = input.at("customer_id");
             auto launch = context.store->get_agent_launch(input.at("launch_id"));
-            if (!launch || launch->customer_id != customer_id) {
-                return ApiResult::failure("not_found", "no such run in this space");
+            if (!launch || launch->customer_id != customer_id ||
+                launch->workspace_id != input.at("workspace_id").get<std::string>()) {
+                return ApiResult::failure("not_found", "no such run in this workspace");
             }
             agent_audit(context,
                         "agent.stop",
@@ -3284,12 +3380,7 @@ void register_agent_run_capabilities(Registry& registry) {
             if (cron.empty()) {
                 const auto translated = control::trigger_cron(trigger);
                 if (!translated) {
-                    co_return ApiResult::failure(
-                        "invalid_input",
-                        "lake cannot place '" + trigger +
-                            "' in time; use every N minutes, hours or days, daily, weekly, every "
-                            "<day> at HH:MM, or a cron expression",
-                        "/trigger");
+                    co_return ApiResult::failure("invalid_input", translated.error(), "/trigger");
                 }
                 cron = *translated;
             }
@@ -3332,7 +3423,8 @@ void register_agent_run_capabilities(Registry& registry) {
                                               .input = std::move(run_input),
                                               .scopes = control::agent_launch_scopes,
                                               .created_by_user_id = context.acting_user_id,
-                                              .created_by_taap_id = context.acting_identity});
+                                              .created_by_taap_id = context.acting_identity,
+                                              .workspace_id = input.at("workspace_id")});
             if (!stored) {
                 co_return ApiResult::failure(stored.error().code, stored.error().message);
             }
@@ -3359,7 +3451,9 @@ void register_agent_run_capabilities(Registry& registry) {
                 return *refused;
             }
             auto listed = context.store->list_agent_cron_schedules(
-                input.at("customer_id"), input.value("agent_id", std::string()));
+                input.at("customer_id"),
+                input.value("agent_id", std::string()),
+                input.at("workspace_id").get<std::string>());
             if (!listed) {
                 return ApiResult::failure(listed.error().code, listed.error().message);
             }
@@ -3387,8 +3481,9 @@ void register_agent_run_capabilities(Registry& registry) {
             }
             const std::string customer_id = input.at("customer_id");
             auto schedule = context.store->get_agent_cron_schedule(input.at("schedule_id"));
-            if (!schedule || schedule->customer_id != customer_id) {
-                return ApiResult::failure("not_found", "no such schedule in this space");
+            if (!schedule || schedule->customer_id != customer_id ||
+                schedule->workspace_id != input.at("workspace_id").get<std::string>()) {
+                return ApiResult::failure("not_found", "no such schedule in this workspace");
             }
             agent_audit(context,
                         "agent.unschedule",
@@ -3798,7 +3893,8 @@ void register_agent_run_capabilities(Registry& registry) {
             if (runtime != "python") {
                 co_return ApiResult::failure("invalid_input", "this agent is not talked to here");
             }
-            auto launches = context.store->list_agent_launches(customer_id, agent, 20);
+            auto launches = context.store->list_agent_launches(
+                customer_id, agent, 20, input.at("workspace_id").get<std::string>());
             if (!launches) {
                 co_return ApiResult::failure(launches.error().code, launches.error().message);
             }
@@ -3814,7 +3910,8 @@ void register_agent_run_capabilities(Registry& registry) {
                                             .trigger = "conversation",
                                             .scopes = control::agent_launch_scopes,
                                             .created_by_user_id = context.acting_user_id,
-                                            .created_by_taap_id = context.acting_identity});
+                                            .created_by_taap_id = context.acting_identity,
+                                            .workspace_id = input.at("workspace_id")});
                 if (!started) {
                     co_return ApiResult::failure(started.error().code, started.error().message);
                 }

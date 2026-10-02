@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <expected>
 #include <cstdint>
 #include <memory>
@@ -35,10 +36,28 @@ inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
 // most once every five minutes.
 std::expected<std::string, std::string> normalize_cron(std::string_view expression);
 
-// Studio's plain-words trigger as a cron expression, or nothing when lake cannot place it in
-// time. Understood: "every N minutes|hours|days", "hourly", "daily", "weekly", "every day at
-// HH:MM", "every weekday at HH:MM", "every <weekday> at HH:MM".
-std::optional<std::string> trigger_cron(std::string_view trigger);
+// Studio's plain-words trigger as a cron expression, or why lake cannot place it in time.
+// Understood: "every N minutes|hours|days", "hourly", "daily", "weekly", "every day at HH:MM",
+// "every weekday at HH:MM", "every <weekday> at HH:MM". A trigger more often than once every five
+// minutes says so (lake#442).
+std::expected<std::string, std::string> trigger_cron(std::string_view trigger);
+
+// How long a launch may wait for the Orama operator to report on it before lake withdraws it, and
+// the reason it records (lake#442). Lake's minute loop applies it; reads apply it at once.
+inline constexpr std::int64_t agent_launch_start_timeout_seconds = 300;
+inline constexpr std::string_view agent_launch_start_timeout_reason =
+    "Timed out: the Orama operator did not start this run within five minutes.";
+
+// What a person is told about a launch: the operator's phase and message once it has reported,
+// otherwise why the run is still waiting, or why lake stopped it (lake#442).
+struct AgentLaunchProgress {
+    std::string phase, message;
+};
+AgentLaunchProgress agent_launch_progress(const AgentLaunch& launch,
+                                          std::chrono::sys_seconds now);
+
+// A store timestamp, YYYY-MM-DDTHH:MM:SSZ, as a time point; nothing when it is not one.
+std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text);
 
 // One turn to an agent's service: POST <endpoint>/v1/turn with the service token as bearer.
 // Injected so tests need no HTTP server.

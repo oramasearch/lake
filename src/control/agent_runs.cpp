@@ -172,15 +172,23 @@ std::expected<std::string, std::string> normalize_cron(std::string_view expressi
     for (std::size_t index = 0; index < minutes.size(); ++index) {
         const int next = index + 1 < minutes.size() ? minutes[index + 1] : minutes.front() + 60;
         if (minutes.size() > 1 && next - minutes[index] < 5) {
-            return std::unexpected(
-                std::string("a schedule may run at most once every five minutes"));
+            return std::unexpected("'" + text +
+                                   "' runs more often than lake allows: a schedule may run at "
+                                   "most once every five minutes (the shortest is */5 * * * *)");
         }
     }
     return text;
 }
 
-std::optional<std::string> trigger_cron(std::string_view trigger) {
+std::expected<std::string, std::string> trigger_cron(std::string_view trigger) {
     const std::string text = lowered(trigger);
+    const std::string quoted = "'" + std::string(trigger) + "'";
+    const std::string understood =
+        "; use every N minutes (5 to 59, or whole hours), every N hours or days, hourly, daily, "
+        "weekly, every day|weekday|<weekday> at HH:MM, or a cron expression";
+    const auto unplaceable = [&] {
+        return std::unexpected("lake cannot place " + quoted + " in time" + understood);
+    };
     if (text == "hourly") {
         return "0 * * * *";
     }
@@ -191,7 +199,7 @@ std::optional<std::string> trigger_cron(std::string_view trigger) {
         return "0 0 * * 0";
     }
     if (!text.starts_with("every ")) {
-        return std::nullopt;
+        return unplaceable();
     }
     std::string_view rest = std::string_view(text).substr(6);
     // "every N minutes|hours|days"
@@ -203,8 +211,15 @@ std::optional<std::string> trigger_cron(std::string_view trigger) {
                 if (*count % 60 == 0 && *count / 60 <= 23) {
                     return *count == 60 ? "0 * * * *" : std::format("0 */{} * * *", *count / 60);
                 }
-                if (*count < 5 || *count > 59) {
-                    return std::nullopt;
+                if (*count < 5) {
+                    return std::unexpected(
+                        quoted + " is too often: a schedule runs at most once every five "
+                                 "minutes, so the shortest is 'every 5 minutes'");
+                }
+                if (*count > 59) {
+                    return std::unexpected(
+                        quoted + " cannot be a cron schedule: minutes go from 5 to 59, or a "
+                                 "whole number of hours such as 'every 120 minutes'");
                 }
                 return std::format("*/{} * * * *", *count);
             }
@@ -213,28 +228,31 @@ std::optional<std::string> trigger_cron(std::string_view trigger) {
                     return "0 0 * * *";
                 }
                 if (*count > 23) {
-                    return std::nullopt;
+                    return std::unexpected(quoted + " cannot be a cron schedule: hours go from "
+                                                    "1 to 24; use every N days for longer");
                 }
                 return *count == 1 ? "0 * * * *" : std::format("0 */{} * * *", *count);
             }
             if (unit.starts_with("day")) {
                 if (*count > 31) {
-                    return std::nullopt;
+                    return std::unexpected(quoted + " cannot be a cron schedule: days go from 1 "
+                                                    "to 31; use a cron expression for longer");
                 }
                 return *count == 1 ? "0 0 * * *" : std::format("0 0 */{} * *", *count);
             }
-            return std::nullopt;
+            return unplaceable();
         }
     }
     // "every day|weekday|<weekday> at HH:MM"
     const std::size_t at = rest.find(" at ");
     if (at == std::string_view::npos) {
-        return std::nullopt;
+        return unplaceable();
     }
     const std::string_view when = rest.substr(0, at);
     const auto time = clock_time(rest.substr(at + 4));
     if (!time) {
-        return std::nullopt;
+        return std::unexpected(quoted + " has no time of day lake can read; write it as HH:MM, "
+                                        "such as 09:00");
     }
     const std::int64_t hour = *time / 3600, minute = *time % 3600 / 60;
     if (when == "day") {
@@ -248,7 +266,57 @@ std::optional<std::string> trigger_cron(std::string_view trigger) {
             return std::format("{} {} * * {}", minute, hour, index);
         }
     }
-    return std::nullopt;
+    return unplaceable();
+}
+
+std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text) {
+    // YYYY-MM-DDTHH:MM:SSZ, as both stores write created_at.
+    if (text.size() != 20 || text[4] != '-' || text[7] != '-' || text[10] != 'T' ||
+        text[13] != ':' || text[16] != ':' || text[19] != 'Z') {
+        return std::nullopt;
+    }
+    const auto year = number(text.substr(0, 4));
+    const auto month = number(text.substr(5, 2));
+    const auto day = number(text.substr(8, 2));
+    const auto hour = number(text.substr(11, 2));
+    const auto minute = number(text.substr(14, 2));
+    const auto second = number(text.substr(17, 2));
+    if (!year || !month || !day || !hour || !minute || !second) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year(*year),
+                                           std::chrono::month(static_cast<unsigned>(*month)),
+                                           std::chrono::day(static_cast<unsigned>(*day))};
+    if (!date.ok() || *hour > 23 || *minute > 59 || *second > 60) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days(date) + std::chrono::hours(*hour) +
+           std::chrono::minutes(*minute) + std::chrono::seconds(*second);
+}
+
+AgentLaunchProgress agent_launch_progress(const AgentLaunch& launch,
+                                          std::chrono::sys_seconds now) {
+    if (!launch.stop_reason.empty() && (launch.phase.empty() || launch.phase == "Stopped")) {
+        return {"Failed", launch.stop_reason};
+    }
+    if (!launch.phase.empty() || launch.observed_generation != 0) {
+        return {launch.phase, launch.message};
+    }
+    if (launch.desired != "present") {
+        return {"Stopped", "Stopped before the Orama operator started it."};
+    }
+    const auto created = utc_seconds(launch.created_at);
+    const std::int64_t waited = created ? (now - *created).count() : 0;
+    if (waited >= agent_launch_start_timeout_seconds) {
+        return {"Failed", std::string(agent_launch_start_timeout_reason)};
+    }
+    if (waited < 60) {
+        return {"Pending", "Waiting for the Orama operator to start this run."};
+    }
+    return {"Pending",
+            std::format("The Orama operator has not started this run after {} seconds. Lake "
+                        "stops it with a reason at five minutes.",
+                        waited)};
 }
 
 liquid::runtime::task<ZettaControlResult<nlohmann::json>>

@@ -423,6 +423,20 @@ int main(int argc, char** argv) {
             if (!swept) {
                 std::println(stderr, "lake: could not sweep expired app authorization codes");
             }
+            // A launch the operator never reported on is withdrawn with a reason (lake#442), so
+            // it neither waits forever nor starts long after the person asked for it.
+            const auto expired = opts.store->expire_unstarted_agent_launches(
+                lake::control::agent_launch_start_timeout_seconds,
+                std::string(lake::control::agent_launch_start_timeout_reason));
+            if (!expired) {
+                std::println(stderr, "lake: could not expire unstarted agent launches");
+            } else if (*expired > 0) {
+                std::println(stderr,
+                             "{}",
+                             nlohmann::json{{"event", "agent_launches_expired"},
+                                            {"count", *expired}}
+                                 .dump());
+            }
             next_app_cleanup = std::chrono::steady_clock::now() + std::chrono::seconds(60);
         }
         server.wait_for_work(std::chrono::milliseconds(100));

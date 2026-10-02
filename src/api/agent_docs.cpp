@@ -53,7 +53,10 @@ constexpr std::array group_rules{
               "The Agent Library of specialized agents Orama ships, and the agents you build in "
               "Train > Agents: create them through workspace_act, talk to any of them with "
               "agent_turn, run Python agents with launch_agent and give them cron schedules with "
-              "schedule_agent (each its own Kubernetes CronJob).",
+              "schedule_agent (each its own Kubernetes CronJob, at most once every five minutes). "
+              "A Python agent's definition is {source: zetta, instructions, entrypoint, files: "
+              "[{path, contents}]}; lake refuses any other field. Runs and schedules belong to "
+              "the workspace they were started in.",
               [](std::string_view n) {
                   return n == "list_agent_library" || n == "launch_agent" ||
                          n == "list_agent_launches" || n == "stop_agent_launch" ||

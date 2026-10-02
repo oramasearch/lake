@@ -766,13 +766,20 @@ public:
     control::Result<control::AgentLaunch> get_agent_launch(const std::string& id) override {
         return call("get_agent_launch", [&] { return store_->get_agent_launch(id); });
     }
-    control::Result<std::vector<control::AgentLaunch>> list_agent_launches(
-        const std::string& customer_id, const std::string& agent_id, int limit) override {
-        return call("list_agent_launches",
-                    [&] { return store_->list_agent_launches(customer_id, agent_id, limit); });
+    control::Result<std::vector<control::AgentLaunch>>
+    list_agent_launches(const std::string& customer_id, const std::string& agent_id, int limit,
+                        const std::string& workspace_id = {}) override {
+        return call("list_agent_launches", [&] {
+            return store_->list_agent_launches(customer_id, agent_id, limit, workspace_id);
+        });
     }
     control::Result<control::AgentLaunch> withdraw_agent_launch(const std::string& id) override {
         return call("withdraw_agent_launch", [&] { return store_->withdraw_agent_launch(id); });
+    }
+    control::Result<std::size_t> expire_unstarted_agent_launches(
+        std::int64_t seconds, const std::string& reason) override {
+        return call("expire_unstarted_agent_launches",
+                    [&] { return store_->expire_unstarted_agent_launches(seconds, reason); });
     }
     control::Result<control::AgentTask>
     create_agent_task(const control::AgentTask& value) override {
@@ -868,20 +875,23 @@ public:
         return call("get_agent_cron_schedule", [&] { return store_->get_agent_cron_schedule(id); });
     }
     control::Result<std::vector<control::AgentCronSchedule>>
-    list_agent_cron_schedules(const std::string& customer_id,
-                              const std::string& agent_id) override {
-        return call("list_agent_cron_schedules",
-                    [&] { return store_->list_agent_cron_schedules(customer_id, agent_id); });
+    list_agent_cron_schedules(const std::string& customer_id, const std::string& agent_id,
+                              const std::string& workspace_id = {}) override {
+        return call("list_agent_cron_schedules", [&] {
+            return store_->list_agent_cron_schedules(customer_id, agent_id, workspace_id);
+        });
     }
     control::Result<control::AgentCronSchedule>
     withdraw_agent_cron_schedule(const std::string& id) override {
         return call("withdraw_agent_cron_schedule",
                     [&] { return store_->withdraw_agent_cron_schedule(id); });
     }
-    control::Result<std::vector<control::AgentLaunch>> list_agent_cron_runs(
-        const std::string& customer_id, const std::string& agent_id, int limit) override {
-        return call("list_agent_cron_runs",
-                    [&] { return store_->list_agent_cron_runs(customer_id, agent_id, limit); });
+    control::Result<std::vector<control::AgentLaunch>>
+    list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit,
+                         const std::string& workspace_id = {}) override {
+        return call("list_agent_cron_runs", [&] {
+            return store_->list_agent_cron_runs(customer_id, agent_id, limit, workspace_id);
+        });
     }
     control::Result<control::AskMessage>
     append_ask_message(const control::AskMessage& value) override {

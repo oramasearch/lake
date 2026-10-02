@@ -3581,8 +3581,10 @@ std::string agent_content(const WorkspacePage& page) {
             if (answer.empty() && result.is_object()) {
                 answer = json_text(result, "error");
             }
-            const std::string status = !present ? std::string("Stopped")
-                                                : (phase.empty() ? std::string("Pending") : phase);
+            // A run lake stopped because the operator never started it reads Failed, with why.
+            const std::string status = !present && phase != "Failed"
+                                           ? std::string("Stopped")
+                                           : (phase.empty() ? std::string("Pending") : phase);
             std::string stop;
             // A scheduled run belongs to its CronJob; removing the schedule stops the next ones.
             if (live && json_text(launch, "trigger") != "schedule") {

@@ -294,3 +294,8 @@ names, malformed CSV refused with its line before any upload call, a taken name 
 reported as renamed, one `<database>/<name>` id across list and get, engine results kept out of
 pickers and grouped under Results, and typed columns. See
 [workspaces.md](../docs/api/workspaces.md).
+`AgentRuns.LaunchesAndSchedulesBelongToTheirWorkspace`,
+`AgentRuns.AWaitingLaunchSaysWhyAndTimesOutWithAReason` and
+`AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop` cover lake#442 in memory;
+`PostgresAgentLaunches` covers the `0043_agent_launch_workspaces` routing trigger, workspace
+filters and the start-timeout withdrawal. See [agent-launches.md](../docs/api/agent-launches.md).

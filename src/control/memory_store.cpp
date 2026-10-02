@@ -7,6 +7,7 @@
 #include <random>
 #include <set>
 
+#include "lake/control/agent_runs.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
@@ -1366,6 +1367,7 @@ Result<AgentLaunch> InMemoryStore::create_agent_launch(const NewAgentLaunch& in)
     launch.desired = "present";
     launch.created_by_user_id = in.created_by_user_id;
     launch.created_by_taap_id = in.created_by_taap_id;
+    launch.workspace_id = in.workspace_id;
     launch.created_at = launch.updated_at = std::format(
         "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
     agent_launches_.push_back(launch);
@@ -1383,11 +1385,13 @@ Result<AgentLaunch> InMemoryStore::get_agent_launch(const std::string& id) {
 
 Result<std::vector<AgentLaunch>> InMemoryStore::list_agent_launches(const std::string& customer_id,
                                                                     const std::string& agent_id,
-                                                                    int limit) {
+                                                                    int limit,
+                                                                    const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
     std::vector<AgentLaunch> launches;
     for (auto it = agent_launches_.rbegin(); it != agent_launches_.rend(); ++it) {
-        if (it->customer_id == customer_id && (agent_id.empty() || it->agent_id == agent_id)) {
+        if (it->customer_id == customer_id && (agent_id.empty() || it->agent_id == agent_id) &&
+            (workspace_id.empty() || it->workspace_id == workspace_id)) {
             launches.push_back(*it);
         }
         if (limit > 0 && static_cast<int>(launches.size()) >= limit) {
@@ -1408,6 +1412,47 @@ Result<AgentLaunch> InMemoryStore::withdraw_agent_launch(const std::string& id) 
         ++found->generation;
     }
     return *found;
+}
+
+namespace {
+
+std::optional<std::chrono::sys_seconds> launch_created_at(const std::string& text) {
+    return utc_seconds(text);
+}
+
+} // namespace
+
+Result<std::size_t> InMemoryStore::expire_unstarted_agent_launches(std::int64_t seconds,
+                                                                   const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    std::size_t expired = 0;
+    for (AgentLaunch& launch : agent_launches_) {
+        const auto created = launch_created_at(launch.created_at);
+        if (launch.desired != "present" || launch.observed_generation != 0 || !created ||
+            now - *created < std::chrono::seconds(seconds)) {
+            continue;
+        }
+        launch.desired = "absent";
+        ++launch.generation;
+        launch.stop_reason = reason;
+        ++expired;
+    }
+    return expired;
+}
+
+Result<void> InMemoryStore::age_agent_launch(const std::string& id, std::int64_t seconds) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(agent_launches_, id, &AgentLaunch::id);
+    if (found == agent_launches_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent launch " + id});
+    }
+    const auto created = launch_created_at(found->created_at);
+    if (!created) {
+        return std::unexpected(StoreError{"invalid_input", "launch time is unreadable"});
+    }
+    found->created_at = std::format("{:%FT%TZ}", *created - std::chrono::seconds(seconds));
+    return {};
 }
 
 Result<void> InMemoryStore::set_agent_launch_status(const std::string& id,
@@ -1456,6 +1501,7 @@ InMemoryStore::create_agent_cron_schedule(const NewAgentCronSchedule& in) {
     schedule.desired = "present";
     schedule.created_by_user_id = in.created_by_user_id;
     schedule.created_by_taap_id = in.created_by_taap_id;
+    schedule.workspace_id = in.workspace_id;
     schedule.created_at = schedule.updated_at = std::format(
         "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
     agent_cron_schedules_.push_back(schedule);
@@ -1473,12 +1519,14 @@ Result<AgentCronSchedule> InMemoryStore::get_agent_cron_schedule(const std::stri
 
 Result<std::vector<AgentCronSchedule>>
 InMemoryStore::list_agent_cron_schedules(const std::string& customer_id,
-                                         const std::string& agent_id) {
+                                         const std::string& agent_id,
+                                         const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
     std::vector<AgentCronSchedule> schedules;
     for (const AgentCronSchedule& schedule : agent_cron_schedules_) {
         if (schedule.customer_id == customer_id && schedule.desired == "present" &&
-            (agent_id.empty() || schedule.agent_id == agent_id)) {
+            (agent_id.empty() || schedule.agent_id == agent_id) &&
+            (workspace_id.empty() || schedule.workspace_id == workspace_id)) {
             schedules.push_back(schedule);
         }
     }
@@ -1501,12 +1549,14 @@ Result<AgentCronSchedule> InMemoryStore::withdraw_agent_cron_schedule(const std:
 
 Result<std::vector<AgentLaunch>> InMemoryStore::list_agent_cron_runs(const std::string& customer_id,
                                                                      const std::string& agent_id,
-                                                                     int limit) {
+                                                                     int limit,
+                                                                     const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
     std::vector<AgentLaunch> runs;
     for (auto it = agent_cron_runs_.rbegin(); it != agent_cron_runs_.rend(); ++it) {
         if (it->second.customer_id == customer_id &&
-            (agent_id.empty() || it->second.agent_id == agent_id)) {
+            (agent_id.empty() || it->second.agent_id == agent_id) &&
+            (workspace_id.empty() || it->second.workspace_id == workspace_id)) {
             runs.push_back(it->second);
         }
         if (limit > 0 && static_cast<int>(runs.size()) >= limit) {
@@ -1558,6 +1608,8 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
         launch.input = schedule->input;
         launch.slug = job_name;
         launch.desired = "present";
+        launch.workspace_id = schedule->workspace_id;
+        launch.observed_generation = 1; // the operator wrote it
         launch.created_by_user_id = schedule->created_by_user_id;
         launch.created_by_taap_id = schedule->created_by_taap_id;
         launch.created_at = launch.updated_at =
