@@ -81,6 +81,14 @@ struct Invitation {
     std::string id, organization_id, team_id, invitee_type, invitee, role, expires_at, status,
         accepted_membership_id, created_by_taap_id, created_at, updated_at;
 };
+// The result of create_organization_space and convert_personal_space. personal is the fresh
+// personal space a conversion provisions; it is empty after create_organization_space.
+struct OrganizationSpace {
+    Organization organization;
+    Customer customer;
+    Membership owner;
+    Customer personal;
+};
 struct PolicyObject {
     std::string id, object_type, external_id, parent_id, created_at, updated_at;
     bool inherit = true;
@@ -121,6 +129,18 @@ struct NewInvitation {
 struct AcceptInvitation {
     std::string invitation_id, principal_type, principal_id, principal_taap_id, attestation_digest,
         accepted_by_taap_id, request_id;
+};
+// A person starts an organization: the organization, its own space (an organization customer
+// with a handle, generated when name is empty), the creator's owner membership and the
+// creator's admin grant on the new space, in one transaction (docs/api/organizations.md).
+struct NewOrganizationSpace {
+    std::string display_name, name, owner_user_id, owner_taap_id, request_id;
+};
+// A person turns their personal space into an organization's space. The customer keeps its id,
+// handle, repositories and workspaces; the person becomes its owner and receives a fresh
+// personal space, in one transaction.
+struct ConvertPersonalSpace {
+    std::string customer_id, display_name, owner_user_id, owner_taap_id, request_id;
 };
 struct NewPolicyObject {
     std::string object_type, external_id, parent_id, acting_principal, request_id;
@@ -828,6 +848,17 @@ public:
     virtual Result<std::vector<Invitation>>
     list_invitations(const std::string& organization_id, const std::string& team_id, int limit) = 0;
     virtual Result<Invitation> get_invitation(const std::string& id) = 0;
+    // Organizations a person runs themselves (docs/api/organizations.md#self-service).
+    virtual Result<OrganizationSpace> create_organization_space(const NewOrganizationSpace&) = 0;
+    virtual Result<OrganizationSpace> convert_personal_space(const ConvertPersonalSpace&) = 0;
+    // Every organization and team membership held by one user principal, newest first.
+    virtual Result<std::vector<Membership>> list_user_memberships(const std::string& user_id,
+                                                                  int limit) = 0;
+    // Pending, unexpired invitations addressed to an email address or to one of the handles.
+    virtual Result<std::vector<Invitation>>
+    list_invitee_invitations(const std::string& email,
+                             const std::vector<std::string>& handles,
+                             int limit) = 0;
 
     virtual Result<PolicyObject> create_policy_object(const NewPolicyObject&) = 0;
     virtual Result<PolicyObject> get_policy_object(const std::string& id) = 0;

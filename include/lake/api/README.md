@@ -51,3 +51,6 @@ renderer arguments remain compatible and mean an ordinary account, never an oper
 
 `AppsPage` carries the selected ApplicationAgent task, working state, and exact proposal digest to
 the pure Ship Apps renderer. Authorization and digest verification remain in the HTTP adapter.
+
+`OrganizationsPageData` gives the Organizations renderer the viewer's memberships, the invitations
+addressed to them and their personal space; see [settings.md](../../../docs/ui/settings.md).

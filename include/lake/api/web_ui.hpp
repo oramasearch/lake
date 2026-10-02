@@ -413,6 +413,24 @@ std::string web_ui_artifacts(const control::Repository& repository,
 std::string web_ui_artifact(const control::Repository& repository,
                             const RepositoryArtifact& artifact,
                             WebUiViewer viewer);
+// One pending invitation addressed to the viewer, with the organization's name, which the
+// invitee cannot read before joining.
+struct OrganizationInvitationForViewer {
+    control::Invitation invitation;
+    std::string organization_name;
+};
+struct OrganizationsPageData {
+    std::vector<control::Organization> organizations;
+    // The viewer's own memberships, for showing their role on each organization.
+    std::vector<control::Membership> memberships;
+    std::vector<OrganizationInvitationForViewer> invitations;
+    // The viewer's personal space, offered for conversion into an organization.
+    std::optional<control::Customer> personal_space;
+    // A signed-in person (not an operator credential) may start organizations and join them.
+    bool person = false;
+    std::string error;
+};
+std::string web_ui_organizations(const OrganizationsPageData& data, WebUiViewer viewer = true);
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations,
                                  WebUiViewer viewer = true);
 struct OrganizationSettingsData {

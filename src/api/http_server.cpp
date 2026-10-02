@@ -6366,15 +6366,156 @@ struct ApiServer::Impl {
         if (!rows.ok) {
             return serve_page_error(route, rows);
         }
-        std::vector<control::Organization> organizations;
+        OrganizationsPageData data;
         for (const auto& value : rows.value.at("items")) {
-            organizations.push_back(organization_from_json(value));
+            data.organizations.push_back(organization_from_json(value));
+        }
+        data.person = !ctx.operator_credential && !ctx.acting_user_id.empty();
+        if (data.person) {
+            const ApiResult memberships = registry.call("list_memberships", {{"limit", 500}}, ctx);
+            if (memberships.ok) {
+                for (const auto& value : memberships.value.at("items")) {
+                    data.memberships.push_back(membership_from_json(value));
+                }
+            }
+            const ApiResult invitations = registry.call("list_invitations", {{"limit", 100}}, ctx);
+            if (invitations.ok) {
+                for (const auto& value : invitations.value.at("items")) {
+                    data.invitations.push_back(
+                        {invitation_from_json(value), value.value("organization_name", "")});
+                }
+            }
+            const ApiResult customers = page_customers(ctx);
+            if (customers.ok) {
+                for (const auto& value : customers.value.value("items", nlohmann::json::array())) {
+                    control::Customer customer = customer_from_json(value);
+                    if (customer.customer_type == "individual" &&
+                        customer.user_id == ctx.acting_user_id) {
+                        data.personal_space = std::move(customer);
+                        break;
+                    }
+                }
+            }
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_organizations(organizations, viewer_for(ctx)),
+                         web_ui_organizations(data, viewer_for(ctx)),
                          "text/html; charset=utf-8",
                          "no-store");
+    }
+
+    boost::http::route_task form_failure(boost::http::route_params& route,
+                                         const ApiResult& result,
+                                         const ApiContext& context) {
+        return send_text(route,
+                         boost::http::int_to_status(rest_status(result)),
+                         web_ui_error(result.error.code, result.error.message, viewer_for(context)),
+                         "text/html; charset=utf-8",
+                         "no-store");
+    }
+
+    // POST /organizations/create: a person starts an organization and is sent on to invite
+    // people (docs/ui/settings.md).
+    boost::http::route_task serve_organization_create(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        nlohmann::json input{{"display_name", form_field(body, "display_name")}};
+        if (const std::string name = form_field(body, "name"); !name.empty()) {
+            input["name"] = name;
+        }
+        const ApiResult result = registry.call("create_organization_space", input, context);
+        if (!result.ok) {
+            co_return co_await form_failure(route, result, context);
+        }
+        co_return co_await redirect(
+            route,
+            "/organization?id=" + result.value.at("organization").at("id").get<std::string>() +
+                "&tab=invitations");
+    }
+
+    // POST /organizations/convert: the confirmed conversion of the viewer's personal space.
+    boost::http::route_task serve_organization_convert(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const std::string customer_id = form_field(body, "customer_id");
+        const ApiResult customer = registry.call("get_customer", {{"id", customer_id}}, context);
+        if (!customer.ok) {
+            co_return co_await form_failure(route, customer, context);
+        }
+        const std::string handle = customer.value.value("name", "");
+        if (form_field(body, "confirm") != handle) {
+            co_return co_await form_failure(
+                route,
+                ApiResult::failure("invalid_input",
+                                   "type the handle " + handle +
+                                       " exactly to confirm turning this space into an "
+                                       "organization; nothing was changed",
+                                   "/confirm"),
+                context);
+        }
+        const ApiResult result = registry.call(
+            "convert_personal_space",
+            {{"customer_id", customer_id}, {"display_name", form_field(body, "display_name")}},
+            context);
+        if (!result.ok) {
+            co_return co_await form_failure(route, result, context);
+        }
+        co_return co_await redirect(
+            route,
+            "/organization?id=" + result.value.at("organization").at("id").get<std::string>() +
+                "&tab=invitations");
+    }
+
+    // POST /invitations/accept: the invitee joins.
+    boost::http::route_task serve_invitation_accept(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await redirect(route, "/sign-in");
+        }
+        const ApiResult result = registry.call(
+            "join_organization", {{"invitation_id", form_field(body, "invitation_id")}}, context);
+        if (!result.ok) {
+            co_return co_await form_failure(route, result, context);
+        }
+        co_return co_await redirect(
+            route, "/organization?id=" + result.value.at("organization_id").get<std::string>());
+    }
+
+    // POST /organization/teams: create a team from the organization's Teams tab.
+    boost::http::route_task serve_organization_team_create(boost::http::route_params& route) {
+        auto [read_error, body] = co_await read_string_body(route);
+        if (read_error) {
+            co_return boost::http::route_error(read_error);
+        }
+        ApiContext context = context_for(route);
+        const std::string organization_id = form_field(body, "organization_id");
+        nlohmann::json input{{"organization_id", organization_id},
+                             {"name", form_field(body, "name")}};
+        if (const std::string display_name = form_field(body, "display_name");
+            !display_name.empty()) {
+            input["display_name"] = display_name;
+        }
+        const ApiResult result = registry.call("create_team", input, context);
+        if (!result.ok) {
+            co_return co_await form_failure(route, result, context);
+        }
+        co_return co_await redirect(route, "/organization?id=" + organization_id + "&tab=teams");
     }
 
     boost::http::route_task serve_organization_page(boost::http::route_params& route) {
@@ -7493,12 +7634,35 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         const std::string organization_id = form_field(body, "organization_id");
+        // The form offers a lifetime in days; an explicit expires_at still wins.
+        std::string expires_at = form_field(body, "expires_at");
+        if (expires_at.empty()) {
+            const std::string days_field = form_field(body, "expires_in_days");
+            int days = 7;
+            if (!days_field.empty()) {
+                const auto [end, error] =
+                    std::from_chars(days_field.data(), days_field.data() + days_field.size(), days);
+                if (error != std::errc{} || end != days_field.data() + days_field.size() ||
+                    days < 1 || days > 90) {
+                    co_return co_await form_failure(
+                        route,
+                        ApiResult::failure("invalid_input",
+                                           "an invitation lasts from 1 to 90 days",
+                                           "/expires_in_days"),
+                        context);
+                }
+            }
+            expires_at = std::format(
+                "{:%FT%TZ}",
+                std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now() +
+                                                         std::chrono::days{days}));
+        }
         const ApiResult result = registry.call("create_invitation",
                                                {{"organization_id", organization_id},
                                                 {"invitee_type", form_field(body, "invitee_type")},
                                                 {"invitee", form_field(body, "invitee")},
                                                 {"role", form_field(body, "role")},
-                                                {"expires_at", form_field(body, "expires_at")}},
+                                                {"expires_at", expires_at}},
                                                context);
         if (!result.ok) {
             co_return co_await send_text(
@@ -14966,6 +15130,26 @@ bool ApiServer::start() {
                    return impl.observe_request(route,
                                                "/organization/invitations",
                                                impl.serve_organization_invitation(route));
+               });
+    add_route(http::method::post,
+               "/organizations/create",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route, "/organizations/create", impl.serve_organization_create(route));
+               });
+    add_route(http::method::post,
+               "/organizations/convert",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route, "/organizations/convert", impl.serve_organization_convert(route));
+               });
+    add_route(http::method::post,
+               "/invitations/accept",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route, "/invitations/accept", impl.serve_invitation_accept(route));
+               });
+    add_route(http::method::post,
+               "/organization/teams",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(route, "/organization/teams", impl.serve_organization_team_create(route));
                });
     add_route(http::method::post,
                "/organization/sso",

@@ -34,6 +34,9 @@ curl -H "$H" 'https://lake.oramadev.net/v1/list_customers?limit=5'
 curl -H "$H" 'https://lake.oramadev.net/v1/get_customer?id=<customer id>'
 ```
 
+`get_customer` also accepts `customer_id`, the name every other capability uses for a space;
+passing both with different values answers `400`.
+
 Response (success): `{"ok":true,"value":{...},"duration_ms":0.4}`. Failure:
 `{"ok":false,"error":{"code":"conflict","message":"...","path":""},"duration_ms":0.2}`.
 
@@ -52,3 +55,8 @@ An ordinary Lake password sign-up now creates its individual customer and a cust
 `admin` grant atomically. It uses a generated permanent handle and the configured storage quota.
 `create_customer` remains operator-only; the public sign-up capability performs the bootstrap
 inside the account transaction. See [provisioning.md](provisioning.md).
+
+A person can also start an organization with its own `organization` customer, or turn their
+personal space into one (`create_organization_space`, `convert_personal_space`). Conversion is
+the one change of `customer_type`: the row keeps its id and handle. See
+[organizations.md](organizations.md#self-service-an-organization-a-person-runs).

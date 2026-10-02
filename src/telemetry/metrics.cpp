@@ -323,6 +323,28 @@ public:
     control::Result<control::Invitation> get_invitation(const std::string& id) override {
         return call("get_invitation", [&] { return store_->get_invitation(id); });
     }
+    control::Result<control::OrganizationSpace>
+    create_organization_space(const control::NewOrganizationSpace& value) override {
+        return call("create_organization_space",
+                    [&] { return store_->create_organization_space(value); });
+    }
+    control::Result<control::OrganizationSpace>
+    convert_personal_space(const control::ConvertPersonalSpace& value) override {
+        return call("convert_personal_space",
+                    [&] { return store_->convert_personal_space(value); });
+    }
+    control::Result<std::vector<control::Membership>>
+    list_user_memberships(const std::string& user_id, int limit) override {
+        return call("list_user_memberships",
+                    [&] { return store_->list_user_memberships(user_id, limit); });
+    }
+    control::Result<std::vector<control::Invitation>>
+    list_invitee_invitations(const std::string& email,
+                             const std::vector<std::string>& handles,
+                             int limit) override {
+        return call("list_invitee_invitations",
+                    [&] { return store_->list_invitee_invitations(email, handles, limit); });
+    }
     control::Result<control::PolicyObject>
     create_policy_object(const control::NewPolicyObject& value) override {
         return call("create_policy_object", [&] { return store_->create_policy_object(value); });

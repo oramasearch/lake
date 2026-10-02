@@ -230,7 +230,13 @@ Front-door renderer checks cover the landing journey and visitor/account/operato
 `HttpServer/HttpResponseIsolation.NavigationUsesTheResolvedViewerOnEveryPage` runs with both
 stores, valid and invalid cookies, and operator credentials; each advertised global link must
 return HTTP 200 for that same viewer. It also pins customer redirects to `/sign-in`. The browser
-proof is in [front-door.md](../docs/ui/front-door.md). `PostgresCapabilities.OrganizationAndPolicyRoundTrip`
+proof is in [front-door.md](../docs/ui/front-door.md).
+`HttpServer/HttpResponseIsolation.PersonCreatesAnOrganizationInvitesAndAColleagueJoins` and
+`.PersonalSpaceBecomesAnOrganizationAfterConfirmation` drive the Organizations page forms as two
+signed-up people against both stores; `Organizations.*` and
+`PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace` cover the capabilities
+and the organization-space grants ([organizations.md](../docs/api/organizations.md)).
+`PostgresCapabilities.OrganizationAndPolicyRoundTrip`
 filters its deletion audit assertion by the exact request ID and `repository/<id>` object.
 `Stores/AuditIsolation.*` proves lookup after 1,105 same-object events and complete cursor traversal
 against memory and PostgreSQL stores. Personal-customer lookup filters by user before limiting.

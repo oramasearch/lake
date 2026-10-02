@@ -12,3 +12,7 @@ errors; the metrics layer adds no authorization or topic state. See
 The same wrapper forwards protected-app resolution, session authorization, code creation,
 exchange, and cleanup without changing their results. Forward-auth timing remains visible through
 the HTTP `Server-Timing` regression described in `docs/serving/http.md`.
+
+It also forwards the organization self-service store calls (`create_organization_space`,
+`convert_personal_space`, `list_user_memberships`, `list_invitee_invitations`) under their own
+operation labels.
