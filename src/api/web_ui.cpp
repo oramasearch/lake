@@ -5579,10 +5579,13 @@ std::string web_ui_packages(const nlohmann::json& catalog,
         content += "<table><thead><tr><th>Name</th><th>Versions</th><th>Install</th></tr></thead>"
                    "<tbody>";
         for (const nlohmann::json& item : items) {
-            const std::string name = item.value("name", std::string());
+            const std::string name = json_text(item, "name");
             std::string versions;
             std::string latest;
-            for (const nlohmann::json& version : item.value("versions", nlohmann::json::array())) {
+            const auto listed = item.find("versions");
+            const nlohmann::json versions_list =
+                listed != item.end() && listed->is_array() ? *listed : nlohmann::json::array();
+            for (const nlohmann::json& version : versions_list) {
                 const std::string text = version.is_string() ? version.get<std::string>() : "";
                 versions += (versions.empty() ? "" : ", ") + text;
                 latest = text;
@@ -5617,16 +5620,18 @@ std::string web_ui_packages(const nlohmann::json& catalog,
         content += "<table><thead><tr><th>Image</th><th>Phase</th><th>Digest</th><th>Log</th>"
                    "</tr></thead><tbody>";
         for (const nlohmann::json& build : builds) {
-            const std::string id = build.value("id", std::string());
+            // A build without an image yet has a null digest (lake#440): read every field as
+            // text that may be absent or null, never as a required string.
+            const std::string id = json_text(build, "id");
             content += std::format(
                 "<tr data-build-id=\"{}\"><td><code>{}</code></td><td class=\"build-phase\">{}"
                 "</td><td><code>{}</code></td><td><details><summary>Live log</summary>"
                 "<pre class=\"build-log\"></pre></details><a href=\"/train/stream?customer_id={}"
                 "&amp;zetta=workspace&amp;topic=build-events.{}\">Browse messages</a></td></tr>",
                 web_ui_escape(id),
-                web_ui_escape(build.value("target", std::string())),
-                web_ui_escape(build.value("phase", std::string())),
-                web_ui_escape(build.value("digest", std::string())),
+                web_ui_escape(json_text(build, "target")),
+                web_ui_escape(json_text(build, "phase")),
+                web_ui_escape(json_text(build, "digest")),
                 url_component(customer_id), url_component(id));
         }
         content += "</tbody></table></section>";

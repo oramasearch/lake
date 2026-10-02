@@ -124,6 +124,28 @@ produces no stderr output. Lake pins `oramasearch/beast2` branch `orama-main`, w
 suppresses the former `read_header error: end of stream` line. The carrier and its update procedure
 are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
+## Handler exceptions
+
+Beast2 closes the connection when a route handler's task ends in an exception: the client sees a
+reset (a `502` behind nginx and Cloudflare) and Lake writes no request log line. Lake registers
+every route, and the workspace and trailing 404 middleware, through `guard_route`
+(`src/api/route_guard.hpp`). An exception thrown while the handler is called or while its task
+runs is logged as one JSON line on stdout:
+
+```json
+{"ts":"…","level":"error","event":"handler_exception","method":"GET","path":"/w/<ws>/ship/packages","route":"/ship/packages","request_id":"…","error":"…"}
+```
+
+The request id is the caller's `X-Request-Id`, or a new UUID. The request is then answered `500`
+with `Cache-Control: no-store` and `X-Request-Id`: the HTML error page when `Accept` names
+`text/html`, otherwise the JSON envelope with code `internal_error`. The response starts from a
+cleared header set, so fields the handler set before it threw do not leak, and the exception text
+stays in the log, never in the response. The usual request log line and metrics follow with status
+`500`, and the connection stays open for the next request.
+
+`HttpServer.AHandlerThatThrowsIsAnswered500AndLogged` throws from a handler before and inside its
+task over one keep-alive connection and checks both answers, the log fields and a following `200`.
+
 ## Response isolation
 
 Beast2 pools workers across connections. At the pinned revision, each worker retains its

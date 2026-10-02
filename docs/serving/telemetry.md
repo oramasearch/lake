@@ -67,7 +67,9 @@ sites. Keep metric labels bounded and never put raw request paths, customer iden
 values in them. Change the bucket array in `src/telemetry/metrics.cpp` only when both request and
 store latency histograms should change together.
 
-Register new HTTP routes before the trailing 404 and wrap their handler with `observe_request`,
-passing the literal route pattern. Continue to use `context_for` for any operational route that
+Register new HTTP routes before the trailing 404 through `add_route` (which applies
+`guard_route`, so an exception is answered 500 and logged as `handler_exception` — see
+[http.md](http.md#handler-exceptions)) and wrap their handler with `observe_request`, passing the
+literal route pattern. Continue to use `context_for` for any operational route that
 requires authentication. A new store implementation must implement `ping()` and return
 `store_unavailable` when it cannot serve calls.

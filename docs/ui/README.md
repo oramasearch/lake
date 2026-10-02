@@ -133,6 +133,7 @@ ownership, zero initial metering, and creating a first private repository at bot
 and themes. The `POST /repository/create` form adapter calls the existing registry capability.
 
 Repository pages expose `POST /repository/build`, which calls `build_image`. Ship → Packages
-shows authorized tenant images and the selected space's build rows, while `/ship/app` shows one
+shows authorized tenant images and the selected space's build rows (a build without an image yet
+has a null digest and shows an empty digest cell; lake#440), while `/ship/app` shows one
 App's build history and calls `build_app`. Both build tables long-poll the audited
 `receive_build_events` capability for live phase and retained log updates.
