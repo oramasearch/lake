@@ -36,6 +36,11 @@ into `ApiContext`, and `build_app` records it as the generated Dockerfile's
 server parser ceiling for OCI upload traffic only; body sinks retain the 64 MiB general limit.
 See [the HTTP body-limit contract](../../../docs/serving/http.md).
 
+`ApiContext::registry_space_bytes` is an injected callable the HTTP adapter sets when registry
+storage exists: it returns the unique bytes the OCI registry holds below `<space>/`. The
+`metering_usage` summary calls it, so the registry layout stays inside the adapter. See
+[metering.md](../../../docs/api/metering.md).
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 

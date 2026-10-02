@@ -600,9 +600,75 @@ TEST(WebUi, MeteringRendersQuotaWarningAndHourlyUsage) {
                                                         {"cost_micros", 7}}})}};
     const std::string html = lake::api::web_ui_metering(usage);
     EXPECT_NE(html.find("Storage quota exceeded"), std::string::npos);
-    EXPECT_NE(html.find("2026-09-04T00:00:00Z"), std::string::npos);
+    EXPECT_NE(html.find("datetime=\"2026-09-04T00:00:00Z\">2026-09-04 00:00 UTC"),
+              std::string::npos);
     EXPECT_NE(html.find("customer&lt;&amp;&gt;"), std::string::npos);
     EXPECT_EQ(html.find("customer<&>"), std::string::npos);
+}
+
+TEST(WebUi, UsageUsesPlainUnitsAndNamesWhatIsNotMeasured) {
+    nlohmann::json usage{
+        {"customer_id", "space-1"},
+        {"currency", "USD"},
+        {"quota_bytes", 0},
+        {"over_quota", false},
+        {"cost_micros", 12'345'678},
+        {"summary",
+         {{"storage",
+           {{"repositories_bytes", 2048},
+            {"images_bytes", 3 * 1024 * 1024},
+            {"workspace_data_bytes", 5 * 1024},
+            {"total_bytes", 2048 + 3 * 1024 * 1024 + 5 * 1024}}},
+          {"compute",
+           {{"repository_build_seconds", 45},
+            {"image_build_seconds", 125},
+            {"image_builds", 2},
+            {"workspace_run_seconds", 3 * 3600 + 4 * 60},
+            {"workspace_runs", 7},
+            {"total_seconds", 45 + 125 + 3 * 3600 + 4 * 60}}},
+          {"workspaces",
+           nlohmann::json::array({{{"name", "main<1>"},
+                                   {"measured", true},
+                                   {"data_bytes", 5 * 1024},
+                                   {"datasets", 2},
+                                   {"run_seconds", 3 * 3600 + 4 * 60},
+                                   {"runs", 7}},
+                                  {{"name", "paused"},
+                                   {"measured", false},
+                                   {"message", "workspace_id is not running"}}})},
+          {"not_measured",
+           nlohmann::json::array({"Model files and indexes inside a workspace: not yet."})},
+          {"priced", true}}},
+        {"items",
+         nlohmann::json::array({{{"hour", "2026-09-04T00:00:00Z"},
+                                 {"stored_bytes", 2048},
+                                 {"transfer_in_bytes", 0},
+                                 {"transfer_out_bytes", 1536},
+                                 {"compute_seconds", 45},
+                                 {"cost_micros", 7}}})}};
+    std::string html = lake::api::web_ui_metering(usage);
+    EXPECT_NE(html.find("<h1>Usage</h1>"), std::string::npos);
+    EXPECT_EQ(html.find("economics"), std::string::npos);
+    EXPECT_EQ(html.find("micro-"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Container images</dt><dd>3.0 MiB</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Workspace data</dt><dd>5.0 KiB</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Repositories</dt><dd>2.0 KiB</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Repository storage limit</dt><dd>No limit</dd>"), std::string::npos);
+    EXPECT_NE(html.find("2 min 5 s across 2 builds, including time queued"), std::string::npos);
+    EXPECT_NE(html.find("3 h 4 min across 7 runs"), std::string::npos);
+    EXPECT_NE(html.find("main&lt;1&gt;"), std::string::npos);
+    EXPECT_NE(html.find("Not measured: workspace_id is not running"), std::string::npos);
+    EXPECT_NE(html.find("<h2>Not Measured Yet</h2>"), std::string::npos);
+    EXPECT_NE(html.find("12.35 USD"), std::string::npos);
+    EXPECT_NE(html.find("less than 0.01 USD"), std::string::npos);
+    EXPECT_NE(html.find("<td>1.5 KiB</td>"), std::string::npos);
+
+    usage["summary"]["priced"] = false;
+    usage["summary"]["storage"]["images_bytes"] = nullptr;
+    html = lake::api::web_ui_metering(usage);
+    EXPECT_NE(html.find("This lake has no prices set"), std::string::npos);
+    EXPECT_EQ(html.find("<th>Charge</th>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Container images</dt><dd>Not measured</dd>"), std::string::npos);
 }
 
 TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {

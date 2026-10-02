@@ -51,7 +51,7 @@ Contextual links lead to exports, SSO, repository content, and drive views. The 
 | Application identity | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed pool-specific identity on lake's host or a configured custom host |
 | Operator sign in | `GET /login`, `POST /session` (form field `token`), `POST /logout` | the operator-token form; a match sets the session cookie and redirects to Repositories |
 | Customers | `GET /customers` | every tenant: handle (links to its repositories), type, identity id, created |
-| Organization settings | `GET /organization?id=<uuid>&tab=<tab>` | overview, teams, members, invitations, access, SSO, applications, metering, and audit; see [settings.md](settings.md) |
+| Organization settings | `GET /organization?id=<uuid>&tab=<tab>` | overview, teams, members, invitations, access, SSO, applications, usage (`tab=metering`), and audit; see [settings.md](settings.md) |
 | Team settings | `GET /team?id=<uuid>` | team memberships and effective access; see [settings.md](settings.md) |
 | Member settings | `GET /member?id=<uuid>` | role, attestation evidence, effective access, role change, and confirmed removal; see [settings.md](settings.md) |
 | Organizations | `GET /organizations` | every authorized organization, with links to the organization settings surface |

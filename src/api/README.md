@@ -9,7 +9,9 @@ Page reads share authentication and customer selection within each GET, and batc
 workspace and local reads with `when_all`. Data uses a projected name/database list; dataset
 details own metadata and the bounded sample. `Server-Timing` reports actual outbound calls and
 their sequential rounds. Startup warms existing repository indexes for Metering without
-caching usage. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
+caching usage. `metering_capabilities.cpp` is asynchronous: its summary reads every workspace's
+datasets and runs concurrently, and `http_server.cpp` injects `registry_space_bytes` so registry
+image bytes are counted where the registry storage lives. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
 and [metering](../../docs/api/metering.md).
 
 Solution catalogue details and solution-backed Project pages call the registry's bounded

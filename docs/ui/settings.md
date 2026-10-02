@@ -8,7 +8,7 @@ visits navigation before the selected page content and form controls.
 
 | Area | Route and tabs | Capability-backed content and actions |
 |---|---|---|
-| Organization | `GET /organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering`, `audit` | Organization, team, member, invitation, effective-access, SSO, application, metering, and audit reads; invite (`create_invitation`), configure provider (`register_sso_provider`), and quota form (`set_storage_quota`) |
+| Organization | `GET /organization?id=<id>&tab=` `overview`, `teams`, `members`, `invitations`, `access`, `sso`, `applications`, `metering` (labelled Usage), `audit` | Organization, team, member, invitation, effective-access, SSO, application, usage, and audit reads (usage only on its own tab, because it reads the space's workspaces); invite (`create_invitation`), configure provider (`register_sso_provider`), and quota form (`set_storage_quota`) |
 | Team | `GET /team?id=<id>` | Team memberships and effective access |
 | Member | `GET /member?id=<id>` | Membership role, attestation evidence, effective access, `set_member_role`, and `remove_member` |
 | Personal | `GET /settings?tab=` `profile`, `sessions`, `passkeys`, `tokens`, `notifications` | Profile identity, active sessions/devices, and links to the existing passkey and token capability forms |

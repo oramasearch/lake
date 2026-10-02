@@ -129,7 +129,9 @@ indexed text and source members with artifact identity, member path, digest, and
 members and containers nested beyond one inner level remain listed by digest only.
 Metering migration `0014_metering` stores hourly unique-byte gauges, sync transfer counters, and
 idempotent build-compute counters. `metering_usage` and `/metering` expose configured integer
-pricing, with audited per-customer quota overrides. `LAKE_STORAGE_QUOTA_BYTES` remains the
+pricing, with audited per-customer quota overrides. Its current summary also measures registry
+image bytes, workspace Zetta dataset bytes, image build time and workspace run time on each read,
+without storing them, and lists what is not measured yet (lake#444). `LAKE_STORAGE_QUOTA_BYTES` remains the
 default and throttles new writes at the customer-store boundary while existing content remains
 complete and readable. The contract is `docs/api/metering.md`.
 Static secrets and encryption add migration `0009_secrets`: customer-namespaced organization

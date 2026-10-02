@@ -525,6 +525,9 @@ bool title_is_current(std::string_view title, std::string_view key) {
     if (key == "mcp") {
         return title == "lake — MCP";
     }
+    if (key == "metering") {
+        return title == "lake — usage";
+    }
     if (key == "applications") {
         return title == "lake — applications" || title == "lake — application users" ||
                title == "lake — application organizations" ||
@@ -618,7 +621,7 @@ std::vector<NavItem> nav_items(const WebUiViewer& viewer) {
         items.push_back(
             {"Administration", "/organizations", "Organizations", "organization", "organizations"});
         items.push_back({"Administration", "/applications", "Applications", "api", "applications"});
-        items.push_back({"Administration", "/metering", "Metering", "metering", "metering"});
+        items.push_back({"Administration", "/metering", "Usage", "metering", "metering"});
         items.push_back({"Administration", "/secret-mounts", "Secrets", "secrets", "secret"});
         items.push_back({"Administration", "/audit", "Audit", "audit", "audit"});
     }
@@ -7496,7 +7499,7 @@ std::string web_ui_organization(const control::Organization& organization,
                                                           {"access", "Access"},
                                                           {"sso", "SSO"},
                                                           {"applications", "Applications"},
-                                                          {"metering", "Metering"},
+                                                          {"metering", "Usage"},
                                                           {"audit", "Audit"}}) {
         content += "<a href=\"" + base + name + "\"" +
                    (selected == name ? " aria-current=\"page\"" : "") + ">" + label + "</a>";
@@ -7589,14 +7592,17 @@ std::string web_ui_organization(const control::Organization& organization,
         content += "</section>";
     } else if (selected == "metering") {
         const std::string customer_id = data.metering.value("customer_id", "");
-        content += "<section class=\"panel\"><h2>Metering</h2>";
+        content += "<section class=\"panel\"><h2>Usage</h2>";
         if (customer_id.empty()) {
-            content += "<p class=\"empty\">No customer is attached to this organization.</p>";
+            content += "<p class=\"empty\">No space is attached to this organization.</p>";
         } else {
-            content += "<p>Storage quota: " +
-                       std::to_string(data.metering.value("quota_bytes", std::uint64_t{0})) +
-                       " bytes.</p><p>" +
-                       row_link("/metering?customer_id=" + customer_id, "Open metering") + "</p>";
+            const std::uint64_t quota = data.metering.value("quota_bytes", std::uint64_t{0});
+            const std::uint64_t total = data.metering.value("summary", nlohmann::json::object())
+                                            .value("storage", nlohmann::json::object())
+                                            .value("total_bytes", std::uint64_t{0});
+            content += "<p>Stored: " + display_size(total) + ". Repository storage limit: " +
+                       (quota == 0 ? std::string("no limit") : display_size(quota)) + ".</p><p>" +
+                       row_link("/metering?customer_id=" + customer_id, "Open usage") + "</p>";
         }
         content += "</section>";
     } else if (selected == "audit") {
@@ -7986,56 +7992,175 @@ web_ui_search(const search::Query& query, const search::QueryResult& result, Web
         "lake — search", query.text.empty() ? "search" : query.text, content, viewer);
 }
 
+namespace {
+
+// "0 s", "45 s", "12 min 5 s", "3 h 4 min": compute time in plain units.
+std::string usage_duration(std::uint64_t seconds) {
+    if (seconds < 60) {
+        return std::format("{} s", seconds);
+    }
+    if (seconds < 3600) {
+        return seconds % 60 == 0 ? std::format("{} min", seconds / 60)
+                                 : std::format("{} min {} s", seconds / 60, seconds % 60);
+    }
+    const std::uint64_t minutes = (seconds % 3600) / 60;
+    return minutes == 0 ? std::format("{} h", seconds / 3600)
+                        : std::format("{} h {} min", seconds / 3600, minutes);
+}
+
+// Integer micro-units of `currency` as an amount a person reads: "12.35 USD", "less than 0.01 USD".
+std::string usage_money(std::uint64_t micros, std::string_view currency) {
+    if (micros != 0 && micros < 10'000) {
+        return std::format("less than 0.01 {}", currency);
+    }
+    const std::uint64_t cents = (micros + 5'000) / 10'000;
+    return std::format("{}.{:02} {}", cents / 100, cents % 100, currency);
+}
+
+// "2026-09-04T00:00:00Z" as "2026-09-04 00:00 UTC".
+std::string usage_hour(std::string_view hour) {
+    if (hour.size() >= 16 && hour[10] == 'T') {
+        return std::format("{} {} UTC", hour.substr(0, 10), hour.substr(11, 5));
+    }
+    return std::string(hour);
+}
+
+} // namespace
+
 std::string web_ui_metering(const nlohmann::json& usage, WebUiViewer viewer) {
     const std::string customer_id = usage.value("customer_id", "");
     std::string content =
-        "<p class=\"eyebrow\">economics</p><h1>Metering</h1>"
-        "<p class=\"sub\">Hourly unique stored bytes, transfer, build compute, and configured "
-        "pricing.</p><form class=\"filters\" method=\"get\" action=\"/metering\">"
-        "<label>Customer<input name=\"customer_id\" value=\"" +
+        "<p class=\"eyebrow\">Storage and compute</p><h1>Usage</h1>"
+        "<p class=\"sub\">What this space stores and the compute it has used, measured from its "
+        "repositories, container images and workspaces.</p>"
+        "<form class=\"filters\" method=\"get\" action=\"/metering\">"
+        "<label>Space ID<input name=\"customer_id\" value=\"" +
         web_ui_escape(customer_id) +
         "\" required></label><button type=\"submit\">Show usage</button></form>";
     if (customer_id.empty()) {
-        content += "<div class=\"panel empty\">Choose a customer.</div>";
-        return web_ui_shell("lake — metering", "metering", content, viewer);
+        content += "<div class=\"panel empty\">Choose a space.</div>";
+        return web_ui_shell("lake — usage", "usage", content, viewer);
     }
     if (usage.value("over_quota", false)) {
         content +=
             std::format("<p class=\"notice\">{}</p>", web_ui_escape(usage.value("warning", "")));
     }
-    content += std::format("<div class=\"panel\"><dl><dt>Storage quota</dt><dd>{} bytes</dd>"
-                           "<dt>Charge</dt><dd>{} micro-{}</dd></dl></div>",
-                           usage.value("quota_bytes", std::uint64_t{0}),
-                           usage.value("cost_micros", std::uint64_t{0}),
-                           web_ui_escape(usage.value("currency", "USD")));
+    const nlohmann::json summary = usage.value("summary", nlohmann::json::object());
+    const nlohmann::json storage = summary.value("storage", nlohmann::json::object());
+    const nlohmann::json compute = summary.value("compute", nlohmann::json::object());
+    const auto count = [](const nlohmann::json& object, const char* key) {
+        return object.value(key, std::uint64_t{0});
+    };
+    const std::uint64_t quota_bytes = usage.value("quota_bytes", std::uint64_t{0});
+    const nlohmann::json images = storage.value("images_bytes", nlohmann::json());
+    content +=
+        std::format("<section class=\"panel\"><h2>Storage</h2><dl>"
+                    "<dt>Repositories</dt><dd>{}</dd>"
+                    "<dt>Container images</dt><dd>{}</dd>"
+                    "<dt>Workspace data</dt><dd>{}</dd>"
+                    "<dt>Total</dt><dd><strong>{}</strong></dd>"
+                    "<dt>Repository storage limit</dt><dd>{}</dd></dl></section>",
+                    display_size(count(storage, "repositories_bytes")),
+                    images.is_number() ? display_size(images.get<std::uint64_t>()) : "Not measured",
+                    display_size(count(storage, "workspace_data_bytes")),
+                    display_size(count(storage, "total_bytes")),
+                    quota_bytes == 0 ? "No limit" : display_size(quota_bytes));
+    content +=
+        std::format("<section class=\"panel\"><h2>Compute</h2><dl>"
+                    "<dt>Repository builds</dt><dd>{}</dd>"
+                    "<dt>Image builds</dt><dd>{} across {} builds, including time queued</dd>"
+                    "<dt>Workspace runs, training included</dt><dd>{} across {} runs</dd>"
+                    "<dt>Total</dt><dd><strong>{}</strong></dd></dl></section>",
+                    usage_duration(count(compute, "repository_build_seconds")),
+                    usage_duration(count(compute, "image_build_seconds")),
+                    count(compute, "image_builds"),
+                    usage_duration(count(compute, "workspace_run_seconds")),
+                    count(compute, "workspace_runs"),
+                    usage_duration(count(compute, "total_seconds")));
+    const nlohmann::json workspaces = summary.value("workspaces", nlohmann::json::array());
+    if (!workspaces.empty()) {
+        content += "<section class=\"panel\"><h2>Workspaces</h2><table><thead><tr>"
+                   "<th>Workspace</th><th>Data</th><th>Datasets</th><th>Run Time</th>"
+                   "<th>Runs</th></tr></thead><tbody>";
+        for (const nlohmann::json& workspace : workspaces) {
+            const std::string name = workspace.value("name", std::string());
+            if (!workspace.value("measured", false)) {
+                content +=
+                    std::format("<tr><td>{}</td><td colspan=\"4\">Not measured: {}</td></tr>",
+                                web_ui_escape(name),
+                                web_ui_escape(workspace.value("message", std::string())));
+                continue;
+            }
+            content += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+                                   "</tr>",
+                                   web_ui_escape(name),
+                                   display_size(count(workspace, "data_bytes")),
+                                   count(workspace, "datasets"),
+                                   usage_duration(count(workspace, "run_seconds")),
+                                   count(workspace, "runs"));
+        }
+        content += "</tbody></table></section>";
+    }
+    const nlohmann::json not_measured = summary.value("not_measured", nlohmann::json::array());
+    if (!not_measured.empty()) {
+        content += "<section class=\"panel\"><h2>Not Measured Yet</h2><ul>";
+        for (const nlohmann::json& line : not_measured) {
+            content +=
+                "<li>" + web_ui_escape(line.is_string() ? line.get<std::string>() : "") + "</li>";
+        }
+        content += "</ul></section>";
+    }
+    const bool priced = summary.value("priced", false);
+    const std::string currency = usage.value("currency", "USD");
+    content +=
+        priced ? std::format("<section class=\"panel\"><h2>Estimated Charge</h2><p><strong>{}"
+                             "</strong></p><p class=\"sub\">Repository storage, transfer and "
+                             "repository build time at this lake's prices. Images, image "
+                             "builds and workspaces are not priced.</p></section>",
+                             web_ui_escape(usage_money(usage.value("cost_micros", std::uint64_t{0}),
+                                                       currency)))
+               : "<section class=\"panel\"><h2>Estimated Charge</h2><p>This lake has no "
+                 "prices set, so there is no charge to show.</p></section>";
     content += std::format(
-        "<div class=\"panel\"><h2>Storage Quota</h2><p class=\"sub\">This value is used by "
-        "storage enforcement.</p><form class=\"stack\" method=\"post\" action=\"/metering/quota\">"
-        "<input type=\"hidden\" name=\"customer_id\" value=\"{}\"><label>Bytes<input "
-        "type=\"number\" name=\"quota_bytes\" min=\"0\" value=\"{}\" required></label>"
-        "<button class=\"primary\" type=\"submit\">Set quota</button></form></div>",
+        "<div class=\"panel\"><h2>Repository Storage Limit</h2><p class=\"sub\">New repository "
+        "writes are refused above this limit; existing content stays readable.</p>"
+        "<form class=\"stack\" method=\"post\" action=\"/metering/quota\">"
+        "<input type=\"hidden\" name=\"customer_id\" value=\"{}\"><label>Limit in bytes (0 for "
+        "no limit)<input type=\"number\" name=\"quota_bytes\" min=\"0\" value=\"{}\" "
+        "required></label><button class=\"primary\" type=\"submit\">Set limit</button></form>"
+        "</div>",
         web_ui_escape(customer_id),
-        usage.value("quota_bytes", std::uint64_t{0}));
+        quota_bytes);
     const auto items = usage.value("items", nlohmann::json::array());
+    content += "<h2>Repository Usage by Hour</h2>";
     if (items.empty()) {
         content += "<div class=\"panel empty\">No hourly usage.</div>";
     } else {
-        content += "<table><thead><tr><th>Hour</th><th>Stored</th><th>In</th><th>Out</th>"
-                   "<th>Compute</th><th>Charge</th></tr></thead><tbody>";
+        content += std::string("<table><thead><tr><th>Hour</th><th>Stored</th><th>Uploaded</th>"
+                               "<th>Downloaded</th><th>Build Time</th>") +
+                   (priced ? "<th>Charge</th>" : "") + "</tr></thead><tbody>";
         for (const nlohmann::json& row : items) {
+            const std::string hour = row.value("hour", "");
             content += std::format(
-                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}s</td>"
-                "<td>{}</td></tr>",
-                web_ui_escape(row.value("hour", "")),
-                row.value("stored_bytes", std::uint64_t{0}),
-                row.value("transfer_in_bytes", std::uint64_t{0}),
-                row.value("transfer_out_bytes", std::uint64_t{0}),
-                row.value("compute_seconds", std::uint64_t{0}),
-                row.value("cost_micros", std::uint64_t{0}));
+                "<tr><td><time datetime=\"{}\">{}</time></td><td>{}</td><td>{}</td><td>{}</td>"
+                "<td>{}</td>",
+                web_ui_escape(hour),
+                web_ui_escape(usage_hour(hour)),
+                display_size(row.value("stored_bytes", std::uint64_t{0})),
+                display_size(row.value("transfer_in_bytes", std::uint64_t{0})),
+                display_size(row.value("transfer_out_bytes", std::uint64_t{0})),
+                usage_duration(row.value("compute_seconds", std::uint64_t{0})));
+            if (priced) {
+                content += "<td>" +
+                           web_ui_escape(
+                               usage_money(row.value("cost_micros", std::uint64_t{0}), currency)) +
+                           "</td>";
+            }
+            content += "</tr>";
         }
         content += "</tbody></table>";
     }
-    return web_ui_shell("lake — metering", customer_id, content, viewer);
+    return web_ui_shell("lake — usage", customer_id, content, viewer);
 }
 
 std::string web_ui_audit(const std::vector<audit::Event>& events,

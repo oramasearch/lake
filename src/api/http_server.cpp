@@ -902,6 +902,57 @@ public:
         return out;
     }
 
+    // Usage (docs/api/metering.md): the bytes the OCI registry holds for one space, its images and
+    // their build cache below `<space>/`. Each manifest, config and layer digest is counted once,
+    // however many tags or repositories of the space reference it. nullopt without storage.
+    std::optional<std::uint64_t> space_stored_bytes(std::string_view space) const {
+        if (!available() || !safe_component(space)) {
+            return std::nullopt;
+        }
+        std::set<std::string> digests;
+        std::error_code error;
+        const std::filesystem::path manifests_root = root_ / "manifests" / std::string(space);
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(manifests_root, error)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".json") {
+                continue;
+            }
+            const auto pointer_text = read_text(entry.path());
+            const nlohmann::json pointer =
+                pointer_text ? nlohmann::json::parse(*pointer_text, nullptr, false)
+                             : nlohmann::json();
+            const std::string manifest_digest =
+                pointer.is_object() ? pointer.value("digest", "") : std::string();
+            if (!valid_digest(manifest_digest) || !digests.insert(manifest_digest).second) {
+                continue;
+            }
+            const auto manifest_bytes = read(blob_path(manifest_digest));
+            if (!manifest_bytes) {
+                continue;
+            }
+            const nlohmann::json manifest = nlohmann::json::parse(
+                std::string(reinterpret_cast<const char*>(manifest_bytes->data()),
+                            manifest_bytes->size()),
+                nullptr,
+                false);
+            if (!manifest.is_object()) {
+                continue;
+            }
+            if (const auto references = manifest_references(manifest)) {
+                digests.insert(references->begin(), references->end());
+            }
+        }
+        std::uint64_t total = 0;
+        for (const std::string& digest : digests) {
+            std::error_code size_error;
+            const std::uintmax_t size = std::filesystem::file_size(blob_path(digest), size_error);
+            if (!size_error) {
+                total += static_cast<std::uint64_t>(size);
+            }
+        }
+        return total;
+    }
+
     ArtifactResult<std::string> begin_upload(std::string_view repository) {
         if (!safe_oci_repository(repository)) {
             return std::unexpected("OCI repository name is invalid");
@@ -5530,6 +5581,11 @@ struct ApiServer::Impl {
         ctx.instance_kek = options.instance_kek;
         ctx.sync_store = &sync_store;
         ctx.metering = options.metering;
+        if (artifacts.available()) {
+            ctx.registry_space_bytes = [this](const std::string& space) {
+                return artifacts.space_stored_bytes(space);
+            };
+        }
         ctx.public_host = options.public_host;
         ctx.request_origin = request_origin(route);
         if (route.req.count(boost::http::field::origin) != 0) {
@@ -6381,16 +6437,16 @@ struct ApiServer::Impl {
     boost::http::route_task serve_organization_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const std::string organization_id = query_value(route, "id");
         if (organization_id.empty()) {
-            return redirect(route, "/organizations");
+            co_return co_await redirect(route, "/organizations");
         }
         const ApiResult organization_result =
             registry.call("get_organization", {{"id", organization_id}}, context);
         if (!organization_result.ok) {
-            return serve_page_error(route, organization_result);
+            co_return co_await serve_page_error(route, organization_result);
         }
         OrganizationSettingsData data;
         const auto load = [&](const std::string& name,
@@ -6410,21 +6466,21 @@ struct ApiServer::Impl {
                 "list_teams",
                 {{"organization_id", organization_id}, {"limit", 500}},
                 [&](const nlohmann::json& item) { data.teams.push_back(team_from_json(item)); })) {
-            return serve_page_error(route, *error);
+            co_return co_await serve_page_error(route, *error);
         }
         if (const auto error = load("list_memberships",
                                     {{"organization_id", organization_id}, {"limit", 500}},
                                     [&](const nlohmann::json& item) {
                                         data.memberships.push_back(membership_from_json(item));
                                     })) {
-            return serve_page_error(route, *error);
+            co_return co_await serve_page_error(route, *error);
         }
         if (const auto error = load("list_invitations",
                                     {{"organization_id", organization_id}, {"limit", 500}},
                                     [&](const nlohmann::json& item) {
                                         data.invitations.push_back(invitation_from_json(item));
                                     })) {
-            return serve_page_error(route, *error);
+            co_return co_await serve_page_error(route, *error);
         }
         const ApiResult access =
             registry.call("entity_effective_access",
@@ -6460,10 +6516,13 @@ struct ApiServer::Impl {
                         data.applications.push_back(application_from_json(application));
                     }
                 }
-                const ApiResult metering =
-                    registry.call("metering_usage", {{"customer_id", customer.id}}, context);
-                if (metering.ok) {
-                    data.metering = metering.value;
+                // Only the Usage tab shows usage, which reads the space's workspaces.
+                if (query_value(route, "tab") == "metering") {
+                    auto metering = co_await registry.call_async(
+                        "metering_usage", {{"customer_id", customer.id}}, context);
+                    if (metering && metering->ok) {
+                        data.metering = metering->value;
+                    }
                 }
                 break;
             }
@@ -6476,15 +6535,16 @@ struct ApiServer::Impl {
                 data.audit_events.push_back(audit::event_from_json(item));
             }
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_organization(organization_from_json(organization_result.value),
-                                             data,
-                                             query_value(route, "tab"),
-                                             "",
-                                             viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_organization(organization_from_json(organization_result.value),
+                                data,
+                                query_value(route, "tab"),
+                                "",
+                                viewer_for(context)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task serve_team_page(boost::http::route_params& route) {
@@ -14036,7 +14096,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_metering_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         std::string customer_id = query_value(route, "customer_id");
         if (customer_id.empty() && !context.operator_credential) {
@@ -14045,18 +14105,22 @@ struct ApiServer::Impl {
         }
         nlohmann::json usage{{"customer_id", customer_id}, {"items", nlohmann::json::array()}};
         if (!customer_id.empty()) {
+            // Usage reads the space's workspaces, so it runs on the asynchronous registry path.
+            auto completed = co_await registry.call_async(
+                "metering_usage", {{"customer_id", customer_id}}, context);
             const ApiResult result =
-                registry.call("metering_usage", {{"customer_id", customer_id}}, context);
+                completed ? std::move(*completed)
+                          : ApiResult::failure("store_error", completed.error().message);
             if (!result.ok) {
-                return serve_page_error(route, result);
+                co_return co_await serve_page_error(route, result);
             }
             usage = result.value;
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_metering(usage, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_metering(usage, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     // Organization > Activity: the signed-in person's own audit events (my_audit).

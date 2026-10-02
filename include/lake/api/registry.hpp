@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -132,6 +133,10 @@ struct ApiContext {
     WebhookSender webhook_sender;
     SyncStore* sync_store = nullptr;
     MeteringConfig metering;
+    // Unique bytes the OCI registry holds below `<space>/` (images and their build cache), each
+    // digest counted once (docs/api/metering.md). Injected by the HTTP server, which owns the
+    // registry storage; null when no registry is configured, so usage reports images unmeasured.
+    std::function<std::optional<std::uint64_t>(const std::string& space)> registry_space_bytes;
     bool sync_wire_request = false;
     std::span<const std::byte> sync_request;
     std::vector<std::byte> sync_response;
