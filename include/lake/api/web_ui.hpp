@@ -235,6 +235,9 @@ struct WorkspacePage {
     std::string project; // the pipeline page's project
     std::string step;    // the pipeline page's selected step
     std::string origin;  // lake's public origin, for copy-ready external calls
+    // The workspace the page reads (its /w/<workspace_id> path), filled into copy-ready external
+    // calls: every data-plane capability requires it (lake#439).
+    std::string workspace_id;
 };
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
 

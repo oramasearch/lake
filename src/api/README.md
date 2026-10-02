@@ -46,6 +46,12 @@ missing configuration suppresses commands. Existing registry sync operations imp
 push. See [forge.md](../../docs/ui/forge.md) and the native
 [private-install proof](../../docs/deployment/private-install.md).
 
+Copy-ready external calls on Ship → Models and the search index page name
+`WorkspacePage::workspace_id`, which `serve_workspace_page` sets from the `/w/<workspace_id>` path;
+every data-plane capability requires it (lake#439). Without one the page shows `<workspace id>`.
+`markdown.cpp` joins a list item's continuation lines before inline markup, so a Docs code span may
+wrap. `tests/test_examples.cpp` validates every such example against the registry.
+
 OCI blob upload patches and final puts stream request buffers into the upload file. The adapter
 checks the configured completed-blob limit and `Content-Range`, hashes the completed file without
 loading it into memory, and leaves the common 64 MiB body limit on every other route. See

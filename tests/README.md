@@ -33,6 +33,13 @@ held and pending A1 rows, the no-holdout-outcomes ROI reason, monitor guardrails
 verdict-first grouped certificate. `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp` calls the direct filtered
 `list_runs` capability and checks its completed status and stage.
 
+`test_examples.cpp` (lake#439) pulls every copy-paste example out of what a customer reads: the
+Ship → Models `curl`, the search index page's `curl` and Python calls, every `/docs` page, and the
+request bodies in `docs/api/*.md`. It names each example's capability from `/v1/<name>`, a code span
+of the name, or a JSON-RPC `tools/call`, and validates the body or query string with the registry's
+`validate_input`. A missing `workspace_id` therefore fails the build's tests rather than a first
+paste. Pages must fill in their own workspace; static Docs show `<workspace id>`.
+
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
 workspace alias checks, audit, REST/MCP parity and actual calls, hashed assets, navigation and
 control mappings, plus the editable ExperimentsAgent proposal. `experiment_fixture.hpp` supplies

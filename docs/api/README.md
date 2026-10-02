@@ -266,7 +266,9 @@ and audit recording remain inside the registry path.
    MCP tools automatically. Binary capabilities declare their transport so OpenAPI can render the
    repository route and MCP can omit a body it cannot represent; `test_api.cpp` proves both cases.
 5. Tests against `InMemoryStore` and the Postgres fixture; a page under `docs/api/` in the same
-   change.
+   change. Request examples in that page (JSON bodies with `customer_id`/`workspace_id`, `curl`
+   commands) are validated against the registry by `tests/test_examples.cpp` (lake#439), so write
+   them complete, with every required field.
 
 **Verify.** `ctest --test-dir build`, then
 `./build/lake --listen 127.0.0.1:4901 --memory-store --admin-token t` and `curl` the routes

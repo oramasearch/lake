@@ -290,7 +290,9 @@ const std::vector<Flow>& flows() {
           {"run_pipeline", "runs the checks, then the pipeline; answers {gate, run}"}}},
         {"Load a dataset",
          "A dataset is a table in your workspace. Upload a CSV or JSONL file's text (up to 16 MiB).",
-         {{"start_workspace", "once per space; poll `workspace_status` until it is ready"},
+         {{"create_workspace",
+           "once (a `name` and an `environment`); its `id` is the `workspace_id` every later call "
+           "names. Poll `workspace_status` until it is ready"},
           {"workspace_act",
            "`capability: \"upload_dataset\"`, `input: {table_name, format: \"csv\"|\"jsonl\", "
            "content}`; answers the rows loaded"},

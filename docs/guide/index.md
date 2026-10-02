@@ -10,16 +10,27 @@ Your **workspace** is where your data, projects, pipelines, runs and models live
 Projects**; if the workspace is not running yet, press **Start workspace** and wait until the page
 says it is ready.
 
-- REST: `POST /v1/start_workspace` with `{"customer_id": "…"}`, then `GET /v1/workspace_status`.
-- MCP: `start_workspace`, then `workspace_status`.
+Every REST and MCP call below names your space (`customer_id`) and your workspace
+(`workspace_id`). A space can have several workspaces, so lake never guesses which one you mean: a
+call without `workspace_id` is refused with `workspace_id is required`. On the site your workspace
+id is in the address bar, `/w/<workspace id>/…`; `list_workspaces` lists them. Replace
+`<customer id>` and `<workspace id>` below with yours.
+
+- REST: `POST /v1/create_workspace` with
+  `{"customer_id": "<customer id>", "name": "analytics", "environment": "dev"}`. The answer's `id`
+  is the workspace id. Then poll
+  `GET /v1/workspace_status?customer_id=<customer id>&workspace_id=<workspace id>` until `ready`
+  is true.
+- MCP: `create_workspace`, then `workspace_status`, with the same inputs.
 
 ## 2. Load your data
 
 Open **Train → Data** and use **Load data → Upload a file** (CSV or JSONL, up to 16 MiB). Give the
 dataset a name, for example `accounts`. The page confirms with the row count and links to it.
 
-- REST: `POST /v1/workspace_act` with `{"customer_id": "…", "capability": "upload_dataset",
-  "input": {"table_name": "accounts", "format": "csv", "content": "<the file's text>"}}`.
+- REST: `POST /v1/workspace_act` with `{"customer_id": "<customer id>", "workspace_id":
+  "<workspace id>", "capability": "upload_dataset", "input": {"table_name": "accounts", "format":
+  "csv", "content": "<the file's text>"}}`.
 - MCP: `workspace_act` with the same input.
 
 More ways to bring data in (a database lake runs for you, generated data): [Load data](/docs/load-data).
@@ -42,12 +53,13 @@ review and apply. Details: [Train a model](/docs/train).
 
 ## 5. Publish and call the model
 
-Open **Ship → Models**, press **Publish** on your model, and copy its `curl`:
+Open **Ship → Models**, press **Publish** on your model, and copy its `curl`. The page fills in
+your space, workspace and model:
 
 ```
 curl -s https://lake.oramadev.net/v1/predict \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
-  -d '{"customer_id": "…", "model": "<model id>", "rows": [{"support_tickets": 11}]}'
+  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model": "<model id>", "rows": [{"support_tickets": 11}]}'
 ```
 
 Create the key on **Developer → MCP**. Details: [Ship](/docs/ship).

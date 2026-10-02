@@ -8787,6 +8787,7 @@ struct ApiServer::Impl {
             options.external_origin.empty()
                 ? (options.public_host.empty() ? std::string() : "https://" + options.public_host)
                 : options.external_origin;
+        page.workspace_id = context.path_workspace_id;
         if (page.customer_id.empty()) {
             page.unavailable = "You have no space to work in yet.";
         } else if (section == "workspaces") {

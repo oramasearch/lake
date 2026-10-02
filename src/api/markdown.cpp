@@ -232,13 +232,14 @@ std::string markdown_to_html(std::string_view source) {
                                          : ordered_item(item);
                 if (same) {
                     const std::size_t text = item.find(' ') + 1;
-                    out += "<li>" + inline_html(item.substr(text));
-                    // Continuation lines of the same item.
+                    // Continuation lines of the same item join it before inline markup, so a
+                    // `code` span (a JSON example, lake#439) may wrap across source lines.
+                    std::string joined(item.substr(text));
                     while (i + 1 < lines.size() && lines[i + 1].starts_with("  ") &&
                            !trim(lines[i + 1]).empty()) {
-                        out += " " + inline_html(trim(lines[++i]));
+                        joined += " " + std::string(trim(lines[++i]));
                     }
-                    out += "</li>";
+                    out += "<li>" + inline_html(joined) + "</li>";
                 } else {
                     break;
                 }

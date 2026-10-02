@@ -24,8 +24,8 @@ and holdout, actions waiting for A1 approval, delivered and held actions, monito
 Policy changes need an explicit approval. A1 approvals change decision state without silently
 delivering the action. Recording an outcome updates the audited ledger and ROI evidence.
 
-REST/MCP use `start_solution` with `{customer_id, project, solution, level, dataset, delivery,
-roi_model}`, followed by `confirm_solution` with `{task_id, edits?}`.
+REST/MCP use `start_solution` with `{customer_id, workspace_id, project, solution, level, dataset,
+delivery, roi_model}`, followed by `confirm_solution` with `{task_id, workspace_id, edits?}`.
 
 ## Change it
 
@@ -48,8 +48,9 @@ A changed pipeline needs **Approve** again before it runs.
   Setting 0 measures nothing and every score is in-sample.
 - **Model name**: defaults to the project and pipeline.
 
-REST/MCP: `run_pipeline` with `{"project", "graph", "dataset_path": "datasets.accounts",
-"holdout_fraction": 0.2, "model_name": "…"}`.
+REST/MCP: `run_pipeline` with `{"customer_id": "<customer id>", "workspace_id": "<workspace id>",
+"project": "retention", "graph": "<pipeline name>", "dataset_path": "datasets.accounts",
+"holdout_fraction": 0.2, "model_name": "retention_churn"}`.
 
 ## Run an experiment
 
@@ -64,7 +65,8 @@ status or an explanation of the best trial through **Ask Orama**. Promotion rema
 confirmation.
 
 REST uses `POST /v1/agent_turn`; MCP uses the `agent_turn` tool. Send
-`{"agent":"agent-experiments","kind":"experiment","message":"…"}`, follow its `task_id`, then
+`{"customer_id":"<customer id>","workspace_id":"<workspace id>","agent":"agent-experiments","kind":"experiment","message":"…"}`,
+follow its `task_id`, then
 send the reviewed result as `context.confirmed_proposal`. Direct clients may instead use the
 documented `start_study`, study/trial reads and confirmed promotion tools.
 
