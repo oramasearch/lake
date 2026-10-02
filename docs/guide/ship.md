@@ -3,12 +3,13 @@
 ## Call a model
 
 **Ship → Models** lists every model with its project, when it was trained and its score. Press
-**Publish**, then call it with a lake key:
+**Publish**, then call it with a lake key. The page shows this call with your space, workspace and
+model filled in; `workspace_id` is required:
 
 ```
 curl -s https://lake.oramadev.net/v1/predict \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
-  -d '{"customer_id": "…", "model": "<model id>", "rows": [{"support_tickets": 11, "tenure_months": 4}]}'
+  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model": "<model id>", "rows": [{"support_tickets": 11, "tenure_months": 4}]}'
 ```
 
 Each row is keyed by the model's features; the answer ranks the rows by risk with what drives each
@@ -17,7 +18,9 @@ score. From an AI agent it is the MCP tool `predict`. **Unpublish** stops every 
 ## Search an index
 
 **Ship → Search Indexes → New index** over a dataset's text columns. Open it to search, publish
-it, and create a key that can only search (`search_index`).
+it, and create a key that can only search (`search_index`). The index page shows the call with your
+values filled in:
+`GET /v1/search_index?customer_id=<customer id>&workspace_id=<workspace id>&index=<index id>&query=renewal%20risk`.
 
 ## Services and storage
 

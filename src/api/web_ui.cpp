@@ -3007,6 +3007,13 @@ std::string pipeline_content(const WorkspacePage& page) {
     return out + "</section>";
 }
 
+// The workspace a copy-ready external call names: the page's own, so the call works as pasted.
+// Every data-plane capability requires `workspace_id` (lake#439); a page rendered without one
+// shows a placeholder the reader replaces rather than a call that is refused.
+std::string example_workspace(const WorkspacePage& page) {
+    return page.workspace_id.empty() ? std::string("<workspace id>") : page.workspace_id;
+}
+
 // One search index (#187): what it covers, a search box, publish and unpublish, and how to call it
 // from outside with a key scoped to search_index.
 std::string index_content(const WorkspacePage& page) {
@@ -3086,10 +3093,12 @@ std::string index_content(const WorkspacePage& page) {
 
     // Call it from outside.
     const std::string origin = page.origin.empty() ? "https://lake.oramadev.net" : page.origin;
-    const std::string url = std::format("{}/v1/search_index?customer_id={}&index={}&query=",
-                                        origin,
-                                        url_component(page.customer_id),
-                                        url_component(page.subject));
+    const std::string url =
+        std::format("{}/v1/search_index?customer_id={}&workspace_id={}&index={}&query=",
+                    origin,
+                    url_component(page.customer_id),
+                    url_component(example_workspace(page)),
+                    url_component(page.subject));
     if (!published) {
         out += "<section class=\"panel\"><h2>Call It from Your Code</h2><p>Publish the index "
                "first: only published indexes answer outside calls.</p></section>";
@@ -3107,8 +3116,9 @@ std::string index_content(const WorkspacePage& page) {
         "`Bearer ${{process.env.LAKE_SEARCH_KEY}}` }},\n}});\nconst {{ value }} = await "
         "res.json(); "
         "// value.hits: [{{ id, score }}]</code></pre><pre><code># Python\nimport os, requests\n"
-        "r = requests.get(\"{}/v1/search_index\", params={{\"customer_id\": \"{}\", \"index\": "
-        "\"{}\", \"query\": \"renewal risk\"}},\n    headers={{\"Authorization\": f\"Bearer "
+        "r = requests.get(\"{}/v1/search_index\", params={{\"customer_id\": \"{}\", "
+        "\"workspace_id\": \"{}\", \"index\": \"{}\", \"query\": \"renewal risk\"}},\n"
+        "    headers={{\"Authorization\": f\"Bearer "
         "{{os.environ['LAKE_SEARCH_KEY']}}\"}})\nhits = "
         "r.json()[\"value\"][\"hits\"]</code></pre></li>"
         "<li><p>From an AI agent, the same search is the MCP tool <code>search_index</code> at "
@@ -3122,6 +3132,7 @@ std::string index_content(const WorkspacePage& page) {
         web_ui_escape(url),
         web_ui_escape(origin),
         web_ui_escape(page.customer_id),
+        web_ui_escape(example_workspace(page)),
         web_ui_escape(page.subject),
         web_ui_escape(origin));
     return out;
@@ -5277,11 +5288,13 @@ std::string workspace_content(const WorkspacePage& page) {
                         "<h3>{} <small class=\"muted\"><code>{}</code></small></h3><pre><code>"
                         "curl -s {}/v1/predict \\\n  -H \"Authorization: Bearer $LAKE_KEY\" "
                         "-H 'Content-Type: application/json' \\\n  -d '{{\"customer_id\": \"{}\", "
-                        "\"model\": \"{}\", \"rows\": [{{{}}}]}}'</code></pre>",
+                        "\"workspace_id\": \"{}\", \"model\": \"{}\", \"rows\": [{{{}}}]}}'"
+                        "</code></pre>",
                         web_ui_escape(json_text(model, "name")),
                         web_ui_escape(id.substr(0, 8)),
                         web_ui_escape(origin),
                         web_ui_escape(page.customer_id),
+                        web_ui_escape(example_workspace(page)),
                         web_ui_escape(id),
                         web_ui_escape(features));
                 }

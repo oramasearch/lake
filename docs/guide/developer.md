@@ -13,8 +13,11 @@ which case you can choose that lifetime.
 - A read is `GET /v1/<tool>?<inputs>`; an action is `POST /v1/<tool>` with a JSON body.
 - Every answer is `{"ok": true, "value": …}` or `{"ok": false, "error": {"code", "message", "path"}}`.
 - The full schema: [/v1/openapi.json](/v1/openapi.json).
+- Every Design, Train and Ship tool takes `customer_id` and `workspace_id` (your workspace, as in
+  the page address `/w/<workspace id>/…`, or from `list_workspaces`); a call without
+  `workspace_id` is refused.
 - `workspace_query` and `workspace_act` are POST: they reach your workspace's own capabilities with
-  `{"capability": "…", "input": {…}}`.
+  `{"customer_id": "…", "workspace_id": "…", "capability": "…", "input": {…}}`.
 
 ## MCP
 

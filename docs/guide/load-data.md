@@ -7,8 +7,12 @@ Every dataset lives in your workspace (**Train → Data**). There are three ways
 **Train → Data → Load data → Upload a file.** CSV (a header row, then one row per line) or JSONL
 (one JSON object per line), up to 16 MiB. The name you give becomes the dataset's name.
 
-- REST/MCP: `workspace_act` with `capability: "upload_dataset"` and `input: {"table_name", "format",
-  "content"}`.
+- REST/MCP: `workspace_act` with `{"customer_id": "<customer id>", "workspace_id": "<workspace
+  id>", "capability": "upload_dataset", "input": {"table_name": "accounts", "format": "csv",
+  "content": "<the file's text>"}}`.
+
+Every workspace call names `customer_id` and `workspace_id`; [Getting started](/docs) says where to
+find them.
 
 ## Connect a database
 
@@ -25,4 +29,5 @@ description, useful for demos and tests (`workspace_act` with `generate_dataset`
 ## Look at it
 
 Open a dataset to see its columns and types, its first rows, and **Query it** with SQL (`SELECT`
-or `WITH`, read-only). REST/MCP: `workspace_sql` with `{"statement": "SELECT …"}`.
+or `WITH`, read-only). REST/MCP: `workspace_sql` with
+`{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "statement": "SELECT * FROM accounts LIMIT 20"}`.
