@@ -9,6 +9,9 @@ Every row of the page's *Area status* table names the capabilities it speaks for
 - a Deployed cell starts with neither "Yes" nor "No", or a Capabilities cell names none
   without saying "—" (a row that has no capability, such as the pages, is unchecked);
 - a row names a capability the source tree's registry does not have (with --registry);
+- the registry has a capability the observed OpenAPI does not list, and no row with Deployed
+  "No" names it (with --registry), so a capability built since the observation is recorded as
+  not deployed instead of left out;
 - the page does not link the observation it is checked against (with --require-link).
 
 --observed takes a file or an http(s) URL. Either a full OpenAPI document (as served at
@@ -92,6 +95,7 @@ def check(status_path, observed, registry=None, require_link=None):
             f"status.md does not link {Path(require_link).name}, the newest observation; "
             "re-check the page against it and link it"
         )
+    undeployed_rows = set()
     for number, row in area_rows(text):
         area = row.get("Area", "?")
         deployed = row["Deployed"]
@@ -103,6 +107,7 @@ def check(status_path, observed, registry=None, require_link=None):
                 if name not in registry:
                     errors.append(f"status.md:{number} {area}: `{name}` is not in the registry")
         if deployed.startswith("No"):
+            undeployed_rows.update(names)
             for name in names:
                 if name in observed:
                     errors.append(
@@ -118,6 +123,12 @@ def check(status_path, observed, registry=None, require_link=None):
                     )
         else:
             errors.append(f"status.md:{number} {area}: Deployed must start with Yes or No")
+    if registry is not None:
+        for name in sorted(registry - observed - undeployed_rows):
+            errors.append(
+                f"status.md: `{name}` is in the registry but not in the observed OpenAPI; "
+                "name it in a row whose Deployed cell says No"
+            )
     return errors
 
 

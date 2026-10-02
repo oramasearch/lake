@@ -50,7 +50,7 @@ end-to-end runs of [orama-bridge#136](https://github.com/oramasearch/orama-bridg
 | Repositories and sync | Yes | Yes, including Postgres cases | Yes | No | `create_repository`, `list_repositories`, `refs` | [repositories](../api/repositories.md), [sync](../api/sync.md) |
 | Forge and export | Yes | Yes, including PostgreSQL review scenario | Yes | No | `create_review`, `create_issue`, `export_repository`, `import_github_repository` | [forge](../api/forge.md), [export](../api/export.md) |
 | Search | Yes | Yes | Yes | No | `search` | [search](../api/search.md) |
-| Platform and metering | Yes | Yes | Yes | `metering_usage` read in the 2026-10-01 review; its numbers are wrong ([lake#444](https://github.com/oramasearch/lake/issues/444)) | `list_environments`, `environment_logs`, `metering_usage` | [platform](../api/platform.md), [metering](../api/metering.md) |
+| Platform and metering (the usage summary across images and workspaces of lake#444 is in the source tree only; see the last row) | Yes | Yes | Yes | `metering_usage` read in the 2026-10-01 review; its numbers are wrong ([lake#444](https://github.com/oramasearch/lake/issues/444)) | `list_environments`, `environment_logs`, `metering_usage` | [platform](../api/platform.md), [metering](../api/metering.md) |
 | Secrets, encryption, PKI, and recovery | Yes | Yes, including PostgreSQL identity exit | Yes | No | `put_secret`, `read_secret`, `encrypt`, `issue_x509_svid`, `begin_email_recovery` | [secrets](../api/secrets.md), [PKI](../api/pki.md) |
 | Drive and models | Yes | Yes, including PostgreSQL drive scenario | Yes | No | `drive_browse`, `upload_drive_files`, `get_model`, `resolve_model_file` | [drive](../api/drive.md), [models](../api/models.md) |
 | Transparency and replication | Yes | Yes | Yes | `transparency_log_configuration` (2026-09-08) | `transparency_log_configuration`, `transparency_checkpoint`, `replicate_transparency_log` | [transparency](../api/transparency.md), [replication](../api/replication.md) |
@@ -62,7 +62,9 @@ end-to-end runs of [orama-bridge#136](https://github.com/oramasearch/orama-bridg
 | Never-expiring agent keys and tokens (opt-in) | Yes | Yes | Yes | No | `create_token`, `mint_agent_session_key` | [agents](../api/agents.md#keys-that-never-expire-lake234), [identity](../api/identity.md) |
 | Train → Agents and the Agent Library | Yes | Yes | Yes | The Agent Library and *Talk to* list in the browser; created agents are not listed ([lake#442](https://github.com/oramasearch/lake/issues/442)) | `list_agent_library` | [train-agents](../api/train-agents.md) |
 | Agents reach Zetta through lake (`/workspaces/<customer>/zetta/v1/`) | Yes | Yes | Yes | No | `workspace_openapi` | [workspaces](../api/workspaces.md#agents-reach-zetta-through-lake) |
-| Workspace-scoped agent launches and schedules, launch start timeout, definition field checks (`0043_agent_launch_workspaces`, lake#442) | Yes | Memory/PostgreSQL regressions | No; merged after the observation (operator schema vendored in orama-operator#244) | No | — | [agent-launches](../api/agent-launches.md) |
+| Organizations in the browser: create an organization space, join one, convert a personal space ([lake#461](https://github.com/oramasearch/lake/pull/461), lake#443) | Yes | Yes: memory and Postgres stores, pages, signed-up-person output checks | No; merged after the 2026-10-01 observation | No | `create_organization_space`, `join_organization`, `convert_personal_space` | [organizations](../api/organizations.md), [settings UI](../ui/settings.md) |
+| Merged after the 2026-10-01 observation, without new capabilities: Project Agent applies and checks its proposals ([#454](https://github.com/oramasearch/lake/pull/454)), `workspace_id` in every copy-paste example ([#455](https://github.com/oramasearch/lake/pull/455)), 500 for a throwing handler and Packages with queued builds ([#456](https://github.com/oramasearch/lake/pull/456)), MCP tool-list change notices and one schema for REST and MCP ([#458](https://github.com/oramasearch/lake/pull/458)), dataset names and upload checks on the Data page ([#459](https://github.com/oramasearch/lake/pull/459)), usage counting workspace data, images, builds and runs ([#462](https://github.com/oramasearch/lake/pull/462)) | Yes | Yes, in each pull request's tests | No | No | — (changes to existing capabilities and pages) | [workspaces](../api/workspaces.md), [MCP](../api/mcp.md), [metering](../api/metering.md) |
+| Workspace-scoped agent launches and schedules, launch start timeout, definition field checks (`0043_agent_launch_workspaces`, lake#442) | Yes | Memory/PostgreSQL regressions | No; merged after the 2026-10-01 observation (operator schema vendored in orama-operator#244) | No | — | [agent-launches](../api/agent-launches.md) |
 
 ## Keeping this page true
 
@@ -75,7 +77,9 @@ The *Deployed* cell starts with **Yes** or **No**, and the *Capabilities* cell n
 operations the row speaks for. `tools/docs/check-status.py` fails when a row says **No** while the
 observed OpenAPI lists one of its capabilities, says **Yes** while one is missing, names a
 capability the source registry does not have, or does not link the newest snapshot under
-`docs/deployment/observed/`. `DocsStatus.MatchesTheObservedOpenApi` runs it in ctest (and CI)
+`docs/deployment/observed/`. It also fails when the source registry has a capability the observed
+OpenAPI lacks and no **No** row names it: a capability merged after the last observation is
+recorded as not deployed, never left out. `DocsStatus.MatchesTheObservedOpenApi` runs it in ctest (and CI)
 against that snapshot. After a deployment, record a new snapshot and run the same check against
 the live service:
 

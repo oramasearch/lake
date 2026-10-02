@@ -111,6 +111,17 @@ TEST(DocsStatus, CheckRefusesEachKindOfContradiction) {
     EXPECT_NE(run_check({"--status", page.string(), "--observed", observed.string(), "--registry",
                          registry.string()}),
               0);
+    // A capability built since the observation must be recorded as not deployed.
+    std::ofstream(registry) << nlohmann::json{{"capabilities", {"server_info", "new_capability"}}}
+                                   .dump();
+    EXPECT_NE(run_check({"--status", page.string(), "--observed", observed.string(), "--registry",
+                         registry.string()}),
+              0);
+    std::ofstream(page) << status_page("Yes", "`server_info`")
+                        << "| Later | No | `new_capability` |\n";
+    EXPECT_EQ(run_check({"--status", page.string(), "--observed", observed.string(), "--registry",
+                         registry.string()}),
+              0);
     // The page must link the observation it is held to.
     EXPECT_NE(run_check({"--status", page.string(), "--observed", observed.string(),
                          "--require-link", observed.string()}),
