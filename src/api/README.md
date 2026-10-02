@@ -132,3 +132,9 @@ digest. Pending builds keep rendering their internal target until that public im
 HTTP registry adapter accepts Basic user `app` only for a current pull hash and only for that app's
 exact image repository.
 See `docs/api/builds.md`.
+
+Organization self-service (`create_organization_space`, `convert_personal_space`,
+`join_organization`, and the scope-less `list_memberships`/`list_invitations` modes) is registered
+in `capabilities.cpp`; `http_server.cpp` adapts the Organizations page forms
+(`/organizations/create`, `/organizations/convert`, `/invitations/accept`, `/organization/teams`)
+to them. See `docs/api/organizations.md` and `docs/ui/settings.md`.

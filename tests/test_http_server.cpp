@@ -901,6 +901,151 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     EXPECT_FALSE(response_header(denied, "location").starts_with("/repository?id="));
 }
 
+namespace {
+
+nlohmann::json response_json(const std::string& response) {
+    return nlohmann::json::parse(response.substr(response.find("\r\n\r\n") + 4));
+}
+
+} // namespace
+
+TEST_P(HttpResponseIsolation, PersonCreatesAnOrganizationInvitesAndAColleagueJoins) {
+    auto client = connect();
+    const std::string sign_in =
+        client->request("POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302")) << sign_in;
+    const std::string owner = response_header(sign_in, "set-cookie")
+                                  .substr(0, response_header(sign_in, "set-cookie").find(';'));
+    const std::string empty = client->request("GET", "/organizations", "", owner);
+    ASSERT_TRUE(empty.starts_with("HTTP/1.1 200")) << empty;
+    EXPECT_NE(empty.find("action=\"/organizations/create\""), std::string::npos);
+    EXPECT_NE(empty.find("action=\"/organizations/convert\""), std::string::npos);
+    EXPECT_NE(empty.find("You are not in an organization yet"), std::string::npos);
+    EXPECT_EQ(empty.find("POST /v1/"), std::string::npos);
+
+    const std::string handle = "acme-" + lake::control::new_uuid_v4().substr(0, 8);
+    const std::string created = client->request(
+        "POST", "/organizations/create", "display_name=Acme+Research&name=" + handle, owner);
+    ASSERT_TRUE(created.starts_with("HTTP/1.1 302")) << created;
+    const std::string settings = response_header(created, "location");
+    ASSERT_TRUE(settings.starts_with("/organization?id=")) << settings;
+    ASSERT_TRUE(settings.ends_with("&tab=invitations")) << settings;
+    const std::string organization_id =
+        settings.substr(17, settings.size() - 17 - std::string("&tab=invitations").size());
+    const std::string invite_page = client->request("GET", settings, "", owner);
+    ASSERT_TRUE(invite_page.starts_with("HTTP/1.1 200")) << invite_page;
+    EXPECT_NE(invite_page.find("Send invitation"), std::string::npos);
+    EXPECT_NE(invite_page.find("name=\"expires_in_days\""), std::string::npos);
+    const std::string listed = client->request("GET", "/organizations", "", owner);
+    EXPECT_NE(listed.find("Acme Research"), std::string::npos);
+    EXPECT_NE(listed.find(">owner<"), std::string::npos);
+
+    if (std::get<0>(GetParam())) {
+        create_identity_document();
+    }
+    const std::string colleague_email =
+        "colleague-" + lake::control::new_uuid_v4() + "@example.test";
+    const std::string signup =
+        client->request("POST",
+                        "/identity/sign-up",
+                        "email=" + colleague_email + "&display_name=Colleague&password=" +
+                            password_ + "&device_name=browser&identity_document=" +
+                            identity_document_);
+    ASSERT_TRUE(signup.starts_with("HTTP/1.1 302")) << signup;
+    const std::string colleague = response_header(signup, "set-cookie")
+                                      .substr(0, response_header(signup, "set-cookie").find(';'));
+
+    const std::string invited = client->request("POST",
+                                                "/organization/invitations",
+                                                "organization_id=" + organization_id +
+                                                    "&invitee_type=email&invitee=" +
+                                                    colleague_email +
+                                                    "&role=admin&expires_in_days=7",
+                                                owner);
+    ASSERT_TRUE(invited.starts_with("HTTP/1.1 302")) << invited;
+    const std::string pending_page = client->request("GET", settings, "", owner);
+    EXPECT_NE(pending_page.find(colleague_email), std::string::npos);
+
+    const std::string colleague_page = client->request("GET", "/organizations", "", colleague);
+    EXPECT_NE(colleague_page.find("Invitations for You"), std::string::npos);
+    EXPECT_NE(colleague_page.find("Acme Research"), std::string::npos);
+    EXPECT_NE(colleague_page.find("action=\"/invitations/accept\""), std::string::npos);
+    const auto invitations =
+        response_json(client->request("GET", "/v1/list_invitations", "", colleague));
+    ASSERT_TRUE(invitations.at("ok")) << invitations.dump();
+    ASSERT_EQ(invitations.at("value").at("items").size(), 1U);
+    const std::string invitation_id = invitations.at("value").at("items").at(0).at("id");
+    EXPECT_EQ(invitations.at("value").at("items").at(0).at("organization_name"), "Acme Research");
+
+    const std::string accepted = client->request(
+        "POST", "/invitations/accept", "invitation_id=" + invitation_id, colleague);
+    ASSERT_TRUE(accepted.starts_with("HTTP/1.1 302")) << accepted;
+    EXPECT_EQ(response_header(accepted, "location"), "/organization?id=" + organization_id);
+    const std::string organization =
+        client->request("GET", "/organization?id=" + organization_id, "", colleague);
+    EXPECT_TRUE(organization.starts_with("HTTP/1.1 200")) << organization;
+    const auto memberships =
+        response_json(client->request("GET", "/v1/list_memberships", "", colleague));
+    ASSERT_TRUE(memberships.at("ok")) << memberships.dump();
+    ASSERT_EQ(memberships.at("value").at("items").size(), 1U);
+    EXPECT_EQ(memberships.at("value").at("items").at(0).at("role"), "admin");
+    const auto spaces =
+        response_json(client->request("GET", "/v1/list_customers", "", colleague));
+    ASSERT_TRUE(spaces.at("ok"));
+    bool organization_space = false;
+    for (const auto& space : spaces.at("value").at("items")) {
+        organization_space = organization_space || space.at("name") == handle;
+    }
+    EXPECT_TRUE(organization_space) << spaces.dump();
+}
+
+TEST_P(HttpResponseIsolation, PersonalSpaceBecomesAnOrganizationAfterConfirmation) {
+    auto client = connect();
+    const std::string sign_in =
+        client->request("POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302")) << sign_in;
+    const std::string cookie = response_header(sign_in, "set-cookie")
+                                   .substr(0, response_header(sign_in, "set-cookie").find(';'));
+    const auto before = response_json(client->request("GET", "/v1/list_customers", "", cookie));
+    ASSERT_TRUE(before.at("ok"));
+    ASSERT_EQ(before.at("value").at("items").size(), 1U);
+    const std::string customer_id = before.at("value").at("items").at(0).at("id");
+    const std::string handle = before.at("value").at("items").at(0).at("name");
+
+    const std::string refused = client->request(
+        "POST",
+        "/organizations/convert",
+        "customer_id=" + customer_id + "&display_name=Solo+Labs&confirm=not-the-handle",
+        cookie);
+    EXPECT_TRUE(refused.starts_with("HTTP/1.1 400")) << refused;
+    const auto unchanged = response_json(
+        client->request("GET", "/v1/get_customer?customer_id=" + customer_id, "", cookie));
+    ASSERT_TRUE(unchanged.at("ok")) << unchanged.dump();
+    EXPECT_EQ(unchanged.at("value").at("customer_type"), "individual");
+
+    const std::string converted = client->request(
+        "POST",
+        "/organizations/convert",
+        "customer_id=" + customer_id + "&display_name=Solo+Labs&confirm=" + handle,
+        cookie);
+    ASSERT_TRUE(converted.starts_with("HTTP/1.1 302")) << converted;
+    const auto after = response_json(
+        client->request("GET", "/v1/get_customer?customer_id=" + customer_id, "", cookie));
+    ASSERT_TRUE(after.at("ok")) << after.dump();
+    EXPECT_EQ(after.at("value").at("customer_type"), "organization");
+    EXPECT_EQ(after.at("value").at("name"), handle);
+    const auto spaces = response_json(client->request("GET", "/v1/list_customers", "", cookie));
+    ASSERT_TRUE(spaces.at("ok"));
+    EXPECT_EQ(spaces.at("value").at("items").size(), 2U) << spaces.dump();
+    const auto memberships =
+        response_json(client->request("GET", "/v1/list_memberships", "", cookie));
+    ASSERT_TRUE(memberships.at("ok")) << memberships.dump();
+    ASSERT_EQ(memberships.at("value").at("items").size(), 1U);
+    EXPECT_EQ(memberships.at("value").at("items").at(0).at("role"), "owner");
+    const std::string page = client->request("GET", "/organizations", "", cookie);
+    EXPECT_NE(page.find("Solo Labs"), std::string::npos);
+}
+
 TEST_P(HttpResponseIsolation, NavigationUsesTheResolvedViewerOnEveryPage) {
     auto connection = connect();
     const std::string sign_in = connection->request(

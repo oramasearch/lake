@@ -86,6 +86,13 @@ public:
                                                      const std::string& team_id,
                                                      int limit) override;
     Result<Invitation> get_invitation(const std::string& id) override;
+    Result<OrganizationSpace> create_organization_space(const NewOrganizationSpace&) override;
+    Result<OrganizationSpace> convert_personal_space(const ConvertPersonalSpace&) override;
+    Result<std::vector<Membership>> list_user_memberships(const std::string& user_id,
+                                                          int limit) override;
+    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& email,
+                                                             const std::vector<std::string>& handles,
+                                                             int limit) override;
     Result<PolicyObject> create_policy_object(const NewPolicyObject&) override;
     Result<PolicyObject> get_policy_object(const std::string& id) override;
     Result<PolicyObject> find_policy_object(const std::string& object_type,
@@ -500,6 +507,9 @@ public:
 
 private:
     bool user_can_access_web_app_locked(const WebApp& app, const std::string& user_id) const;
+    // The organization's own space shares its organization-scope memberships' grants.
+    void derive_space_grant_locked(const Membership& membership, const std::string& role);
+    void drop_space_grant_locked(const Membership& membership, const std::string& role);
     Result<std::string> customer_kek_locked(const std::string& customer_id, bool create);
     Result<std::string> data_key_locked(const std::string& customer_id,
                                         const std::string& owner_id,

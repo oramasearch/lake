@@ -116,7 +116,7 @@ credentials.
 | `get_organization` | read | `id` | organization | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |
-| `get_customer` | read | `id` | customer | [customers.md](customers.md) |
+| `get_customer` | read | `id` (or `customer_id`) | customer | [customers.md](customers.md) |
 | `create_customer` | action | `customer_type`, `user_id?`, `organization_id?`, `name?` | customer | [customers.md](customers.md) |
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
@@ -148,8 +148,9 @@ credentials.
 | `export_repository`, `import_repository`, `list_exports` | read/action | repository or destination customer, archive, and optional Git projection | signed portable archive, recreated repository, or prior export records | [export.md](export.md) |
 | `import_github_repository` | action | destination customer, local Git directory, and recorded GitHub responses | imported repository and durable fidelity report | [github-import.md](github-import.md) |
 | `list_teams`, `get_team`, `create_team` | read/action | organization or team identifiers and fields | team(s) | [organizations.md](organizations.md) |
-| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope, membership id, principal, role, TAAP evidence | membership(s) or removal confirmation | [organizations.md](organizations.md) |
-| `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope, invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
+| `list_memberships`, `get_membership`, `create_membership`, `set_member_role`, `remove_member` | read/action | scope (omit for your own), membership id, principal, role, TAAP evidence | membership(s) or removal confirmation | [organizations.md](organizations.md) |
+| `list_invitations`, `create_invitation`, `accept_invitation` | read/action | scope (omit for your own), invitee, role, expiry or accepting principal | invitation or membership | [organizations.md](organizations.md) |
+| `create_organization_space`, `convert_personal_space`, `join_organization` | action | organization name and handle, your personal space, or an invitation addressed to you | organization space or membership | [organizations.md](organizations.md) |
 | `list_objects`, `get_object`, `create_object` | read/action | graph identifiers, type, parent, `inherit` | object(s) | [policy.md](policy.md) |
 | `list_grants`, `create_grant` | read/action | object, principal, role, TAAP evidence | grant(s) | [policy.md](policy.md) |
 | `effective_access` | read | `object_id` | `{items: [effective access]}` | [policy.md](policy.md) |

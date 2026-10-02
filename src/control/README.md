@@ -60,3 +60,8 @@ workspace, membership, expiry, and use state; PostgreSQL consumes a code atomica
 `builds.cpp` defines build JSON, its successful public digest reference, plus source, push and event
 token purposes. Memory and PostgreSQL stores insert queued rows, retain operator observations and
 notify `lake_builds` on create/cancel. See `docs/control-plane/builds.md`.
+
+Both stores implement `create_organization_space` and `convert_personal_space` as one transaction
+each, list a user's memberships and the invitations addressed to an email or handles, and keep an
+organization-scope membership's grant on the organization's own space in step with the membership.
+See `docs/api/organizations.md`.

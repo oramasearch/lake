@@ -1486,8 +1486,8 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers, We
                           "class=\"sub\">The tenants. "
                           "Each is an individual or an organization and owns its repositories.</p>";
     if (customers.empty()) {
-        content += "<div class=\"panel empty\">No customers yet. <code>POST "
-                   "/v1/create_customer</code> creates one.</div>";
+        content += "<div class=\"panel empty\">No customers yet. A customer appears when a "
+                   "person signs up or creates an organization.</div>";
     } else {
         content += "<table><thead><tr><th>Handle</th><th>Type</th><th>Identity</"
                    "th><th>Created</"
@@ -7446,24 +7446,64 @@ std::string web_ui_artifact(const control::Repository& repository,
 
 std::string web_ui_organizations(const std::vector<control::Organization>& organizations,
                                  WebUiViewer viewer) {
+    OrganizationsPageData data;
+    data.organizations = organizations;
+    return web_ui_organizations(data, std::move(viewer));
+}
+
+std::string web_ui_organizations(const OrganizationsPageData& data, WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">identity</p><h1>Organizations</h1>"
-                          "<p class=\"sub\">Organizations, teams, members, and delegated "
-                          "administration.</p>";
-    if (organizations.empty()) {
-        content += "<div class=\"panel empty\">No organizations yet. "
-                   "<code>POST /v1/create_organization</code> creates one.</div>";
-    } else {
-        content += "<table><thead><tr><th>Organization</th><th>TAAP identity</th>"
-                   "<th>Administration</th><th>SSO</th><th>Created</th></tr></thead><tbody>";
-        for (const auto& organization : organizations) {
-            const std::string organization_query = "organization_id=" + organization.id;
+                          "<p class=\"sub\">An organization has its own space for repositories, "
+                          "workspaces and apps, and people in it as owners, admins or "
+                          "members.</p>" +
+                          error_markup(data.error);
+    if (!data.invitations.empty()) {
+        content += "<section class=\"panel\"><h2>Invitations for You</h2><table><thead><tr>"
+                   "<th>Organization</th><th>Role</th><th>Expires</th><th></th></tr></thead>"
+                   "<tbody>";
+        for (const OrganizationInvitationForViewer& item : data.invitations) {
             content += std::format(
-                "<tr><td>{}</td><td><code>{}</code></td><td>{} · {} · "
-                "{} · {}</td><td>{}</td><td>{}</td></tr>",
-                web_ui_escape(organization.display_name.empty() ? organization.id
-                                                                : organization.display_name),
-                web_ui_escape(organization.taap_id.empty() ? "not assigned" : organization.taap_id),
+                "<tr><td>{}</td><td><span class=\"badge\">{}</span></td><td>{}</td><td><form "
+                "class=\"inline\" method=\"post\" action=\"/invitations/accept\"><input "
+                "type=\"hidden\" name=\"invitation_id\" value=\"{}\"><button class=\"primary\" "
+                "type=\"submit\">Join</button></form></td></tr>",
+                web_ui_escape(item.organization_name.empty() ? item.invitation.organization_id
+                                                             : item.organization_name),
+                web_ui_escape(item.invitation.role),
+                web_ui_escape(item.invitation.expires_at),
+                web_ui_escape(item.invitation.id));
+        }
+        content += "</tbody></table></section>";
+    }
+    std::map<std::string, std::string> roles;
+    for (const control::Membership& membership : data.memberships) {
+        if (membership.team_id.empty()) {
+            roles[membership.organization_id] = membership.role;
+        }
+    }
+    if (data.organizations.empty()) {
+        content += data.person ? "<div class=\"panel empty\">You are not in an organization yet. "
+                                 "Create one below, or ask a colleague to invite you by your "
+                                 "email address.</div>"
+                               : "<div class=\"panel empty\">No organizations yet. They appear "
+                                 "here when a person creates one.</div>";
+    } else {
+        content += "<table><thead><tr><th>Organization</th><th>Your role</th>"
+                   "<th>Administration</th><th>SSO</th><th>Created</th></tr></thead><tbody>";
+        for (const auto& organization : data.organizations) {
+            const std::string organization_query = "organization_id=" + organization.id;
+            const auto role = roles.find(organization.id);
+            content += std::format(
+                "<tr><td>{}</td><td>{}</td><td>{} · {} · {} · {} · {} · "
+                "{}</td><td>{}</td><td>{}</td></tr>",
+                row_link("/organization?id=" + organization.id,
+                         organization.display_name.empty() ? organization.id
+                                                           : organization.display_name),
+                role == roles.end() ? "—"
+                                    : "<span class=\"badge\">" + web_ui_escape(role->second) +
+                                          "</span>",
                 row_link("/organization?id=" + organization.id, "settings"),
+                row_link("/organization?id=" + organization.id + "&tab=invitations", "invite"),
                 row_link("/teams?" + organization_query, "teams"),
                 row_link("/members?" + organization_query, "members"),
                 row_link("/invitations?" + organization_query, "invitations"),
@@ -7473,8 +7513,43 @@ std::string web_ui_organizations(const std::vector<control::Organization>& organ
         }
         content += "</tbody></table>";
     }
+    if (data.person) {
+        content +=
+            "<section class=\"panel\"><h2>Create an Organization</h2>"
+            "<p>You become its owner. It gets its own space, separate from your personal "
+            "space; invite colleagues next.</p>"
+            "<form class=\"stack\" method=\"post\" action=\"/organizations/create\">"
+            "<label>Organization name<input name=\"display_name\" required "
+            "placeholder=\"Acme Research\"></label>"
+            "<label>Handle (optional)<input name=\"name\" "
+            "pattern=\"[a-z0-9]([a-z0-9\\-]{0,254}[a-z0-9])?\" placeholder=\"acme-research\">"
+            "</label><p class=\"muted\">The handle names the organization's space, as in "
+            "<code>handle/repository</code>. Use lowercase letters, numbers, and inner hyphens; "
+            "leave it empty and lake generates one.</p>"
+            "<button class=\"primary\" type=\"submit\">Create organization</button></form>"
+            "</section>";
+    }
+    if (data.person && data.personal_space) {
+        const std::string handle = web_ui_escape(data.personal_space->name);
+        content +=
+            "<section class=\"panel\"><h2>Turn Your Personal Space into an Organization</h2>"
+            "<p>Your personal space <code>" +
+            handle +
+            "</code> becomes the organization's space. Its handle, repositories, workspaces and "
+            "apps stay where they are, so links and clones keep working. You become the "
+            "organization's owner and can invite colleagues. lake gives you a new, empty "
+            "personal space with a generated handle.</p><p class=\"muted\">This cannot be undone "
+            "here.</p><form class=\"stack\" method=\"post\" action=\"/organizations/convert\">"
+            "<input type=\"hidden\" name=\"customer_id\" value=\"" +
+            web_ui_escape(data.personal_space->id) +
+            "\"><label>Organization name<input name=\"display_name\" required></label>"
+            "<label>Type <code>" +
+            handle +
+            "</code> to confirm<input name=\"confirm\" required autocomplete=\"off\"></label>"
+            "<button type=\"submit\">Turn into an organization</button></form></section>";
+    }
     return web_ui_shell("lake — organizations",
-                        std::format("{} organizations", organizations.size()),
+                        std::format("{} organizations", data.organizations.size()),
                         content,
                         viewer);
 }
@@ -7521,9 +7596,17 @@ std::string web_ui_organization(const control::Organization& organization,
                 "<p>" + row_link("/team?id=" + team.id, web_ui_escape(team.display_name)) + "</p>";
         }
         if (data.teams.empty()) {
-            content += "<p class=\"empty\">No teams in this organization.</p>";
+            content += "<p class=\"empty\">No teams in this organization yet.</p>";
         }
-        content += "</section>";
+        content += "</section><section class=\"panel\"><h2>Create a Team</h2><form "
+                   "class=\"stack\" method=\"post\" action=\"/organization/teams\">"
+                   "<input type=\"hidden\" name=\"organization_id\" value=\"" +
+                   web_ui_escape(organization.id) +
+                   "\"><label>Team name<input name=\"name\" required "
+                   "pattern=\"[a-z0-9]([a-z0-9\\-]{0,254}[a-z0-9])?\" "
+                   "placeholder=\"reviewers\"></label><label>Display name<input "
+                   "name=\"display_name\"></label><button class=\"primary\" type=\"submit\">"
+                   "Create team</button></form></section>";
     } else if (selected == "members") {
         content += "<section class=\"panel\"><h2>Members</h2>";
         for (const auto& member : data.memberships) {
@@ -7533,24 +7616,47 @@ std::string web_ui_organization(const control::Organization& organization,
                 " <span class=\"badge\">" + web_ui_escape(member.role) + "</span></p>";
         }
         if (data.memberships.empty()) {
-            content += "<p class=\"empty\">No memberships in this organization.</p>";
+            content += "<p class=\"empty\">No members yet. " +
+                       row_link(base + "invitations", "Invite people") +
+                       " by email address or handle.</p>";
+        } else {
+            content += "<p>" + row_link(base + "invitations", "Invite more people") + "</p>";
         }
         content += "</section>";
     } else if (selected == "invitations") {
         content +=
-            "<section class=\"panel\"><h2>Invite a Member</h2><form class=\"stack\" "
+            "<section class=\"panel\"><h2>Invite a Member</h2><p>The person joins from their "
+            "Organizations page once they sign in with that email address, or with the "
+            "personal space that has that handle.</p><form class=\"stack\" "
             "method=\"post\" action=\"/organization/invitations\">"
             "<input type=\"hidden\" name=\"organization_id\" value=\"" +
             web_ui_escape(organization.id) +
             "\"><label>Email or handle<input name=\"invitee\" required></label><label>Type<select "
             "name=\"invitee_type\"><option value=\"email\">Email</option><option "
             "value=\"handle\">Handle</option></select></label><label>Role<select "
-            "name=\"role\"><option>member</option><option>admin</option><option>owner</option></"
-            "select></label><label>Expiry<input name=\"expires_at\" type=\"datetime-local\" "
-            "required></label><button class=\"primary\" type=\"submit\">Send "
-            "invitation</button></form></section>";
+            "name=\"role\"><option value=\"member\">Member: can read the organization"
+            "</option><option value=\"admin\">Admin: can manage people, teams and access"
+            "</option><option value=\"owner\">Owner: can manage; an organization always "
+            "keeps at least one</option></select></label><label>Expires in<select name=\"expires_in_days\">"
+            "<option value=\"1\">1 day</option><option value=\"7\" selected>7 days</option>"
+            "<option value=\"30\">30 days</option></select></label><button class=\"primary\" "
+            "type=\"submit\">Send invitation</button></form></section>";
         if (data.invitations.empty()) {
-            content += "<div class=\"panel empty\">No pending invitations.</div>";
+            content += "<div class=\"panel empty\">No invitations yet. Invitations you send "
+                       "appear here until they are accepted or expire.</div>";
+        } else {
+            content += "<table><thead><tr><th>Invitee</th><th>Role</th><th>Status</th>"
+                       "<th>Expires</th></tr></thead><tbody>";
+            for (const control::Invitation& invitation : data.invitations) {
+                content += std::format("<tr><td>{}: {}</td><td><span class=\"badge\">{}</span>"
+                                       "</td><td>{}</td><td>{}</td></tr>",
+                                       web_ui_escape(invitation.invitee_type),
+                                       web_ui_escape(invitation.invitee),
+                                       web_ui_escape(invitation.role),
+                                       badge_markup(invitation.status),
+                                       web_ui_escape(invitation.expires_at));
+            }
+            content += "</tbody></table>";
         }
     } else if (selected == "access") {
         content += "<section class=\"panel\"><h2>Effective Access</h2>";
@@ -7726,10 +7832,11 @@ std::string web_ui_sso(std::string_view organization_id,
     std::string content = "<p class=\"eyebrow\">organization identity</p><h1>Enterprise SSO</h1>"
                           "<p class=\"sub\">Provider configuration, federation policy, and SCIM "
                           "provisioning evidence.</p>";
-    content += "<div class=\"panel\"><p>Configure providers with <code>POST "
-               "/v1/register_sso_provider</code>, then validate them with <code>POST "
-               "/v1/test_sso_provider</code>. Provider secrets and SCIM tokens are never shown "
-               "here.</p></div>";
+    content += "<div class=\"panel\"><p>" +
+               row_link("/organization?id=" + std::string(organization_id) + "&tab=sso",
+                        "Add a provider") +
+               " from the organization's settings. Provider secrets and SCIM tokens are never "
+               "shown here.</p></div>";
     content += "<h2>Providers</h2>";
     if (providers.empty()) {
         content += "<div class=\"panel empty\">No SSO providers are configured.</div>";
@@ -7789,9 +7896,10 @@ std::string web_ui_teams(std::string_view organization_id,
                           "<p class=\"sub\">Roles on an organization flow to its teams unless "
                           "inheritance is cut.</p>";
     if (teams.empty()) {
-        content += "<div class=\"panel empty\">No teams yet. <code>POST "
-                   "/v1/create_team</code> "
-                   "creates one.</div>";
+        content += "<div class=\"panel empty\">No teams yet. " +
+                   row_link("/organization?id=" + std::string(organization_id) + "&tab=teams",
+                            "Create a team") +
+                   " from the organization's settings.</div>";
     } else {
         content += "<table><thead><tr><th>Team</th><th>Name</th><th>Members</"
                    "th><th>Created</th>"
@@ -7819,8 +7927,11 @@ std::string web_ui_memberships(std::string_view organization_id,
                           "<p class=\"sub\">Every role is backed by an "
                           "org_membership/1 attestation.</p>";
     if (memberships.empty()) {
-        content += "<div class=\"panel empty\">No memberships yet. "
-                   "<code>POST /v1/create_membership</code> creates one.</div>";
+        content += "<div class=\"panel empty\">No members yet. " +
+                   row_link("/organization?id=" + std::string(organization_id) +
+                                "&tab=invitations",
+                            "Invite people") +
+                   " to add them.</div>";
     } else {
         content += "<table><thead><tr><th>Principal</th><th>Type</th><th>Role</th>"
                    "<th>Attestation</th><th>Granted by</th></tr></thead><tbody>";
@@ -7848,8 +7959,11 @@ std::string web_ui_invitations(std::string_view organization_id,
                           "<p class=\"sub\">Email and handle invitations expire and become "
                           "attested memberships.</p>";
     if (invitations.empty()) {
-        content += "<div class=\"panel empty\">No invitations yet. "
-                   "<code>POST /v1/create_invitation</code> creates one.</div>";
+        content += "<div class=\"panel empty\">No invitations yet. " +
+                   row_link("/organization?id=" + std::string(organization_id) +
+                                "&tab=invitations",
+                            "Invite someone") +
+                   " by email address or handle.</div>";
     } else {
         content += "<table><thead><tr><th>Invitee</th><th>Role</th><th>Status</"
                    "th><th>Expires</th>"
@@ -7876,9 +7990,8 @@ std::string web_ui_grants(const control::PolicyObject& object,
                           "<p class=\"sub\">Attestation-backed roles directly "
                           "attached to this object.</p>";
     if (grants.empty()) {
-        content += "<div class=\"panel empty\">No direct grants. <code>POST "
-                   "/v1/create_grant</code> "
-                   "creates one.</div>";
+        content += "<div class=\"panel empty\">No direct grants on this object. Access to it "
+                   "comes from the space, organization or team above it.</div>";
     } else {
         content += "<table><thead><tr><th>Principal</th><th>Role</th><th>Attestation</th>"
                    "<th>Granted by</th></tr></thead><tbody>";
@@ -8284,8 +8397,8 @@ std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts
         "<p class=\"sub\">Organization-scoped static secrets and named encryption keys. "
         "Key material remains inside lake.</p>";
     if (mounts.empty()) {
-        content += "<div class=\"panel empty\">No readable mounts. <code>POST "
-                   "/v1/create_secret_mount</code> creates one.</div>";
+        content += "<div class=\"panel empty\">No secret mounts you can read yet. An "
+                   "organization administrator creates them.</div>";
     } else {
         content += "<table><thead><tr><th>Name</th><th>Organization</th><th>Customer</th>"
                    "<th>Description</th><th>Created</th><th></th></tr></thead><tbody>";
@@ -8358,8 +8471,7 @@ std::string web_ui_encryption_keys(const control::SecretMount& mount,
                           " Keys</h1><p class=\"sub\">Named, versioned keys for encryption, "
                           "signing, HMAC and derivation. Key material is never returned.</p>";
     if (keys.empty()) {
-        content += "<div class=\"panel empty\">No keys yet. <code>POST "
-                   "/v1/create_encryption_key</code> creates one.</div>";
+        content += "<div class=\"panel empty\">No keys in this mount yet.</div>";
     } else {
         content += "<table><thead><tr><th>Name</th><th>Current version</th><th>Derived from</th>"
                    "<th>Created</th><th>Updated</th></tr></thead><tbody>";

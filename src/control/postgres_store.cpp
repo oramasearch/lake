@@ -2541,6 +2541,45 @@ public:
         });
     }
 
+    // An organization's own space (the customer whose organization_id is that organization)
+    // belongs to the organization's people: an organization-scope membership derives the same
+    // policy grant on the space's customer object as on the organization object, so members
+    // reach its repositories, workspaces and apps (docs/api/organizations.md).
+    static void derive_space_grant(pqxx::work& tx,
+                                   const Membership& membership,
+                                   const std::string& role) {
+        if (!membership.team_id.empty()) {
+            return;
+        }
+        tx.exec_params("INSERT INTO grants (principal_taap_id, object_id, role, attestation_digest, "
+                       "granted_by_taap_id) SELECT $1, o.id, $3, $4, $5 FROM customers c "
+                       "JOIN objects o ON o.object_type = 'customer' AND o.external_id = c.id::text "
+                       "WHERE c.organization_id = $2::uuid ON CONFLICT DO NOTHING",
+                       membership.principal_taap_id,
+                       membership.organization_id,
+                       role == "member" ? "read" : "admin",
+                       membership.attestation_digest,
+                       membership.granted_by_taap_id);
+    }
+
+    static void drop_space_grant(pqxx::work& tx,
+                                 const Membership& membership,
+                                 const std::string& role) {
+        if (!membership.team_id.empty()) {
+            return;
+        }
+        tx.exec_params("DELETE FROM grants g USING customers c, objects o "
+                       "WHERE c.organization_id = $2::uuid AND o.object_type = 'customer' "
+                       "AND o.external_id = c.id::text AND g.object_id = o.id "
+                       "AND g.principal_taap_id = $1 AND g.role = $3 "
+                       "AND g.attestation_digest = $4 AND g.granted_by_taap_id = $5",
+                       membership.principal_taap_id,
+                       membership.organization_id,
+                       role == "member" ? "read" : "admin",
+                       membership.attestation_digest,
+                       membership.granted_by_taap_id);
+    }
+
     Result<Membership> create_membership(const NewMembership& in) override {
         return with_tx<Membership>([&](pqxx::work& tx) -> Result<Membership> {
             if (in.principal_type == "user") {
@@ -2607,6 +2646,7 @@ public:
                            grant_role,
                            in.attestation_digest,
                            in.granted_by_taap_id);
+            derive_space_grant(tx, membership, in.role);
             return membership;
         });
     }
@@ -2711,6 +2751,8 @@ public:
                 next_grant_role,
                 membership.attestation_digest,
                 membership.granted_by_taap_id);
+            drop_space_grant(tx, membership, membership.role);
+            derive_space_grant(tx, membership, role);
             const pqxx::result updated = tx.exec_params(
                 std::string("UPDATE memberships SET role = $2 WHERE id = $1::uuid RETURNING ") +
                     membership_columns,
@@ -2764,6 +2806,7 @@ public:
                 membership.role == "member" ? "read" : "admin",
                 membership.attestation_digest,
                 membership.granted_by_taap_id);
+            drop_space_grant(tx, membership, membership.role);
             tx.exec_params("DELETE FROM objects WHERE object_type = 'member' AND external_id = $1",
                            id);
             tx.exec_params("DELETE FROM memberships WHERE id = $1::uuid", id);
@@ -2852,6 +2895,236 @@ public:
         });
     }
 
+    // Inserts the owner membership, its member object, and its organization admin grant.
+    static Membership insert_owner_membership(pqxx::work& tx,
+                                              const std::string& organization_id,
+                                              const std::string& organization_object_id,
+                                              const std::string& user_id,
+                                              const std::string& taap_id,
+                                              const std::string& evidence) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("INSERT INTO memberships (organization_id, principal_type, principal_id, "
+                        "principal_taap_id, role, attestation_digest, granted_by_taap_id) "
+                        "VALUES ($1::uuid, 'user', $2, $3, 'owner', $4, $3) RETURNING ") +
+                membership_columns,
+            organization_id,
+            user_id,
+            taap_id,
+            evidence);
+        Membership membership = membership_of(rows[0]);
+        tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
+                       "VALUES ('member', $1, $2::uuid)",
+                       membership.id,
+                       organization_object_id);
+        tx.exec_params("INSERT INTO grants (principal_taap_id, object_id, role, attestation_digest, "
+                       "granted_by_taap_id) VALUES ($1, $2::uuid, 'admin', $3, $1)",
+                       taap_id,
+                       organization_object_id,
+                       evidence);
+        derive_space_grant(tx, membership, "owner");
+        return membership;
+    }
+
+    static bool user_matches_identity(pqxx::work& tx,
+                                      const std::string& user_id,
+                                      const std::string& taap_id) {
+        return !tx.exec_params("SELECT 1 FROM users WHERE id = $1::uuid AND taap_id = $2",
+                               user_id,
+                               taap_id)
+                    .empty();
+    }
+
+    Result<OrganizationSpace> create_organization_space(const NewOrganizationSpace& in) override {
+        return with_tx<OrganizationSpace>([&](pqxx::work& tx) -> Result<OrganizationSpace> {
+            if (in.owner_user_id.empty() || in.owner_taap_id.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "an organization is started by a signed-in person"});
+            }
+            if (!user_matches_identity(tx, in.owner_user_id, in.owner_taap_id)) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "user principal does not match its TAAP identity"});
+            }
+            if (!in.name.empty() && !valid_handle(in.name)) {
+                return std::unexpected(StoreError{"invalid_input",
+                                                  "handle must be lowercase letters, digits and "
+                                                  "inner hyphens (customer_name_format)"});
+            }
+            if (!in.name.empty() &&
+                !tx.exec_params("SELECT 1 FROM customers WHERE name = $1", in.name).empty()) {
+                return std::unexpected(
+                    StoreError{"conflict", "name already taken (customer_name_unique)"});
+            }
+            const std::string evidence = "create_organization_space/" + in.request_id;
+            OrganizationSpace space;
+            space.organization = organization_of(
+                tx.exec_params(std::string("INSERT INTO organizations (display_name) VALUES ($1) "
+                                           "RETURNING ") +
+                                   organization_columns,
+                               in.display_name)[0]);
+            for (int attempt = 0; attempt < 32 && space.customer.id.empty(); ++attempt) {
+                const std::string name = in.name.empty() ? generate_handle() : in.name;
+                const pqxx::result rows = tx.exec_params(
+                    std::string("INSERT INTO customers (customer_type, organization_id, name) "
+                                "VALUES ('organization', $1::uuid, $2) "
+                                "ON CONFLICT (name) DO NOTHING RETURNING ") +
+                        customer_columns,
+                    space.organization.id,
+                    name);
+                if (!rows.empty()) {
+                    space.customer = customer_of(rows[0]);
+                } else if (!in.name.empty()) {
+                    return std::unexpected(
+                        StoreError{"conflict", "name already taken (customer_name_unique)"});
+                }
+            }
+            if (space.customer.id.empty()) {
+                return std::unexpected(StoreError{
+                    "conflict", "could not allocate an organization handle; pass a name"});
+            }
+            const std::string customer_object =
+                tx.exec_params("INSERT INTO objects (object_type, external_id) "
+                               "VALUES ('customer', $1) RETURNING id::text",
+                               space.customer.id)[0][0]
+                    .as<std::string>();
+            const std::string organization_object =
+                tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
+                               "VALUES ('organization', $1, $2::uuid) RETURNING id::text",
+                               space.organization.id,
+                               customer_object)[0][0]
+                    .as<std::string>();
+            space.owner = insert_owner_membership(tx,
+                                                  space.organization.id,
+                                                  organization_object,
+                                                  in.owner_user_id,
+                                                  in.owner_taap_id,
+                                                  evidence);
+            return space;
+        });
+    }
+
+    Result<OrganizationSpace> convert_personal_space(const ConvertPersonalSpace& in) override {
+        return with_tx<OrganizationSpace>([&](pqxx::work& tx) -> Result<OrganizationSpace> {
+            if (in.owner_user_id.empty() || in.owner_taap_id.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "a personal space is converted by the person who owns it"});
+            }
+            if (!user_matches_identity(tx, in.owner_user_id, in.owner_taap_id)) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "user principal does not match its TAAP identity"});
+            }
+            const pqxx::result customers =
+                tx.exec_params(std::string("SELECT ") + customer_columns +
+                                   " FROM customers WHERE id = $1::uuid FOR UPDATE",
+                               in.customer_id);
+            if (customers.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+            }
+            const Customer current = customer_of(customers[0]);
+            if (current.customer_type != "individual") {
+                return std::unexpected(
+                    StoreError{"conflict", "this space already belongs to an organization"});
+            }
+            if (current.user_id != in.owner_user_id) {
+                return std::unexpected(StoreError{
+                    "unauthorized", "only the person whose personal space this is can convert it"});
+            }
+            const pqxx::result customer_objects =
+                tx.exec_params("SELECT id::text FROM objects WHERE object_type = 'customer' "
+                               "AND external_id = $1",
+                               in.customer_id);
+            if (customer_objects.empty()) {
+                return std::unexpected(
+                    StoreError{"store_error", "the space's policy object is missing"});
+            }
+            const std::string evidence = "convert_personal_space/" + in.request_id;
+            OrganizationSpace space;
+            space.organization = organization_of(
+                tx.exec_params(std::string("INSERT INTO organizations (display_name) VALUES ($1) "
+                                           "RETURNING ") +
+                                   organization_columns,
+                               in.display_name)[0]);
+            space.customer = customer_of(tx.exec_params(
+                std::string("UPDATE customers SET customer_type = 'organization', user_id = NULL, "
+                            "organization_id = $2::uuid WHERE id = $1::uuid RETURNING ") +
+                    customer_columns,
+                in.customer_id,
+                space.organization.id)[0]);
+            const std::string organization_object =
+                tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
+                               "VALUES ('organization', $1, $2::uuid) RETURNING id::text",
+                               space.organization.id,
+                               customer_objects[0][0].as<std::string>())[0][0]
+                    .as<std::string>();
+            space.owner = insert_owner_membership(tx,
+                                                  space.organization.id,
+                                                  organization_object,
+                                                  in.owner_user_id,
+                                                  in.owner_taap_id,
+                                                  evidence);
+            const auto personal =
+                provision_personal_customer(tx, in.owner_user_id, in.owner_taap_id, evidence);
+            if (!personal) {
+                return std::unexpected(personal.error());
+            }
+            space.personal = customer_of(tx.exec_params(std::string("SELECT ") + customer_columns +
+                                                            " FROM customers WHERE id = $1::uuid",
+                                                        *personal)[0]);
+            return space;
+        });
+    }
+
+    Result<std::vector<Membership>> list_user_memberships(const std::string& user_id,
+                                                          int limit) override {
+        return with_tx<std::vector<Membership>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Membership>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + membership_columns +
+                        " FROM memberships WHERE principal_type = 'user' AND principal_id = $1 "
+                        "ORDER BY created_at DESC LIMIT $2",
+                    user_id,
+                    limit);
+                std::vector<Membership> out;
+                for (const auto& row : rows) {
+                    out.push_back(membership_of(row));
+                }
+                return out;
+            });
+    }
+
+    Result<std::vector<Invitation>> list_invitee_invitations(const std::string& email,
+                                                             const std::vector<std::string>& handles,
+                                                             int limit) override {
+        return with_tx<std::vector<Invitation>>(
+            [&](pqxx::work& tx) -> Result<std::vector<Invitation>> {
+                pqxx::params params;
+                params.append(email);
+                std::string handle_list;
+                for (const std::string& handle : handles) {
+                    std::string value = handle;
+                    std::ranges::transform(value, value.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                    });
+                    params.append(value);
+                    handle_list += (handle_list.empty() ? "$" : ", $") + std::to_string(params.size());
+                }
+                params.append(limit);
+                const std::string handle_match =
+                    handle_list.empty() ? "false" : "invitee IN (" + handle_list + ")";
+                const pqxx::result rows = tx.exec(
+                    std::string("SELECT ") + invitation_columns +
+                        " FROM invitations WHERE status = 'pending' AND expires_at > now() "
+                        "AND ((invitee_type = 'email' AND $1 <> '' AND invitee = lower($1)) OR "
+                        "(invitee_type = 'handle' AND " + handle_match + ")) "
+                        "ORDER BY created_at DESC LIMIT $" + std::to_string(params.size()),
+                    params);
+                std::vector<Invitation> out;
+                for (const auto& row : rows) {
+                    out.push_back(invitation_of(row));
+                }
+                return out;
+            });
+    }
+
     Result<Membership> accept_invitation(const AcceptInvitation& in) override {
         return with_tx<Membership>([&](pqxx::work& tx) -> Result<Membership> {
             const pqxx::result invitations =
@@ -2923,6 +3196,7 @@ public:
                            grant_role,
                            in.attestation_digest,
                            in.accepted_by_taap_id);
+            derive_space_grant(tx, membership, invitation.role);
             tx.exec_params("UPDATE invitations SET status = 'accepted', "
                            "accepted_membership_id = $1::uuid "
                            "WHERE id = $2::uuid",

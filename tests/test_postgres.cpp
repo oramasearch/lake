@@ -407,6 +407,80 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     EXPECT_FALSE(access.value.at("items").empty());
 }
 
+TEST(PostgresCapabilities, OrganizationSpaceMembershipsCarryTheirGrantToTheSpace) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping());
+    Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto founder = store->create_user(
+        {"taap:1:ed25519:founder-" + suffix, "founder-" + suffix + "@example.com", "Founder"});
+    const auto colleague = store->create_user(
+        {"taap:1:ed25519:colleague-" + suffix, "colleague-" + suffix + "@example.com", "C"});
+    ASSERT_TRUE(founder && colleague);
+    auto context_for = [&](const lake::control::User& user) {
+        ApiContext context;
+        context.store = store.get();
+        context.authorized = true;
+        context.acting_identity = user.taap_id;
+        context.acting_user_id = user.id;
+        context.request_id = lake::control::new_uuid_v4();
+        context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        return context;
+    };
+    ApiContext owner = context_for(*founder);
+    const ApiResult created = registry.call(
+        "create_organization_space", {{"display_name", "Space " + suffix}}, owner);
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string organization_id = created.value.at("organization").at("id");
+    const auto space_object =
+        store->find_policy_object("customer", created.value.at("customer").at("id"));
+    ASSERT_TRUE(space_object);
+    auto may = [&](const std::string& principal, const std::string& action) {
+        lake::control::AuthorizationCache cache;
+        const auto decision =
+            lake::control::authorize(*store, principal, space_object->id, action, cache);
+        return decision && decision->allowed;
+    };
+    EXPECT_TRUE(may(founder->taap_id, "admin"));
+
+    const ApiResult invitation = registry.call("create_invitation",
+                                               {{"organization_id", organization_id},
+                                                {"invitee_type", "email"},
+                                                {"invitee", colleague->email},
+                                                {"role", "admin"},
+                                                {"expires_at", "2999-01-01T00:00:00Z"}},
+                                               owner);
+    ASSERT_TRUE(invitation.ok) << invitation.error.message;
+    ApiContext invitee = context_for(*colleague);
+    const ApiResult mine = registry.call("list_invitations", json::object(), invitee);
+    ASSERT_TRUE(mine.ok) << mine.error.message;
+    ASSERT_EQ(mine.value.at("items").size(), 1U);
+    const ApiResult joined =
+        registry.call("join_organization", {{"invitation_id", invitation.value.at("id")}}, invitee);
+    ASSERT_TRUE(joined.ok) << joined.error.message;
+    EXPECT_TRUE(may(colleague->taap_id, "admin"));
+    EXPECT_TRUE(registry.call("list_invitations", json::object(), invitee).value.at("items").empty());
+
+    owner.request_id = lake::control::new_uuid_v4();
+    ASSERT_TRUE(registry
+                    .call("set_member_role",
+                          {{"id", joined.value.at("id")}, {"role", "member"}},
+                          owner)
+                    .ok);
+    EXPECT_TRUE(may(colleague->taap_id, "read"));
+    EXPECT_FALSE(may(colleague->taap_id, "admin"));
+    owner.request_id = lake::control::new_uuid_v4();
+    ASSERT_TRUE(registry.call("remove_member", {{"id", joined.value.at("id")}}, owner).ok);
+    EXPECT_FALSE(may(colleague->taap_id, "read"));
+    EXPECT_TRUE(may(founder->taap_id, "admin"));
+}
+
 TEST(PostgresCapabilities, DriveShareLinksRoundTrip) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

@@ -1087,6 +1087,7 @@ json invitation_schema() {
               {"status", {{"type", "string"}}},
               {"accepted_membership_id", {{"type", json::array({"string", "null"})}}},
               {"created_by_taap_id", {{"type", "string"}}},
+              {"organization_name", {{"type", "string"}}},
               {"created_at", {{"type", "string"}}},
               {"updated_at", {{"type", "string"}}}}}};
 }
@@ -1750,19 +1751,54 @@ void register_identity_capabilities(Registry& registry) {
                                    ctx.store->list_customers(limit_of(in)), ctx, "customer")
                              : no_store();
         }});
-    registry.add(Capability{.name = "get_customer",
-                            .title = "Get customer",
-                            .description = "One customer by id.",
-                            .input_schema = id_input(),
-                            .output_schema = customer_schema(),
-                            .kind = CapabilityKind::Read,
-                            .object = "customer",
-                            .action = "read",
-                            .resolve_object = entity_object("customer", "id"),
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store ? one_result(ctx.store->get_customer(in["id"]))
-                                                 : no_store();
-                            }});
+    // customer_id is accepted as well as id, because every other capability names a space
+    // customer_id (lake#443).
+    const auto customer_key = [](const json& in) -> std::expected<std::string, ApiError> {
+        const std::string id = in.value("id", "");
+        const std::string customer_id = in.value("customer_id", "");
+        if (id.empty() && customer_id.empty()) {
+            return std::unexpected(ApiError{"invalid_input", "id is required", "/id"});
+        }
+        if (!id.empty() && !customer_id.empty() && id != customer_id) {
+            return std::unexpected(
+                ApiError{"invalid_input", "id and customer_id name different customers", "/id"});
+        }
+        return id.empty() ? customer_id : id;
+    };
+    registry.add(Capability{
+        .name = "get_customer",
+        .title = "Get customer",
+        .description = "One customer by id (customer_id is accepted as the same field).",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}}, {"customer_id", {{"type", "string"}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = customer_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = [customer_key](const json& in,
+                                         ApiContext& context) -> std::expected<std::string, ApiError> {
+            const auto key = customer_key(in);
+            if (!key) {
+                return std::unexpected(key.error());
+            }
+            auto object = context.store->find_policy_object("customer", *key);
+            if (!object) {
+                return std::unexpected(ApiError{object.error().code, object.error().message, "/id"});
+            }
+            return object->id;
+        },
+        .handler = [customer_key](const json& in, ApiContext& ctx) {
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto key = customer_key(in);
+            if (!key) {
+                return ApiResult::failure(key.error().code, key.error().message, key.error().path);
+            }
+            return one_result(ctx.store->get_customer(*key));
+        }});
     registry.add(Capability{
         .name = "create_customer",
         .title = "Create customer",
@@ -3895,6 +3931,52 @@ void register_repository_capabilities(Registry& registry) {
         }});
 }
 
+// The pending invitations addressed to the signed-in person: their email, or the handle of a
+// personal space they hold. Each item carries the organization's display name, which the
+// invitee cannot otherwise read before joining.
+ApiResult own_invitations(ApiContext& ctx, int limit) {
+    const auto user = ctx.store->get_user(ctx.acting_user_id);
+    if (!user) {
+        return from_store_error(user.error());
+    }
+    std::vector<std::string> handles;
+    if (const auto customers = ctx.store->list_customers(10, ctx.acting_user_id)) {
+        for (const control::Customer& customer : *customers) {
+            handles.push_back(customer.name);
+        }
+    }
+    const auto rows = ctx.store->list_invitee_invitations(user->email, handles, limit);
+    if (!rows) {
+        return from_store_error(rows.error());
+    }
+    json items = json::array();
+    for (const control::Invitation& invitation : *rows) {
+        json item = control::to_json(invitation);
+        const auto organization = ctx.store->get_organization(invitation.organization_id);
+        item["organization_name"] = organization ? organization->display_name : std::string();
+        items.push_back(std::move(item));
+    }
+    return ApiResult::success({{"items", std::move(items)}});
+}
+
+json organization_space_json(const control::OrganizationSpace& space) {
+    json value{{"organization", control::to_json(space.organization)},
+               {"customer", control::to_json(space.customer)},
+               {"membership", control::to_json(space.owner)}};
+    if (!space.personal.id.empty()) {
+        value["personal_customer"] = control::to_json(space.personal);
+    }
+    return value;
+}
+
+std::string trim_copy(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return {};
+    }
+    return value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+}
+
 void register_organization_capabilities(Registry& registry) {
     // ---- teams and membership ----
     registry.add(Capability{
@@ -3961,13 +4043,13 @@ void register_organization_capabilities(Registry& registry) {
         Capability{.name = "list_memberships",
                    .title = "List memberships",
                    .description = "Organization or team memberships with their TAAP "
-                                  "attestation digests.",
+                                  "attestation digests. Without organization_id, the "
+                                  "signed-in person's own memberships in every organization.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"organization_id", {{"type", "string"}}},
                                       {"team_id", {{"type", "string"}}},
                                       {"limit", {{"type", "integer"}}}}},
-                                    {"required", json::array({"organization_id"})},
                                     {"additionalProperties", false}},
                    .output_schema = list_schema(membership_schema()),
                    .kind = CapabilityKind::Read,
@@ -3976,17 +4058,32 @@ void register_organization_capabilities(Registry& registry) {
                    .resolve_object = scope_object,
                    .authorizes_candidates = true,
                    .handler = [](const json& in, ApiContext& ctx) {
+                       if (!ctx.store) {
+                           return no_store();
+                       }
+                       const std::string organization_id = in.value("organization_id", "");
                        const std::string team_id = in.value("team_id", "");
+                       if (organization_id.empty()) {
+                           if (!team_id.empty() || ctx.acting_user_id.empty()) {
+                               return ApiResult::failure(
+                                   "invalid_input",
+                                   "organization_id is required unless a signed-in person lists "
+                                   "their own memberships",
+                                   "/organization_id");
+                           }
+                           return list_result(
+                               ctx.store->list_user_memberships(ctx.acting_user_id, limit_of(in)));
+                       }
                        const auto authorization = authorize_entity_scope(
                            ctx,
                            team_id.empty() ? "organization" : "team",
-                           team_id.empty() ? in.at("organization_id").get<std::string>() : team_id,
+                           team_id.empty() ? organization_id : team_id,
                            "read");
                        if (!authorization) {
                            return authorization_failure(authorization);
                        }
-                       return list_result(ctx.store->list_memberships(
-                           in.at("organization_id"), in.value("team_id", ""), limit_of(in)));
+                       return list_result(
+                           ctx.store->list_memberships(organization_id, team_id, limit_of(in)));
                    }});
     registry.add(Capability{
         .name = "create_membership",
@@ -4087,13 +4184,14 @@ void register_organization_capabilities(Registry& registry) {
         Capability{.name = "list_invitations",
                    .title = "List invitations",
                    .description = "Invitations in an organization or team, including expiry "
-                                  "and acceptance.",
+                                  "and acceptance. Without organization_id, the pending "
+                                  "invitations addressed to the signed-in person, by email or "
+                                  "by the handle of their personal space, with organization_name.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"organization_id", {{"type", "string"}}},
                                       {"team_id", {{"type", "string"}}},
                                       {"limit", {{"type", "integer"}}}}},
-                                    {"required", json::array({"organization_id"})},
                                     {"additionalProperties", false}},
                    .output_schema = list_schema(invitation_schema()),
                    .kind = CapabilityKind::Read,
@@ -4102,17 +4200,31 @@ void register_organization_capabilities(Registry& registry) {
                    .resolve_object = scope_object,
                    .authorizes_candidates = true,
                    .handler = [](const json& in, ApiContext& ctx) {
+                       if (!ctx.store) {
+                           return no_store();
+                       }
+                       const std::string organization_id = in.value("organization_id", "");
                        const std::string team_id = in.value("team_id", "");
+                       if (organization_id.empty()) {
+                           if (!team_id.empty() || ctx.acting_user_id.empty()) {
+                               return ApiResult::failure(
+                                   "invalid_input",
+                                   "organization_id is required unless a signed-in person lists "
+                                   "the invitations addressed to them",
+                                   "/organization_id");
+                           }
+                           return own_invitations(ctx, limit_of(in));
+                       }
                        const auto authorization = authorize_entity_scope(
                            ctx,
                            team_id.empty() ? "organization" : "team",
-                           team_id.empty() ? in.at("organization_id").get<std::string>() : team_id,
+                           team_id.empty() ? organization_id : team_id,
                            "admin");
                        if (!authorization) {
                            return authorization_failure(authorization);
                        }
-                       return list_result(ctx.store->list_invitations(
-                           in.at("organization_id"), in.value("team_id", ""), limit_of(in)));
+                       return list_result(
+                           ctx.store->list_invitations(organization_id, team_id, limit_of(in)));
                    }});
     registry.add(Capability{
         .name = "create_invitation",
@@ -4179,6 +4291,154 @@ void register_organization_capabilities(Registry& registry) {
                                                                        in.at("attestation_digest"),
                                                                        ctx.acting_identity,
                                                                        ctx.request_id}));
+        }});
+
+    // ---- organizations a person runs themselves ----
+    const json space_output = {{"type", "object"},
+                               {"properties",
+                                {{"organization", organization_schema()},
+                                 {"customer", customer_schema()},
+                                 {"membership", membership_schema()},
+                                 {"personal_customer", customer_schema()}}},
+                               {"required", json::array({"organization", "customer", "membership"})}};
+    registry.add(Capability{
+        .name = "create_organization_space",
+        .title = "Create organization",
+        .description = "Start an organization as the signed-in person: the organization, its own "
+                       "space (handle generated when name is omitted), and the caller as its "
+                       "owner, in one step. Invite colleagues next with create_invitation.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"display_name", {{"type", "string"}}},
+                           {"name",
+                            {{"type", "string"}, {"description", "handle; generated when omitted"}}}}},
+                         {"required", json::array({"display_name"})},
+                         {"additionalProperties", false}},
+        .output_schema = space_output,
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            if (!ctx.store) {
+                return no_store();
+            }
+            if (ctx.acting_user_id.empty()) {
+                return ApiResult::failure("unauthorized",
+                                          "an organization is started by a signed-in person; "
+                                          "an operator uses create_organization");
+            }
+            if (trim_copy(in.at("display_name").get<std::string>()).empty()) {
+                return ApiResult::failure(
+                    "invalid_input", "name the organization", "/display_name");
+            }
+            auto space = ctx.store->create_organization_space(
+                control::NewOrganizationSpace{trim_copy(in.at("display_name").get<std::string>()),
+                                              in.value("name", ""),
+                                              ctx.acting_user_id,
+                                              ctx.acting_identity,
+                                              ctx.request_id});
+            if (!space) {
+                return from_store_error(space.error());
+            }
+            ctx.audit_customer_id = space->customer.id;
+            ctx.audit_object = "organization/" + space->organization.id;
+            return ApiResult::success(organization_space_json(*space));
+        }});
+    registry.add(Capability{
+        .name = "convert_personal_space",
+        .title = "Turn a personal space into an organization",
+        .description = "Turn the caller's personal space into an organization's space. The space "
+                       "keeps its id, handle, repositories, workspaces and apps; the caller "
+                       "becomes the organization's owner and receives a fresh personal space.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"display_name", {{"type", "string"}}}}},
+                         {"required", json::array({"customer_id", "display_name"})},
+                         {"additionalProperties", false}},
+        .output_schema = space_output,
+        .kind = CapabilityKind::Action,
+        .object = "customer",
+        .action = "admin",
+        .resolve_object = entity_object("customer", "customer_id"),
+        .handler = [](const json& in, ApiContext& ctx) {
+            if (!ctx.store) {
+                return no_store();
+            }
+            if (ctx.acting_user_id.empty()) {
+                return ApiResult::failure(
+                    "unauthorized", "only the person whose personal space this is can convert it");
+            }
+            if (trim_copy(in.at("display_name").get<std::string>()).empty()) {
+                return ApiResult::failure(
+                    "invalid_input", "name the organization", "/display_name");
+            }
+            auto space = ctx.store->convert_personal_space(
+                control::ConvertPersonalSpace{in.at("customer_id"),
+                                              trim_copy(in.at("display_name").get<std::string>()),
+                                              ctx.acting_user_id,
+                                              ctx.acting_identity,
+                                              ctx.request_id});
+            if (!space) {
+                return from_store_error(space.error());
+            }
+            ctx.audit_customer_id = space->customer.id;
+            ctx.audit_object = "organization/" + space->organization.id;
+            return ApiResult::success(organization_space_json(*space));
+        }});
+    registry.add(Capability{
+        .name = "join_organization",
+        .title = "Join organization",
+        .description = "Accept, as the signed-in person, a pending invitation addressed to their "
+                       "email or to the handle of their personal space. The membership records "
+                       "the invitation as its evidence and its inviter as the grantor.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"invitation_id", {{"type", "string"}}}}},
+                         {"required", json::array({"invitation_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = membership_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "principal",
+        .action = "write",
+        .resolve_object = self_object,
+        .handler = [](const json& in, ApiContext& ctx) {
+            if (!ctx.store) {
+                return no_store();
+            }
+            if (ctx.acting_user_id.empty()) {
+                return ApiResult::failure(
+                    "unauthorized", "an invitation is accepted by the person it is addressed to");
+            }
+            const std::string invitation_id = in.at("invitation_id");
+            const auto invitation = ctx.store->get_invitation(invitation_id);
+            if (!invitation) {
+                return from_store_error(invitation.error());
+            }
+            const auto addressed = own_invitations(ctx, 500);
+            if (!addressed.ok) {
+                return addressed;
+            }
+            const json& items = addressed.value.at("items");
+            if (std::ranges::none_of(items, [&](const json& item) {
+                    return item.value("id", "") == invitation_id;
+                })) {
+                return ApiResult::failure(
+                    invitation->status == "pending" ? "unauthorized" : "conflict",
+                    invitation->status == "pending"
+                        ? "this invitation is addressed to someone else, or has expired"
+                        : "invitation is not pending",
+                    "/invitation_id");
+            }
+            ctx.audit_object = "organization/" + invitation->organization_id;
+            return one_result(ctx.store->accept_invitation(
+                control::AcceptInvitation{invitation_id,
+                                          "user",
+                                          ctx.acting_user_id,
+                                          ctx.acting_identity,
+                                          "invitation/" + invitation_id,
+                                          invitation->created_by_taap_id,
+                                          ctx.request_id}));
         }});
 }
 

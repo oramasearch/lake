@@ -54,7 +54,7 @@ Contextual links lead to exports, SSO, repository content, and drive views. The 
 | Organization settings | `GET /organization?id=<uuid>&tab=<tab>` | overview, teams, members, invitations, access, SSO, applications, usage (`tab=metering`), and audit; see [settings.md](settings.md) |
 | Team settings | `GET /team?id=<uuid>` | team memberships and effective access; see [settings.md](settings.md) |
 | Member settings | `GET /member?id=<uuid>` | role, attestation evidence, effective access, role change, and confirmed removal; see [settings.md](settings.md) |
-| Organizations | `GET /organizations` | every authorized organization, with links to the organization settings surface |
+| Organizations | `GET /organizations`; `POST /organizations/create`, `/organizations/convert`, `/invitations/accept` | every authorized organization with the viewer's role and settings/invite links; for a signed-in person, invitations addressed to them (Join), Create an organization, and the confirmed conversion of their personal space; see [settings.md](settings.md) |
 | Teams | `GET /teams?organization_id=<uuid>` | the organization's authorized teams with member and effective-access links |
 | Enterprise SSO | `GET /sso?organization_id=<uuid>[&provider_id=<uuid>]` | SAML/OIDC provider configuration, federation issuer claims, and one provider's SCIM provisioning log |
 | Members | `GET /members?organization_id=<uuid>[&team_id=<uuid>]` | direct memberships, their role, principal and attestation evidence |

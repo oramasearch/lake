@@ -42,3 +42,7 @@ Agent claims carry a renewable lease and up to three attempts. The Store interfa
 credential-checked renewal and acknowledgement of durable retry notices; the bus pump receives
 the workspace service for publication. `parse_agent_leases` validates per-library durations.
 See [the lease contract](../../../docs/api/agent-bus.md).
+
+`store.hpp` declares `NewOrganizationSpace`, `ConvertPersonalSpace` and their `OrganizationSpace`
+result for organizations a person runs, plus `list_user_memberships` and
+`list_invitee_invitations`. See [organizations.md](../../../docs/api/organizations.md).

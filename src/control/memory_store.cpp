@@ -4260,6 +4260,66 @@ Result<Team> InMemoryStore::get_team(const std::string& id) {
     return std::unexpected(StoreError{"not_found", "no team " + id});
 }
 
+void InMemoryStore::derive_space_grant_locked(const Membership& membership,
+                                              const std::string& role) {
+    if (!membership.team_id.empty()) {
+        return;
+    }
+    const auto customer = std::ranges::find(
+        customers_, membership.organization_id, &Customer::organization_id);
+    if (customer == customers_.end()) {
+        return;
+    }
+    const auto object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& item) {
+        return item.object_type == "customer" && item.external_id == customer->id;
+    });
+    if (object == policy_objects_.end()) {
+        return;
+    }
+    const std::string grant_role = policy_role_for_membership(role);
+    if (std::ranges::any_of(grants_, [&](const Grant& item) {
+            return item.principal_taap_id == membership.principal_taap_id &&
+                   item.object_id == object->id && item.role == grant_role;
+        })) {
+        return;
+    }
+    const std::string now = now_iso8601();
+    grants_.push_back(Grant{new_uuid_v4(),
+                            membership.principal_taap_id,
+                            object->id,
+                            grant_role,
+                            membership.attestation_digest,
+                            membership.granted_by_taap_id,
+                            now,
+                            now});
+}
+
+void InMemoryStore::drop_space_grant_locked(const Membership& membership,
+                                            const std::string& role) {
+    if (!membership.team_id.empty()) {
+        return;
+    }
+    const auto customer = std::ranges::find(
+        customers_, membership.organization_id, &Customer::organization_id);
+    if (customer == customers_.end()) {
+        return;
+    }
+    const auto object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& item) {
+        return item.object_type == "customer" && item.external_id == customer->id;
+    });
+    if (object == policy_objects_.end()) {
+        return;
+    }
+    const std::string object_id = object->id;
+    const std::string grant_role = policy_role_for_membership(role);
+    std::erase_if(grants_, [&](const Grant& item) {
+        return item.principal_taap_id == membership.principal_taap_id &&
+               item.object_id == object_id && item.role == grant_role &&
+               item.attestation_digest == membership.attestation_digest &&
+               item.granted_by_taap_id == membership.granted_by_taap_id;
+    });
+}
+
 Result<Membership> InMemoryStore::create_membership(const NewMembership& in) {
     std::lock_guard lock(mutex_);
     if ((in.principal_type != "user" && in.principal_type != "workload") ||
@@ -4334,6 +4394,7 @@ Result<Membership> InMemoryStore::create_membership(const NewMembership& in) {
                             in.granted_by_taap_id,
                             now,
                             now});
+    derive_space_grant_locked(memberships_.back(), in.role);
     return memberships_.back();
 }
 
@@ -4408,6 +4469,10 @@ Result<Membership> InMemoryStore::set_member_role(const std::string& id,
     }
     grant->role = policy_role_for_membership(role);
     grant->updated_at = membership->updated_at;
+    Membership previous = *membership;
+    previous.role = previous_role;
+    drop_space_grant_locked(previous, previous_role);
+    derive_space_grant_locked(*membership, role);
     static_cast<void>(actor);
     return *membership;
 }
@@ -4451,6 +4516,7 @@ Result<void> InMemoryStore::remove_member(const std::string& id, const std::stri
                                   item.granted_by_taap_id == membership->granted_by_taap_id;
                        }),
         grants_.end());
+    drop_space_grant_locked(*membership, membership->role);
     policy_objects_.erase(std::remove_if(policy_objects_.begin(),
                                          policy_objects_.end(),
                                          [&](const PolicyObject& item) {
@@ -4591,10 +4657,196 @@ Result<Membership> InMemoryStore::accept_invitation(const AcceptInvitation& in) 
                             in.accepted_by_taap_id,
                             now,
                             now});
+    derive_space_grant_locked(memberships_.back(), invitation->role);
     invitation->status = "accepted";
     invitation->accepted_membership_id = memberships_.back().id;
     invitation->updated_at = now;
     return memberships_.back();
+}
+
+namespace {
+
+bool invitation_addressed_to(const Invitation& invitation,
+                             const std::string& email,
+                             const std::vector<std::string>& handles) {
+    if (invitation.invitee_type == "email") {
+        return !email.empty() && invitation.invitee == lower(email);
+    }
+    return std::ranges::any_of(
+        handles, [&](const std::string& handle) { return invitation.invitee == lower(handle); });
+}
+
+} // namespace
+
+Result<OrganizationSpace> InMemoryStore::create_organization_space(const NewOrganizationSpace& in) {
+    std::lock_guard lock(mutex_);
+    if (in.owner_user_id.empty() || in.owner_taap_id.empty()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "an organization is started by a signed-in person"});
+    }
+    if (std::ranges::none_of(users_, [&](const User& row) {
+            return row.id == in.owner_user_id && row.taap_id == in.owner_taap_id;
+        })) {
+        return std::unexpected(
+            StoreError{"invalid_input", "user principal does not match its TAAP identity"});
+    }
+    std::string handle = in.name;
+    if (handle.empty()) {
+        do {
+            handle = generate_handle();
+        } while (std::ranges::any_of(customers_,
+                                     [&](const Customer& row) { return row.name == handle; }));
+    } else if (!valid_handle(handle)) {
+        return std::unexpected(StoreError{
+            "invalid_input",
+            "handle must be lowercase letters, digits and inner hyphens (customer_name_format)"});
+    } else if (std::ranges::any_of(customers_,
+                                   [&](const Customer& row) { return row.name == handle; })) {
+        return std::unexpected(StoreError{"conflict", "name already taken (customer_name_unique)"});
+    }
+    const std::string now = now_iso8601();
+    const std::string evidence = "create_organization_space/" + in.request_id;
+    OrganizationSpace space;
+    space.organization = Organization{new_uuid_v4(), "", in.display_name, now, now};
+    space.customer =
+        Customer{new_uuid_v4(), "organization", "", space.organization.id, handle, now, now};
+    const PolicyObject customer_object{new_uuid_v4(), "customer", space.customer.id, "", now, now,
+                                       true};
+    const PolicyObject organization_object{new_uuid_v4(), "organization", space.organization.id,
+                                           customer_object.id, now, now, true};
+    space.owner = Membership{new_uuid_v4(),
+                             space.organization.id,
+                             "",
+                             "user",
+                             in.owner_user_id,
+                             in.owner_taap_id,
+                             "owner",
+                             evidence,
+                             in.owner_taap_id,
+                             now,
+                             now};
+    organizations_.push_back(space.organization);
+    customers_.push_back(space.customer);
+    policy_objects_.push_back(customer_object);
+    policy_objects_.push_back(organization_object);
+    policy_objects_.push_back(PolicyObject{
+        new_uuid_v4(), "member", space.owner.id, organization_object.id, now, now, true});
+    memberships_.push_back(space.owner);
+    grants_.push_back(Grant{new_uuid_v4(), in.owner_taap_id, organization_object.id, "admin",
+                            evidence, in.owner_taap_id, now, now});
+    derive_space_grant_locked(space.owner, "owner");
+    return space;
+}
+
+Result<OrganizationSpace> InMemoryStore::convert_personal_space(const ConvertPersonalSpace& in) {
+    std::lock_guard lock(mutex_);
+    if (in.owner_user_id.empty() || in.owner_taap_id.empty()) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a personal space is converted by the person who owns it"});
+    }
+    if (std::ranges::none_of(users_, [&](const User& row) {
+            return row.id == in.owner_user_id && row.taap_id == in.owner_taap_id;
+        })) {
+        return std::unexpected(
+            StoreError{"invalid_input", "user principal does not match its TAAP identity"});
+    }
+    const auto customer = std::ranges::find(customers_, in.customer_id, &Customer::id);
+    if (customer == customers_.end()) {
+        return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+    }
+    if (customer->customer_type != "individual") {
+        return std::unexpected(
+            StoreError{"conflict", "this space already belongs to an organization"});
+    }
+    if (customer->user_id != in.owner_user_id) {
+        return std::unexpected(StoreError{
+            "unauthorized", "only the person whose personal space this is can convert it"});
+    }
+    const auto customer_object = std::ranges::find_if(policy_objects_, [&](const PolicyObject& row) {
+        return row.object_type == "customer" && row.external_id == in.customer_id;
+    });
+    if (customer_object == policy_objects_.end()) {
+        return std::unexpected(StoreError{"store_error", "the space's policy object is missing"});
+    }
+    const std::string customer_object_id = customer_object->id;
+    std::string fresh_handle;
+    do {
+        fresh_handle = generate_handle();
+    } while (std::ranges::any_of(customers_,
+                                 [&](const Customer& row) { return row.name == fresh_handle; }));
+    const std::string now = now_iso8601();
+    const std::string evidence = "convert_personal_space/" + in.request_id;
+    OrganizationSpace space;
+    space.organization = Organization{new_uuid_v4(), "", in.display_name, now, now};
+    customer->customer_type = "organization";
+    customer->user_id.clear();
+    customer->organization_id = space.organization.id;
+    customer->updated_at = now;
+    space.customer = *customer;
+    const PolicyObject organization_object{new_uuid_v4(), "organization", space.organization.id,
+                                           customer_object_id, now, now, true};
+    space.owner = Membership{new_uuid_v4(),
+                             space.organization.id,
+                             "",
+                             "user",
+                             in.owner_user_id,
+                             in.owner_taap_id,
+                             "owner",
+                             evidence,
+                             in.owner_taap_id,
+                             now,
+                             now};
+    space.personal =
+        Customer{new_uuid_v4(), "individual", in.owner_user_id, "", fresh_handle, now, now};
+    const PolicyObject personal_object{new_uuid_v4(), "customer", space.personal.id, "", now, now,
+                                       true};
+    organizations_.push_back(space.organization);
+    policy_objects_.push_back(organization_object);
+    policy_objects_.push_back(PolicyObject{
+        new_uuid_v4(), "member", space.owner.id, organization_object.id, now, now, true});
+    memberships_.push_back(space.owner);
+    grants_.push_back(Grant{new_uuid_v4(), in.owner_taap_id, organization_object.id, "admin",
+                            evidence, in.owner_taap_id, now, now});
+    derive_space_grant_locked(space.owner, "owner");
+    customers_.push_back(space.personal);
+    policy_objects_.push_back(personal_object);
+    grants_.push_back(Grant{new_uuid_v4(), in.owner_taap_id, personal_object.id, "admin", evidence,
+                            in.owner_taap_id, now, now});
+    return space;
+}
+
+Result<std::vector<Membership>> InMemoryStore::list_user_memberships(const std::string& user_id,
+                                                                     int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<Membership> out;
+    for (auto membership = memberships_.rbegin(); membership != memberships_.rend(); ++membership) {
+        if (membership->principal_type == "user" && membership->principal_id == user_id) {
+            out.push_back(*membership);
+        }
+    }
+    if (limit > 0 && out.size() > static_cast<std::size_t>(limit)) {
+        out.resize(static_cast<std::size_t>(limit));
+    }
+    return out;
+}
+
+Result<std::vector<Invitation>>
+InMemoryStore::list_invitee_invitations(const std::string& email,
+                                        const std::vector<std::string>& handles,
+                                        int limit) {
+    std::lock_guard lock(mutex_);
+    const std::string now = now_iso8601();
+    std::vector<Invitation> out;
+    for (auto invitation = invitations_.rbegin(); invitation != invitations_.rend(); ++invitation) {
+        if (invitation->status == "pending" && invitation->expires_at > now &&
+            invitation_addressed_to(*invitation, email, handles)) {
+            out.push_back(*invitation);
+        }
+    }
+    if (limit > 0 && out.size() > static_cast<std::size_t>(limit)) {
+        out.resize(static_cast<std::size_t>(limit));
+    }
+    return out;
 }
 
 Result<PolicyObject> InMemoryStore::create_policy_object(const NewPolicyObject& in) {

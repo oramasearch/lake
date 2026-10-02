@@ -297,3 +297,174 @@ TEST(Organizations, MemberRoleAndRemovalPreserveAnOwnerAndDerivedAccess) {
     EXPECT_FALSE(lake::control::authorize(store, owner->taap_id, object->id, "read", removed_cache)
                      ->allowed);
 }
+
+namespace {
+
+ApiContext person_context(InMemoryStore& store,
+                          const lake::control::User& user,
+                          const std::string& request_id) {
+    ApiContext context;
+    context.store = &store;
+    context.authorized = true;
+    context.acting_identity = user.taap_id;
+    context.acting_user_id = user.id;
+    context.request_id = request_id;
+    return context;
+}
+
+bool allowed(InMemoryStore& store,
+             const std::string& principal,
+             const std::string& customer_id,
+             const std::string& action) {
+    const auto object = store.find_policy_object("customer", customer_id);
+    if (!object) {
+        return false;
+    }
+    AuthorizationCache cache;
+    const auto decision = lake::control::authorize(store, principal, object->id, action, cache);
+    return decision && decision->allowed;
+}
+
+} // namespace
+
+TEST(Organizations, APersonCreatesAnOrganizationInvitesAndAColleagueJoinsItsSpace) {
+    InMemoryStore store;
+    const auto owner = store.create_user({"taap:1:ed25519:founder", "founder@example.com", "F"});
+    const auto colleague =
+        store.create_user({"taap:1:ed25519:colleague", "Colleague@Example.com", "C"});
+    const auto stranger = store.create_user({"taap:1:ed25519:stranger", "s@example.com", "S"});
+    ASSERT_TRUE(owner && colleague && stranger);
+    Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+
+    ApiContext founder = person_context(store, *owner, "create");
+    const ApiResult created = registry.call(
+        "create_organization_space", {{"display_name", " Acme "}, {"name", "acme"}}, founder);
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string organization_id = created.value.at("organization").at("id");
+    const std::string space_id = created.value.at("customer").at("id");
+    EXPECT_EQ(created.value.at("organization").at("display_name"), "Acme");
+    EXPECT_EQ(created.value.at("customer").at("customer_type"), "organization");
+    EXPECT_EQ(created.value.at("customer").at("name"), "acme");
+    EXPECT_EQ(created.value.at("membership").at("role"), "owner");
+    EXPECT_FALSE(created.value.contains("personal_customer"));
+    EXPECT_TRUE(allowed(store, owner->taap_id, space_id, "admin"));
+    const ApiResult taken = registry.call(
+        "create_organization_space", {{"display_name", "Again"}, {"name", "acme"}}, founder);
+    EXPECT_EQ(taken.error.code, "conflict");
+
+    founder.request_id = "invite";
+    const ApiResult invitation = registry.call("create_invitation",
+                                               {{"organization_id", organization_id},
+                                                {"invitee_type", "email"},
+                                                {"invitee", "colleague@example.com"},
+                                                {"role", "admin"},
+                                                {"expires_at", "2999-01-01T00:00:00Z"}},
+                                               founder);
+    ASSERT_TRUE(invitation.ok) << invitation.error.message;
+    const std::string invitation_id = invitation.value.at("id");
+
+    ApiContext invitee = person_context(store, *colleague, "list");
+    const ApiResult mine = registry.call("list_invitations", json::object(), invitee);
+    ASSERT_TRUE(mine.ok) << mine.error.message;
+    ASSERT_EQ(mine.value.at("items").size(), 1U);
+    EXPECT_EQ(mine.value.at("items").at(0).at("organization_name"), "Acme");
+
+    ApiContext outsider = person_context(store, *stranger, "steal");
+    EXPECT_TRUE(registry.call("list_invitations", json::object(), outsider)
+                    .value.at("items")
+                    .empty());
+    const ApiResult stolen =
+        registry.call("join_organization", {{"invitation_id", invitation_id}}, outsider);
+    EXPECT_EQ(stolen.error.code, "unauthorized");
+
+    invitee.request_id = "join";
+    const ApiResult joined =
+        registry.call("join_organization", {{"invitation_id", invitation_id}}, invitee);
+    ASSERT_TRUE(joined.ok) << joined.error.message;
+    EXPECT_EQ(joined.value.at("role"), "admin");
+    EXPECT_EQ(joined.value.at("attestation_digest"), "invitation/" + invitation_id);
+    EXPECT_EQ(joined.value.at("granted_by_taap_id"), owner->taap_id);
+    EXPECT_EQ(registry.call("join_organization", {{"invitation_id", invitation_id}}, invitee)
+                  .error.code,
+              "conflict");
+    const ApiResult memberships = registry.call("list_memberships", json::object(), invitee);
+    ASSERT_TRUE(memberships.ok) << memberships.error.message;
+    ASSERT_EQ(memberships.value.at("items").size(), 1U);
+    EXPECT_TRUE(allowed(store, colleague->taap_id, space_id, "admin"));
+
+    const std::string membership_id = joined.value.at("id");
+    ASSERT_TRUE(registry.call("set_member_role", {{"id", membership_id}, {"role", "member"}}, founder)
+                    .ok);
+    EXPECT_TRUE(allowed(store, colleague->taap_id, space_id, "read"));
+    EXPECT_FALSE(allowed(store, colleague->taap_id, space_id, "admin"));
+    ASSERT_TRUE(registry.call("remove_member", {{"id", membership_id}}, founder).ok);
+    EXPECT_FALSE(allowed(store, colleague->taap_id, space_id, "read"));
+
+    ApiContext operator_context;
+    operator_context.store = &store;
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    EXPECT_EQ(registry.call("list_memberships", json::object(), operator_context).error.code,
+              "invalid_input");
+    EXPECT_EQ(registry.call("create_organization_space", {{"display_name", "Ops"}}, operator_context)
+                  .error.code,
+              "unauthorized");
+}
+
+TEST(Organizations, APersonalSpaceBecomesAnOrganizationAndItsOwnerGetsAFreshOne) {
+    InMemoryStore store;
+    const auto person = store.create_user({"taap:1:ed25519:solo", "solo@example.com", "Solo"});
+    const auto other = store.create_user({"taap:1:ed25519:other", "other@example.com", "Other"});
+    ASSERT_TRUE(person && other);
+    const auto personal = store.create_customer({"individual", person->id, "", "solo-space"});
+    ASSERT_TRUE(personal);
+    const auto object = store.find_policy_object("customer", personal->id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store.create_grant(
+        {person->taap_id, object->id, "admin", "sign_up_password/test", person->taap_id, "r"}));
+    Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+
+    ApiContext intruder = person_context(store, *other, "intrude");
+    EXPECT_EQ(registry
+                  .call("convert_personal_space",
+                        {{"customer_id", personal->id}, {"display_name", "Taken"}},
+                        intruder)
+                  .error.code,
+              "unauthorized");
+
+    ApiContext owner = person_context(store, *person, "convert");
+    const ApiResult converted = registry.call(
+        "convert_personal_space", {{"customer_id", personal->id}, {"display_name", "Solo Labs"}},
+        owner);
+    ASSERT_TRUE(converted.ok) << converted.error.message;
+    EXPECT_EQ(converted.value.at("customer").at("id"), personal->id);
+    EXPECT_EQ(converted.value.at("customer").at("name"), "solo-space");
+    EXPECT_EQ(converted.value.at("customer").at("customer_type"), "organization");
+    EXPECT_EQ(converted.value.at("membership").at("role"), "owner");
+    const std::string fresh = converted.value.at("personal_customer").at("id");
+    EXPECT_NE(fresh, personal->id);
+    EXPECT_EQ(converted.value.at("personal_customer").at("customer_type"), "individual");
+    EXPECT_TRUE(allowed(store, person->taap_id, personal->id, "admin"));
+    EXPECT_TRUE(allowed(store, person->taap_id, fresh, "admin"));
+    const auto personal_spaces = store.list_customers(10, person->id);
+    ASSERT_TRUE(personal_spaces);
+    ASSERT_EQ(personal_spaces->size(), 1U);
+    EXPECT_EQ(personal_spaces->front().id, fresh);
+
+    owner.request_id = "again";
+    EXPECT_EQ(registry
+                  .call("convert_personal_space",
+                        {{"customer_id", personal->id}, {"display_name", "Twice"}},
+                        owner)
+                  .error.code,
+              "conflict");
+    const ApiResult by_customer_id =
+        registry.call("get_customer", {{"customer_id", personal->id}}, owner);
+    ASSERT_TRUE(by_customer_id.ok) << by_customer_id.error.message;
+    EXPECT_EQ(by_customer_id.value.at("organization_id"),
+              converted.value.at("organization").at("id"));
+    EXPECT_EQ(registry.call("get_customer", json::object(), owner).error.code, "invalid_input");
+}

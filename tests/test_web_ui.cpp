@@ -694,6 +694,53 @@ TEST(WebUi, OrganizationAndPolicyPagesEscapeTheirData) {
     expect_theme_scripts(access);
 }
 
+TEST(WebUi, OrganizationsPageCreatesJoinsAndConvertsWithoutNamingEndpoints) {
+    lake::api::OrganizationsPageData data;
+    data.person = true;
+    const std::string empty = lake::api::web_ui_organizations(data);
+    EXPECT_NE(empty.find("action=\"/organizations/create\""), std::string::npos);
+    EXPECT_NE(empty.find("You are not in an organization yet"), std::string::npos);
+    EXPECT_EQ(empty.find("action=\"/organizations/convert\""), std::string::npos);
+    EXPECT_EQ(empty.find("POST /v1/"), std::string::npos);
+    expect_theme_scripts(empty);
+
+    data.organizations.push_back(
+        {"o1", "", "Acme", "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z"});
+    data.memberships.push_back(
+        {"m1", "o1", "", "user", "u1", "taap:1:user", "owner", "e", "g", "c", "u"});
+    lake::control::Invitation invitation;
+    invitation.id = "i<1>";
+    invitation.organization_id = "o2";
+    invitation.role = "admin";
+    invitation.expires_at = "2026-10-09T00:00:00Z";
+    data.invitations.push_back({invitation, "<Other Org>"});
+    data.personal_space =
+        lake::control::Customer{"c1", "individual", "u1", "", "brave-otter-7", "c", "u"};
+    const std::string page = lake::api::web_ui_organizations(data);
+    EXPECT_NE(page.find("Invitations for You"), std::string::npos);
+    EXPECT_NE(page.find("&lt;Other Org&gt;"), std::string::npos);
+    EXPECT_NE(page.find("value=\"i&lt;1&gt;\""), std::string::npos);
+    EXPECT_NE(page.find("action=\"/invitations/accept\""), std::string::npos);
+    EXPECT_NE(page.find("/organization?id=o1&amp;tab=invitations"), std::string::npos);
+    EXPECT_NE(page.find("<span class=\"badge\">owner</span>"), std::string::npos);
+    EXPECT_NE(page.find("action=\"/organizations/convert\""), std::string::npos);
+    EXPECT_NE(page.find("Type <code>brave-otter-7</code> to confirm"), std::string::npos);
+
+    lake::api::OrganizationsPageData operator_view;
+    const std::string administration = lake::api::web_ui_organizations(operator_view);
+    EXPECT_EQ(administration.find("action=\"/organizations/create\""), std::string::npos);
+    EXPECT_NE(administration.find("No organizations yet"), std::string::npos);
+
+    for (const std::string& empty_state :
+         {lake::api::web_ui_teams("o1", {}),
+          lake::api::web_ui_memberships("o1", "", {}),
+          lake::api::web_ui_invitations("o1", "", {}),
+          lake::api::web_ui_grants({"p1", "team", "t1", "", "c", "u", true}, {}),
+          lake::api::web_ui_customers({})}) {
+        EXPECT_EQ(empty_state.find("POST /v1/"), std::string::npos) << empty_state;
+    }
+}
+
 TEST(WebUi, SettingsPagesExposeTabsMutationsAndConfirmation) {
     const lake::control::Organization organization{
         "o1", "taap:1:ed25519:org", "Orama", "created", "updated"};
@@ -716,6 +763,8 @@ TEST(WebUi, SettingsPagesExposeTabsMutationsAndConfirmation) {
     EXPECT_NE(organization_page.find("action=\"/organization/invitations\""), std::string::npos);
     expect_theme_scripts(organization_page);
 
+    const std::string teams_page = lake::api::web_ui_organization(organization, data, "teams");
+    EXPECT_NE(teams_page.find("action=\"/organization/teams\""), std::string::npos);
     const std::string sso_page = lake::api::web_ui_organization(organization, data, "sso");
     EXPECT_NE(sso_page.find("action=\"/organization/sso\""), std::string::npos);
     expect_theme_scripts(sso_page);
@@ -754,7 +803,8 @@ TEST(WebUi, SsoPageEscapesProviderAndProvisioningValues) {
     const lake::control::ProvisioningLog log{
         "l1", "p1", "user", "deactivate", "<external>", "success", {}, "created"};
     const std::string page = lake::api::web_ui_sso("o1", {provider}, {issuer}, {log});
-    EXPECT_NE(page.find("/v1/register_sso_provider"), std::string::npos);
+    EXPECT_NE(page.find("/organization?id=o1&amp;tab=sso"), std::string::npos);
+    EXPECT_EQ(page.find("POST /v1/"), std::string::npos);
     EXPECT_NE(page.find("&lt;provider&gt;"), std::string::npos);
     EXPECT_NE(page.find("&lt;external&gt;"), std::string::npos);
     expect_theme_scripts(page);
