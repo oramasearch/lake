@@ -75,8 +75,9 @@ The Clerk instance needs:
   `{"aud": "lake", "email": "{{user.primary_email_address}}", "name": "{{user.full_name}}"}`,
   lifetime 300 seconds.
 - **Email sign-in** with verification at sign-up, so the email a token carries is verified.
-- **Sign-up mode** `restricted` while lake is in development: people are added in Clerk, and the
-  sign-up page says accounts are by invitation.
+- **Sign-up mode** `restricted` while lake is in development: people are added in Clerk. The
+  sign-up page and the visitor homepage say the same sentence, `web_ui_invitation_note`, and no
+  page offers a visitor *Create account* (lake#448, `Clerk.VisitorsAreNotOfferedAnAccountTheSignUpPageRefuses`).
 
 ### The instance lake.oramadev.net uses
 
@@ -105,7 +106,8 @@ needs a real Clerk instance: sign in at `/sign-in` with an invited address and c
 ## Change it
 
 - A different instance: change `LAKE_CLERK_PUBLISHABLE_KEY` and create the `lake` template there.
-- Public sign-up: set the instance's `auth_access_control.sign_up_mode` to `public` and change the
-  sign-up page's copy in `web_ui_clerk_sign_in`.
+- Public sign-up: set the instance's `auth_access_control.sign_up_mode` to `public`, then change
+  `web_ui_invitation_note` and the Clerk branches of `web_ui_home` and `session_control`
+  (`src/api/web_ui.cpp`) to offer *Create account* again, with that test.
 - Keep the verifier strict: any change to the claims lake reads belongs in both the template and
   `serve_clerk_session`, with a test in `tests/test_clerk.cpp`.

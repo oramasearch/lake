@@ -1,8 +1,10 @@
 # lake
 
-lake hosts Liquid repositories, collaboration, file workspaces, search, package artifacts, and
-identity services through one API and server-rendered web application. Start with the account and
-repository journey, then use the same service to store, review, find, and share work.
+lake is where a customer designs, trains and ships AI on their own data. Each customer space has
+one or more workspace Zettas for data, projects, pipelines, runs and models; lake adds the
+accounts, agents, services, apps, Liquid repositories, search and identity around them, through one
+capability registry served as REST, OpenAPI and MCP, and a server-rendered web application. Start
+at the homepage's Getting started (`/docs`).
 
 ## Build and get a first result
 
@@ -36,19 +38,17 @@ confirmation. Routing resolves `workspaces.zetta_service_id`; migration 0039 and
 
 | Route | Serves |
 |---|---|
-| `GET /` | the account → repository → push journey, with navigation matched to the viewer |
+| `GET /` | *Design, train, and ship AI on your own data*: Getting started and the Design, Train and Ship cards, with actions and navigation matched to the viewer ([`docs/ui/front-door.md`](docs/ui/front-door.md)) |
 | `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by every page |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, api, store}}`, no auth |
 | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages; with `LAKE_CLERK_PUBLISHABLE_KEY` set, `/sign-in` and `/sign-up` are Clerk's forms ([`docs/api/clerk.md`](docs/api/clerk.md)) |
-| `GET /design/projects`, `/design/project`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, Train and Ship over the customer's own Zetta workspace ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
 | `GET /ship/apps`, `/ship/app`; `POST /ship/apps/*`, `/ship/app/*` | create and operate customer apps, or review and confirm an ApplicationAgent proposal, with masked secrets and live app/build events ([`docs/ui/apps.md`](docs/ui/apps.md)) |
-| `GET /ship/apps`, `/ship/app`; `POST /ship/apps/*`, `/ship/app/*` | create and operate customer apps, with masked secrets and live app/build events ([`docs/ui/apps.md`](docs/ui/apps.md)) |
 | `GET /train/streams`, `/train/stream` | paged space-scoped topic/message CRUD, shared agent views and non-consuming live browse on workspace and bus Zettas ([`docs/ui/streams.md`](docs/ui/streams.md), [`docs/api/streams.md`](docs/api/streams.md)) |
 | `GET /train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare`; `POST /train/experiments/agent`, `/train/experiments/agent/confirm` | space-scoped studies, live run metrics, comparison, confirmed promotion, and an editable ExperimentsAgent proposal before a study starts ([`docs/ui/experiments.md`](docs/ui/experiments.md), [`docs/api/experiments.md`](docs/api/experiments.md)) |
-| `GET /design/projects`, `/design/project`, `/design/solutions`, `/design/solution`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, solution projects, Train and Ship over the customer's own Zetta workspace ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
+| `GET /design/projects`, `/design/project`, `/design/solutions`, `/design/solution`, `/train/data`, `/train/runs`, `/train/run`, `/ship/models`, `/ship/indexes`; `POST /workspace/start` and the forms under them | Design, solution projects, Train and Ship over the selected workspace Zetta ([`docs/api/workspaces.md`](docs/api/workspaces.md)) |
 | `POST /identity/clerk-session` | exchanges a verified Clerk `lake` template token for a `lake_session`; absent without Clerk |
 | `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
 | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
@@ -143,10 +143,13 @@ For the full PostgreSQL-backed suite, local database setup, and every run option
 
 ## Deployment status
 
-The dated [`Lake/prod` deployment record](docs/deployment/production-2026-09-08.md) names the
-active artifact, its recorded source revision, applied schema, verified public requests, and a
-read-only smoke check. [`docs/design/status.md`](docs/design/status.md) distinguishes what is
-implemented, exercised locally, deployed, and exercised in deployment.
+Status: 2026-10-01. `Lake/prod` on the dev AKS cluster (there is no production environment yet)
+runs `oramasearch/lake:20261001d`, source `36679e1`; the dated
+[deployment record](docs/deployment/dev-2026-10-01.md) names the artifact, revision, schema and
+what was exercised there. [`docs/design/status.md`](docs/design/status.md) distinguishes what is
+implemented, exercised locally, deployed, and exercised in deployment, and
+`DocsStatus.MatchesTheObservedOpenApi` fails when it calls a capability undeployed that the
+observed OpenAPI lists.
 
 ## Documentation
 

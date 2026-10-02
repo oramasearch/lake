@@ -471,9 +471,9 @@ void register_workspace_call(Registry& registry, bool read) {
         .name = read ? "workspace_query" : "workspace_act",
         .title = read ? "Query a workspace" : "Act in a workspace",
         .description =
-            read ? "Call one of the allowed read capabilities on the customer's Zetta workspace."
-                 : "Call one of the allowed actions on the customer's Zetta workspace. A Python "
-                   "agent's create_agent or update_agent definition is {source: zetta, "
+            read ? "Call one of the allowed read capabilities on the workspace Zetta named by `workspace_id`."
+                 : "Call one of the allowed actions on the workspace Zetta named by `workspace_id`. "
+                   "A Python agent's create_agent or update_agent definition is {source: zetta, "
                    "instructions, entrypoint, files: [{path, contents}]} or {source: lake, "
                    "repository_id, revision, entrypoint}; lake refuses any other field.",
         .input_schema = customer_input_schema(
@@ -4513,8 +4513,8 @@ void register_workspace_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "workspace_status",
         .title = "Workspace status",
-        .description = "Whether the customer's Zetta workspace was requested, its operator phase, "
-                       "and whether lake can call it.",
+        .description = "Whether the workspace named by `workspace_id` was requested, its "
+                       "operator phase, and whether lake can call it.",
         .input_schema = customer_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -4538,8 +4538,11 @@ void register_workspace_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_workspace",
         .title = "Start a workspace",
-        .description = "Ask the operator for the customer's Zetta workspace. Repeating it is "
-                       "harmless.",
+        .description = "Make sure the space has its first workspace (named `workspace`), asking "
+                       "the operator for it if absent, and answer its state with its "
+                       "`workspace_id`. Repeating it is harmless. A space can hold many "
+                       "workspaces: `create_workspace` adds another and `list_workspaces` lists "
+                       "them. Every workspace-scoped call names one with `workspace_id`.",
         .input_schema = control_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,

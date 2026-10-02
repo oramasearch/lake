@@ -39,7 +39,9 @@ contract is in [`../api/workspaces.md`](../api/workspaces.md).
 self-hosted font URLs, an accessible shared shell, and a persisted light/dark theme control,
 unit-tested as strings. Navigation uses the resolved viewer: visitors can browse public
 repositories, account holders see workspace and account links, and operators see Administration.
-The landing copy, navigation matrix, and browser proof are in [front-door.md](front-door.md).
+The landing copy, navigation matrix, and browser proof are in [front-door.md](front-door.md);
+its bold landing quotes are checked against the rendered homepage by
+`WebUi.FrontDoorDocQuotesTheRenderedHomePage`.
 Contextual links lead to exports, SSO, repository content, and drive views. The unhashed stylesheet and font routes remain compatibility aliases with
 `Cache-Control: no-cache`.
 

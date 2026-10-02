@@ -39,7 +39,8 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
   test_platform.cpp
   test_identity_exit.cpp
   test_postgres_identity.cpp
-  test_token_attenuation.cpp)
+  test_token_attenuation.cpp
+  test_docs_status.cpp)
 target_link_libraries(lake-tests PRIVATE lake-api lake-control-postgres pqxx OpenSSL::Crypto
   Boost::beast2 Boost::http Boost::corosio GTest::gtest)
 # src/ for the Beast2 adapter's private headers (api/route_guard.hpp).

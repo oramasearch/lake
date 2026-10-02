@@ -352,8 +352,8 @@ const std::vector<Flow>& flows() {
 std::string llms_txt(const Registry& registry, std::string_view origin) {
     std::string out = std::format(
         "# lake\n\n"
-        "> lake is Orama's hosted platform: private liquid repositories, and a Zetta workspace per "
-        "customer where you Design (projects and pipelines), Train (data, runs) and Ship "
+        "> lake is Orama's hosted platform: private liquid repositories, and Zetta workspaces in "
+        "each customer space (a call names one with `workspace_id`) where you Design (projects and pipelines), Train (data, runs) and Ship "
         "(models, search indexes, services). Everything a person can do on the site is a "
         "capability in one registry, served as REST, OpenAPI and MCP.\n\n"
         "## Connect\n\n{0}\n"

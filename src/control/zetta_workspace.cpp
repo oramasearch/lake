@@ -137,8 +137,8 @@ liquid::runtime::task<ZettaControlResult<nlohmann::json>> ZettaWorkspaceCaller::
     request.url = url + "/v1/" + capability;
     request.headers = {{"Accept", "application/json"}, {"Authorization", "Bearer " + token}};
     request.secret_headers = {"Authorization"};
-    // A read that hangs must not hold a page for a minute (zetta#1007: get_run_report never
-    // answers); actions such as compile_intent may legitimately take longer.
+    // A read that hangs must not hold a page for a minute (as get_run_report did before
+    // zetta#1007 was fixed); actions such as compile_intent may legitimately take longer.
     request.timeout_seconds = read ? 15 : 60;
     if (capability == "receive_events" || capability == "browse_topic") {
         input["wait_ms"] = std::clamp(input.value("wait_ms", 0LL), 0LL, 30'000LL);

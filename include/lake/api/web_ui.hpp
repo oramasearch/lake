@@ -57,6 +57,11 @@ std::string web_ui_loading(std::string_view subject, WebUiViewer viewer = false)
 std::string web_ui_hashed_asset_url(std::string_view path, std::string_view contents);
 std::string_view web_ui_stylesheet();
 std::string_view web_ui_stylesheet_url();
+// The one sentence that says how accounts are created under Clerk, where sign-up is restricted
+// (docs/api/clerk.md). The visitor home page and the sign-up page both use it, so they cannot
+// disagree (lake#448).
+inline constexpr std::string_view web_ui_invitation_note =
+    "Accounts are added by invitation while lake is in development.";
 std::span<const std::string_view> web_ui_font_names();
 std::string_view web_ui_font_url(std::string_view name);
 std::string_view web_ui_asset_cache_control(std::string_view path);

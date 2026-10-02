@@ -8,12 +8,16 @@ document rules, confidentiality, and the decisions not to drift past. Read both.
 
 ## Status
 
-`Lake/prod` serves the Lake API from `oramasearch/lake:20260908b` on AKS. The dated
-[`docs/deployment/production-2026-09-08.md`](docs/deployment/production-2026-09-08.md) record is
-the authoritative statement of its artifact, source revision, schema, observed public routes, and
-smoke check. [`docs/design/status.md`](docs/design/status.md) distinguishes implemented,
+Status: 2026-10-01. `Lake/prod` on the dev AKS cluster (there is no production environment yet)
+serves `oramasearch/lake:20261001d`, source `36679e1`. The dated
+[`docs/deployment/dev-2026-10-01.md`](docs/deployment/dev-2026-10-01.md) record is the
+authoritative statement of its artifact, source revision, schema, observed routes, and what was
+exercised there. [`docs/design/status.md`](docs/design/status.md) distinguishes implemented,
 exercised locally, deployed, and exercised-in-deployment behavior; do not infer an end-to-end
-deployment exercise from a route's presence in OpenAPI.
+deployment exercise from a route's presence in OpenAPI. `tools/docs/check-status.py` (run by
+`DocsStatus.MatchesTheObservedOpenApi`) fails when that page calls a capability undeployed that
+the newest snapshot in `docs/deployment/observed/` lists; after a deployment, record a new
+snapshot and update the page.
 
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
 live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
