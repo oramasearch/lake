@@ -1325,6 +1325,23 @@ TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
     EXPECT_NE(refused.find("Why it cannot be applied"), std::string::npos);
     EXPECT_EQ(refused.find("action=\"/design/pipeline/apply\""), std::string::npos)
         << "a proposal that would not apply cannot be applied";
+    // lake#438: what a workspace call answered reaches the page as one plain sentence and a
+    // next step, never as a status code and JSON body.
+    page.data["proposal"]["problems"] = json::array(
+        {"compile_intent did not succeed: compile_intent FAILED: 403 {\"duration_ms\":0.0,"
+         "\"error\":{\"code\":\"unauthorized\",\"message\":\"credential does not grant "
+         "workspace_act\",\"path\":\"\"},\"ok\":false}",
+         "plan_features FAILED: 500 {\"ok\":false}"});
+    const std::string raw = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(raw.find("The Project Agent&#39;s compile_intent check did not succeed on your "
+                       "workspace."),
+              std::string::npos)
+        << raw.substr(raw.find("Why it cannot"), 600);
+    EXPECT_NE(raw.find("plan_features check did not succeed"), std::string::npos);
+    EXPECT_NE(raw.find("Ask the Project Agent again below, or change the steps by hand."),
+              std::string::npos);
+    EXPECT_EQ(raw.find("duration_ms"), std::string::npos);
+    EXPECT_EQ(raw.find("403"), std::string::npos);
     page.data.erase("proposal");
     page.data.erase("run_dataset");
 
@@ -1338,6 +1355,16 @@ TEST(Workspaces, PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns) {
     EXPECT_NE(question.find("name=\"task_id\" value=\"task-question\""), std::string::npos);
     EXPECT_NE(question.find("name=\"reply\""), std::string::npos);
     page.data.erase("project_agent_error");
+
+    // lake#438: the working panel reloads the page itself. Its URL ends in #proposal, and a
+    // declarative refresh to it is a fragment navigation that never reloaded.
+    page.data["project_agent_working"] = true;
+    const std::string working = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(working.find("The Project Agent is working on it"), std::string::npos);
+    EXPECT_NE(working.find("setTimeout(()=>location.reload(),3000)"), std::string::npos);
+    EXPECT_NE(working.find("<noscript><meta http-equiv=\"refresh\" content=\"3\"></noscript>"),
+              std::string::npos);
+    page.data.erase("project_agent_working");
     page.data.erase("project_agent_reply");
     page.data.erase("project_agent_task_id");
 
@@ -3601,6 +3628,183 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
                       {"message", "wrong kind"}})
                   .error.code,
               "invalid_input");
+}
+
+// lake#438: a Project Agent change proposal runs its compile check, is applied by the person,
+// approved and run. The turn's credential reaches compile_intent and no other workspace action.
+TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-project", "http://project:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const json pipeline{
+        {"graph_id", "g-1"},
+        {"name", "churn"},
+        {"project", "retention"},
+        {"approval", "approved"},
+        {"nodes",
+         json::array({{{"id", "pull"}, {"kind", "connect"}, {"name", "Pull"}},
+                      {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}})},
+        {"edges", json::array({{{"from", "pull"}, {"to", "train"}, {"kind", "data_flow"}}})}};
+    r.w.caller->answers["get_graph"] = pipeline;
+
+    // Ask: a change request carries the pipeline and grants exactly the compile check.
+    const json context{{"project", "retention"}, {"graph", "churn"}};
+    const auto asked = r.call("agent_turn",
+                              {{"agent", "agent-project"},
+                               {"kind", "pipeline"},
+                               {"message", "Use tenure_months and failed_payments as features"},
+                               {"context", context}});
+    ASSERT_TRUE(asked.ok) << asked.error.message;
+    const auto task = r.store.get_agent_task(asked.value["task_id"]);
+    ASSERT_TRUE(task);
+    EXPECT_EQ(task->body["context"]["pipeline"]["name"], "churn");
+    EXPECT_NE(std::ranges::find(task->scopes, "workspace_act"), task->scopes.end());
+    EXPECT_NE(std::ranges::find(task->scopes, "compile_intent"), task->scopes.end());
+    for (const char* action : {"save_graph", "approve_plan", "run", "deploy", "edit_pipeline",
+                               "run_pipeline", "create_project"}) {
+        EXPECT_EQ(std::ranges::find(task->scopes, action), task->scopes.end()) << action;
+    }
+
+    // A Project Agent turn that is not a change request gets no workspace action at all.
+    const auto design = r.call("agent_turn",
+                               {{"agent", "agent-project"}, {"message", "Design a churn model"}});
+    ASSERT_TRUE(design.ok) << design.error.message;
+    const auto design_task = r.store.get_agent_task(design.value["task_id"]);
+    ASSERT_TRUE(design_task);
+    EXPECT_EQ(std::ranges::find(design_task->scopes, "workspace_act"), design_task->scopes.end());
+
+    const std::string credential = "lat." + task->id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        task->id, "agent-project", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto agent = r.store.context_for(credential);
+    ASSERT_TRUE(agent);
+
+    // The compile check: confined to the turn's project and lake's check graph, with only the
+    // arguments compile_intent takes.
+    const json compiled{{"name", "Project Agent check M-1"},
+                        {"project", "retention"},
+                        {"nodes", pipeline.at("nodes")},
+                        {"edges", pipeline.at("edges")}};
+    r.w.caller->answers["compile_intent"] = compiled;
+    const auto checked = r.call_as(
+        *agent,
+        "workspace_act",
+        {{"capability", "compile_intent"},
+         {"input",
+          {{"project", "someone-elses"},
+           {"intent", "Use tenure_months and failed_payments as features"},
+           {"methodology", "M-1"}}}});
+    ASSERT_TRUE(checked.ok) << checked.error.message;
+    EXPECT_EQ(checked.value["name"], "Project Agent check M-1");
+    EXPECT_EQ(r.w.caller->capability, "compile_intent");
+    EXPECT_EQ(r.w.caller->input,
+              (json{{"project", "retention"},
+                    {"methodology", "M-1"},
+                    {"name", "Project Agent check M-1"}}))
+        << "never the pipeline being changed, and no argument Zetta would refuse";
+
+    // A repeat check finds the check graph already stored and reads it back.
+    r.w.caller->before_reply = [&] {
+        r.w.caller->failure =
+            r.w.caller->capability == "compile_intent"
+                ? std::optional<lake::control::ZettaControlError>(
+                      lake::control::ZettaControlError{"engine_error", "the graph name collides"})
+                : std::nullopt;
+    };
+    r.w.caller->answers["get_graph"] = compiled;
+    const auto again = r.call_as(
+        *agent,
+        "workspace_act",
+        {{"capability", "compile_intent"},
+         {"input", {{"project", "retention"}, {"methodology", "M-1"}}}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["name"], "Project Agent check M-1");
+    EXPECT_EQ(r.w.caller->capability, "get_graph");
+    EXPECT_EQ(r.w.caller->input["graph"], "Project Agent check M-1");
+    r.w.caller->before_reply = nullptr;
+    r.w.caller->failure.reset();
+    r.w.caller->answers["get_graph"] = pipeline;
+
+    // Every other action stays the person's.
+    for (const char* action : {"save_graph", "approve_plan", "run", "deploy", "capture_intent"}) {
+        const auto refused = r.call_as(
+            *agent,
+            "workspace_act",
+            {{"capability", action}, {"input", {{"project", "retention"}, {"graph", "churn"}}}});
+        EXPECT_EQ(refused.error.code, "unauthorized") << action;
+        EXPECT_EQ(refused.error.message,
+                  std::string("this Project Agent turn does not grant ") + action);
+    }
+    EXPECT_EQ(r.call_as(*agent,
+                        "edit_pipeline",
+                        {{"project", "retention"}, {"graph", "churn"}, {"op", "rename"},
+                         {"name", "x"}})
+                  .error.code,
+              "unauthorized");
+
+    // Propose: the agent's checked proposal, reviewed on the pipeline page.
+    const json edits = json::array(
+        {{{"op", "set_attribute"}, {"step", "pull"}, {"name", "source"}, {"value", "datasets"}},
+         {{"op", "set_attribute"}, {"step", "pull"}, {"name", "table"}, {"value", "accounts"}},
+         {{"op", "set_attribute"},
+          {"step", "train"},
+          {"name", "features"},
+          {"value", json::array({"tenure_months", "failed_payments"})}}});
+    const json proposal{{"project", "retention"},
+                        {"graph", "churn"},
+                        {"methodology", "M-1"},
+                        {"summary", "Train on the four named features"},
+                        {"edits", edits},
+                        {"run", {{"dataset", "datasets.accounts"}, {"holdout", 0.2}}},
+                        {"problems", json::array()}};
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        task->id,
+        "Succeeded",
+        "",
+        "",
+        {{"ok", true},
+         {"result", {{"kind", "proposal"}, {"proposal", proposal}, {"reply", "Proposed"}}}}));
+    const auto review = r.call("get_agent_task", {{"task_id", task->id}});
+    ASSERT_TRUE(review.ok) << review.error.message;
+    EXPECT_EQ(review.value["status"], "succeeded");
+    EXPECT_EQ(review.value["review_url"],
+              "/design/pipeline?customer_id=" + r.w.customer_id +
+                  "&project=retention&graph=churn&task=" + task->id);
+
+    // Apply: the person saves the edits as one graph.
+    r.w.caller->answers["save_graph"] = {{"graph_id", "g-1"}, {"approval", "proposed"}};
+    const auto applied = r.call(
+        "edit_pipeline", {{"project", "retention"}, {"graph", "churn"}, {"edits", edits}});
+    ASSERT_TRUE(applied.ok) << applied.error.message;
+    EXPECT_EQ(r.w.caller->capability, "save_graph");
+    EXPECT_EQ(r.w.caller->input["graph"], "g-1");
+    const json saved = r.w.caller->input["nodes"];
+    ASSERT_TRUE(saved.is_array());
+    EXPECT_EQ(saved[0]["attributes"]["table"], "accounts");
+    EXPECT_EQ(saved[1]["attributes"]["features"],
+              json::array({"tenure_months", "failed_payments"}));
+
+    // Approve, then run on the proposal's settings.
+    r.w.caller->answers["approve_plan"] = {{"graph", "churn"}, {"approval", "approved"}};
+    const auto approved = r.call(
+        "workspace_act",
+        {{"capability", "approve_plan"}, {"input", {{"project", "retention"}, {"graph", "churn"}}}});
+    ASSERT_TRUE(approved.ok) << approved.error.message;
+    EXPECT_EQ(r.w.caller->capability, "approve_plan");
+
+    r.w.caller->answers["gate"] = {{"verdict", "pass"}, {"block_deploy", false}};
+    r.w.caller->answers["run"] = {{"run_id", "run-1"}, {"status", "running"}};
+    const auto ran = r.call("run_pipeline",
+                            {{"project", "retention"},
+                             {"graph", "churn"},
+                             {"dataset_path", "datasets.accounts"},
+                             {"holdout_fraction", 0.2}});
+    ASSERT_TRUE(ran.ok) << ran.error.message;
+    EXPECT_EQ(ran.value["run"]["run_id"], "run-1");
+    EXPECT_EQ(r.w.caller->capability, "run");
+    EXPECT_EQ(r.w.caller->input["dataset_path"], "datasets.accounts");
+    EXPECT_EQ(r.w.caller->input["holdout_fraction"], 0.2);
 }
 
 TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {

@@ -192,6 +192,12 @@ compares the `agent_turn` OpenAPI/MCP schemas, continues one conversation across
 then replies to a page question, edits and confirms the proposal.
 `AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations` verifies the
 three kinds, independent topic/credential, workspace URL and confirmation-limited study actions.
+`AgentRuns.AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun` covers lake#438: a pipeline
+change turn's credential runs `compile_intent` confined to lake's check graph on its own project
+(and reads it back on a repeat), is refused every other workspace action, and the person then
+applies the proposal with `edit_pipeline`, approves it and runs it with the proposal's settings.
+`Workspaces.PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns` also pins that raw agent
+failures render as plain sentences with a next step and that the working panel reloads itself.
 `HttpServer/HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho/*`
 claims and completes `app`, `solution:` and `experiment` tasks through the HTTP bus without a
 workspace field, publishes progress before the result, and exercises task-credential workspace

@@ -41,6 +41,8 @@ R"lake_styles(
 html {
   background: var(--lake-canvas);
   scroll-behavior: smooth;
+  /* A #fragment target lands below the sticky top bar, not under it (lake#438). */
+  scroll-padding-top: calc(var(--lake-topbar-height) + var(--lake-space-4));
 }
 body {
   min-width: 20rem;

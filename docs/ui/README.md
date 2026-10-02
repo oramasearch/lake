@@ -117,6 +117,8 @@ Repository-page details and the liquid #166 deferrals are recorded in
 The reproducible seeded screenshot workflow and complete before/after page inventory are recorded
 in [`design-system.md`](design-system.md). The fixture uses the production HTTP and renderer paths;
 it does not add a fixture route to the server.
+Its shell section also records the root scroll padding that keeps a `#fragment` target below the
+sticky top bar (lake#438).
 
 Secret mutations and cryptographic operations are also capability-only. The secrets page renders
 metadata and lifecycle timestamps, while the encryption page renders key metadata. Neither page

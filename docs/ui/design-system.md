@@ -69,7 +69,9 @@ Every renderer uses the same application recipe:
 2. A sticky sidebar shows the viewer's usable workspace, account, administration, and developer
    destinations, and marks the current page with `aria-current="page"`.
    [Front-door navigation](front-door.md) records the visitor, account, and operator matrix.
-3. A sticky top bar carries page context, session controls, and the theme control.
+3. A sticky top bar carries page context, session controls, and the theme control. The root's
+   `scroll-padding-top` (top-bar height plus `--lake-space-4`) lands a `#fragment` target, such as
+   a pipeline's `#proposal` notice, below the bar instead of under it (lake#438).
 4. A bounded content area presents the eyebrow, one `h1`, supporting copy, actions, panels, and
    dense data regions.
 
