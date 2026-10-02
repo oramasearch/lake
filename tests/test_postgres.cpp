@@ -1331,6 +1331,18 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     listener.listen("lake_services",
                     [&](pqxx::notification note) { notified.emplace_back(note.payload); });
 
+    const auto workspace = store->create_workspace({customer->id, "agents", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    // lake#442: a launch names its workspace; the routing trigger refuses one that does not.
+    EXPECT_FALSE(store->create_agent_launch({customer->id,
+                                             "a-1",
+                                             "Watcher",
+                                             "job",
+                                             "manual",
+                                             nullptr,
+                                             lake::control::agent_launch_scopes,
+                                             user->id,
+                                             user->taap_id}));
     const auto launch = store->create_agent_launch({customer->id,
                                                     "a-1",
                                                     "Watcher",
@@ -1339,8 +1351,14 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
                                                     json{{"week", 39}},
                                                     lake::control::agent_launch_scopes,
                                                     user->id,
-                                                    user->taap_id});
+                                                    user->taap_id,
+                                                    workspace->id});
     ASSERT_TRUE(launch) << launch.error().message;
+    EXPECT_EQ(launch->workspace_id, workspace->id);
+    EXPECT_TRUE(store->list_agent_launches(customer->id, "", 10, lake::control::new_uuid_v4())
+                    ->empty())
+        << "another workspace lists none of this one's runs";
+    EXPECT_EQ(store->list_agent_launches(customer->id, "", 10, workspace->id)->size(), 1U);
     EXPECT_EQ(launch->slug, lake::control::managed_service_slug("al", launch->id));
     EXPECT_EQ(launch->input["week"], 39);
     EXPECT_EQ(launch->scopes, lake::control::agent_launch_scopes);
@@ -1373,6 +1391,37 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     ASSERT_TRUE(store->withdraw_agent_launch(launch->id));
     EXPECT_FALSE(store->context_for(credential)) << "a stopped launch's credential stops too";
 
+    // lake#442: a launch the operator never reports on is withdrawn with a reason, once; one it
+    // reported on is left alone.
+    const auto stuck = store->create_agent_launch({customer->id,
+                                                   "a-1",
+                                                   "Watcher",
+                                                   "job",
+                                                   "manual",
+                                                   nullptr,
+                                                   lake::control::agent_launch_scopes,
+                                                   user->id,
+                                                   user->taap_id,
+                                                   workspace->id});
+    ASSERT_TRUE(stuck) << stuck.error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE agent_launches SET created_at = now() - interval '10 minutes' "
+                       "WHERE id = $1::uuid",
+                       stuck->id);
+        tx.commit();
+    }
+    const auto expired = store->expire_unstarted_agent_launches(300, "Timed out: test.");
+    ASSERT_TRUE(expired) << expired.error().message;
+    EXPECT_GE(*expired, 1U);
+    const auto withdrawn = store->get_agent_launch(stuck->id);
+    EXPECT_EQ(withdrawn->desired, "absent");
+    EXPECT_EQ(withdrawn->generation, 2);
+    EXPECT_EQ(withdrawn->stop_reason, "Timed out: test.");
+    EXPECT_EQ(store->get_agent_launch(launch->id)->stop_reason, "") << "it had a status row";
+    EXPECT_EQ(store->get_agent_launch(stuck->id)->generation, 2);
+
     // Cron schedules: several per agent, each with its own slug and credential (migration 0031).
     const auto weekly =
         store->create_agent_cron_schedule({.customer_id = customer->id,
@@ -1383,7 +1432,8 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
                                            .input = json{{"week", 39}},
                                            .scopes = lake::control::agent_launch_scopes,
                                            .created_by_user_id = user->id,
-                                           .created_by_taap_id = user->taap_id});
+                                           .created_by_taap_id = user->taap_id,
+                                           .workspace_id = workspace->id});
     ASSERT_TRUE(weekly) << weekly.error().message;
     const auto nightly =
         store->create_agent_cron_schedule({.customer_id = customer->id,
@@ -1393,7 +1443,8 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
                                            .time_zone = "America/Toronto",
                                            .scopes = lake::control::agent_launch_scopes,
                                            .created_by_user_id = user->id,
-                                           .created_by_taap_id = user->taap_id});
+                                           .created_by_taap_id = user->taap_id,
+                                           .workspace_id = workspace->id});
     ASSERT_TRUE(nightly) << nightly.error().message;
     EXPECT_EQ(weekly->slug, lake::control::managed_service_slug("as", weekly->id));
     EXPECT_EQ(weekly->time_zone, "Etc/UTC");
@@ -1433,6 +1484,10 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     EXPECT_FALSE(got->last_schedule_at.empty());
     const auto runs = store->list_agent_cron_runs(customer->id, "a-1", 10);
     ASSERT_TRUE(runs && runs->size() == 1U);
+    EXPECT_EQ(runs->front().workspace_id, workspace->id);
+    EXPECT_TRUE(store->list_agent_cron_runs(customer->id, "a-1", 10, lake::control::new_uuid_v4())
+                    ->empty());
+    EXPECT_EQ(store->list_agent_cron_schedules(customer->id, "a-1", workspace->id)->size(), 2U);
     EXPECT_EQ(runs->front().id, run_id);
     EXPECT_EQ(runs->front().trigger, "schedule");
     EXPECT_EQ(runs->front().exit_code, 0);

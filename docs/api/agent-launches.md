@@ -1,6 +1,6 @@
 # Running and talking to agents
 
-**Status: implemented 2026-09-27 (lake#231, epic lake#228); cron schedules as CronJobs 2026-09-27.** How lake runs user-created Python
+**Status: implemented 2026-09-27 (lake#231, epic lake#228); cron schedules as CronJobs 2026-09-27; workspace-scoped launches, start timeout and definition checks 2026-10-02 (lake#442).** How lake runs user-created Python
 agents on `agent-runtime`, fires their schedules, and delivers one conversation turn to any agent,
 from the Agent Library's specialized agents to the ones people build.
 
@@ -14,6 +14,24 @@ Orama operator (orama-operator#185) runs it and writes `agent_launch_status`:
 |---|---|---|
 | `job` | a Kubernetes Job (`backoffLimit: 0`), `AGENT_MODE=job`, the launch's `input` as `AGENT_INPUT` | the pod exits; `exit_code` and the runtime's summary land in `result` |
 | `service` | a Deployment and Service, `AGENT_MODE=service`; `endpoint` is where lake sends turns | `stop_agent_launch` |
+
+**A launch belongs to one workspace (lake#442, migration `0043_agent_launch_workspaces`).**
+`launch_agent` records the `workspace_id` it was called with, the workspace whose Zetta holds the
+agent. The operator joins `workspaces` on it to place the Job or Deployment in that workspace's
+namespace. Before 0043 the column did not exist, so the operator's query failed (`column
+l.workspace_id does not exist`) and every launch stayed at phase `""`. `list_agent_launches`,
+`stop_agent_launch`, `list_agent_schedules` and `unschedule_agent` see only the workspace's own
+runs and schedules, so a run never names an agent that this workspace's `list_agents` cannot
+show.
+
+**A waiting launch says why, and stops with a reason (lake#442).** Until the operator reports,
+`phase` is `Pending` and `message` says lake is waiting for the Orama operator. After a minute it
+says how long the launch has waited. A launch the operator has not reported on within five
+minutes reads `Failed` with the message *Timed out: the Orama operator did not start this run
+within five minutes.* Lake's minute loop then withdraws it (`desired = absent`, `stop_reason`
+set), so it cannot start late. `operator_phase` is the phase the operator wrote, empty until it
+reports. Migration 0043 withdraws, in the same way, launches the operator never saw and that are
+older than five minutes.
 
 **The pod's credential never touches the database.** The operator generates a random credential
 per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or Deployment, and
@@ -48,7 +66,9 @@ already written stay.
 `@yearly`) or `trigger` in Studio's plain words, which lake turns into cron: `every N minutes`
 (5–59, or whole hours), `every N hours|days`, `hourly`, `daily`, `weekly`, `every day|weekday|<weekday>
 at HH:MM`. lake checks each field's range and refuses a schedule that could fire more often than
-once every five minutes. Creating a Python agent with a trigger in Train → Agents (or through the
+once every five minutes. The refusal states the rule: `every 1 minutes` answers that a schedule runs
+at most once every five minutes, so the shortest is `every 5 minutes` (lake#442). A schedule
+belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Train → Agents (or through the
 Agent Factory) adds its first schedule; deleting the agent removes all of them.
 
 The per-agent `agent_schedules` table of 0030 and lake's in-process scheduler are retired: the
@@ -108,8 +128,8 @@ service.
 
 | Capability | Kind | Authorization | What it does |
 |---|---|---|---|
-| `launch_agent` | action | `write` on the customer | `{agent_id, mode: job\|service, input?}`; Python agents only |
-| `list_agent_launches` | read | `read` | `{agent_id?, limit?}`, newest first, with phase, message, exit code and result; the schedules' runs are included (trigger `schedule`) |
+| `launch_agent` | action | `write` on the customer | `{workspace_id, agent_id, mode: job\|service, input?}`; Python agents only |
+| `list_agent_launches` | read | `read` | `{workspace_id, agent_id?, limit?}`, the workspace's runs newest first, with phase, message, `operator_phase`, `stop_reason`, exit code and result; the schedules' runs are included (trigger `schedule`) |
 | `stop_agent_launch` | action | `write` | `{launch_id}`; the operator removes the Job or Deployment |
 | `schedule_agent` | action | `write` | `{agent_id, cron \| trigger, time_zone?, input?}`; adds one schedule; Python agents only |
 | `list_agent_schedules` | read | `read` | `{agent_id?}`, oldest first, with the operator's phase and last firing |
@@ -145,8 +165,20 @@ ctest --test-dir build -R 'AgentRuns|PostgresAgentLaunches'
 `…AScheduleCredentialActsAsWhoeverSetTheSchedule`,
 `…ALaunchCredentialActsAsTheLauncherWithTheLaunchScopes`,
 `…LaunchStopAndScheduleAPythonAgentButNeverANativeOne`,
-`…AgentTurnReachesLibraryNativeAndPythonAgents`, and
-`PostgresAgentLaunches.LaunchesCredentialsSchedulesAndConversationsFollowTheContract`.
+`…AgentTurnReachesLibraryNativeAndPythonAgents`, `…LaunchesAndSchedulesBelongToTheirWorkspace`,
+`…AWaitingLaunchSaysWhyAndTimesOutWithAReason`, `…CreateAgentRefusesDefinitionFieldsZettaWouldDrop`,
+and `PostgresAgentLaunches.LaunchesCredentialsSchedulesAndConversationsFollowTheContract`.
+
+## Creating a Python agent
+
+A Python agent is created with `workspace_act` `create_agent`. Its `definition` is
+`{source: "zetta", instructions, entrypoint, files: [{path, contents}]}`, with each file's text in
+`contents`, or `{source: "lake", repository_id, revision, entrypoint}`. Zetta keeps the definition
+as a loose object and ignores keys it does not read, so `{path, content}` used to become an empty
+file. Lake now refuses any other field in the definition or in a file, and a `files` that is not a
+list, with `invalid_input` and the field's path (for example `/input/definition/files/0/content`)
+(lake#442). `update_agent` is checked the same way. A refusal from Zetta itself
+(`invalid_argument`) is reported as lake's `invalid_input`.
 
 ## Known limits
 

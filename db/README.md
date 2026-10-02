@@ -38,3 +38,12 @@ notices to `agent_task_status`, with partial indexes for expiry and notice deliv
 Running rows receive a lease once. The latest guard is `agent_task_leases_guard`; the operator
 must vendor this schema and update its guard before rollout. The contract, idempotency checks
 and deferred operator configuration are in [agent-bus.md](../docs/api/agent-bus.md).
+
+Migration `0043_agent_launch_workspaces` adds `workspace_id` to `agent_launches` and
+`agent_cron_schedules` (the column the operator's launch and schedule queries already join on)
+and `stop_reason` to `agent_launches`. Existing rows are assigned to the space's only live
+workspace and recorded in `workspace_assignments`. Launches the operator never reported and that
+are older than five minutes are withdrawn with a reason. New rows go through
+`enforce_workspace_routing`. The latest guard is `agent_launch_workspaces_guard`; the operator
+must vendor this schema and update its guard before rollout. See
+[agent-launches.md](../docs/api/agent-launches.md).

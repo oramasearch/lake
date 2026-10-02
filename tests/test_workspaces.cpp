@@ -2907,6 +2907,12 @@ TEST(AgentRuns, TriggersBecomeCronExpressions) {
     using lake::control::trigger_cron;
     EXPECT_EQ(trigger_cron("every 15 minutes"), "*/15 * * * *");
     EXPECT_FALSE(trigger_cron("every 1 minute")) << "at most every five minutes";
+    // lake#442: the refusal names the rule and the shortest schedule, not "cannot place".
+    EXPECT_NE(trigger_cron("every 1 minutes").error().find("at most once every five minutes"),
+              std::string::npos);
+    EXPECT_NE(trigger_cron("every 1 minutes").error().find("'every 5 minutes'"), std::string::npos);
+    EXPECT_NE(trigger_cron("every 90 minutes").error().find("5 to 59"), std::string::npos);
+    EXPECT_NE(trigger_cron("sometimes").error().find("cannot place"), std::string::npos);
     EXPECT_EQ(trigger_cron("every 120 minutes"), "0 */2 * * *");
     EXPECT_EQ(trigger_cron("hourly"), "0 * * * *");
     EXPECT_EQ(trigger_cron("Every 2 days"), "0 0 */2 * *");
@@ -3063,6 +3069,144 @@ TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
 
     r.w.caller->answers["get_agent"] = {{"id", "n-1"}, {"name", "Native"}, {"runtime", "native"}};
     EXPECT_FALSE(r.call("launch_agent", {{"agent_id", "n-1"}}).ok);
+}
+
+// lake#442: a launch and a schedule belong to the workspace whose Zetta holds the agent. The
+// operator reads that workspace to place the run; lake lists a workspace's own runs only.
+TEST(AgentRuns, LaunchesAndSchedulesBelongToTheirWorkspace) {
+    AgentRuns r;
+    r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Watcher"}, {"runtime", "python"}};
+    const std::string workspace = r.w.workspace_id();
+    ASSERT_FALSE(workspace.empty());
+    const auto launched = r.call("launch_agent", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(launched.ok) << launched.error.message;
+    EXPECT_EQ(launched.value["workspace_id"], workspace);
+    EXPECT_EQ(r.store.get_agent_launch(launched.value["id"])->workspace_id, workspace);
+    const auto scheduled =
+        r.call("schedule_agent", {{"agent_id", "a-1"}, {"trigger", "every 10 minutes"}});
+    ASSERT_TRUE(scheduled.ok) << scheduled.error.message;
+    EXPECT_EQ(scheduled.value["workspace_id"], workspace);
+
+    const std::string elsewhere = lake::control::new_uuid_v4();
+    EXPECT_EQ(r.call("list_agent_launches", {{"workspace_id", workspace}}).value["launches"].size(),
+              1U);
+    EXPECT_TRUE(
+        r.call("list_agent_launches", {{"workspace_id", elsewhere}}).value["launches"].empty())
+        << "another workspace's Zetta does not hold this agent";
+    EXPECT_TRUE(
+        r.call("list_agent_schedules", {{"workspace_id", elsewhere}}).value["schedules"].empty());
+    const auto stray = r.call("stop_agent_launch",
+                              {{"workspace_id", elsewhere}, {"launch_id", launched.value["id"]}});
+    ASSERT_FALSE(stray.ok) << "a run is stopped only from its own workspace";
+    EXPECT_EQ(r.store.get_agent_launch(launched.value["id"])->desired, "present");
+    EXPECT_FALSE(r.call("unschedule_agent",
+                        {{"workspace_id", elsewhere}, {"schedule_id", scheduled.value["id"]}})
+                     .ok);
+}
+
+// lake#442: a launch says why it is waiting from the first read, and one the operator never
+// starts is withdrawn with a reason instead of staying at phase "" forever.
+TEST(AgentRuns, AWaitingLaunchSaysWhyAndTimesOutWithAReason) {
+    AgentRuns r;
+    r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Watcher"}, {"runtime", "python"}};
+    const auto launched = r.call("launch_agent", {{"agent_id", "a-1"}, {"mode", "job"}});
+    ASSERT_TRUE(launched.ok) << launched.error.message;
+    const std::string id = launched.value["id"];
+    EXPECT_EQ(launched.value["phase"], "Pending");
+    EXPECT_NE(launched.value["message"].get<std::string>().find("Waiting for the Orama operator"),
+              std::string::npos);
+    EXPECT_EQ(launched.value["operator_phase"], "") << "the operator has not reported";
+
+    ASSERT_TRUE(r.store.age_agent_launch(id, 90));
+    auto listed = r.call("list_agent_launches", {{"agent_id", "a-1"}});
+    EXPECT_EQ(listed.value["launches"][0]["phase"], "Pending");
+    EXPECT_NE(listed.value["launches"][0]["message"].get<std::string>().find(
+                  "has not started this run after"),
+              std::string::npos);
+
+    ASSERT_TRUE(r.store.age_agent_launch(id, 300));
+    listed = r.call("list_agent_launches", {{"agent_id", "a-1"}});
+    EXPECT_EQ(listed.value["launches"][0]["phase"], "Failed") << "terminal before the sweep";
+    EXPECT_EQ(listed.value["launches"][0]["message"],
+              std::string(lake::control::agent_launch_start_timeout_reason));
+
+    // A launch the operator reported on is never expired.
+    const auto running = r.call("launch_agent", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(running.ok);
+    ASSERT_TRUE(r.store.set_agent_launch_status(running.value["id"], "Running", "", "", ""));
+    ASSERT_TRUE(r.store.age_agent_launch(running.value["id"], 3600));
+
+    const auto expired = r.store.expire_unstarted_agent_launches(
+        lake::control::agent_launch_start_timeout_seconds,
+        std::string(lake::control::agent_launch_start_timeout_reason));
+    ASSERT_TRUE(expired);
+    EXPECT_EQ(*expired, 1U);
+    const auto stopped = r.store.get_agent_launch(id);
+    EXPECT_EQ(stopped->desired, "absent") << "the operator never starts it late";
+    EXPECT_EQ(stopped->stop_reason, lake::control::agent_launch_start_timeout_reason);
+    EXPECT_EQ(r.store.get_agent_launch(running.value["id"])->desired, "present");
+    listed = r.call("list_agent_launches", {{"agent_id", "a-1"}});
+    const auto timed_out = std::ranges::find_if(
+        listed.value["launches"], [&](const json& launch) { return launch["id"] == id; });
+    ASSERT_NE(timed_out, listed.value["launches"].end());
+    EXPECT_EQ((*timed_out)["phase"], "Failed");
+    EXPECT_EQ((*timed_out)["stop_reason"],
+              std::string(lake::control::agent_launch_start_timeout_reason));
+    EXPECT_EQ(*r.store.expire_unstarted_agent_launches(300, "again"), 0U) << "once";
+}
+
+// lake#442: Zetta read only `contents` from a definition file and dropped `content` silently,
+// leaving an empty main.py. Lake refuses unknown definition fields and names the right one.
+TEST(AgentRuns, CreateAgentRefusesDefinitionFieldsZettaWouldDrop) {
+    AgentRuns r;
+    r.w.caller->answers["create_agent"] = {{"id", "a-7"}};
+    const auto python = [](json files) {
+        return json{{"name", "Echo"},
+                    {"runtime", "python"},
+                    {"definition",
+                     {{"source", "zetta"},
+                      {"instructions", "Echo the input."},
+                      {"entrypoint", "main:run"},
+                      {"files", std::move(files)}}}};
+    };
+    const auto misnamed = r.call(
+        "workspace_act",
+        {{"capability", "create_agent"},
+         {"input", python(json::array({{{"path", "main.py"}, {"content", "print(1)"}}}))}});
+    ASSERT_FALSE(misnamed.ok);
+    EXPECT_EQ(misnamed.error.code, "invalid_input");
+    EXPECT_EQ(misnamed.error.path, "/input/definition/files/0/content");
+    EXPECT_NE(misnamed.error.message.find("{path, contents}"), std::string::npos);
+    EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls,
+                                     [](const auto& call) { return call.first == "create_agent"; }))
+        << "nothing reached the workspace";
+
+    const auto object = r.call(
+        "workspace_act",
+        {{"capability", "create_agent"}, {"input", python({{"main.py", "print(1)"}})}});
+    ASSERT_FALSE(object.ok);
+    EXPECT_EQ(object.error.code, "invalid_input");
+    EXPECT_EQ(object.error.path, "/input/definition/files");
+
+    const auto stray = r.call("workspace_act",
+                              {{"capability", "update_agent"},
+                               {"input", {{"id", "a-7"}, {"definition", {{"code", "x"}}}}}});
+    ASSERT_FALSE(stray.ok);
+    EXPECT_EQ(stray.error.path, "/input/definition/code");
+
+    const auto made = r.call(
+        "workspace_act",
+        {{"capability", "create_agent"},
+         {"input", python(json::array({{{"path", "main.py"}, {"contents", "print(1)"}}}))}});
+    ASSERT_TRUE(made.ok) << made.error.message;
+    EXPECT_EQ(r.w.caller->calls.back().second["definition"]["files"][0]["contents"], "print(1)");
+
+    // Zetta's own refusal code is reported as lake's documented invalid_input.
+    r.w.caller->failure = lake::control::ZettaControlError{"invalid_argument", "agent.name"};
+    const auto refused = r.call("workspace_act",
+                                {{"capability", "create_agent"}, {"input", {{"name", "x"}}}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
 }
 
 TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {

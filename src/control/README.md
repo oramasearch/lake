@@ -65,3 +65,9 @@ Both stores implement `create_organization_space` and `convert_personal_space` a
 each, list a user's memberships and the invitations addressed to an email or handles, and keep an
 organization-scope membership's grant on the organization's own space in step with the membership.
 See `docs/api/organizations.md`.
+Agent launches and cron schedules carry the workspace that holds their agent (migration
+`0043_agent_launch_workspaces`, lake#442). Both stores filter launch, schedule and scheduled-run
+lists by it. `expire_unstarted_agent_launches` withdraws, with a `stop_reason`, a launch the
+operator has not reported on within the timeout. `agent_runs.cpp` holds that timeout,
+`agent_launch_progress` (what a person is told about a waiting run), and `trigger_cron`, which
+now says why a plain-words schedule is refused. See `docs/api/agent-launches.md`.

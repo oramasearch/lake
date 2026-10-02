@@ -5083,7 +5083,8 @@ public:
         "to_char(l.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(ls.phase, ''), COALESCE(ls.message, ''), COALESCE(ls.endpoint, ''), "
         "ls.exit_code, COALESCE(ls.result, 'null'::jsonb)::text, "
-        "COALESCE(ls.credential_sha256, ''), COALESCE(ls.observed_generation, 0)";
+        "COALESCE(ls.credential_sha256, ''), COALESCE(ls.observed_generation, 0), "
+        "COALESCE(l.workspace_id::text, ''), l.stop_reason";
 
     static AgentLaunch launch_from(const pqxx::row& row) {
         AgentLaunch launch;
@@ -5112,6 +5113,8 @@ public:
         launch.result = nlohmann::json::parse(row[19].as<std::string>(), nullptr, false);
         launch.credential_sha256 = row[20].as<std::string>();
         launch.observed_generation = row[21].as<std::int64_t>();
+        launch.workspace_id = row[22].as<std::string>();
+        launch.stop_reason = row[23].as<std::string>();
         return launch;
     }
 
@@ -5175,10 +5178,10 @@ public:
             const std::string id = new_uuid_v4();
             tx.exec_params(
                 "INSERT INTO agent_launches (id, customer_id, agent_id, agent_name, mode, input, "
-                "scopes, slug, trigger, created_by_user_id, created_by_taap_id) VALUES "
-                "($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, "
+                "scopes, slug, trigger, created_by_user_id, created_by_taap_id, workspace_id) "
+                "VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, "
                 "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, $9, "
-                "NULLIF($10, '')::uuid, $11)",
+                "NULLIF($10, '')::uuid, $11, NULLIF($12, '')::uuid)",
                 id,
                 in.customer_id,
                 in.agent_id,
@@ -5189,7 +5192,8 @@ public:
                 managed_service_slug("al", id),
                 in.trigger.empty() ? std::string("manual") : in.trigger,
                 in.created_by_user_id,
-                in.created_by_taap_id);
+                in.created_by_taap_id,
+                in.workspace_id);
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
             return one_launch(tx, id);
         });
@@ -5202,17 +5206,20 @@ public:
 
     Result<std::vector<AgentLaunch>> list_agent_launches(const std::string& customer_id,
                                                          const std::string& agent_id,
-                                                         int limit) override {
+                                                         int limit,
+                                                         const std::string& workspace_id) override {
         return with_tx<std::vector<AgentLaunch>>(
             [&](pqxx::work& tx) -> Result<std::vector<AgentLaunch>> {
                 const pqxx::result rows = tx.exec_params(
                     std::string("SELECT ") + launch_columns +
                         " FROM agent_launches l LEFT JOIN agent_launch_status ls ON "
                         "ls.launch_id = l.id WHERE l.customer_id = $1::uuid AND ($2 = '' OR "
-                        "l.agent_id = $2) ORDER BY l.created_at DESC, l.id LIMIT $3",
+                        "l.agent_id = $2) AND ($4 = '' OR l.workspace_id = NULLIF($4, '')::uuid) "
+                        "ORDER BY l.created_at DESC, l.id LIMIT $3",
                     customer_id,
                     agent_id,
-                    limit > 0 ? limit : 100);
+                    limit > 0 ? limit : 100,
+                    workspace_id);
                 std::vector<AgentLaunch> launches;
                 for (const pqxx::row& row : rows) {
                     launches.push_back(launch_from(row));
@@ -5232,6 +5239,24 @@ public:
         });
     }
 
+    Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
+                                                        const std::string& reason) override {
+        return with_tx<std::size_t>([&](pqxx::work& tx) -> Result<std::size_t> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE agent_launches l SET desired = 'absent', generation = generation + 1, "
+                "stop_reason = $2, updated_at = now() WHERE l.desired = 'present' AND "
+                "l.created_at < now() - make_interval(secs => $1::double precision) AND NOT "
+                "EXISTS (SELECT 1 FROM agent_launch_status ls WHERE ls.launch_id = l.id) "
+                "RETURNING l.id::text",
+                seconds,
+                reason);
+            for (const pqxx::row& row : rows) {
+                tx.exec_params("SELECT pg_notify('lake_services', $1)", row[0].as<std::string>());
+            }
+            return rows.size();
+        });
+    }
+
     static constexpr const char* cron_schedule_columns =
         "s.id::text, s.customer_id::text, s.agent_id, s.agent_name, s.cron, s.time_zone, "
         "s.description, s.slug, s.desired, s.input::text, array_to_json(s.scopes)::text, "
@@ -5241,7 +5266,7 @@ public:
         "COALESCE(ss.phase, ''), COALESCE(ss.message, ''), "
         "COALESCE(to_char(ss.last_schedule_at AT TIME ZONE 'UTC', "
         "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), ''), COALESCE(ss.credential_sha256, ''), "
-        "COALESCE(ss.observed_generation, 0)";
+        "COALESCE(ss.observed_generation, 0), COALESCE(s.workspace_id::text, '')";
 
     static AgentCronSchedule cron_schedule_from(const pqxx::row& row) {
         AgentCronSchedule schedule;
@@ -5267,6 +5292,7 @@ public:
         schedule.last_schedule_at = row[18].as<std::string>();
         schedule.credential_sha256 = row[19].as<std::string>();
         schedule.observed_generation = row[20].as<std::int64_t>();
+        schedule.workspace_id = row[21].as<std::string>();
         return schedule;
     }
 
@@ -5331,9 +5357,9 @@ public:
             tx.exec_params(
                 "INSERT INTO agent_cron_schedules (id, customer_id, agent_id, agent_name, cron, "
                 "time_zone, description, input, scopes, slug, created_by_user_id, "
-                "created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, "
-                "ARRAY(SELECT jsonb_array_elements_text($9::jsonb)), $10, NULLIF($11, '')::uuid, "
-                "$12)",
+                "created_by_taap_id, workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, "
+                "$7, $8::jsonb, ARRAY(SELECT jsonb_array_elements_text($9::jsonb)), $10, "
+                "NULLIF($11, '')::uuid, $12, NULLIF($13, '')::uuid)",
                 id,
                 in.customer_id,
                 in.agent_id,
@@ -5345,7 +5371,8 @@ public:
                 nlohmann::json(in.scopes).dump(),
                 managed_service_slug("as", id),
                 in.created_by_user_id,
-                in.created_by_taap_id);
+                in.created_by_taap_id,
+                in.workspace_id);
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
             return one_cron_schedule(tx, id);
         });
@@ -5358,16 +5385,19 @@ public:
 
     Result<std::vector<AgentCronSchedule>>
     list_agent_cron_schedules(const std::string& customer_id,
-                              const std::string& agent_id) override {
+                              const std::string& agent_id,
+                              const std::string& workspace_id) override {
         return with_tx<std::vector<AgentCronSchedule>>(
             [&](pqxx::work& tx) -> Result<std::vector<AgentCronSchedule>> {
                 const pqxx::result rows = tx.exec_params(
                     std::string("SELECT ") + cron_schedule_columns +
                         " FROM agent_cron_schedules s LEFT JOIN agent_cron_schedule_status ss ON "
                         "ss.schedule_id = s.id WHERE s.customer_id = $1::uuid AND s.desired = "
-                        "'present' AND ($2 = '' OR s.agent_id = $2) ORDER BY s.created_at, s.id",
+                        "'present' AND ($2 = '' OR s.agent_id = $2) AND ($3 = '' OR "
+                        "s.workspace_id = NULLIF($3, '')::uuid) ORDER BY s.created_at, s.id",
                     customer_id,
-                    agent_id);
+                    agent_id,
+                    workspace_id);
                 std::vector<AgentCronSchedule> schedules;
                 for (const pqxx::row& row : rows) {
                     schedules.push_back(cron_schedule_from(row));
@@ -5396,7 +5426,8 @@ public:
 
     Result<std::vector<AgentLaunch>> list_agent_cron_runs(const std::string& customer_id,
                                                           const std::string& agent_id,
-                                                          int limit) override {
+                                                          int limit,
+                                                          const std::string& workspace_id) override {
         return with_tx<std::vector<AgentLaunch>>(
             [&](pqxx::work& tx) -> Result<std::vector<AgentLaunch>> {
                 const pqxx::result rows = tx.exec_params(
@@ -5405,12 +5436,14 @@ public:
                     "s.created_by_taap_id, to_char(r.started_at AT TIME ZONE 'UTC', "
                     "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), to_char(r.updated_at AT TIME ZONE 'UTC', "
                     "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), r.phase, r.message, r.exit_code, "
-                    "r.result::text FROM agent_cron_runs r JOIN agent_cron_schedules s ON s.id = "
-                    "r.schedule_id WHERE s.customer_id = $1::uuid AND ($2 = '' OR s.agent_id = "
-                    "$2) ORDER BY r.started_at DESC, r.id LIMIT $3",
+                    "r.result::text, COALESCE(s.workspace_id::text, '') FROM agent_cron_runs r "
+                    "JOIN agent_cron_schedules s ON s.id = r.schedule_id WHERE s.customer_id = "
+                    "$1::uuid AND ($2 = '' OR s.agent_id = $2) AND ($4 = '' OR s.workspace_id = "
+                    "NULLIF($4, '')::uuid) ORDER BY r.started_at DESC, r.id LIMIT $3",
                     customer_id,
                     agent_id,
-                    limit > 0 ? limit : 100);
+                    limit > 0 ? limit : 100,
+                    workspace_id);
                 std::vector<AgentLaunch> runs;
                 for (const pqxx::row& row : rows) {
                     AgentLaunch run;
@@ -5433,6 +5466,8 @@ public:
                         run.exit_code = row[12].as<int>();
                     }
                     run.result = nlohmann::json::parse(row[13].as<std::string>(), nullptr, false);
+                    run.workspace_id = row[14].as<std::string>();
+                    run.observed_generation = 1; // the operator wrote the row
                     runs.push_back(std::move(run));
                 }
                 return runs;

@@ -149,3 +149,8 @@ Organization self-service (`create_organization_space`, `convert_personal_space`
 in `capabilities.cpp`; `http_server.cpp` adapts the Organizations page forms
 (`/organizations/create`, `/organizations/convert`, `/invitations/accept`, `/organization/teams`)
 to them. See `docs/api/organizations.md` and `docs/ui/settings.md`.
+`workspace_capabilities.cpp` scopes launches and schedules to the calling workspace, reports a
+waiting launch's reason through `launch_json`, and checks a `create_agent` or `update_agent`
+definition before it reaches Zetta, which would drop unknown fields such as `content`. Zetta's
+`invalid_argument` is reported as `invalid_input`. `web_ui.cpp` shows a run lake timed out as
+Failed, with its reason (lake#442). See `docs/api/agent-launches.md`.

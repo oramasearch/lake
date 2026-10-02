@@ -372,12 +372,18 @@ struct AgentLaunch {
     nlohmann::json result = nullptr;
     std::string credential_sha256;
     std::int64_t observed_generation = 0;
+    // The workspace whose Zetta holds the agent (migration 0043); the operator runs the launch in
+    // that workspace's namespace and lists only that workspace's runs.
+    std::string workspace_id;
+    // Why lake withdrew the launch itself, e.g. the operator never started it (lake#442).
+    std::string stop_reason;
 };
 struct NewAgentLaunch {
     std::string customer_id, agent_id, agent_name, mode, trigger;
     nlohmann::json input = nullptr;
     std::vector<std::string> scopes;
     std::string created_by_user_id, created_by_taap_id;
+    std::string workspace_id;
 };
 // One cron schedule of a Python agent (docs/api/agent-launches.md): an agent may have several.
 // lake writes the desired schedule (agent_cron_schedules, migration 0031); the Orama operator makes
@@ -392,12 +398,14 @@ struct AgentCronSchedule {
     std::string phase, message, last_schedule_at; // empty until the operator reports
     std::string credential_sha256;
     std::int64_t observed_generation = 0;
+    std::string workspace_id; // migration 0043, as for launches
 };
 struct NewAgentCronSchedule {
     std::string customer_id, agent_id, agent_name, cron, time_zone, description;
     nlohmann::json input = nullptr;
     std::vector<std::string> scopes;
     std::string created_by_user_id, created_by_taap_id;
+    std::string workspace_id;
 };
 // One agent turn run in the background (lake#269): lake writes it, publishes it on the agent bus
 // (docs/api/agent-bus.md) and answers the request at once. `phase` is empty until an agent claims
@@ -1005,22 +1013,30 @@ public:
     // Agent launches (lake#231). Writing one NOTIFYs lake_services, as services and stores do.
     virtual Result<AgentLaunch> create_agent_launch(const NewAgentLaunch&) = 0;
     virtual Result<AgentLaunch> get_agent_launch(const std::string& id) = 0;
-    // Newest first; an empty agent_id lists every launch of the customer.
+    // Newest first; an empty agent_id lists every launch of the customer, an empty workspace_id
+    // every workspace's.
     virtual Result<std::vector<AgentLaunch>>
-    list_agent_launches(const std::string& customer_id, const std::string& agent_id, int limit) = 0;
+    list_agent_launches(const std::string& customer_id, const std::string& agent_id, int limit,
+                        const std::string& workspace_id = {}) = 0;
     virtual Result<AgentLaunch> withdraw_agent_launch(const std::string& id) = 0;
+    // Withdraws every present launch the operator has not reported on within `seconds` of its
+    // creation, recording `reason` as its stop_reason (lake#442). Returns how many it withdrew.
+    virtual Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
+                                                                const std::string& reason) = 0;
     // Cron schedules: any number per agent. Creating or withdrawing one NOTIFYs lake_services.
     virtual Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) = 0;
     virtual Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) = 0;
     // Present schedules, oldest first; an empty agent_id lists every agent's.
     virtual Result<std::vector<AgentCronSchedule>>
-    list_agent_cron_schedules(const std::string& customer_id, const std::string& agent_id) = 0;
+    list_agent_cron_schedules(const std::string& customer_id, const std::string& agent_id,
+                              const std::string& workspace_id = {}) = 0;
     // Marks a schedule absent so the operator deletes its CronJob. Refuses one already absent.
     virtual Result<AgentCronSchedule> withdraw_agent_cron_schedule(const std::string& id) = 0;
     // The runs the schedules' CronJobs started, as launches (trigger "schedule"), newest first.
     virtual Result<std::vector<AgentLaunch>> list_agent_cron_runs(const std::string& customer_id,
                                                                   const std::string& agent_id,
-                                                                  int limit) = 0;
+                                                                  int limit,
+                                                                  const std::string& workspace_id = {}) = 0;
     // Background agent turns (lake#269, docs/api/agent-bus.md).
     virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
     virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;

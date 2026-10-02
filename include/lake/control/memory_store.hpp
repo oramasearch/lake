@@ -242,8 +242,13 @@ public:
     Result<AgentLaunch> get_agent_launch(const std::string& id) override;
     Result<std::vector<AgentLaunch>> list_agent_launches(const std::string& customer_id,
                                                          const std::string& agent_id,
-                                                         int limit) override;
+                                                         int limit,
+                                                         const std::string& workspace_id = {}) override;
     Result<AgentLaunch> withdraw_agent_launch(const std::string& id) override;
+    Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
+                                                        const std::string& reason) override;
+    // Moves a launch's creation time back, as if it had been waiting `seconds`; tests only.
+    Result<void> age_agent_launch(const std::string& id, std::int64_t seconds);
     // What the operator writes to agent_launch_status; tests and local demos call it directly.
     Result<void> set_agent_launch_status(const std::string& id,
                                          std::string phase,
@@ -255,11 +260,13 @@ public:
     Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) override;
     Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) override;
     Result<std::vector<AgentCronSchedule>>
-    list_agent_cron_schedules(const std::string& customer_id, const std::string& agent_id) override;
+    list_agent_cron_schedules(const std::string& customer_id, const std::string& agent_id,
+                              const std::string& workspace_id = {}) override;
     Result<AgentCronSchedule> withdraw_agent_cron_schedule(const std::string& id) override;
     Result<std::vector<AgentLaunch>> list_agent_cron_runs(const std::string& customer_id,
                                                           const std::string& agent_id,
-                                                          int limit) override;
+                                                          int limit,
+                                                          const std::string& workspace_id = {}) override;
     // What the operator writes to agent_cron_schedule_status and agent_cron_runs; tests and local
     // demos call them directly. A run is keyed by its Job's uid.
     Result<void> set_agent_cron_schedule_status(const std::string& id,
