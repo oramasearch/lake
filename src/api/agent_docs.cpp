@@ -299,8 +299,11 @@ const std::vector<Flow>& flows() {
            "names. Poll `workspace_status` until it is ready"},
           {"workspace_act",
            "`capability: \"upload_dataset\"`, `input: {table_name, format: \"csv\"|\"jsonl\", "
-           "content}`; answers the rows loaded"},
-          {"workspace_query", "`capability: \"get_dataset\"`, `input: {dataset}`: its columns"},
+           "content}`; answers the rows loaded and the dataset's `id`. A name is letters, digits "
+           "and underscores; a taken name answers `conflict` unless `if_exists: \"rename\"`; a "
+           "CSV row whose field count differs from the header is refused with its line"},
+          {"workspace_query", "`capability: \"get_dataset\"`, `input: {dataset}` (the `id` "
+           "`<database>/<name>` from `list_datasets`): its columns"},
           {"workspace_sql", "`statement: \"SELECT … LIMIT 20\"` to look at it"}}},
         {"Train a model and call it",
          "Train from a dataset, read the report, publish the model and score new rows.",

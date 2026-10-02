@@ -3570,10 +3570,11 @@ private:
             return {{"hits", json::array()}};
         }
         if (capability == "sql") {
-            if (input.value("statement", "") == "SELECT database, name FROM system.datasets") {
+            // Zetta's system.datasets names the table column `dataset` (lake#447).
+            if (input.value("statement", "") == "SELECT database, dataset FROM system.datasets") {
                 json rows = json::array();
                 for (std::size_t index = 0; index < datasets_.load(std::memory_order_relaxed); ++index) {
-                    rows.push_back({{"name", "dataset-" + std::to_string(index)},
+                    rows.push_back({{"dataset", "dataset-" + std::to_string(index)},
                                     {"database", "datasets"}});
                 }
                 return {{"rows", std::move(rows)}};
@@ -3817,7 +3818,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/train/agent", {3, 1}},
         {"/w/:workspace_id/train/agents", {1, 1}},
         {"/w/:workspace_id/train/data", {3, 1}},
-        {"/w/:workspace_id/train/dataset", {2, 1}},
+        {"/w/:workspace_id/train/dataset", {3, 1}},
         {"/w/:workspace_id/train/experiment", {2, 1}},
         {"/w/:workspace_id/train/experiment/run", {1, 1}},
         {"/w/:workspace_id/train/experiments", {2, 1}},

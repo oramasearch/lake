@@ -13,7 +13,9 @@ observations: neither may discard the final failure notice or fail a fresh retry
 production GET router, resets the workspace definition cache before each render, and checks every
 route's exact `Server-Timing` call and sequential-round budget. Unlisted routes must make zero
 workspace calls; Project's bounded run details bring its populated fixture to nine calls in two
-rounds, and Solution uses three calls in one round.
+rounds, Solution uses three calls in one round, and a dataset page three in one round (its
+metadata, first rows and `analyze_dataset` column types). The fake workspace answers the Data
+list with Zetta's real `system.datasets` column, `dataset`.
 The loose wall guard is p95 below 500 ms over 20 renders at 30 ms of workspace latency. Its
 populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering case
 with four repositories and 128 files. The first Metering request checks populated-byte correctness;
@@ -285,3 +287,10 @@ the raw detail is retained in the server log.
 measures 7,000 rows, checks actual tuple counts, password policy, stored-digest refusal, operator
 precedence, migration idempotence, scopes, expiry and next-request bearer/cookie revocation.
 See [session authentication proof](../docs/build/session-authentication.md).
+
+`Workspaces.DatasetRulesNameCsvIdAndEngineResults`, `Workspaces.DatasetWritesAreCheckedAndIdsAgree`
+and `Workspaces.DataPageNamesResultsColumnTypesAndUploadNotice` pin lake#447: SQL-queryable
+names, malformed CSV refused with its line before any upload call, a taken name refused or
+reported as renamed, one `<database>/<name>` id across list and get, engine results kept out of
+pickers and grouped under Results, and typed columns. See
+[workspaces.md](../docs/api/workspaces.md).

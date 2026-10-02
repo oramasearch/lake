@@ -63,3 +63,6 @@ the pure Ship Apps renderer. Authorization and digest verification remain in the
 
 `OrganizationsPageData` gives the Organizations renderer the viewer's memberships, the invitations
 addressed to them and their personal space; see [settings.md](../../../docs/ui/settings.md).
+`datasets.hpp` is pure: workspace dataset naming, CSV checks, the `<database>/<name>` id and the
+engine-result classification shared by the capabilities and the pages. See
+[workspaces.md](../../../docs/api/workspaces.md).

@@ -1,6 +1,7 @@
 #include "lake/api/web_ui.hpp"
 
 #include "lake/api/capabilities.hpp"
+#include "lake/api/datasets.hpp"
 #include "lake/api/markdown.hpp"
 
 #include <algorithm>
@@ -2437,6 +2438,98 @@ std::string cell_text(const nlohmann::json& value) {
     return value.is_null() ? std::string() : value.dump();
 }
 
+// A table the engine wrote as a run's output rather than data a person loaded (lake#447): kept out
+// of the dataset pickers and grouped under Results on the Data page.
+bool result_dataset(const nlohmann::json& dataset) {
+    if (dataset.value("kind", std::string()) == "result") {
+        return true;
+    }
+    return dataset.contains("database") && dataset["database"].is_string() &&
+           lake::api::datasets::engine_database(dataset["database"].get<std::string>());
+}
+
+// The value type SQL sees in a column, read from the first rows: the workspace stores schemaless
+// JSON rows and types each CSV cell when it loads it.
+std::string sampled_type(const nlohmann::json& rows, const std::string& column) {
+    std::set<std::string> seen;
+    for (const nlohmann::json& row : rows) {
+        if (!row.is_object() || !row.contains(column) || row.at(column).is_null()) {
+            continue;
+        }
+        const nlohmann::json& value = row.at(column);
+        seen.insert(value.is_boolean()          ? "boolean"
+                    : value.is_number_integer() ? "integer"
+                    : value.is_number()         ? "decimal"
+                    : value.is_string()         ? "text"
+                                                : "JSON");
+    }
+    if (seen.empty()) {
+        return "empty";
+    }
+    if (seen == std::set<std::string>{"integer", "decimal"}) {
+        return "decimal";
+    }
+    if (seen.size() > 1) {
+        std::string mixed;
+        for (const std::string& type : seen) {
+            mixed += (mixed.empty() ? "" : " or ") + type;
+        }
+        return mixed;
+    }
+    return *seen.begin();
+}
+
+// The dataset's columns with their types (lake#447): the value type from the first rows, and what
+// the workspace's analysis reads the column as, when it answered.
+std::string dataset_columns_table(const nlohmann::json& dataset,
+                                  const nlohmann::json& analysis,
+                                  const nlohmann::json& rows) {
+    std::vector<std::string> names;
+    for (const nlohmann::json& column : dataset.value("columns", nlohmann::json::array())) {
+        names.push_back(cell_text(column));
+    }
+    std::map<std::string, nlohmann::json> analysed;
+    for (const nlohmann::json& column : analysis.value("columns", nlohmann::json::array())) {
+        const std::string name = json_text(column, "name");
+        analysed[name] = column;
+        if (std::ranges::find(names, name) == names.end()) {
+            names.push_back(name);
+        }
+    }
+    if (names.empty()) {
+        return "<p class=\"muted\">No columns yet.</p>";
+    }
+    std::string out = "<table><thead><tr><th>Column</th><th>Type</th><th>Reads as</th>"
+                      "<th>Empty</th></tr></thead><tbody>";
+    for (const std::string& name : names) {
+        const auto found = analysed.find(name);
+        const nlohmann::json column =
+            found == analysed.end() ? nlohmann::json::object() : found->second;
+        std::string empty;
+        if (column.contains("null_rate") && column["null_rate"].is_number()) {
+            empty = std::format("{:.0f}%", column["null_rate"].get<double>() * 100.0);
+        }
+        out += std::format("<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                           web_ui_escape(name),
+                           web_ui_escape(sampled_type(rows, name)),
+                           web_ui_escape(json_text(column, "semantic_type")),
+                           web_ui_escape(empty));
+    }
+    return out + "</tbody></table>";
+}
+
+// The fewest copies any partition of the dataset has; 0 when it is not partitioned (every node
+// holds it).
+std::size_t fewest_copies(const nlohmann::json& dataset) {
+    std::size_t fewest = 0;
+    for (const nlohmann::json& partition : dataset.value("partitions", nlohmann::json::array())) {
+        const std::size_t owners =
+            partition.value("owner_nodes", nlohmann::json::array()).size();
+        fewest = fewest == 0 ? owners : std::min(fewest, owners);
+    }
+    return fewest;
+}
+
 // A list of objects as a table, columns from the first row's keys.
 std::string object_table(const nlohmann::json& rows) {
     if (!rows.is_array() || rows.empty()) {
@@ -2980,6 +3073,9 @@ std::string pipeline_content(const WorkspacePage& page) {
     std::string datasets;
     for (const nlohmann::json& dataset : page.data.value("list_datasets", nlohmann::json::object())
                                              .value("datasets", nlohmann::json::array())) {
+        if (result_dataset(dataset)) {
+            continue;
+        }
         const std::string name = json_text(dataset, "name");
         const std::string database = json_text(dataset, "database");
         const std::string path = database.empty() ? name : database + "." + name;
@@ -4206,6 +4302,9 @@ std::string solutions_content(const WorkspacePage& page) {
             for (const nlohmann::json& dataset :
                  page.data.value("list_datasets", nlohmann::json::object())
                      .value("datasets", nlohmann::json::array())) {
+                if (result_dataset(dataset)) {
+                    continue;
+                }
                 const std::string database = json_text(dataset, "database").empty()
                                                  ? std::string("datasets")
                                                  : json_text(dataset, "database");
@@ -4818,6 +4917,9 @@ std::string workspace_content(const WorkspacePage& page) {
                 for (const nlohmann::json& dataset :
                      data.value("list_datasets", nlohmann::json::object())
                          .value("datasets", nlohmann::json::array())) {
+                    if (result_dataset(dataset)) {
+                        continue;
+                    }
                     const std::string database = json_text(dataset, "database").empty()
                                                      ? std::string("datasets")
                                                      : json_text(dataset, "database");
@@ -4889,13 +4991,26 @@ std::string workspace_content(const WorkspacePage& page) {
         std::string load;
         if (const auto loaded = data.find("loaded"); loaded != data.end()) {
             const std::string table = json_text(*loaded, "table");
+            const std::string database =
+                json_text(*loaded, "database").empty() ? std::string("datasets")
+                                                       : json_text(*loaded, "database");
+            const std::string format = json_text(*loaded, "format");
+            const std::string renamed = json_text(*loaded, "renamed_from");
             out += std::format(
                 "<section class=\"panel notice\" role=\"status\"><p>Loaded <strong>{}</strong> rows "
-                "into {}.</p></section>",
+                "{}into {}.{}</p></section>",
                 web_ui_escape(json_text(*loaded, "rows")),
-                row_link("/train/dataset?" + query + "&database=datasets&name=" +
-                             url_component(table),
-                         table));
+                format == "csv"     ? "from your CSV file "
+                : format == "jsonl" ? "from your JSONL file "
+                                    : "",
+                row_link("/train/dataset?" + query + "&database=" + url_component(database) +
+                             "&name=" + url_component(table),
+                         table),
+                renamed.empty() || renamed == table
+                    ? std::string()
+                    : " <strong>" + web_ui_escape(renamed) +
+                          "</strong> was already taken, so it was saved as <strong>" +
+                          web_ui_escape(table) + "</strong>.");
         }
         const std::size_t load_at = out.size();
         out += "<section class=\"panel\"><h2>Connections</h2>";
@@ -5032,23 +5147,47 @@ std::string workspace_content(const WorkspacePage& page) {
             "</details>",
             hidden("customer_id", page.customer_id));
         out += "</section><section class=\"panel\"><h2>Datasets</h2>";
-        if (datasets.empty()) {
+        // What a person loaded, then the engine's run outputs apart under Results (lake#447).
+        std::string own_rows;
+        std::string result_rows;
+        std::size_t result_count = 0;
+        for (const nlohmann::json& dataset : datasets) {
+            const std::string name = json_text(dataset, "name");
+            if (name.empty()) {
+                continue;
+            }
+            const std::string database = json_text(dataset, "database").empty()
+                                             ? std::string("datasets")
+                                             : json_text(dataset, "database");
+            const std::string row = std::format(
+                "<tr><td>{}</td><td>{}</td></tr>",
+                row_link("/train/dataset?" + query + "&database=" + url_component(database) +
+                             "&name=" + url_component(name),
+                         name),
+                web_ui_escape(database));
+            if (result_dataset(dataset)) {
+                result_rows += row;
+                ++result_count;
+            } else {
+                own_rows += row;
+            }
+        }
+        if (own_rows.empty()) {
             out += "<p>No datasets yet.</p>";
         } else {
-            out += "<table><thead><tr><th>Name</th><th>Database</th></tr>"
-                   "</thead><tbody>";
-            for (const nlohmann::json& dataset : datasets) {
-                const std::string name = json_text(dataset, "name");
-                out += std::format("<tr><td>{}</td><td>{}</td></tr>",
-                                   row_link("/train/dataset?" + query + "&database=" +
-                                                url_component(json_text(dataset, "database")) +
-                                                "&name=" + url_component(name),
-                                            name),
-                                   web_ui_escape(json_text(dataset, "database")));
-            }
-            out += "</tbody></table>";
+            out += "<table><thead><tr><th>Name</th><th>Database</th></tr></thead><tbody>" +
+                   own_rows + "</tbody></table>";
         }
-        out += "<p class=\"muted\">Open a dataset for its row count, size, format and sample.</p>";
+        if (!result_rows.empty()) {
+            out += std::format(
+                "<details><summary>Results ({})</summary><p class=\"muted\">Tables the engine wrote "
+                "as the output of runs. They are not offered as training data.</p><table><thead>"
+                "<tr><th>Name</th><th>Database</th></tr></thead><tbody>{}</tbody></table>"
+                "</details>",
+                result_count,
+                result_rows);
+        }
+        out += "<p class=\"muted\">Open a dataset for its columns and their types, row count, size and first rows.</p>";
         out +=
             std::format("<p>{}</p>", row_link("/train/query?" + query, "Query your data with SQL"));
         load += std::format(
@@ -5059,7 +5198,12 @@ std::string workspace_content(const WorkspacePage& page) {
             "<option value=\"\">From the file name</option><option value=\"csv\">CSV</option>"
             "<option value=\"jsonl\">JSONL</option></select></label><label>Dataset name<input "
             "name=\"table_name\" required pattern=\"[A-Za-z_][A-Za-z0-9_]{{0,62}}\" "
-            "placeholder=\"accounts\"></label><button class=\"button button-primary\" "
+            "placeholder=\"accounts\"><small>Letters, digits and underscores, starting with a "
+            "letter, so SQL can query it.</small></label><label><input "
+            "type=\"checkbox\" name=\"if_exists\" value=\"rename\"> If the name is taken, save "
+            "it under the next free name (accounts_2)</label><p class=\"muted\">Otherwise a taken "
+            "name is refused, and a CSV row whose field count differs from the header is refused "
+            "with its line number.</p><button class=\"button button-primary\" "
             "type=\"submit\">Upload</button></form></details>",
             hidden("customer_id", page.customer_id));
         if (!connections.empty()) {
@@ -5115,42 +5259,64 @@ std::string workspace_content(const WorkspacePage& page) {
                    load + "</section>");
     } else if (page.section == "dataset") {
         const nlohmann::json dataset = data.value("get_dataset", nlohmann::json::object());
-        std::string columns;
-        for (const nlohmann::json& column : dataset.value("columns", nlohmann::json::array())) {
-            columns += (columns.empty() ? "" : ", ") + cell_text(column);
-        }
         const nlohmann::json partitions = dataset.value("partitions", nlohmann::json::array());
         const std::string database = json_text(dataset, "database").empty()
                                          ? std::string("datasets")
                                          : json_text(dataset, "database");
+        const nlohmann::json sample_rows =
+            data.value("sample", nlohmann::json::object()).value("rows", nlohmann::json::array());
+        // The workspace keeps every dataset as JSON rows and does not record the file it came
+        // from, so this is how it is stored, not what was uploaded (lake#447).
+        const std::string stored = json_text(dataset, "format") == "jsonl"
+                                       ? std::string("JSON rows")
+                                       : json_text(dataset, "format");
+        // More copies only matter when a partition has one (lake#447): every load path can
+        // land that way, so the offer does not assume a connection.
+        const std::size_t copies = fewest_copies(dataset);
+        std::string durability;
+        if (partitions.empty()) {
+            durability = "<dt>Copies</dt><dd>Every node</dd>";
+        } else {
+            durability = std::format("<dt>Copies</dt><dd>{}</dd>", copies);
+        }
+        std::string promote;
+        if (!partitions.empty() && copies <= 1) {
+            promote = std::format(
+                "<form class=\"inline\" method=\"post\" action=\"/train/dataset/promote\">{}{}{}"
+                "<button type=\"submit\">Keep durable</button></form> <span class=\"muted\">This "
+                "dataset has one copy; keeping more lets it survive losing a node.</span> ",
+                hidden("customer_id", page.customer_id),
+                hidden("database", database),
+                hidden("dataset", page.subject));
+        }
         out += std::format(
-            "<section class=\"panel\"><dl><dt>Database</dt><dd>{}</dd><dt>Format</dt><dd>{}</dd>"
-            "<dt>Rows</dt><dd>{}</dd><dt>Bytes</dt><dd>{}</dd><dt>Columns</dt><dd>{}</dd>"
-            "<dt>Partitions</dt><dd>{}</dd>{}</"
-            "dl>"
-            "<form class=\"inline\" method=\"post\" "
-            "action=\"/train/dataset/promote\">{}{}{}<button "
-            "type=\"submit\">Keep durable</button></form> <span class=\"muted\">A dataset pulled "
-            "from a connection is a cache with one copy; this keeps more copies.</span> "
-            "{}</section>",
+            "<section class=\"panel\">{}<dl><dt>Id</dt><dd><code>{}</code></dd><dt>Database</dt>"
+            "<dd>{}</dd><dt>Stored as</dt><dd>{}</dd><dt>Rows</dt><dd>{}</dd><dt>Bytes</dt><dd>{}"
+            "</dd><dt>Partitions</dt><dd>{}</dd>{}{}</dl>{}{}</section>",
+            result_dataset(dataset) || lake::api::datasets::engine_database(database)
+                ? "<p class=\"muted\">A table the engine wrote as the output of a run.</p>"
+                : "",
+            web_ui_escape(lake::api::datasets::id_of(database, page.subject)),
             web_ui_escape(database),
-            web_ui_escape(json_text(dataset, "format")),
+            web_ui_escape(stored),
             web_ui_escape(cell_text(dataset.value("rows",
                 dataset.value("expected_rows", nlohmann::json(""))))),
             web_ui_escape(json_text(dataset, "size_bytes")),
-            web_ui_escape(columns),
             partitions.size(),
+            durability,
             dataset.value("degraded", false)
                 ? "<dt>Health</dt><dd class=\"error\">" +
                       web_ui_escape(json_text(dataset, "degraded_reason")) + "</dd>"
                 : std::string(),
-            hidden("customer_id", page.customer_id),
-            hidden("database", database),
-            hidden("dataset", page.subject),
+            promote,
             row_link(
                 "/train/query?" + query + "&statement=" +
                     url_component("SELECT * FROM " + database + "." + page.subject),
                 "Query it"));
+        out += "<section class=\"panel\"><h2>Columns</h2>" +
+               dataset_columns_table(
+                   dataset, data.value("analyze_dataset", nlohmann::json::object()), sample_rows) +
+               "</section>";
         if (const auto sample = data.find("sample"); sample != data.end()) {
             out += "<section class=\"panel\"><h2>First Rows</h2>" +
                    object_table(sample->value("rows", nlohmann::json::array())) + "</section>";
@@ -5383,9 +5549,15 @@ std::string workspace_content(const WorkspacePage& page) {
                    "and call it from your own code.</p>";
         }
         std::string tables;
+        std::string result_tables;
         for (const nlohmann::json& dataset : data.value("list_datasets", nlohmann::json::object())
                                                  .value("datasets", nlohmann::json::array())) {
-            tables += std::format("<option>{}</option>", web_ui_escape(json_text(dataset, "name")));
+            (result_dataset(dataset) ? result_tables : tables) +=
+                std::format("<option>{}</option>", web_ui_escape(json_text(dataset, "name")));
+        }
+        if (!result_tables.empty()) {
+            // A run's output can be worth searching, but it is not data a person loaded.
+            tables += "<optgroup label=\"Results\">" + result_tables + "</optgroup>";
         }
         out += tables.empty()
                    ? std::string("<p class=\"muted\">To make an index, first add a dataset on "

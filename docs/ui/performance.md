@@ -105,7 +105,7 @@ workspace work without an explicit review of this table and the test map.
 | `/w/:workspace_id/train/agent` | 3 | 1 |
 | `/w/:workspace_id/train/agents` | 1 | 1 |
 | `/w/:workspace_id/train/data` | 3 | 1 |
-| `/w/:workspace_id/train/dataset` | 2 | 1 |
+| `/w/:workspace_id/train/dataset` | 3 | 1 |
 | `/w/:workspace_id/train/experiment` | 2 | 1 |
 | `/w/:workspace_id/train/experiment/run` | 1 | 1 |
 | `/w/:workspace_id/train/experiments` | 2 | 1 |
@@ -187,9 +187,12 @@ not reproduce the earlier 19-dataset population. Populated live after figures re
 Data already made one `list_datasets` call, not per-dataset Lake reads. The upstream
 `Node::datasets()` implementation scans stored rows for columns, table directories for JSONL
 byte totals and partition placement. Its list contract has no projection argument.
-Lake now requests just `database` and `name` with
-`SELECT database, name FROM system.datasets`; counts, byte totals, format and samples are
-shown on the dataset page, whose SQL sample uses `LIMIT 20`.
+Lake now requests just the database and the dataset name with
+`SELECT database, dataset FROM system.datasets` (the view names the table column `dataset`;
+asking for `name` left every Data row blank until lake#447); counts, byte totals, format and
+samples are shown on the dataset page, whose SQL sample uses `LIMIT 20`. The dataset page's
+third call, `analyze_dataset` over 256 sampled rows, runs in the same round and gives the column
+types (lake#447).
 Zetta still materializes summaries before SQL projection.
 [zetta#1195](https://github.com/oramasearch/zetta/issues/1195) requests removal of that upstream
 scan; the read-only reference checkout was not changed.

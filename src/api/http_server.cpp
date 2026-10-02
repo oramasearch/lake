@@ -72,6 +72,7 @@
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/datasets.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
@@ -8746,7 +8747,7 @@ struct ApiServer::Impl {
             if (lean_datasets && capability == "list_datasets") {
                 capability = "workspace_sql";
                 input = {{"customer_id", customer_id},
-                         {"statement", "SELECT database, name FROM system.datasets"}};
+                         {"statement", "SELECT database, dataset FROM system.datasets"}};
                 projected.push_back(index);
                 continue;
             }
@@ -8762,7 +8763,10 @@ struct ApiServer::Impl {
         for (const auto index : projected) {
             auto& result = results->at(index);
             if (result.ok) {
+                // system.datasets names the column `dataset`; annotate_list adds the `name`,
+                // `id` and `kind` the pages read (lake#447).
                 result.value = {{"datasets", result.value.value("rows", nlohmann::json::array())}};
+                datasets::annotate_list(result.value);
             }
         }
         co_return std::move(*results);
@@ -9212,7 +9216,11 @@ struct ApiServer::Impl {
                 }
             } else if (section == "data") {
                 if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
-                    page.data["loaded"] = {{"table", loaded}, {"rows", query_value(route, "rows")}};
+                    page.data["loaded"] = {{"table", loaded},
+                                           {"rows", query_value(route, "rows")},
+                                           {"database", query_value(route, "database")},
+                                           {"format", query_value(route, "format")},
+                                           {"renamed_from", query_value(route, "renamed_from")}};
                 }
             } else if (section == "agent") {
                 reads = {{"get_agent", {{"id", page.subject}}},
@@ -9239,7 +9247,15 @@ struct ApiServer::Impl {
                      {"workspace_sql",
                       {{"customer_id", page.customer_id},
                        {"statement", "SELECT * FROM " + selected_database + "." + page.subject +
-                                         " LIMIT 20"}}}});
+                                         " LIMIT 20"}}},
+                     // Column types (lake#447): the workspace stores schemaless rows, and its
+                     // analysis reads each column's type from a sample.
+                     {"workspace_query",
+                      {{"customer_id", page.customer_id},
+                       {"capability", "analyze_dataset"},
+                       {"input",
+                        {{"dataset", selected_database + "." + page.subject},
+                         {"sample_rows", 256}}}}}});
                 if (!results) {
                     page.error = results.error().message;
                 } else {
@@ -9256,6 +9272,9 @@ struct ApiServer::Impl {
                             rows.erase(rows.begin() + 20, rows.end());
                         }
                         page.data["sample"] = {{"rows", std::move(rows)}};
+                    }
+                    if (const ApiResult& analysis = results->at(2); analysis.ok) {
+                        page.data["analyze_dataset"] = analysis.value;
                     }
                 }
             } else if (section == "query") {
@@ -9529,21 +9548,35 @@ struct ApiServer::Impl {
             }
             std::string content(file.contents.size(), '\0');
             std::memcpy(content.data(), file.contents.data(), file.contents.size());
+            // A taken name is refused unless the person chose the next free name (lake#447).
+            const std::string if_exists =
+                form.fields["if_exists"] == "rename" ? "rename" : "fail";
             result = unwrap(co_await workspace_call("workspace_act",
                                                     {{"customer_id", customer_id},
                                                      {"capability", "upload_dataset"},
                                                      {"input",
                                                       {{"table_name", form.fields["table_name"]},
                                                        {"format", format},
-                                                       {"content", std::move(content)}}}},
+                                                       {"content", std::move(content)},
+                                                       {"if_exists", if_exists}}}},
                                                     context));
+            if (result.ok && !result.value.contains("format")) {
+                result.value["format"] = format;
+            }
         }
         if (!result.ok) {
             back += "&error=" + oauth_url_encode(result.error.message);
         } else {
-            // Say what arrived, and where (lake#256).
+            // Say what arrived, from what, and where (lake#256, lake#447).
             back += "&loaded=" + oauth_url_encode(result.value.value("table", std::string())) +
-                    "&rows=" + std::to_string(result.value.value("rows", 0));
+                    "&rows=" + std::to_string(result.value.value("rows", 0)) +
+                    "&database=" +
+                    oauth_url_encode(result.value.value("database", std::string("datasets"))) +
+                    "&format=" + oauth_url_encode(result.value.value("format", std::string()));
+            if (const std::string renamed = result.value.value("renamed_from", std::string());
+                !renamed.empty()) {
+                back += "&renamed_from=" + oauth_url_encode(renamed);
+            }
         }
         co_return co_await redirect(route, back);
     }
