@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/api/datasets.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
@@ -2165,6 +2166,303 @@ TEST(Workspaces, ApplicationAgentDatasetToolsUseWorkspaceDatasetIds) {
               (json{{"database", "customer_success"}, {"dataset", "accounts"}}));
 }
 
+// The dataset rules lake applies on top of the workspace (lake#447), as pure functions.
+TEST(Workspaces, DatasetRulesNameCsvIdAndEngineResults) {
+    namespace datasets = lake::api::datasets;
+    EXPECT_EQ(datasets::name_problem("accounts_2026"), "");
+    EXPECT_EQ(datasets::name_problem("_staging"), "");
+    EXPECT_NE(datasets::name_problem("ux-review-2026-10-01-accounts").find("not '-'"),
+              std::string::npos);
+    EXPECT_NE(datasets::name_problem("2026_accounts"), "");
+    EXPECT_NE(datasets::name_problem("accounts list"), "");
+    EXPECT_NE(datasets::name_problem("Select").find("SQL keyword"), std::string::npos);
+    EXPECT_NE(datasets::name_problem(std::string(64, 'a')), "");
+    EXPECT_NE(datasets::name_problem(""), "");
+
+    EXPECT_EQ(datasets::csv_problem("id,plan\n1,pro\n2,\"free, trial\"\n"), "");
+    EXPECT_EQ(datasets::csv_problem("id,plan\r\n1,pro\r\n\r\n"), "") << "CRLF and blank lines";
+    EXPECT_EQ(datasets::csv_problem("id,plan\n1,pro\n2,team,extra\n"),
+              "line 3: 3 fields, but the header has 2 columns");
+    EXPECT_EQ(datasets::csv_problem("\nid,plan\n1\n"),
+              "line 3: 1 fields, but the header has 2 columns")
+        << "the line number counts the leading blank line";
+    EXPECT_EQ(datasets::csv_problem("id,plan\n1,\"pro\n"),
+              "line 2: a quoted field is not closed (a row must stay on one line)");
+    EXPECT_EQ(datasets::csv_problem("id,,plan\n"), "line 1: header column 2 has no name");
+    EXPECT_EQ(datasets::csv_problem("id,id\n"), "line 1: the header names column 'id' twice");
+    EXPECT_EQ(datasets::csv_problem("\n\n"), "the file has no header row");
+
+    for (const char* id : {"datasets/accounts", "datasets.accounts", "accounts"}) {
+        const auto ref = datasets::parse_id(id);
+        ASSERT_TRUE(ref) << id;
+        EXPECT_EQ(ref->database, "datasets") << id;
+        EXPECT_EQ(ref->name, "accounts") << id;
+    }
+    EXPECT_FALSE(datasets::parse_id("datasets/"));
+    EXPECT_FALSE(datasets::parse_id("/accounts"));
+    EXPECT_EQ(datasets::id_of("", "accounts"), "datasets/accounts");
+
+    for (const char* database : {"entity_resolution_results", "churn_results",
+                                 "segmentation_results", "solution_results", "forecasts"}) {
+        EXPECT_TRUE(datasets::engine_database(database)) << database;
+    }
+    for (const char* database : {"datasets", "customer_success", "_results"}) {
+        EXPECT_FALSE(datasets::engine_database(database)) << database;
+    }
+
+    // system.datasets names the column `dataset`; the list gains name, id and kind.
+    json listed = {{"datasets",
+                    json::array({{{"database", "datasets"}, {"dataset", "accounts"}},
+                                 {{"database", "entity_resolution_results"},
+                                  {"dataset", "pairs_1a2b"}}})}};
+    datasets::annotate_list(listed);
+    EXPECT_EQ(listed["datasets"][0]["name"], "accounts");
+    EXPECT_EQ(listed["datasets"][0]["id"], "datasets/accounts");
+    EXPECT_EQ(listed["datasets"][0]["kind"], "data");
+    EXPECT_EQ(listed["datasets"][1]["id"], "entity_resolution_results/pairs_1a2b");
+    EXPECT_EQ(listed["datasets"][1]["kind"], "result");
+}
+
+// Uploads are checked before they reach the workspace, a taken name is never renamed silently,
+// and every dataset surface reads the one id form (lake#447).
+TEST(Workspaces, DatasetWritesAreCheckedAndIdsAgree) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.registry = &registry;
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.credential_session_id = principal->session_id;
+        context.credential_kind = principal->kind;
+        context.scopes = principal->scopes;
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = w.customer_id;
+        if (registry.find(name)->input_schema["properties"].contains("workspace_id") &&
+            !input.contains("workspace_id")) {
+            input["workspace_id"] = w.workspace_id();
+        }
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    };
+    const auto upload = [&](json input) {
+        return call("workspace_act", {{"capability", "upload_dataset"}, {"input", std::move(input)}});
+    };
+    const auto uploads = [&] {
+        return std::ranges::count_if(w.caller->calls, [](const auto& called) {
+            return called.first == "upload_dataset";
+        });
+    };
+
+    // A name SQL cannot query never reaches the workspace.
+    auto refused = upload({{"table_name", "ux-review-2026-10-01-accounts"},
+                           {"format", "csv"},
+                           {"content", "id,plan\n1,pro\n"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/input/table_name");
+    refused = upload({{"table_name", "accounts"},
+                      {"database", "my-data"},
+                      {"format", "csv"},
+                      {"content", "id\n1\n"}});
+    EXPECT_EQ(refused.error.path, "/input/database");
+    // A malformed CSV is refused with its line, not loaded short.
+    refused = upload({{"table_name", "accounts"},
+                      {"format", "csv"},
+                      {"content", "id,plan\n1,pro\n2,team,extra\n"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_NE(refused.error.message.find("line 3: 3 fields, but the header has 2 columns"),
+              std::string::npos)
+        << refused.error.message;
+    EXPECT_EQ(uploads(), 0);
+    // So is a name the pull path would land.
+    refused = call("workspace_act",
+                   {{"capability", "create_dataset_from_query"},
+                    {"input", {{"table_name", "q-1"}, {"connection", "crm"}, {"query", "SELECT 1"}}}});
+    EXPECT_EQ(refused.error.path, "/input/table_name");
+
+    // A taken name is refused unless the caller chose the next free name.
+    w.caller->answers["get_dataset"] = {{"name", "accounts"}, {"database", "datasets"}};
+    refused = upload({{"table_name", "accounts"}, {"format", "csv"}, {"content", "id\n1\n"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "conflict");
+    EXPECT_NE(refused.error.message.find("if_exists"), std::string::npos);
+    EXPECT_EQ(uploads(), 0);
+    w.caller->answers["upload_dataset"] = {
+        {"database", "datasets"}, {"table", "accounts_2"}, {"format", "csv"}, {"rows", 1}};
+    const auto renamed = upload({{"table_name", "accounts"},
+                                 {"format", "csv"},
+                                 {"content", "id\n1\n"},
+                                 {"if_exists", "rename"}});
+    ASSERT_TRUE(renamed.ok) << renamed.error.message;
+    EXPECT_EQ(renamed.value["renamed_from"], "accounts");
+    EXPECT_EQ(renamed.value["id"], "datasets/accounts_2");
+    EXPECT_EQ(w.caller->capability, "upload_dataset");
+    EXPECT_FALSE(w.caller->input.contains("if_exists")) << "a lake field, not sent to Zetta";
+    EXPECT_FALSE(upload({{"table_name", "accounts"}, {"if_exists", "replace"}}).ok);
+
+    // A free name loads as asked, with nothing renamed.
+    w.caller->answers.erase("get_dataset");
+    w.caller->answers["upload_dataset"] = {
+        {"database", "datasets"}, {"table", "orders"}, {"format", "csv"}, {"rows", 2}};
+    const auto loaded = upload({{"table_name", "orders"},
+                                {"format", "csv"},
+                                {"content", "id,total\n1,9.5\n2,\"1,200\"\n"}});
+    ASSERT_TRUE(loaded.ok) << loaded.error.message;
+    EXPECT_FALSE(loaded.value.contains("renamed_from"));
+    EXPECT_EQ(loaded.value["format"], "csv");
+
+    // One id form: list gives it, every get reads it.
+    w.caller->answers["list_datasets"] = {
+        {"datasets", json::array({{{"database", "datasets"}, {"name", "accounts"}},
+                                  {{"database", "churn_results"}, {"name", "scores_1"}}})}};
+    const auto listed = call("workspace_query", {{"capability", "list_datasets"}});
+    ASSERT_TRUE(listed.ok);
+    EXPECT_EQ(listed.value["datasets"][0]["id"], "datasets/accounts");
+    EXPECT_EQ(listed.value["datasets"][0]["kind"], "data");
+    EXPECT_EQ(listed.value["datasets"][1]["kind"], "result");
+    const auto direct = call("list_datasets", json::object());
+    ASSERT_TRUE(direct.ok);
+    EXPECT_EQ(direct.value["datasets"][1]["id"], "churn_results/scores_1");
+    w.caller->answers["get_dataset"] = {{"name", "accounts"}, {"database", "datasets"}};
+    for (const char* id : {"datasets/accounts", "datasets.accounts"}) {
+        const auto got = call("workspace_query",
+                              {{"capability", "get_dataset"}, {"input", {{"dataset", id}}}});
+        ASSERT_TRUE(got.ok) << id;
+        EXPECT_EQ(w.caller->input, (json{{"dataset", "accounts"}, {"database", "datasets"}})) << id;
+        EXPECT_EQ(got.value["id"], "datasets/accounts");
+    }
+    call("workspace_query",
+         {{"capability", "analyze_dataset"}, {"input", {{"dataset", "datasets/accounts"}}}});
+    EXPECT_EQ(w.caller->input, (json{{"dataset", "datasets.accounts"}}));
+    // The direct tool takes the list's id with or without workspace_id.
+    const auto got = call("get_dataset", {{"id", "datasets/accounts"}});
+    ASSERT_TRUE(got.ok) << got.error.message;
+    EXPECT_EQ(got.value["kind"], "data");
+    lake::api::ApiContext bare;
+    bare.store = &store;
+    bare.workspaces = w.service.get();
+    bare.authorized = true;
+    bare.acting_user_id = principal->user_id;
+    bare.acting_identity = principal->taap_id;
+    bare.credential_session_id = principal->session_id;
+    bare.credential_kind = principal->kind;
+    bare.scopes = principal->scopes;
+    bare.request_id = lake::control::new_uuid_v4();
+    // The workspace from the URL (/w/<workspace>/v1/get_dataset), not repeated in the input.
+    bare.path_workspace_id = w.workspace_id();
+    bare.workspace_id = bare.path_workspace_id;
+    auto without = liquid::runtime::block_on(registry.call_async(
+        "get_dataset", {{"id", "datasets.accounts"}, {"customer_id", w.customer_id}}, bare));
+    ASSERT_TRUE(without);
+    ASSERT_TRUE(without->ok) << without->error.message;
+    EXPECT_EQ(without->value["id"], "datasets/accounts");
+    EXPECT_EQ(without->value["kind"], "data");
+}
+
+// The Data page shows every name, keeps engine results apart and out of the pickers, and the
+// dataset page shows column types and offers more copies only when there is one (lake#447).
+TEST(Workspaces, DataPageNamesResultsColumnTypesAndUploadNotice) {
+    lake::api::WorkspacePage page;
+    page.section = "data";
+    page.customer_id = std::string(customer);
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    json listed = {{"datasets",
+                    json::array({{{"database", "datasets"}, {"dataset", "accounts"}},
+                                 {{"database", "entity_resolution_results"},
+                                  {"dataset", "pairs_1a2b"}},
+                                 {{"database", "churn_results"}, {"dataset", "scores_9"}}})}};
+    lake::api::datasets::annotate_list(listed);
+    page.data["list_datasets"] = listed;
+    std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("name=accounts\">accounts</a>"), std::string::npos)
+        << "the name shows (it was blank)";
+    const std::size_t results = html.find("<summary>Results (2)</summary>");
+    ASSERT_NE(results, std::string::npos);
+    EXPECT_GT(html.find("pairs_1a2b"), results) << "engine tables are grouped under Results";
+    EXPECT_LT(html.find("name=accounts\""), results);
+    EXPECT_NE(html.find("name=\"if_exists\" value=\"rename\""), std::string::npos);
+
+    page.data["loaded"] = {{"table", "accounts_2"},
+                           {"rows", "400"},
+                           {"database", "datasets"},
+                           {"format", "csv"},
+                           {"renamed_from", "accounts"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Loaded <strong>400</strong> rows from your CSV file into"),
+              std::string::npos);
+    EXPECT_NE(html.find("<strong>accounts</strong> was already taken, so it was saved as "
+                        "<strong>accounts_2</strong>"),
+              std::string::npos);
+    page.data.erase("loaded");
+
+    // Pickers offer only data a person loaded.
+    page.section = "project";
+    page.subject = "retention";
+    page.data["get_project"] = {{"name", "retention"}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<option value=\"datasets.accounts\">accounts</option>"),
+              std::string::npos);
+    EXPECT_EQ(html.find("pairs_1a2b"), std::string::npos);
+    EXPECT_EQ(html.find("scores_9"), std::string::npos);
+    page.section = "indexes";
+    page.subject.clear();
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<optgroup label=\"Results\"><option>pairs_1a2b</option>"),
+              std::string::npos);
+
+    page.section = "dataset";
+    page.subject = "accounts";
+    page.data = {{"get_dataset",
+                  {{"database", "datasets"},
+                   {"name", "accounts"},
+                   {"rows", 2},
+                   {"format", "jsonl"},
+                   {"columns", json::array({"id", "plan", "seats", "renewed"})},
+                   {"partitions",
+                    json::array({{{"partition_id", "p1"},
+                                  {"owner_nodes", json::array({"n1", "n2", "n3"})}}})}}},
+                 {"sample",
+                  {{"rows", json::array({{{"id", 1}, {"plan", "pro"}, {"seats", 2.5},
+                                          {"renewed", true}},
+                                         {{"id", 2}, {"plan", "team"}, {"seats", 3},
+                                          {"renewed", nullptr}}})}}},
+                 {"analyze_dataset",
+                  {{"columns", json::array({{{"name", "id"},
+                                             {"semantic_type", "identifier"},
+                                             {"null_rate", 0.0}},
+                                            {{"name", "plan"},
+                                             {"semantic_type", "categorical"},
+                                             {"null_rate", 0.5}}})}}}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("<td><code>id</code></td><td>integer</td><td>identifier</td><td>0%</td>"),
+              std::string::npos);
+    EXPECT_NE(html.find("<td><code>plan</code></td><td>text</td><td>categorical</td><td>50%</td>"),
+              std::string::npos);
+    EXPECT_NE(html.find("<td><code>seats</code></td><td>decimal</td>"), std::string::npos);
+    EXPECT_NE(html.find("<td><code>renewed</code></td><td>boolean</td>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Stored as</dt><dd>JSON rows</dd>"), std::string::npos);
+    EXPECT_EQ(html.find("<dt>Format</dt>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Copies</dt><dd>3</dd>"), std::string::npos);
+    EXPECT_EQ(html.find("Keep durable"), std::string::npos) << "three copies need no more";
+    EXPECT_EQ(html.find("pulled from a connection"), std::string::npos);
+    page.data["get_dataset"]["partitions"][0]["owner_nodes"] = json::array({"n1"});
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Keep durable"), std::string::npos);
+    EXPECT_NE(html.find("This dataset has one copy"), std::string::npos);
+}
+
 TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
     lake::api::WorkspacePage page;
     page.section = "data";
@@ -2192,8 +2490,7 @@ TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
     EXPECT_EQ(html.find("name=\"path\""), std::string::npos) << "no writing files on the node";
     EXPECT_EQ(html.find("<th>Rows</th>"), std::string::npos);
     EXPECT_EQ(html.find("<th>Bytes</th>"), std::string::npos);
-    EXPECT_NE(html.find("Open a dataset for its row count, size, format and sample"),
-              std::string::npos);
+    EXPECT_NE(html.find("Open a dataset for its columns and their types"), std::string::npos);
 
     page.section = "dataset";
     page.subject = "accounts";
@@ -2212,7 +2509,8 @@ TEST(Workspaces, DataPagesBrowseTablesShowADatasetAndQueryIt) {
     EXPECT_NE(html.find("action=\"/train/dataset/promote\""), std::string::npos);
     EXPECT_NE(html.find("<dt>Rows</dt><dd>1234</dd>"), std::string::npos);
     EXPECT_NE(html.find("<dt>Bytes</dt><dd>5678</dd>"), std::string::npos);
-    EXPECT_NE(html.find("<dt>Format</dt><dd>parquet</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Stored as</dt><dd>parquet</dd>"), std::string::npos);
+    EXPECT_NE(html.find("<dt>Id</dt><dd><code>datasets/accounts</code></dd>"), std::string::npos);
 
     page.section = "query";
     page.data = {{"statement", "SELECT 1"},

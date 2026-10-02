@@ -197,6 +197,7 @@ add_library(lake-core STATIC
   src/api/oauth.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
+  src/api/datasets.cpp
   src/api/stream_capabilities.cpp
   src/api/experiment_capabilities.cpp
   src/api/web_ui_streams.cpp

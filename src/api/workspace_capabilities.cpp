@@ -20,6 +20,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "lake/api/datasets.hpp"
 #include "workspace_bus.hpp"
 
 namespace lake::api {
@@ -297,6 +298,106 @@ liquid::runtime::task<ApiResult> project_agent_compile_check(ApiContext& context
     co_return ApiResult::failure(refused.code, refused.message);
 }
 
+// A dataset reference in any id form (`<database>/<name>`, `<database>.<name>`, `<name>`) as the
+// workspace capability reads it (lake#447): get_dataset takes `dataset` plus `database`, the
+// analysis reads take `database.table`.
+void normalize_dataset_reference(const std::string& capability, json& arguments) {
+    if (!arguments.is_object() || !arguments.contains("dataset") ||
+        !arguments["dataset"].is_string()) {
+        return;
+    }
+    const std::string id = arguments["dataset"];
+    if (id.find('/') == std::string::npos &&
+        (capability != "get_dataset" || id.find('.') == std::string::npos)) {
+        return;
+    }
+    const auto ref = datasets::parse_id(id);
+    if (!ref) {
+        return;
+    }
+    if (capability == "get_dataset") {
+        arguments["dataset"] = ref->name;
+        if (!arguments.contains("database")) {
+            arguments["database"] = ref->database;
+        }
+    } else if (capability == "analyze_dataset" || capability == "plan_features") {
+        arguments["dataset"] = ref->database + "." + ref->name;
+    }
+}
+
+struct DatasetWriteCheck {
+    std::optional<ApiResult> failure;
+    std::string requested_table;
+};
+
+// Before a dataset lands (lake#447): the table and database names must be ones SQL can query, a
+// CSV upload must parse into rows that match its header, and a name already taken is refused
+// unless the caller asked for the next free name with `if_exists: "rename"` (a lake field, removed
+// before the call). The workspace itself renames silently; lake reports it as `renamed_from`.
+liquid::runtime::task<DatasetWriteCheck> check_dataset_write(ApiContext& context,
+                                                             std::string customer_id,
+                                                             std::string capability,
+                                                             json& arguments) {
+    DatasetWriteCheck check;
+    if (!arguments.is_object()) {
+        co_return check;
+    }
+    std::string if_exists = "fail";
+    if (arguments.contains("if_exists")) {
+        if (!arguments["if_exists"].is_string() ||
+            (arguments["if_exists"] != "fail" && arguments["if_exists"] != "rename")) {
+            check.failure = ApiResult::failure(
+                "invalid_input", "if_exists is \"fail\" or \"rename\"", "/input/if_exists");
+            co_return check;
+        }
+        if_exists = arguments["if_exists"];
+        arguments.erase("if_exists");
+    }
+    for (const char* field : {"table_name", "database"}) {
+        if (!arguments.contains(field)) {
+            continue;
+        }
+        const std::string problem = arguments[field].is_string()
+                                        ? datasets::name_problem(arguments[field].get<std::string>())
+                                        : std::string("must be a string");
+        if (!problem.empty()) {
+            check.failure = ApiResult::failure(
+                "invalid_input", std::string(field) + ": " + problem, std::string("/input/") + field);
+            co_return check;
+        }
+    }
+    if (capability == "upload_dataset" && arguments.value("format", std::string()) == "csv" &&
+        arguments.contains("content") && arguments["content"].is_string()) {
+        const std::string problem = datasets::csv_problem(arguments["content"].get<std::string>());
+        if (!problem.empty()) {
+            check.failure = ApiResult::failure(
+                "invalid_input", "the CSV file is malformed: " + problem, "/input/content");
+            co_return check;
+        }
+    }
+    if (!arguments.contains("table_name")) {
+        co_return check;
+    }
+    check.requested_table = arguments["table_name"];
+    if (if_exists == "rename") {
+        co_return check;
+    }
+    const std::string database = arguments.value("database", std::string("datasets"));
+    auto existing = co_await call_workspace(
+        context, std::move(customer_id), "get_dataset", true,
+        {{"dataset", check.requested_table}, {"database", database}});
+    if (existing && *existing && (*existing)->is_object() &&
+        (*existing)->value("name", std::string()) == check.requested_table) {
+        check.failure = ApiResult::failure(
+            "conflict",
+            "a dataset named '" + check.requested_table + "' already exists in " + database +
+                "; choose another name, or pass if_exists: \"rename\" to save it under the next "
+                "free name",
+            "/input/table_name");
+    }
+    co_return check;
+}
+
 void register_workspace_call(Registry& registry, bool read) {
     registry.add(Capability{
         .name = read ? "workspace_query" : "workspace_act",
@@ -357,11 +458,28 @@ void register_workspace_call(Registry& registry, bool read) {
                     study_actions.at(capability), arguments, context);
                 co_return result ? *result : ApiResult::failure("store_error", result.error().message);
             }
+            json arguments = input.value("input", json::object());
+            // Dataset rules lake applies before and after the workspace answers (lake#447).
+            std::string requested_table;
+            if (!read && (capability == "upload_dataset" ||
+                          capability == "create_dataset_from_query")) {
+                auto checked = co_await check_dataset_write(
+                    context, input.at("customer_id"), capability, arguments);
+                if (!checked) {
+                    co_return ApiResult::failure("store_error", checked.error().message);
+                }
+                if (checked->failure) {
+                    co_return *checked->failure;
+                }
+                requested_table = std::move(checked->requested_table);
+            } else if (read) {
+                normalize_dataset_reference(capability, arguments);
+            }
             auto called = co_await call_workspace(context,
                                                   input.at("customer_id"),
                                                   capability,
                                                   workspace_uses_get(capability),
-                                                  input.value("input", json::object()));
+                                                  std::move(arguments));
             if (!called) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }
@@ -379,6 +497,22 @@ void register_workspace_call(Registry& registry, bool read) {
                 co_return ApiResult::failure(called->error().code, message, path);
             }
             json value = std::move(**called);
+            if (capability == "list_datasets") {
+                datasets::annotate_list(value);
+            } else if (capability == "get_dataset" && value.is_object() &&
+                       value.contains("name") && value["name"].is_string()) {
+                const std::string database = value.value("database", std::string("datasets"));
+                value["id"] = datasets::id_of(database, value["name"].get<std::string>());
+                value["kind"] = datasets::kind_of(database);
+            } else if (!requested_table.empty() && value.is_object()) {
+                const std::string table = value.value("table", std::string());
+                if (!table.empty() && table != requested_table) {
+                    value["renamed_from"] = requested_table;
+                }
+                if (!table.empty()) {
+                    value["id"] = datasets::id_of(value.value("database", std::string()), table);
+                }
+            }
             co_return ApiResult::success(value.is_object() ? std::move(value)
                                                            : json{{"value", std::move(value)}});
         }});
@@ -1649,7 +1783,10 @@ void register_dataset_catalog_capability(Registry& registry) {
     registry.add(Capability{
         .name = "list_datasets",
         .title = "List workspace datasets",
-        .description = "List the datasets in a customer's workspace for ApplicationAgent.",
+        .description = "List the datasets in a customer's workspace. Each carries `id` "
+                       "(<database>/<name>, the form get_dataset takes) and `kind`: `data` for "
+                       "data a person loaded, `result` for tables the engine wrote as a run's "
+                       "output.",
         .input_schema = customer_input_schema(json::object(), json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -1672,16 +1809,7 @@ void register_dataset_catalog_capability(Registry& registry) {
                 co_return ApiResult::failure(called->error().code, called->error().message);
             }
             json value = std::move(**called);
-            for (json& dataset : value["datasets"]) {
-                if (!dataset.is_object() || dataset.contains("id")) {
-                    continue;
-                }
-                const std::string database = dataset.value("database", std::string("datasets"));
-                const std::string name = dataset.value("name", std::string());
-                if (!name.empty()) {
-                    dataset["id"] = database + "/" + name;
-                }
-            }
+            datasets::annotate_list(value);
             set_audit(context, "workspace.query", input, "list_datasets");
             co_return ApiResult::success(std::move(value));
         }});

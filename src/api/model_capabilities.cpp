@@ -11,6 +11,7 @@
 
 #include <openssl/evp.h>
 
+#include "lake/api/datasets.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/store.hpp"
@@ -422,8 +423,9 @@ Capability dataset_capability() {
     return Capability{
         .name = "get_dataset",
         .title = "Get dataset",
-        .description = "Read a repository dataset revision, or a workspace dataset by its "
-                       "<database>/<dataset> id for ApplicationAgent.",
+        .description = "Read a repository dataset revision, or a workspace dataset by the "
+                       "<database>/<dataset> id list_datasets returns (<database>.<dataset> "
+                       "and a bare name in `datasets` are read too).",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -451,9 +453,6 @@ Capability dataset_capability() {
             if (input.contains("revision")) {
                 co_return repository_info(input, context, "dataset");
             }
-            if (!input.contains("workspace_id")) {
-                co_return ApiResult::failure("invalid_input", "workspace_id is required", "/workspace_id");
-            }
             if (!context.workspaces) {
                 co_return ApiResult::failure("store_unavailable",
                                              "workspaces are not configured on this lake");
@@ -464,16 +463,15 @@ Capability dataset_capability() {
                                              customer_id.error().message,
                                              customer_id.error().path);
             }
-            std::string database = "datasets";
-            std::string dataset = input.at("id");
-            if (const std::size_t slash = dataset.find('/'); slash != std::string::npos) {
-                database = dataset.substr(0, slash);
-                dataset.erase(0, slash + 1);
-            }
-            if (database.empty() || dataset.empty()) {
+            // One id form with list_datasets (lake#447); `<database>.<name>` and a bare name in
+            // `datasets` are read as well.
+            const auto ref = datasets::parse_id(input.at("id").get<std::string>());
+            if (!ref) {
                 co_return ApiResult::failure(
                     "invalid_input", "id is <database>/<dataset>", "/id");
             }
+            const std::string database = ref->database;
+            const std::string dataset = ref->name;
             auto called = co_await call_workspace(context,
                                                   *customer_id,
                                                   "get_dataset",
@@ -486,7 +484,8 @@ Capability dataset_capability() {
                 co_return ApiResult::failure(called->error().code, called->error().message);
             }
             json value = std::move(**called);
-            value["id"] = database + "/" + dataset;
+            value["id"] = datasets::id_of(database, dataset);
+            value["kind"] = datasets::kind_of(database);
             context.audit_customer_id = *customer_id;
             context.audit_kind = "workspace.query";
             context.audit_object = "customer/" + *customer_id + "/workspace";

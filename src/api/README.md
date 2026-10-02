@@ -6,13 +6,20 @@ first terminal write wins. Apps, Experiments and Project panels show the persist
 without extra workspace requests. See [agent leases](../../docs/api/agent-bus.md).
 
 Page reads share authentication and customer selection within each GET, and batch independent
-workspace and local reads with `when_all`. Data uses a projected name/database list; dataset
+workspace and local reads with `when_all`. Data uses a projected dataset/database list from `system.datasets`; dataset
 details own metadata and the bounded sample. `Server-Timing` reports actual outbound calls and
 their sequential rounds. Startup warms existing repository indexes for Metering without
 caching usage. `metering_capabilities.cpp` is asynchronous: its summary reads every workspace's
 datasets and runs concurrently, and `http_server.cpp` injects `registry_space_bytes` so registry
 image bytes are counted where the registry storage lives. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
 and [metering](../../docs/api/metering.md).
+
+`datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
+result databases, SQL-queryable names, CSV row checks with line numbers, and the one
+`<database>/<name>` id. `workspace_query`/`workspace_act` apply them to `list_datasets`,
+`get_dataset`, `analyze_dataset`, `upload_dataset` and `create_dataset_from_query`; the Data page
+and the dataset pickers use them to keep engine results apart. See
+[`workspaces.md`](../../docs/api/workspaces.md) and [load data](../../docs/guide/load-data.md).
 
 Solution catalogue details and solution-backed Project pages call the registry's bounded
 `list_runs` read. It filters by project or solution, completes retained summaries through
