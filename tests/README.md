@@ -240,6 +240,13 @@ expired PostgreSQL ancestors, application-pool issuance without an additional JW
 PostgreSQL case owns an isolated schema in `LAKE_TEST_DB_URI` and removes it afterward. Run the
 full static and shared CTest suites with PostgreSQL configured; see `docs/api/identity.md`.
 
+`Mcp.ToolSchemasAreByteIdenticalToOpenApi` (`test_api.cpp`) compares every MCP tool's input and
+output schema with its OpenAPI operation, byte for byte, for callers and agent-task credentials;
+`Mcp.SessionsNameTheToolListTheyBeganOn` and `HttpServer.McpSessionsLearnThatTheToolListChanged`
+(`test_http_server.cpp`) prove `tools.listChanged`, the tool-list session identifier and the
+`notifications/tools/list_changed` notice after an upgrade; `Registry.EnforcesEnumsAndNumericBoundsOnEveryTransport`
+proves the published bounds are enforced. See [`../docs/api/mcp.md`](../docs/api/mcp.md) (lake#441).
+
 `test_schema_conformance.cpp` records real MCP and REST responses from the production HTTP server
 with an isolated in-memory control store and real Liquid data. `validate_api_schema.py` validates those payloads with Python
 `jsonschema`, checks every advertised tool was called, and requires success coverage for every

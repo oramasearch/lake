@@ -205,7 +205,8 @@ nlohmann::json rest_envelope(const ApiResult& result) {
     return result.envelope();
 }
 
-nlohmann::json openapi_document(const Registry& registry, std::string_view version) {
+nlohmann::json
+openapi_document(const Registry& registry, std::string_view version, SchemaAudience audience) {
     nlohmann::json document;
     document["openapi"] = "3.1.0";
     document["info"] = {{"title", "lake control surface"},
@@ -253,10 +254,10 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
         if (!capability->requires_auth)
             operation["security"] = nlohmann::json::array();
         const std::string method = rest_method(*capability);
+        const nlohmann::json input_schema = audience_input_schema(*capability, audience);
         const nlohmann::json properties =
-            capability->input_schema.value("properties", nlohmann::json::object());
-        const nlohmann::json required =
-            capability->input_schema.value("required", nlohmann::json::array());
+            input_schema.value("properties", nlohmann::json::object());
+        const nlohmann::json required = input_schema.value("required", nlohmann::json::array());
         if (method == "GET") {
             nlohmann::json parameters = nlohmann::json::array();
             for (auto it = properties.begin(); it != properties.end(); ++it) {
@@ -275,7 +276,7 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
         } else {
             operation["requestBody"] = {
                 {"required", !required.empty()},
-                {"content", {{"application/json", {{"schema", capability->input_schema}}}}}};
+                {"content", {{"application/json", {{"schema", input_schema}}}}}};
         }
         nlohmann::json responses;
         responses["200"] = {{"description", "the call succeeded"},
@@ -292,7 +293,7 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
             operation.erase("parameters");
             operation["requestBody"] = {
                 {"required", true},
-                {"content", {{"application/json", {{"schema", capability->input_schema}}}}}};
+                {"content", {{"application/json", {{"schema", input_schema}}}}}};
             paths[rest_path(*capability)]["post"] = std::move(operation);
         }
     }
@@ -300,8 +301,11 @@ nlohmann::json openapi_document(const Registry& registry, std::string_view versi
         {"operationId", "mcp"},
         {"summary", "MCP (JSON-RPC 2.0): initialize, ping, tools/list, tools/call"},
         {"description",
-         "Every JSON registry entry is a tool; tools/call runs the same authorized, validated call "
-         "as its REST route."},
+         "Every JSON registry entry is a tool with the input and output schemas this document "
+         "gives its REST route; tools/call runs the same authorized, validated call. initialize "
+         "declares tools.listChanged and answers an Mcp-Session-Id; a later request whose session "
+         "began on a different tool list is answered, when the client accepts text/event-stream, "
+         "with notifications/tools/list_changed before its response."},
         {"tags", nlohmann::json::array({"mcp"})},
         {"requestBody",
          {{"required", true},

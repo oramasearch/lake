@@ -153,6 +153,39 @@ validate_value(const nlohmann::json& schema, const nlohmann::json& value, const 
             return ApiResult::failure("invalid_input", "expected type " + type->dump(), path);
         }
     }
+    if (const auto allowed = schema.find("enum");
+        allowed != schema.end() && allowed->is_array() &&
+        std::ranges::find(*allowed, value) == allowed->end()) {
+        return ApiResult::failure("invalid_input", "expected one of " + allowed->dump(), path);
+    }
+    if (value.is_number()) {
+        const double number = value.get<double>();
+        const auto bound = [&](const char* keyword) -> std::optional<double> {
+            const auto found = schema.find(keyword);
+            if (found == schema.end() || !found->is_number()) {
+                return std::nullopt;
+            }
+            return found->get<double>();
+        };
+        if (const auto minimum = bound("minimum"); minimum && number < *minimum) {
+            return ApiResult::failure(
+                "invalid_input", "expected at least " + schema.at("minimum").dump(), path);
+        }
+        if (const auto maximum = bound("maximum"); maximum && number > *maximum) {
+            return ApiResult::failure(
+                "invalid_input", "expected at most " + schema.at("maximum").dump(), path);
+        }
+        if (const auto minimum = bound("exclusiveMinimum"); minimum && number <= *minimum) {
+            return ApiResult::failure("invalid_input",
+                                      "expected more than " + schema.at("exclusiveMinimum").dump(),
+                                      path);
+        }
+        if (const auto maximum = bound("exclusiveMaximum"); maximum && number >= *maximum) {
+            return ApiResult::failure("invalid_input",
+                                      "expected less than " + schema.at("exclusiveMaximum").dump(),
+                                      path);
+        }
+    }
     if (value.is_array() && schema.contains("items")) {
         for (std::size_t index = 0; index < value.size(); ++index) {
             auto result = validate_value(
@@ -494,6 +527,27 @@ ApiResult finish_call(const std::string& name, ApiResult result, ApiContext& con
 }
 
 } // namespace
+
+SchemaAudience schema_audience(const ApiContext& context) {
+    return context.credential_kind == "agent_task" ? SchemaAudience::AgentTask
+                                                   : SchemaAudience::Caller;
+}
+
+nlohmann::json audience_input_schema(const Capability& capability, SchemaAudience audience) {
+    nlohmann::json schema = capability.input_schema;
+    if (audience != SchemaAudience::AgentTask || !schema.is_object()) {
+        return schema;
+    }
+    const auto required = schema.find("required");
+    if (required == schema.end() || !required->is_array()) {
+        return schema;
+    }
+    const auto workspace = std::ranges::find(*required, "workspace_id");
+    if (workspace != required->end()) {
+        required->erase(workspace);
+    }
+    return schema;
+}
 
 ApiResult validate_input(const Capability& capability, const nlohmann::json& input) {
     if (!input.is_object())
