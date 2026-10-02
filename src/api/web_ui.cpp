@@ -4701,7 +4701,9 @@ std::string workspace_content(const WorkspacePage& page) {
             hidden("customer_id", page.customer_id));
     } else if (page.section == "project") {
         const nlohmann::json project = data.value("get_project", nlohmann::json::object());
-        const nlohmann::json graphs = project.value("graphs", nlohmann::json::array());
+        // The Project Agent's compile check graphs are not the project's pipelines (lake#438).
+        const nlohmann::json graphs =
+            without_project_agent_checks(project.value("graphs", nlohmann::json::array()));
         const nlohmann::json solution_task = data.value("solution_task", nlohmann::json::object());
         const nlohmann::json solution_project =
             data.value("solution_project", nlohmann::json::object());

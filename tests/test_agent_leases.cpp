@@ -405,7 +405,14 @@ TEST_P(AgentLeases, RetryNoticeRendersOnAppsExperimentsAndProject) {
     experiments.customer_id = customer_id;
     experiments.agent_task = view;
     experiments.agent_working = true;
-    EXPECT_NE(lake::api::web_ui_experiments(experiments).find(message), std::string::npos);
+    const std::string experiments_html = lake::api::web_ui_experiments(experiments);
+    EXPECT_NE(experiments_html.find(message), std::string::npos);
+    // lake#438: the review URL ends in #experiment-proposal, where a declarative refresh is only
+    // a fragment jump; the panel reloads the page itself.
+    EXPECT_NE(experiments_html.find("setTimeout(()=>location.reload(),2000)"), std::string::npos);
+    EXPECT_NE(experiments_html.find(
+                  "<noscript><meta http-equiv=\"refresh\" content=\"2\"></noscript>"),
+              std::string::npos);
     lake::api::WorkspacePage project;
     project.section = "project";
     project.customer_id = customer_id;

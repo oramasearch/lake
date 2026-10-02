@@ -18,7 +18,8 @@ The [workspace contract](workspaces.md) records how solution-backed Project page
 `get_experiment.balance.allocations`, scope-filtered `list_ledger` actions, bounded pending A1
 decision rows and the ROI reason without adding a workspace read.
 It also records the one workspace action a Project Agent pipeline change turn may run: its
-`compile_intent` check, confined to lake's check graph on the turn's project (lake#438).
+`compile_intent` check, confined to lake's check graph on the turn's project and hidden from
+every pipeline list (lake#438).
 
 **Shape.** lake exposes JSON capabilities three ways, the way Zetta does: REST under `/v1`, an
 OpenAPI 3.1 document at `GET /v1/openapi.json`, and MCP at `POST /mcp`. One capability registry

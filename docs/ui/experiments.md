@@ -23,6 +23,10 @@ the form starts an `agent_turn` for `agent-experiments` with kind `experiment` a
 task on the same page. While it runs, the page refreshes its durable task state. A completed
 proposal shows the agent's explanation and its complete `study` JSON in an editable text area.
 
+While the turn works, its panel reloads the page every two seconds with a script. The review URL
+ends in `#experiment-proposal`, and a declarative refresh to it is only a fragment jump that never
+reloaded (lake#438); the declarative refresh remains inside `<noscript>`.
+
 If the completed turn asks a question or returns no proposal, its answer is followed by a
 **Reply** box. Submitting it starts another `experiment` turn with the source task's conversation
 ID and prior turn, so ExperimentsAgent can use the answer without the person restating the goal.

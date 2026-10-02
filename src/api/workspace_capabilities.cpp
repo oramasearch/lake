@@ -233,10 +233,10 @@ std::string project_agent_check_graph(const json& arguments) {
     for (const char* key : {"methodology", "solution"}) {
         if (const auto found = arguments.find(key);
             found != arguments.end() && found->is_string() && !found->get<std::string>().empty()) {
-            return "Project Agent check " + found->get<std::string>();
+            return std::string(project_agent_check_prefix) + " " + found->get<std::string>();
         }
     }
-    return "Project Agent check";
+    return std::string(project_agent_check_prefix);
 }
 
 // The compile check a Project Agent change proposal runs (lake#438). Zetta's compile_intent
@@ -250,11 +250,15 @@ liquid::runtime::task<ApiResult> project_agent_compile_check(ApiContext& context
                                                              const control::AgentTask& task) {
     const json handed = task.body.is_object() ? task.body.value("context", json::object())
                                               : json::object();
-    const std::string project =
+    // A change request names its project; a build turn ("build:<project>") designs one.
+    std::string project =
         handed.is_object() ? handed.value("project", std::string()) : std::string();
+    if (project.empty() && task.kind.starts_with("build:")) {
+        project = task.kind.substr(6);
+    }
     if (project.empty()) {
         co_return ApiResult::failure(
-            "unauthorized", "this Project Agent turn has no pipeline to check a change against");
+            "unauthorized", "this Project Agent turn has no project to compile a check for");
     }
     const json asked = input.value("input", json::object());
     json arguments{{"project", project}};
@@ -2258,7 +2262,8 @@ liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::Agen
     if (!read.ok) {
         co_return read;
     }
-    const json graphs = read.value.value("graphs", json::array());
+    // The Project Agent's compile check graphs are never the project's pipeline (lake#438).
+    const json graphs = without_project_agent_checks(read.value.value("graphs", json::array()));
     if (graphs.empty()) {
         co_return called(co_await compile_pipeline(context,
                                                    task.customer_id,
@@ -3591,8 +3596,11 @@ void register_agent_run_capabilities(Registry& registry) {
                     // project_agent_compile_check to lake's check graph on this project; every
                     // other workspace action stays refused, and the edits themselves are applied
                     // only by the person.
-                    if (handed.value("project", std::string()) != "" &&
-                        handed.value("graph", std::string()) != "") {
+                    // A build turn ("build:<project>") gets the same confined check: the graph
+                    // it stores is skipped by settle_build's pick of the project's pipeline.
+                    if ((handed.value("project", std::string()) != "" &&
+                         handed.value("graph", std::string()) != "") ||
+                        task_kind.starts_with("build:")) {
                         scopes.push_back("workspace_act");
                         scopes.push_back("compile_intent");
                     }
@@ -3716,6 +3724,28 @@ void register_agent_run_capabilities(Registry& registry) {
                 : ApiResult::failure("engine_error",
                                      answer.value("error", std::string("the agent failed")));
         }});
+}
+
+bool is_project_agent_check_graph(const nlohmann::json& graph) {
+    if (!graph.is_object()) {
+        return false;
+    }
+    const auto name = graph.find("name");
+    return name != graph.end() && name->is_string() &&
+           name->get<std::string>().starts_with(project_agent_check_prefix);
+}
+
+nlohmann::json without_project_agent_checks(const nlohmann::json& graphs) {
+    if (!graphs.is_array()) {
+        return graphs;
+    }
+    nlohmann::json kept = nlohmann::json::array();
+    for (const nlohmann::json& graph : graphs) {
+        if (!is_project_agent_check_graph(graph)) {
+            kept.push_back(graph);
+        }
+    }
+    return kept;
 }
 
 bool workspace_read_allowed(std::string_view capability) {

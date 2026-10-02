@@ -3666,7 +3666,7 @@ TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
         EXPECT_EQ(std::ranges::find(task->scopes, action), task->scopes.end()) << action;
     }
 
-    // A Project Agent turn that is not a change request gets no workspace action at all.
+    // A Project Agent turn that neither changes a pipeline nor builds one gets no workspace action.
     const auto design = r.call("agent_turn",
                                {{"agent", "agent-project"}, {"message", "Design a churn model"}});
     ASSERT_TRUE(design.ok) << design.error.message;
@@ -3805,6 +3805,116 @@ TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
     EXPECT_EQ(r.w.caller->capability, "run");
     EXPECT_EQ(r.w.caller->input["dataset_path"], "datasets.accounts");
     EXPECT_EQ(r.w.caller->input["holdout_fraction"], 0.2);
+
+    // The check graph is lake's, not a pipeline: the project page's Pipelines table, the agent
+    // page's approved pipelines and the pick after a build all skip it.
+    const json listed = json::array(
+        {{{"id", "c-1"}, {"name", "Project Agent check M-1"}, {"approval", "approved"}},
+         {{"id", "g-1"}, {"name", "churn"}, {"approval", "approved"}}});
+    EXPECT_EQ(lake::api::without_project_agent_checks(listed),
+              json::array({listed[1]}));
+    EXPECT_TRUE(lake::api::is_project_agent_check_graph(listed[0]));
+    EXPECT_FALSE(lake::api::is_project_agent_check_graph(listed[1]));
+    lake::api::WorkspacePage project;
+    project.section = "project";
+    project.customer_id = r.w.customer_id;
+    project.subject = "retention";
+    project.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    project.data["get_project"] = {{"name", "retention"}, {"graphs", listed}};
+    const std::string project_html = lake::api::web_ui_workspace(project, true);
+    EXPECT_NE(project_html.find("graph=churn"), std::string::npos);
+    EXPECT_EQ(project_html.find("Project Agent check"), std::string::npos)
+        << "the check graph is not listed as a pipeline";
+    project.data["get_project"]["graphs"] = json::array({listed[0]});
+    EXPECT_NE(lake::api::web_ui_workspace(project, true).find("No pipelines yet."),
+              std::string::npos)
+        << "a project holding only a check graph has no pipeline";
+}
+
+// lake#438: a Project Agent build turn gets the same confined compile check, and the pick of the
+// project's pipeline after the build ignores the check graph it stored.
+TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph) {
+    AgentRuns r;
+    auto& config = const_cast<lake::control::WorkspaceConfig&>(r.w.service->config());
+    config.agent_endpoints = {{"agent-project", "http://project:8080"}};
+    config.internal_url = "http://lake.internal:4900";
+    const auto started = r.call("agent_turn",
+                                {{"agent", "agent-project"},
+                                 {"kind", "build:retention"},
+                                 {"message", "Design the pipeline for the project retention"},
+                                 {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto task = r.store.get_agent_task(started.value["task_id"]);
+    ASSERT_TRUE(task);
+    EXPECT_NE(std::ranges::find(task->scopes, "workspace_act"), task->scopes.end());
+    EXPECT_NE(std::ranges::find(task->scopes, "compile_intent"), task->scopes.end());
+    EXPECT_EQ(std::ranges::find(task->scopes, "save_graph"), task->scopes.end());
+
+    const std::string credential = "lat." + task->id + ".0123456789abcdef0123456789abcdef";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        task->id, "agent-project", lake::control::identity_crypto::sha256_hex(credential)));
+    const auto agent = r.store.context_for(credential);
+    ASSERT_TRUE(agent);
+    r.w.caller->answers["compile_intent"] = {{"name", "Project Agent check M-1"},
+                                             {"project", "retention"}};
+    const auto checked = r.call_as(*agent,
+                                   "workspace_act",
+                                   {{"capability", "compile_intent"},
+                                    {"input",
+                                     {{"project", "other"},
+                                      {"intent", "churn"},
+                                      {"methodology", "M-1"}}}});
+    ASSERT_TRUE(checked.ok) << checked.error.message;
+    EXPECT_EQ(r.w.caller->input,
+              (json{{"project", "retention"},
+                    {"methodology", "M-1"},
+                    {"name", "Project Agent check M-1"}}))
+        << "the project the build designs, under the check graph's name";
+    EXPECT_EQ(r.call_as(*agent,
+                        "workspace_act",
+                        {{"capability", "save_graph"}, {"input", {{"project", "retention"}}}})
+                  .error.code,
+              "unauthorized");
+
+    // The build finishes. The project holds only the check graph, so lake compiles the project's
+    // own pipeline instead of repointing the check graph.
+    r.w.caller->answers["get_project"] = {
+        {"name", "retention"},
+        {"graphs",
+         json::array({{{"id", "c-1"},
+                       {"name", "Project Agent check M-1"},
+                       {"approval", "proposed"},
+                       {"methodology", "M-1"}}})}};
+    r.w.caller->answers["list_methodologies"] = {
+        {"methodologies", json::array({{{"id", "M-1"}, {"runnable", true}}})}};
+    r.w.caller->answers["capture_intent"] = {{"input_id", "intent-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "churn skeleton"}, {"project", "retention"}};
+    r.w.caller->answers["get_graph"] = {{"name", "churn skeleton"},
+                                        {"nodes", json::array()},
+                                        {"edges", json::array()}};
+    ASSERT_TRUE(r.store.set_agent_task_status(
+        task->id,
+        "Succeeded",
+        "",
+        "",
+        {{"ok", true},
+         {"result",
+          {{"pipeline",
+            {{"dataset", "datasets.accounts"}, {"methodology", "M-1"}, {"label", "churned"}}}}}}));
+    r.w.caller->calls.clear();
+    const auto followed = r.call("get_agent_task", {{"task_id", task->id}});
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    const auto compiled = std::ranges::find_if(r.w.caller->calls, [](const auto& call) {
+        return call.first == "compile_intent";
+    });
+    ASSERT_NE(compiled, r.w.caller->calls.end()) << "the check graph was not taken as the pipeline";
+    EXPECT_EQ(compiled->second.value("name", std::string()), "")
+        << "lake's own compile names no check graph";
+    EXPECT_EQ(compiled->second["input_id"], "intent-1");
+    EXPECT_TRUE(std::ranges::none_of(r.w.caller->calls, [](const auto& call) {
+        return call.first == "get_graph" &&
+               call.second.value("graph", std::string()).starts_with("Project Agent check");
+    })) << "the check graph is never read as the pipeline to repoint";
 }
 
 TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {

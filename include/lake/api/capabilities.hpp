@@ -46,6 +46,12 @@ bool workspace_action_allowed(std::string_view capability);
 // Whether Zetta takes the capability with GET: every read, and `chat`, which lake authorizes as
 // an action because it loads a model.
 bool workspace_uses_get(std::string_view capability);
+// The graphs a Project Agent compile check stores on a project are named with this prefix
+// (lake#438). They are lake's, not the person's: every list of a project's pipelines and the pick
+// after a build skip them through these two functions.
+inline constexpr std::string_view project_agent_check_prefix = "Project Agent check";
+bool is_project_agent_check_graph(const nlohmann::json& graph);
+nlohmann::json without_project_agent_checks(const nlohmann::json& graphs);
 liquid::runtime::task<control::ZettaControlResult<nlohmann::json>>
 call_workspace(ApiContext& context,
                std::string customer_id,
