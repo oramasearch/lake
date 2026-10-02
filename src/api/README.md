@@ -74,12 +74,16 @@ Verify changes with the full PostgreSQL-backed static and shared CTest suites. K
 contract in `docs/api/identity.md` updated with changes to token derivation.
 
 `registry.cpp` owns `ApiResult::envelope()` and the advertised success/error envelope schemas.
-REST and MCP use those definitions; recursive input validation rejects malformed array items
-before capability handlers run. The contract and HTTP conformance proof are in
+REST and MCP use those definitions; recursive input validation rejects malformed array items,
+values outside an `enum` and numbers outside their bounds before capability handlers run.
+`audience_input_schema` is the one input schema `rest.cpp` and `mcp.cpp` render, and `mcp.cpp`
+issues the tool-list `Mcp-Session-Id` that `http_server.cpp` uses to send
+`notifications/tools/list_changed` after an upgrade (lake#441, [`docs/api/mcp.md`](../../docs/api/mcp.md)). The contract and HTTP conformance proof are in
 [`docs/api/README.md`](../../docs/api/README.md).
 For an authenticated agent-task credential, the registry supplies the immutable task workspace
 when an allowed capability has a `workspace_id` property and the caller omitted it. Explicit IDs
-still pass normal task-scope authorization. `http_server.cpp` serves the matching agent OpenAPI,
+still pass normal task-scope authorization. `http_server.cpp` serves the matching agent OpenAPI (rendered for `SchemaAudience::AgentTask`, as
+that credential's `tools/list` is),
 and routes unprefixed Zetta-shaped task calls through the same registry path. See
 [`docs/api/agent-bus.md`](../../docs/api/agent-bus.md).
 The sign-up registry contract includes personal customer provisioning, with atomic ownership and

@@ -199,7 +199,11 @@ std::string how_to_connect(std::string_view origin) {
         "- REST: every tool is also `{2}/v1/<tool>` (a read is GET with a query string, an "
         "action is POST with a JSON body); the schema is `{2}/v1/openapi.json`.\n"
         "- Answers are `{{\"ok\": true, \"value\": …}}` or `{{\"ok\": false, \"error\": "
-        "{{\"code\", \"message\"}}}}`.\n",
+        "{{\"code\", \"message\"}}}}`.\n"
+        "- After lake is upgraded, reconnect your MCP client to lake (or restart it). "
+        "lake declares `tools.listChanged` and sends `notifications/tools/list_changed` to a "
+        "session that began on an older tool list, but a client that connected before an upgrade "
+        "or ignores the notice keeps the tools and schemas it first listed.\n",
         mcp_endpoint(origin),
         mcp_protocol_version,
         origin);

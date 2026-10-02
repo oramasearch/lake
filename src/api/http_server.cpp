@@ -5012,36 +5012,6 @@ private:
     std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
 };
 
-std::string agent_task_openapi(nlohmann::json document) {
-    for (auto& operations : document["paths"]) {
-        for (auto& [method, operation] : operations.items()) {
-            if (method == "get") {
-                if (operation.contains("parameters")) {
-                    for (auto& parameter : operation["parameters"]) {
-                        if (parameter.value("name", std::string()) == "workspace_id") {
-                            parameter["required"] = false;
-                        }
-                    }
-                }
-                continue;
-            }
-            const nlohmann::json::json_pointer schema_path(
-                "/requestBody/content/application~1json/schema");
-            if (method != "post" || !operation.contains(schema_path)) {
-                continue;
-            }
-            auto& schema = operation[schema_path];
-            auto required = schema.value("required", nlohmann::json::array());
-            const auto workspace = std::ranges::find(required, "workspace_id");
-            if (workspace != required.end()) {
-                required.erase(workspace);
-                schema["required"] = std::move(required);
-            }
-        }
-    }
-    return document.dump();
-}
-
 } // namespace
 
 struct ApiServer::Impl {
@@ -5062,6 +5032,8 @@ struct ApiServer::Impl {
     std::unique_ptr<control::callers::Service> callers;
     std::string openapi_body;
     std::string agent_openapi_body;
+    // The registry is fixed for the life of the process, so its MCP tool list is too (lake#441).
+    std::string mcp_tool_digest;
     mutable OutboundHttpClient outbound_http;
     struct CachedJwks {
         std::string document;
@@ -5122,9 +5094,10 @@ struct ApiServer::Impl {
         }
         clerk = clerk_config(options.clerk_publishable_key);
         register_core_capabilities(registry, version_string());
-        nlohmann::json openapi = openapi_document(registry, version_string());
-        openapi_body = openapi.dump();
-        agent_openapi_body = agent_task_openapi(std::move(openapi));
+        openapi_body = openapi_document(registry, version_string()).dump();
+        agent_openapi_body =
+            openapi_document(registry, version_string(), SchemaAudience::AgentTask).dump();
+        mcp_tool_digest = mcp_tool_list_digest(registry);
         metrics.set_gauge("lake_build_info",
                           {{"version", std::string(version_string())}, {"node", options.node_name}},
                           1.0);
@@ -14873,10 +14846,15 @@ struct ApiServer::Impl {
         co_return http::route_done;
     }
 
-    // POST /mcp — JSON-RPC 2.0 over HTTP. Notifications get 202 and no body.
+    // POST /mcp — JSON-RPC 2.0 over HTTP. Notifications get 202 and no body. initialize answers an
+    // Mcp-Session-Id naming this build's tool list; a later request from a session that began on
+    // another list (lake was upgraded since) is told notifications/tools/list_changed ahead of its
+    // response, as Server-Sent Events, when the client accepts them (docs/api/mcp.md).
     boost::http::route_task serve_mcp(boost::http::route_params& route) {
         namespace http = boost::http;
         std::string body;
+        std::string content_type = "application/json; charset=utf-8";
+        std::string session_id;
         http::status status = http::status::ok;
         JsonBodySink sink;
         auto [read_error, bytes_read] = co_await boost::capy::push_to(route.req_body, sink);
@@ -14910,16 +14888,45 @@ struct ApiServer::Impl {
                 status = http::status::accepted;
             } else {
                 body = **completed;
+                const std::string method = request.is_object() ? request.value("method", "") : "";
+                const std::string presented(route.req.value_or("Mcp-Session-Id", ""));
+                const std::string accept(route.req.value_or(http::field::accept, ""));
+                if (method == "initialize") {
+                    session_id = mcp_session_id(mcp_tool_digest);
+                } else if (method != "tools/list" &&
+                           mcp_session_tool_list_changed(presented, mcp_tool_digest) &&
+                           accept.find("text/event-stream") != std::string::npos) {
+                    // tools/list is itself the fresh list, so it never carries the notice:
+                    // a client that refetches on the notice is not told again.
+                    content_type = "text/event-stream";
+                    body = "event: message\ndata: " +
+                           mcp_tool_list_changed_notification().dump() +
+                           "\n\nevent: message\ndata: " + body + "\n\n";
+                }
             }
         }
         route.status(status);
-        route.res.set(http::field::content_type, "application/json; charset=utf-8");
+        route.res.set(http::field::content_type, content_type);
         route.res.set(http::field::cache_control, "no-store");
+        if (!session_id.empty()) {
+            route.res.set("Mcp-Session-Id", session_id);
+        }
         stamp_response_headers(route, body);
         auto [send_error] = co_await route.send(body);
         if (send_error)
             co_return http::route_error(send_error);
         co_return http::route_done;
+    }
+
+    // GET and DELETE /mcp. Streamable HTTP: lake opens no standalone event stream and keeps no
+    // session to delete, so both are 405 — a 404 would tell the client its session expired.
+    boost::http::route_task serve_mcp_method_not_allowed(boost::http::route_params& route) {
+        route.res.set(boost::http::field::allow, "POST");
+        return send_text(route,
+                         boost::http::status::method_not_allowed,
+                         error_body("method_not_allowed", "MCP is POST /mcp"),
+                         "application/json; charset=utf-8",
+                         "no-store");
     }
 
     // Anything no route claimed. The router falls through (route_next) past the
@@ -16325,6 +16332,13 @@ bool ApiServer::start() {
         [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/mcp", impl.serve_mcp(route));
         });
+    for (const auto method : {http::method::get, http::method::delete_}) {
+        add_workspace_api_route(
+            method, "/mcp", [&impl](http::route_params& route) -> http::route_task {
+                return impl.observe_request(
+                    route, "/mcp", impl.serve_mcp_method_not_allowed(route));
+            });
+    }
     add_route(http::method::get, "/v2/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/v2/", impl.serve_oci_ping(route));
     });

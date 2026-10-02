@@ -2735,6 +2735,7 @@ TEST(Mcp, InitializeListAndCall) {
         s.registry, {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"}}, s.ctx, "0.0.1");
     ASSERT_TRUE(init);
     EXPECT_EQ(json::parse(*init)["result"]["serverInfo"]["name"], "lake");
+    EXPECT_EQ(json::parse(*init)["result"]["capabilities"]["tools"]["listChanged"], true);
     EXPECT_FALSE(mcp_dispatch(
         s.registry, {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}, s.ctx, "0.0.1"));
 
@@ -2787,6 +2788,166 @@ TEST(Mcp, InitializeListAndCall) {
     const auto unknown = json::parse(*mcp_dispatch(
         s.registry, {{"jsonrpc", "2.0"}, {"id", 4}, {"method", "nope"}}, s.ctx, "0.0.1"));
     EXPECT_EQ(unknown["error"]["code"], -32601);
+}
+
+// lake#441: one registry, one schema. Every MCP tool's input and output schema is the schema
+// OpenAPI gives its REST route, byte for byte, for each audience.
+TEST(Mcp, ToolSchemasAreByteIdenticalToOpenApi) {
+    Surface s;
+    for (const SchemaAudience audience : {SchemaAudience::Caller, SchemaAudience::AgentTask}) {
+        SCOPED_TRACE(audience == SchemaAudience::Caller ? "caller" : "agent_task");
+        s.ctx.credential_kind = audience == SchemaAudience::AgentTask ? "agent_task" : "";
+        const json openapi = openapi_document(s.registry, "0.0.1", audience);
+        const json listed = json::parse(*mcp_dispatch(
+            s.registry, {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}}, s.ctx, "0.0.1"));
+        const json& tools = listed.at("result").at("tools");
+        ASSERT_EQ(tools, mcp_tools(s.registry, audience));
+        ASSERT_FALSE(tools.empty());
+        std::size_t workspace_relaxed = 0;
+        for (const json& tool : tools) {
+            const std::string name = tool.at("name");
+            SCOPED_TRACE(name);
+            const auto capability = s.registry.find(name);
+            ASSERT_NE(capability, nullptr);
+            const json& route = openapi.at("paths").at(rest_path(*capability));
+            const std::string method = rest_method(*capability) == "GET" ? "get" : "post";
+            const json& operation = route.at(method);
+            EXPECT_EQ(tool.at("description"), operation.at("description"));
+            EXPECT_EQ(tool.at("title"), operation.at("summary"));
+            const json& input = tool.at("inputSchema");
+            if (method == "post") {
+                EXPECT_EQ(input.dump(),
+                          operation.at("requestBody")
+                              .at("content")
+                              .at("application/json")
+                              .at("schema")
+                              .dump());
+            } else {
+                const json properties = input.value("properties", json::object());
+                const json required = input.value("required", json::array());
+                ASSERT_EQ(operation.at("parameters").size(), properties.size());
+                for (const json& parameter : operation.at("parameters")) {
+                    const std::string key = parameter.at("name");
+                    ASSERT_TRUE(properties.contains(key)) << key;
+                    EXPECT_EQ(parameter.at("schema").dump(), properties.at(key).dump()) << key;
+                    EXPECT_EQ(parameter.at("required").get<bool>(),
+                              std::ranges::find(required, json(key)) != required.end())
+                        << key;
+                }
+                if (capability->post_alias) {
+                    EXPECT_EQ(input.dump(),
+                              route.at("post")
+                                  .at("requestBody")
+                                  .at("content")
+                                  .at("application/json")
+                                  .at("schema")
+                                  .dump());
+                }
+            }
+            const json& success =
+                operation.at("responses").at("200").at("content").at("application/json").at(
+                    "schema");
+            if (tool.contains("outputSchema")) {
+                EXPECT_EQ(tool.at("outputSchema").dump(), success.dump());
+            } else {
+                EXPECT_TRUE(capability->output_schema.empty());
+            }
+            const json declared = capability->input_schema.value("required", json::array());
+            if (std::ranges::find(declared, "workspace_id") != declared.end()) {
+                const json shown = input.value("required", json::array());
+                const bool listed_required =
+                    std::ranges::find(shown, "workspace_id") != shown.end();
+                EXPECT_EQ(listed_required, audience == SchemaAudience::Caller);
+                workspace_relaxed += listed_required ? 0 : 1;
+            }
+        }
+        // The task's workspace fills workspace_id, so a task credential is shown it as optional.
+        if (audience == SchemaAudience::AgentTask) {
+            EXPECT_GT(workspace_relaxed, 0U);
+        }
+    }
+}
+
+// lake#441: the session identifier carries the tool list, so an upgraded lake knows the client
+// holds an older one.
+TEST(Mcp, SessionsNameTheToolListTheyBeganOn) {
+    Surface s;
+    const std::string digest = mcp_tool_list_digest(s.registry);
+    ASSERT_EQ(digest.size(), 64U);
+    EXPECT_EQ(digest, mcp_tool_list_digest(s.registry));
+    const std::string session = mcp_session_id(digest);
+    EXPECT_TRUE(session.starts_with(digest + "."));
+    EXPECT_NE(session, mcp_session_id(digest));
+    EXPECT_FALSE(mcp_session_tool_list_changed(session, digest));
+    EXPECT_FALSE(mcp_session_tool_list_changed("", digest));
+    EXPECT_TRUE(mcp_session_tool_list_changed(digest, digest));
+    EXPECT_TRUE(mcp_session_tool_list_changed("not-a-lake-session", digest));
+
+    Registry upgraded;
+    register_core_capabilities(upgraded, "0.0.1");
+    EXPECT_EQ(mcp_tool_list_digest(upgraded), digest);
+    upgraded.add(Capability{.name = "added_after_upgrade",
+                            .title = "Added after an upgrade",
+                            .description = "A tool the client has not listed.",
+                            .input_schema = {{"type", "object"},
+                                             {"properties", json::object()},
+                                             {"additionalProperties", false}},
+                            .output_schema = {{"type", "object"}},
+                            .requires_auth = false,
+                            .handler = [](const json&, ApiContext&) {
+                                return ApiResult::success(json::object());
+                            }});
+    const std::string upgraded_digest = mcp_tool_list_digest(upgraded);
+    EXPECT_NE(upgraded_digest, digest);
+    EXPECT_TRUE(mcp_session_tool_list_changed(session, upgraded_digest));
+    EXPECT_EQ(mcp_tool_list_changed_notification(),
+              json({{"jsonrpc", "2.0"}, {"method", "notifications/tools/list_changed"}}));
+}
+
+// lake#441: the published bounds are enforced, so REST cannot accept what MCP's schema refuses.
+TEST(Registry, EnforcesEnumsAndNumericBoundsOnEveryTransport) {
+    Registry registry;
+    registry.add(Capability{
+        .name = "bounded",
+        .title = "Bounded",
+        .description = "Takes a bounded fraction and a mode.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"fraction", {{"type", "number"}, {"minimum", 0}, {"maximum", 0.9}}},
+                           {"above", {{"type", "integer"}, {"exclusiveMinimum", 0}}},
+                           {"below", {{"type", "number"}, {"exclusiveMaximum", 1}}},
+                           {"mode", {{"type", "string"}, {"enum", {"left", "right"}}}}}},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .handler = [](const json&, ApiContext&) { return ApiResult::success(json::object()); }});
+    ApiContext context;
+    const auto refused = [&](const json& input, const std::string& path) {
+        const ApiResult result = registry.call("bounded", input, context);
+        EXPECT_FALSE(result.ok) << input;
+        EXPECT_EQ(result.error.code, "invalid_input") << input;
+        EXPECT_EQ(result.error.path, path) << input;
+    };
+    EXPECT_TRUE(registry.call("bounded", {{"fraction", 0.9}, {"mode", "left"}}, context).ok);
+    EXPECT_TRUE(registry.call("bounded", {{"fraction", 0}, {"above", 1}, {"below", 0.99}}, context)
+                    .ok);
+    refused({{"fraction", 1.0}}, "/fraction");
+    refused({{"fraction", -0.1}}, "/fraction");
+    refused({{"above", 0}}, "/above");
+    refused({{"below", 1}}, "/below");
+    refused({{"mode", "middle"}}, "/mode");
+
+    const json tools = json::parse(*mcp_dispatch(
+        registry,
+        {{"jsonrpc", "2.0"},
+         {"id", 1},
+         {"method", "tools/call"},
+         {"params", {{"name", "bounded"}, {"arguments", {{"fraction", 1.0}}}}}},
+        context,
+        "0.0.1"));
+    EXPECT_TRUE(tools["result"]["isError"]);
+    EXPECT_EQ(tools["result"]["structuredContent"]["error"]["path"], "/fraction");
 }
 
 TEST(Repositories, OwnedByACustomerNamedWithinIt) {

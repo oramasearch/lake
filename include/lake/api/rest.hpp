@@ -28,6 +28,10 @@ int rest_status(const ApiResult& result);
 // structuredContent.
 nlohmann::json rest_envelope(const ApiResult& result);
 
-nlohmann::json openapi_document(const Registry& registry, std::string_view version);
+// Every route's input schema is audience_input_schema(capability, audience) — the same schema
+// MCP's tools/list gives that audience.
+nlohmann::json openapi_document(const Registry& registry,
+                                std::string_view version,
+                                SchemaAudience audience = SchemaAudience::Caller);
 
 }  // namespace lake::api

@@ -3123,6 +3123,96 @@ TEST(HttpServer, AHandlerThatThrowsIsAnswered500AndLogged) {
     EXPECT_EQ(line["error"], failures[1].message);
 }
 
+// lake#441: a client learns that lake's tools changed instead of keeping a stale list.
+TEST(HttpServer, McpSessionsLearnThatTheToolListChanged) {
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.instance_kek = "mcp-list-changed-test-kek";
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    HttpConnection connection(server.port());
+    const auto body_of = [](const std::string& response) {
+        return response.substr(response.find("\r\n\r\n") + 4);
+    };
+    const std::vector<std::pair<std::string, std::string>> accepts_events = {
+        {"Accept", "application/json, text/event-stream"}};
+
+    const std::string initialized = connection.request(
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}})",
+        {}, "HTTP/1.1", {}, "application/json", accepts_events);
+    ASSERT_TRUE(initialized.starts_with("HTTP/1.1 200")) << initialized.substr(0, 300);
+    EXPECT_EQ(nlohmann::json::parse(body_of(initialized))["result"]["capabilities"]["tools"]
+                                                         ["listChanged"],
+              true);
+    const std::string session = response_header(initialized, "mcp-session-id");
+    ASSERT_FALSE(session.empty());
+    // The session names this build's tool list: 64 hex digest characters, a dot, 32 random ones.
+    ASSERT_EQ(session.size(), 64U + 1U + 32U) << session;
+    EXPECT_EQ(session[64], '.');
+
+    const std::string call =
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"server_info","arguments":{}}})";
+    auto with_session = accepts_events;
+    with_session.emplace_back("Mcp-Session-Id", session);
+    const std::string current =
+        connection.request("POST", "/mcp", call, {}, "HTTP/1.1", {}, "application/json", with_session);
+    ASSERT_TRUE(current.starts_with("HTTP/1.1 200")) << current.substr(0, 300);
+    EXPECT_EQ(response_header(current, "content-type"), "application/json; charset=utf-8");
+    EXPECT_EQ(body_of(current).find("list_changed"), std::string::npos);
+    EXPECT_TRUE(response_header(current, "mcp-session-id").empty());
+
+    // A session that began on another tool list — lake was upgraded since — is told, ahead of the
+    // response it asked for.
+    auto stale = accepts_events;
+    stale.emplace_back("Mcp-Session-Id", std::string(64, '0') + "." + std::string(32, '1'));
+    const std::string changed =
+        connection.request("POST", "/mcp", call, {}, "HTTP/1.1", {}, "application/json", stale);
+    ASSERT_TRUE(changed.starts_with("HTTP/1.1 200")) << changed.substr(0, 300);
+    EXPECT_EQ(response_header(changed, "content-type"), "text/event-stream");
+    const std::string events = body_of(changed);
+    const std::string notice =
+        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"
+        "\n\n";
+    ASSERT_TRUE(events.starts_with(notice)) << events.substr(0, 300);
+    const std::string second = events.substr(notice.size());
+    ASSERT_TRUE(second.starts_with("event: message\ndata: ")) << second.substr(0, 300);
+    ASSERT_TRUE(second.ends_with("\n\n"));
+    const auto reply = nlohmann::json::parse(
+        second.substr(std::string_view("event: message\ndata: ").size(),
+                      second.size() - std::string_view("event: message\ndata: ").size() - 2));
+    EXPECT_EQ(reply["id"], 2);
+    EXPECT_EQ(reply["result"]["isError"], false);
+
+    // tools/list is the fresh list itself, so refetching on the notice is not told again.
+    const std::string relisted = connection.request(
+        "POST", "/mcp", R"({"jsonrpc":"2.0","id":3,"method":"tools/list"})", {}, "HTTP/1.1", {},
+        "application/json", stale);
+    ASSERT_TRUE(relisted.starts_with("HTTP/1.1 200")) << relisted.substr(0, 300);
+    EXPECT_EQ(response_header(relisted, "content-type"), "application/json; charset=utf-8");
+    EXPECT_FALSE(nlohmann::json::parse(body_of(relisted))["result"]["tools"].empty());
+
+    // A client that accepts only JSON still gets its plain response.
+    const std::string json_only = connection.request(
+        "POST", "/mcp", call, {}, "HTTP/1.1", {}, "application/json",
+        {{"Accept", "application/json"},
+         {"Mcp-Session-Id", std::string(64, '0') + "." + std::string(32, '1')}});
+    ASSERT_TRUE(json_only.starts_with("HTTP/1.1 200")) << json_only.substr(0, 300);
+    EXPECT_EQ(nlohmann::json::parse(body_of(json_only))["id"], 2);
+
+    // No standalone event stream and no session to delete: 405, never a 404 that reads as an
+    // expired session.
+    for (const std::string_view method : {"GET", "DELETE"}) {
+        const std::string refused =
+            connection.request(method, "/mcp", {}, {}, "HTTP/1.1", {}, "application/json",
+                               with_session);
+        EXPECT_TRUE(refused.starts_with("HTTP/1.1 405")) << method << refused.substr(0, 300);
+        EXPECT_EQ(response_header(refused, "allow"), "POST");
+    }
+}
+
 TEST(HttpServer, ClerkReplacesTheBrowserSignInPagesWhenConfigured) {
     lake::api::ServerOptions options;
     options.port = 0;

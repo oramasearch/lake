@@ -9704,7 +9704,12 @@ std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer) {
         copy_block("mcp-claude-code", "Claude Code", claude_code) +
         copy_block("mcp-cursor", "Cursor (mcp.json)", cursor) +
         copy_block("mcp-desktop", "Claude Desktop (claude_desktop_config.json)", desktop) +
-        copy_block("mcp-curl", "Any client: JSON-RPC over HTTP", curl) + "</section>";
+        copy_block("mcp-curl", "Any client: JSON-RPC over HTTP", curl) +
+        "<h3 id=\"mcp-upgrades\">After lake Upgrades</h3><p>Reconnect your MCP client to lake, or "
+        "restart it, after lake is upgraded. lake tells a connected client when its tools "
+        "change (<code>notifications/tools/list_changed</code>), but a client connected before an "
+        "upgrade, or one that ignores the notice, keeps the tools and schemas it first "
+        "listed.</p></section>";
     content += "<section class=\"panel\"><h2>Teach Your Agent</h2><ul>"
                "<li><a href=\"/skills/lake/SKILL.md\" download=\"SKILL.md\">Download the lake "
                "skill</a>: a Claude skill (<code>SKILL.md</code>) with the setup, which tools to "

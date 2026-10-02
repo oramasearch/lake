@@ -28,7 +28,10 @@ a kind (`read` → `GET /v1/<name>`, input in the query string; `action` → `PO
 input as the JSON body), an input schema, an output schema, an authorization object and action,
 an object resolver, and a handler. REST and MCP go through the same `Registry::call` or coroutine
 `Registry::call_async`, so they
-authorize, validate and fail identically.
+authorize, validate and fail identically. Both render each input schema from
+`audience_input_schema`, so a capability's REST and MCP schemas are byte-identical for every
+caller (lake#441, [`mcp.md`](mcp.md)); MCP declares `tools.listChanged` and tells a session that
+began on an older tool list.
 
 Binary liquid-sync capabilities use the same registry for validation, policy, execution, and
 audit, while the one HTTP adapter streams their bodies on repository-scoped routes. OpenAPI renders
@@ -54,7 +57,8 @@ JSON pointer, such as repository-name conflicts at `/name`; REST and MCP therefo
 same actionable error without schema names, SQL text or tenant identifiers from the database.
 
 Registry input validation descends through declared object properties and array `items`, checking
-types, required fields, and `additionalProperties: false` before authorization-object resolution
+types, required fields, `enum` values, numeric bounds (`minimum`, `maximum`, `exclusiveMinimum`,
+`exclusiveMaximum`), and `additionalProperties: false` before authorization-object resolution
 or handler execution. Invalid nested input reports `invalid_input` and a JSON pointer such as
 `/files/0/content`; pointer tokens escape `~` and `/`. Top-level input still rejects undeclared fields, and existing optional top-level null values
 retain their absent-value interpretation. File encoding validation remains with the capability's

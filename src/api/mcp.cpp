@@ -1,7 +1,24 @@
 #include "lake/api/mcp.hpp"
 
+#include <array>
+#include <stdexcept>
+
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+
 namespace lake::api {
 namespace {
+
+std::string hex(const unsigned char* data, std::size_t size) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(size * 2);
+    for (std::size_t index = 0; index < size; ++index) {
+        out.push_back(digits[data[index] >> 4]);
+        out.push_back(digits[data[index] & 0x0f]);
+    }
+    return out;
+}
 
 std::string jsonrpc_error(const nlohmann::json& id, int code, const std::string& message) {
     nlohmann::json response;
@@ -21,6 +38,66 @@ std::string jsonrpc_result(const nlohmann::json& id, nlohmann::json result) {
 
 } // namespace
 
+nlohmann::json mcp_tools(const Registry& registry, SchemaAudience audience) {
+    nlohmann::json tools = nlohmann::json::array();
+    for (const auto& capability : registry.list()) {
+        if (capability->transport != CapabilityTransport::Json) {
+            continue;
+        }
+        nlohmann::json tool = {{"name", capability->name},
+                               {"title", capability->title},
+                               {"description", capability->description},
+                               {"inputSchema", audience_input_schema(*capability, audience)}};
+        const bool read_only =
+            capability->kind == CapabilityKind::Read || capability->action == "read";
+        tool["annotations"] = {{"readOnlyHint", read_only}, {"destructiveHint", !read_only}};
+        if (capability->output_schema.is_object() && !capability->output_schema.empty()) {
+            tool["outputSchema"] = success_envelope_schema(capability->output_schema);
+        }
+        tools.push_back(std::move(tool));
+    }
+    return tools;
+}
+
+std::string mcp_tool_list_digest(const Registry& registry) {
+    const std::string canonical = nlohmann::json{
+        {"caller", mcp_tools(registry, SchemaAudience::Caller)},
+        {"agent_task", mcp_tools(registry, SchemaAudience::AgentTask)}}.dump();
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int size = 0;
+    if (EVP_Digest(canonical.data(),
+                   canonical.size(),
+                   digest.data(),
+                   &size,
+                   EVP_sha256(),
+                   nullptr) != 1) {
+        throw std::runtime_error("could not hash the MCP tool list");
+    }
+    return hex(digest.data(), size);
+}
+
+std::string mcp_session_id(std::string_view tool_list_digest) {
+    std::array<unsigned char, 16> random{};
+    if (RAND_bytes(random.data(), static_cast<int>(random.size())) != 1) {
+        throw std::runtime_error("could not draw an MCP session identifier");
+    }
+    return std::string(tool_list_digest) + "." + hex(random.data(), random.size());
+}
+
+bool mcp_session_tool_list_changed(std::string_view session_id,
+                                   std::string_view tool_list_digest) {
+    if (session_id.empty()) {
+        return false;
+    }
+    return !(session_id.size() > tool_list_digest.size() &&
+             session_id.starts_with(tool_list_digest) &&
+             session_id[tool_list_digest.size()] == '.');
+}
+
+nlohmann::json mcp_tool_list_changed_notification() {
+    return {{"jsonrpc", "2.0"}, {"method", "notifications/tools/list_changed"}};
+}
+
 std::optional<std::string> mcp_dispatch(const Registry& registry,
                                         const nlohmann::json& request,
                                         ApiContext& context,
@@ -37,31 +114,13 @@ std::optional<std::string> mcp_dispatch(const Registry& registry,
         return jsonrpc_result(
             id,
             {{"protocolVersion", std::string(mcp_protocol_version)},
-             {"capabilities", {{"tools", nlohmann::json::object()}}},
+             {"capabilities", {{"tools", {{"listChanged", true}}}}},
              {"serverInfo", {{"name", "lake"}, {"version", std::string(version)}}}});
     }
     if (method == "ping")
         return jsonrpc_result(id, nlohmann::json::object());
     if (method == "tools/list") {
-        nlohmann::json tools = nlohmann::json::array();
-        for (const auto& capability : registry.list()) {
-            if (capability->transport != CapabilityTransport::Json) {
-                continue;
-            }
-            nlohmann::json tool = {{"name", capability->name},
-                                   {"title", capability->title},
-                                   {"description", capability->description},
-                                   {"inputSchema", capability->input_schema}};
-            const bool read_only = capability->kind == CapabilityKind::Read ||
-                                   capability->action == "read";
-            tool["annotations"] = {{"readOnlyHint", read_only},
-                                   {"destructiveHint", !read_only}};
-            if (capability->output_schema.is_object() && !capability->output_schema.empty()) {
-                tool["outputSchema"] = success_envelope_schema(capability->output_schema);
-            }
-            tools.push_back(std::move(tool));
-        }
-        return jsonrpc_result(id, {{"tools", std::move(tools)}});
+        return jsonrpc_result(id, {{"tools", mcp_tools(registry, schema_audience(context))}});
     }
     if (method == "tools/call") {
         const nlohmann::json params = request.value("params", nlohmann::json::object());

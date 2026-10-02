@@ -5,10 +5,10 @@ serves. Methods:
 
 | Method | Behaviour |
 |---|---|
-| `initialize` | `{protocolVersion, capabilities: {tools: {}}, serverInfo: {name: "lake", version}}` |
+| `initialize` | `{protocolVersion, capabilities: {tools: {listChanged: true}}, serverInfo: {name: "lake", version}}`, with an `Mcp-Session-Id` response header |
 | `notifications/initialized` | accepted, `202`, no body |
 | `ping` | `{}` |
-| `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` |
+| `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` (`lake::api::mcp_tools`) |
 | `tools/call` | `params: {name, arguments}` → `Registry::call` with the request's bearer; result `{content: [{type: text, text}], structuredContent: <envelope>, isError}` |
 
 The [shared envelope decision](README.md) defines both transports: `outputSchema` describes the
@@ -16,7 +16,56 @@ complete successful `structuredContent`, including `ok`, `value`, and `duration_
 errors carry the shared error envelope with `isError: true` over HTTP 200.
 
 Unknown methods answer `-32601`; a body that is not JSON answers `400` with `-32700`; a request
-without `"jsonrpc": "2.0"` answers `-32600`.
+without `"jsonrpc": "2.0"` answers `-32600`. `GET /mcp` and `DELETE /mcp` answer `405` with
+`Allow: POST`: lake opens no standalone event stream and keeps no session to delete, and a `404`
+would tell a Streamable HTTP client that its session expired.
+
+## A changed tool list reaches connected clients (lake#441)
+
+**What was observed.** On 2026-10-01 a connected MCP client listed 274 tools while the live
+`tools/list` served 352, and its cached schemas lacked `workspace_id`, so
+`workspace_status({customer_id})` failed with `workspace_id is required`. The client had listed
+the tools once, from an older lake, and nothing told it the list had changed: `initialize`
+declared `tools: {}` (no `listChanged`), and lake never sent `notifications/tools/list_changed`.
+Within one process the registry is fixed and REST, OpenAPI and MCP already read the same entries,
+so the divergence was a client holding a list across a deploy.
+
+**What lake does now.**
+
+- `initialize` declares `capabilities.tools.listChanged: true` and answers an `Mcp-Session-Id`:
+  the hex SHA-256 of this build's tool list (`mcp_tool_list_digest`, both schema audiences), a dot,
+  and 128 random bits. Lake keeps no session state; the identifier itself says which list the
+  client was given.
+- On every later request that carries an `Mcp-Session-Id` naming a different digest — lake was
+  upgraded since the client initialized, on any replica — and whose client accepts
+  `text/event-stream`, the response is Server-Sent Events: first
+  `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`, then the response the client
+  asked for. The call itself still runs.
+- `tools/list` never carries the notice, because its response is the fresh list: a client that
+  refetches on the notice is not told again by that refetch. A client that accepts only
+  `application/json` receives its plain response. During a rolling upgrade, replicas on the old
+  and new builds can each send the notice; it stops once one build serves every request.
+- A client that connected to a lake older than this change has no session identifier, so lake
+  cannot tell what it holds. It must reconnect once; `/developer/mcp`, `llms.txt` and the lake
+  skill tell people to reconnect after upgrades.
+
+**One schema per capability.** `audience_input_schema` (registry) is the only input schema REST,
+OpenAPI and MCP render. A caller sees the declared schema. An agent-task credential sees
+`workspace_id` as optional, because `Registry::call` fills it from the task: `GET
+/v1/openapi.json` for that credential and its `tools/list` are rendered from the same function
+(they were two separate code paths before, and only OpenAPI relaxed the field). Registry
+validation now also enforces `enum`, `minimum`, `maximum`, `exclusiveMinimum` and
+`exclusiveMaximum`, so a value the published schema refuses — `run_pipeline`'s
+`holdout_fraction` of `1.0` against its `maximum: 0.9` — is refused with `invalid_input` on REST
+as well as MCP.
+
+**How to verify.** `Mcp.ToolSchemasAreByteIdenticalToOpenApi` compares every tool's
+`inputSchema`, `outputSchema`, title and description with its OpenAPI operation, byte for byte,
+for both audiences. `Mcp.SessionsNameTheToolListTheyBeganOn` checks that an added capability
+changes the digest. `HttpServer.McpSessionsLearnThatTheToolListChanged` drives the HTTP server:
+the session header, no notice for a current session, the notice then the response for a stale
+one, no notice on `tools/list`, plain JSON for a JSON-only client, and `405` for `GET` and
+`DELETE`. `Registry.EnforcesEnumsAndNumericBoundsOnEveryTransport` covers the bounds.
 
 Authorization is the REST bearer ([`auth.md`](auth.md)) on the same HTTP request; `tools/list`
 needs none, `tools/call` on anything but `server_info` does. JSON operations have the same
@@ -52,6 +101,7 @@ Developer → MCP):
   (`mcp.json` with `url` and `headers`), Claude Desktop (`mcp-remote` through `npx`), and plain
   JSON-RPC `curl` (`initialize`, `tools/list`). Each block has a **Copy** button: the page's one
   added script, `copy-buttons` (`navigator.clipboard.writeText` of the block's text).
+- **After lake Upgrades**: reconnect or restart the MCP client (see lake#441 above).
 - **Teach Your Agent**: *Download the lake skill* (`GET /skills/lake/SKILL.md`, **public** and linked
   from `/llms.txt` with a one-line install command; `/developer/mcp/skill` serves the same; `SKILL.md` as an
   attachment, for `~/.claude/skills/lake/`), `/llms.txt`, `/llms-full.txt`, and OpenAPI.

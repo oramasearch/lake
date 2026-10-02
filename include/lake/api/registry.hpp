@@ -232,9 +232,20 @@ struct Capability {
     AsyncCapabilityHandler async_handler;
 };
 
-// Recursive boundary validation: required and declared keys, JSON types and array
-// items. Errors carry an escaped JSON pointer to the failing field or item.
+// Recursive boundary validation: required and declared keys, JSON types, enum values, numeric
+// bounds (minimum, maximum and their exclusive forms) and array items, so a schema REST, OpenAPI
+// and MCP publish is the contract every transport enforces. Errors carry an escaped JSON pointer
+// to the failing field or item.
 ApiResult validate_input(const Capability& capability, const nlohmann::json& input);
+
+// Who is asking for a capability's input schema. An agent-task credential names its task, and the
+// task names its workspace, so `workspace_id` is optional to that caller (Registry::call fills it).
+enum class SchemaAudience { Caller, AgentTask };
+SchemaAudience schema_audience(const ApiContext& context);
+
+// The input schema one audience is shown. REST/OpenAPI and MCP both render it from here, so a
+// capability's schema is byte-identical on every transport (lake#441).
+nlohmann::json audience_input_schema(const Capability& capability, SchemaAudience audience);
 
 class Registry {
 public:
