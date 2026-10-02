@@ -128,13 +128,17 @@ public:
     std::optional<nlohmann::json> connection(const ManagedService& service) const;
 
     // Stores (docs/control-plane/storage.md). Every call is on behalf of `customer_id`; a store of
-    // another customer is not_found.
-    Result<std::vector<ManagedStore>> stores(const std::string& customer_id);
-    Result<ManagedStore> store(const std::string& customer_id, const std::string& store_id);
+    // another customer is not_found. A non-empty `workspace_id` narrows the call to that
+    // workspace's stores (lake#465): another workspace's store is not_found too.
+    Result<std::vector<ManagedStore>> stores(const std::string& customer_id,
+                                             const std::string& workspace_id = {});
+    Result<ManagedStore> store(const std::string& customer_id, const std::string& store_id,
+                               const std::string& workspace_id = {});
     // Refuses a type × provider pair that is not in the provider table or not available on this
     // lake, with invalid_input naming the reason.
     Result<ManagedStore> create_store(NewManagedStore store);
-    Result<ManagedStore> delete_store(const std::string& customer_id, const std::string& store_id);
+    Result<ManagedStore> delete_store(const std::string& customer_id, const std::string& store_id,
+                                      const std::string& workspace_id = {});
     // The operator's connection for a store, `<service_dir>/<slug>.json` beside the services'
     // connections, or nothing before it is delivered.
     std::optional<nlohmann::json> store_connection(const ManagedStore& store) const;

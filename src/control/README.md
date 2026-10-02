@@ -71,3 +71,7 @@ lists by it. `expire_unstarted_agent_launches` withdraws, with a `stop_reason`, 
 operator has not reported on within the timeout. `agent_runs.cpp` holds that timeout,
 `agent_launch_progress` (what a person is told about a waiting run), and `trigger_cron`, which
 now says why a plain-words schedule is refused. See `docs/api/agent-launches.md`.
+Stores carry the workspace they belong to (migration `0044_store_workspaces`, lake#465). Both
+stores record it on `create_store` and filter `list_stores` by it; `WorkspaceService::store` and
+`delete_store` treat another workspace's store as `not_found`. See
+`docs/control-plane/storage.md`.

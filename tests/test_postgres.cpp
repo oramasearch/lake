@@ -1237,6 +1237,8 @@ TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     ASSERT_TRUE(user) << user.error().message;
     const auto customer = store->create_customer({"individual", user->id, "", "st-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "storage", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
 
     // The operator's listener: every insert and withdrawal wakes it on the services channel.
     pqxx::connection listener(uri);
@@ -1246,8 +1248,15 @@ TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
 
     lake::control::NewManagedStore volume{customer->id, "volume", "cluster", "uploads", "taap:x"};
     volume.size_gi = 20;
+    // lake#465: a store names its workspace; the routing trigger refuses one that does not.
+    EXPECT_FALSE(store->create_store(volume));
+    volume.workspace_id = workspace->id;
     const auto first = store->create_store(volume);
     ASSERT_TRUE(first) << first.error().message;
+    EXPECT_EQ(first->workspace_id, workspace->id);
+    EXPECT_TRUE(store->list_stores(customer->id, lake::control::new_uuid_v4())->empty())
+        << "another workspace lists none of this one's stores";
+    EXPECT_EQ(store->list_stores(customer->id, workspace->id)->size(), 1U);
     EXPECT_EQ(first->slug, lake::control::managed_service_slug("st", first->id));
     EXPECT_EQ(first->type, "volume");
     EXPECT_EQ(first->provider, "cluster");
@@ -1309,6 +1318,71 @@ TEST(PostgresStores, CreateListWithdrawAndNotifyFollowTheContract) {
     EXPECT_EQ(listed->front().observed_generation, 1);
     EXPECT_EQ(store->get_store(first->id)->phase, "Deleted") << "history is still readable";
     EXPECT_EQ(store->get_store(lake::control::new_uuid_v4()).error().code, "not_found");
+}
+
+// lake#465: migration 0044 gives earlier stores the space's only live workspace, records a space
+// with several as needing a selection, and makes the workspace immutable afterwards.
+TEST(PostgresStores, MigrationAssignsTheSoleWorkspaceAndRecordsTheRest) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "store-workspace-migration-test");
+    std::vector<std::string> customers, stores;
+    std::vector<std::vector<std::string>> workspaces;
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "store-migration-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        workspaces.emplace_back();
+        // The second space has two workspaces, so its store cannot be assigned by itself.
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces.back().push_back(workspace->id);
+        }
+        lake::control::NewManagedStore volume{customer->id, "volume", "cluster", "uploads", "t"};
+        volume.workspace_id = workspaces.back().front();
+        const auto created = store->create_store(volume);
+        ASSERT_TRUE(created) << created.error().message;
+        stores.push_back(created->id);
+    }
+    pqxx::connection connection(uri);
+    {
+        // The state before 0044: stores name no workspace.
+        pqxx::work tx(connection);
+        tx.exec("DROP TRIGGER store_workspace_routing ON stores");
+        tx.exec("UPDATE stores SET workspace_id = NULL");
+        tx.exec("DELETE FROM workspace_assignments WHERE object_table = 'stores'");
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0044_store_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0044_store_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM workspace_assignments WHERE object_table = 'stores' "
+                          "AND outcome = 'sole_workspace'")[0][0].as<int>(), 1);
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM workspace_assignments WHERE object_table = 'stores' "
+                          "AND outcome = 'needs_selection'")[0][0].as<int>(), 1);
+        tx.commit();
+    }
+    EXPECT_EQ(store->get_store(stores[0])->workspace_id, workspaces[0].front());
+    EXPECT_TRUE(store->get_store(stores[1])->workspace_id.empty()) << "two workspaces: unassigned";
+    EXPECT_TRUE(store->withdraw_store(stores[1])) << "an unassigned store can still be withdrawn";
+    EXPECT_THROW(([&] {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE stores SET workspace_id = NULL WHERE id = $1::uuid", stores[0]);
+        tx.commit();
+    })(), pqxx::check_violation);
 }
 
 // Agent launches, their credential, cron schedules and Ask Orama messages against the production

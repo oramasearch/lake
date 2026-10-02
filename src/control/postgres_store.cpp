@@ -4960,7 +4960,7 @@ public:
         "to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "COALESCE(st.phase, ''), COALESCE(st.message, ''), COALESCE(st.endpoint, ''), "
-        "COALESCE(st.observed_generation, 0)";
+        "COALESCE(st.observed_generation, 0), COALESCE(s.workspace_id::text, '')";
 
     static ManagedStore store_from(const pqxx::row& row) {
         ManagedStore store;
@@ -4982,6 +4982,7 @@ public:
         store.message = row[15].as<std::string>();
         store.endpoint = row[16].as<std::string>();
         store.observed_generation = row[17].as<std::int64_t>();
+        store.workspace_id = row[18].as<std::string>();
         return store;
     }
 
@@ -4997,15 +4998,18 @@ public:
         return store_from(rows[0]);
     }
 
-    Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) override {
+    Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id,
+                                                  const std::string& workspace_id) override {
         return with_tx<std::vector<ManagedStore>>(
             [&](pqxx::work& tx) -> Result<std::vector<ManagedStore>> {
                 const pqxx::result rows = tx.exec_params(
                     std::string("SELECT ") + store_columns +
                         " FROM stores s LEFT JOIN store_status st ON st.store_id = s.id "
-                        "WHERE s.customer_id = $1::uuid AND NOT (s.desired = 'absent' AND "
+                        "WHERE s.customer_id = $1::uuid AND ($2 = '' OR s.workspace_id = "
+                        "NULLIF($2, '')::uuid) AND NOT (s.desired = 'absent' AND "
                         "COALESCE(st.phase, '') = 'Deleted') ORDER BY s.created_at, s.id",
-                    customer_id);
+                    customer_id,
+                    workspace_id);
                 std::vector<ManagedStore> stores;
                 for (const pqxx::row& row : rows) {
                     stores.push_back(store_from(row));
@@ -5039,9 +5043,10 @@ public:
             const std::string id = new_uuid_v4();
             const nlohmann::json spec{
                 {"size_gi", in.size_gi}, {"region", in.region}, {"public", in.is_public}};
+            // The routing trigger refuses a store without a live workspace of this space.
             tx.exec_params("INSERT INTO stores (id, customer_id, type, provider, name, slug, spec, "
-                           "created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, "
-                           "$7::jsonb, $8)",
+                           "created_by_taap_id, workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, "
+                           "$5, $6, $7::jsonb, $8, NULLIF($9, '')::uuid)",
                            id,
                            in.customer_id,
                            in.type,
@@ -5049,7 +5054,8 @@ public:
                            in.name,
                            managed_service_slug("st", id),
                            spec.dump(),
-                           in.created_by_taap_id);
+                           in.created_by_taap_id,
+                           in.workspace_id);
             // Same channel as services: the operator's listener wakes the Lake at once;
             // delivered on commit.
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);

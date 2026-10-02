@@ -229,7 +229,8 @@ public:
     Result<Build> cancel_build(const std::string& id) override;
     // The production operator updates these columns directly after reconciling the Job.
     Result<void> set_build_status(const std::string& id, BuildStatus status);
-    Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id) override;
+    Result<std::vector<ManagedStore>> list_stores(const std::string& customer_id,
+                                                  const std::string& workspace_id = {}) override;
     Result<ManagedStore> get_store(const std::string& id) override;
     Result<ManagedStore> create_store(const NewManagedStore&) override;
     Result<ManagedStore> withdraw_store(const std::string& id) override;

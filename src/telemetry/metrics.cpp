@@ -704,8 +704,8 @@ public:
         return call("cancel_build", [&] { return store_->cancel_build(id); });
     }
     control::Result<std::vector<control::ManagedStore>>
-    list_stores(const std::string& customer_id) override {
-        return call("list_stores", [&] { return store_->list_stores(customer_id); });
+    list_stores(const std::string& customer_id, const std::string& workspace_id = {}) override {
+        return call("list_stores", [&] { return store_->list_stores(customer_id, workspace_id); });
     }
     control::Result<control::ManagedStore> get_store(const std::string& id) override {
         return call("get_store", [&] { return store_->get_store(id); });

@@ -72,6 +72,7 @@ nlohmann::json service_json(const ManagedService& service) {
 nlohmann::json store_json(const ManagedStore& store) {
     return {{"id", store.id},
             {"customer_id", store.customer_id},
+            {"workspace_id", store.workspace_id},
             {"type", store.type},
             {"provider", store.provider},
             {"name", store.name},
@@ -267,14 +268,17 @@ std::optional<nlohmann::json> WorkspaceService::connection(const ManagedService&
     return parsed;
 }
 
-Result<std::vector<ManagedStore>> WorkspaceService::stores(const std::string& customer_id) {
-    return store_->list_stores(customer_id);
+Result<std::vector<ManagedStore>> WorkspaceService::stores(const std::string& customer_id,
+                                                           const std::string& workspace_id) {
+    return store_->list_stores(customer_id, workspace_id);
 }
 
 Result<ManagedStore> WorkspaceService::store(const std::string& customer_id,
-                                             const std::string& store_id) {
+                                             const std::string& store_id,
+                                             const std::string& workspace_id) {
     Result<ManagedStore> found = store_->get_store(store_id);
-    if (found && found->customer_id != customer_id) {
+    if (found && (found->customer_id != customer_id ||
+                  (!workspace_id.empty() && found->workspace_id != workspace_id))) {
         return std::unexpected(StoreError{"not_found", "no store " + store_id});
     }
     return found;
@@ -296,8 +300,9 @@ Result<ManagedStore> WorkspaceService::create_store(NewManagedStore store) {
 }
 
 Result<ManagedStore> WorkspaceService::delete_store(const std::string& customer_id,
-                                                    const std::string& store_id) {
-    const Result<ManagedStore> found = store(customer_id, store_id);
+                                                    const std::string& store_id,
+                                                    const std::string& workspace_id) {
+    const Result<ManagedStore> found = store(customer_id, store_id, workspace_id);
     if (!found) {
         return found;
     }

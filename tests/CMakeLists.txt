@@ -55,7 +55,7 @@ add_dependencies(lake-tests lake)
 include(GoogleTest)
 gtest_discover_tests(lake-tests)
 
-add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp)
+add_executable(lake-postgres-tests test_main.cpp test_postgres.cpp test_operator_contract.cpp)
 target_link_libraries(lake-postgres-tests PRIVATE lake-control-postgres pqxx OpenSSL::Crypto GTest::gtest)
 target_compile_definitions(lake-postgres-tests PRIVATE
   LAKE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
