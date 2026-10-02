@@ -236,6 +236,8 @@ proof is in [front-door.md](../docs/ui/front-door.md).
 signed-up people against both stores; `Organizations.*` and
 `PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace` cover the capabilities
 and the organization-space grants ([organizations.md](../docs/api/organizations.md)).
+`SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls `create_organization_space`
+and `convert_personal_space` with a signed-up person's session, since they refuse the operator.
 `PostgresCapabilities.OrganizationAndPolicyRoundTrip`
 filters its deletion audit assertion by the exact request ID and `repository/<id>` object.
 `Stores/AuditIsolation.*` proves lookup after 1,105 same-object events and complete cursor traversal

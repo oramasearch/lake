@@ -59,7 +59,7 @@ public:
             {.url = url_,
              .method = method,
              .suffix = path,
-             .headers = {{"Authorization", "Bearer schema-test"},
+             .headers = {{"Authorization", "Bearer " + bearer},
                          {"Content-Type", "application/json"}},
              .body = input.is_null() ? std::vector<std::byte>{} : bytes(input.dump())})));
         const std::string body(reinterpret_cast<const char*>(response.body.data()),
@@ -93,6 +93,9 @@ public:
     }
 
     json document;
+    // The operator credential by default; a person's session secret for capabilities that
+    // refuse an operator (organization self-service).
+    std::string bearer = "schema-test";
 
 private:
     std::string url_;
@@ -190,6 +193,26 @@ void check_membership(HttpEvidence& http, const json& user) {
                                        {"role", "member"},
                                        {"attestation_digest", "sha512-256:schema-membership"}});
     http.call("remove_member", {{"id", membership.at("id")}});
+}
+
+// create_organization_space and convert_personal_space serve a signed-in person and refuse the
+// operator credential, so they are called with a person's session.
+void check_person_organizations(HttpEvidence& http, lake::control::Store& store) {
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto session = checked(store.sign_up_password({"lake",
+                                                         "schema-person-" + suffix + "@example.test",
+                                                         "correct horse battery staple",
+                                                         "Schema person",
+                                                         "schema",
+                                                         "{}"}));
+    const std::string personal =
+        checked(store.list_customers(2, session.session.user_id)).at(0).id;
+    const std::string operator_bearer = http.bearer;
+    http.bearer = session.secret;
+    http.call("create_organization_space", {{"display_name", "Schema organization"}});
+    http.call("convert_personal_space",
+              {{"customer_id", personal}, {"display_name", "Schema converted"}});
+    http.bearer = operator_bearer;
 }
 
 void check_proofs(HttpEvidence& http) {
@@ -314,6 +337,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("preview_drive_share_link", linked_file);
     http.call("download_drive_share_link", linked_file);
     check_membership(http, lake::control::to_json(user));
+    check_person_organizations(http, *store);
     check_proofs(http);
     validate_evidence(http.document);
 }

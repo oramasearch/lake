@@ -4299,7 +4299,8 @@ void register_organization_capabilities(Registry& registry) {
                                 {{"organization", organization_schema()},
                                  {"customer", customer_schema()},
                                  {"membership", membership_schema()},
-                                 {"personal_customer", customer_schema()}}}};
+                                 {"personal_customer", customer_schema()}}},
+                               {"required", json::array({"organization", "customer", "membership"})}};
     registry.add(Capability{
         .name = "create_organization_space",
         .title = "Create organization",
