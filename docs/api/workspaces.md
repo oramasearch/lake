@@ -90,8 +90,9 @@ customer's policy object and is authorized by lake before anything reaches Zetta
   unclosed quoted field, or a row whose field count differs from the header, naming the line.
   Zetta's reader would otherwise drop extra fields and fill missing ones with null.
 - A `table_name` that already exists answers `conflict` unless `input.if_exists` is `"rename"`
-  (`if_exists` is a lake field and is removed before the call). Zetta then takes the next free
-  name, and lake adds `renamed_from` with the name asked for, and the new dataset's `id`.
+  (forwarded on `upload_dataset`, whose Zetta side refuses a taken name the same way and takes the
+  same opt-in since zetta#1221; removed for `create_dataset_from_query`). Zetta then takes the
+  next free name, and lake adds `renamed_from` with the name asked for, and the new dataset's `id`.
 
 Input for the last two is `{customer_id, capability, input}`, where `input` is the Zetta
 capability's own input. Anything off the lists is refused with `invalid_input`, so nothing reaches
