@@ -35,12 +35,14 @@ call_workspace(ApiContext& context,
     const auto timing = context.workspace_call_timing;
     const std::size_t round = timing
         ? timing->completed_rounds.load(std::memory_order_relaxed) + 1 : 0;
+    std::string named = timing ? capability : std::string();
     auto completed = co_await context.workspaces->call(
         std::move(customer_id), context.workspace_id, std::move(capability), read, std::move(input),
-        [timing, round](std::chrono::nanoseconds elapsed) {
+        [timing, round, named = std::move(named)](std::chrono::nanoseconds elapsed) {
             if (timing) {
                 timing->count.fetch_add(1, std::memory_order_relaxed);
                 timing->nanoseconds.fetch_add(elapsed.count(), std::memory_order_relaxed);
+                timing->record(named, elapsed.count());
                 auto completed = timing->completed_rounds.load(std::memory_order_relaxed);
                 while (completed < round && !timing->completed_rounds.compare_exchange_weak(
                     completed, round, std::memory_order_relaxed)) {

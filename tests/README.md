@@ -32,6 +32,14 @@ readiness/credential changes, errors and stale in-flight replies. Run with Postg
 native builds; [performance.md](../docs/ui/performance.md) explains the evidence rows.
 It requires `LAKE_TEST_DB_URI`, uses a regular authenticated user, and rejects redirects or errors
 for canonical `/w/:workspace_id/...` pages and `/workspaces`.
+Since lake#446 it also fixes the exact Zetta capabilities of Ask Orama, Agents, Search Indexes,
+Models and Experiments, requires every response's `zetta_<capability>` `Server-Timing` entries to
+match what the fake observed, holds the three deferred panel routes to their own JSON budgets, and
+refuses any page that waits for `list_agents`, `get_agent`, `agent_training_status` or the full
+`list_datasets` outside the documented exceptions.
+`HttpServer/HttpResponseIsolation.SlowZettaPanelsLoadAfterTheirPage/*` proves in both stores that
+Ask Orama renders without `list_agents` and loads the space's chat agents from `/ask/agents`, and
+that Agents and Indexes defer their panels (and `?inline=1` waits).
 Non-workspace discovery also tries operator and signed-out profiles to include protected operator
 pages and public sign-in forms.
 

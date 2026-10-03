@@ -66,3 +66,9 @@ addressed to them and their personal space; see [settings.md](../../../docs/ui/s
 `datasets.hpp` is pure: workspace dataset naming, CSV checks, the `<database>/<name>` id and the
 engine-result classification shared by the capabilities and the pages. See
 [workspaces.md](../../../docs/api/workspaces.md).
+
+`WorkspaceCallTiming` records each workspace call's Zetta capability and duration for the
+`zetta_<capability>` entries of `Server-Timing`. `web_ui_deferred_panels` names the JSON routes a
+page fills a slow panel from; `web_ui_your_agents` and `web_ui_new_index` render two of them, and
+`AskPage::defer_agents` marks the deferred agent picker. See
+[performance.md](../../../docs/ui/performance.md) (lake#446).
