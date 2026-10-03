@@ -899,8 +899,9 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     ASSERT_TRUE(usage.at("ok")) << usage.dump();
     EXPECT_EQ(usage.at("value").at("cost_micros"), 0);
     EXPECT_EQ(usage.at("value").at("quota_bytes"), 1ULL << 30);
-    ASSERT_EQ(usage.at("value").at("items").size(), 1U);
-    EXPECT_EQ(usage.at("value").at("items").at(0).at("stored_bytes"), 0);
+    // No transfer and no builds yet: no hourly rows, and storage is measured live (lake#348).
+    EXPECT_TRUE(usage.at("value").at("items").empty());
+    EXPECT_EQ(usage.at("value").at("summary").at("storage").at("repositories_bytes"), 0);
     EXPECT_FALSE(usage.at("value").at("over_quota"));
     const auto workspace = store_->create_workspace({customer_id, "notes", "dev", ""});
     ASSERT_TRUE(workspace) << workspace.error().message;
@@ -4024,8 +4025,9 @@ void verify_cold_metering(lake::api::ApiServer& server,
         {}, cookie);
     const auto body = json::parse(response.substr(response.find("\r\n\r\n") + 4));
     ASSERT_TRUE(body.at("ok")) << body;
-    ASSERT_FALSE(body.at("value").at("items").empty());
-    EXPECT_GT(body.at("value").at("items").front().at("stored_bytes").get<std::uint64_t>(), 0U);
+    EXPECT_GT(
+        body.at("value").at("summary").at("storage").at("repositories_bytes").get<std::uint64_t>(),
+        0U);
 }
 
 } // namespace
@@ -4196,16 +4198,16 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/train/dataset", {3, 1}},
         {"/w/:workspace_id/train/experiment", {2, 1}},
         {"/w/:workspace_id/train/experiment/run", {1, 1}},
-        {"/w/:workspace_id/train/experiments",
-         {2, 1, Capabilities{"list_runs", "list_studies"}}},
+        {"/w/:workspace_id/train/experiments", {2, 1, Capabilities{"list_runs", "list_studies"}}},
         {"/w/:workspace_id/train/experiments/compare", {2, 1}},
         {"/w/:workspace_id/train/run", {3, 1}},
         {"/w/:workspace_id/train/runs", {2, 1}},
         // The topic, its creator record (lake#379) and its messages, read together.
         {"/w/:workspace_id/train/stream", {3, 1}},
         {"/w/:workspace_id/train/streams", {1, 1}},
-        // Usage reads each workspace's datasets and runs together.
-        {"/metering", {2, 1}}};
+        // Usage reads each workspace's datasets, runs, and repository transfer and build records
+        // (lake#348, lake#349) together, in one round.
+        {"/metering", {4, 1}}};
     const auto workspace_call_budget = [&workspace_call_budgets](const std::string& pattern) {
         const auto found = workspace_call_budgets.find(pattern);
         return found == workspace_call_budgets.end() ? WorkspaceCallBudget{} : found->second;

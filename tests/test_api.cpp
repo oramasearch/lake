@@ -38,6 +38,7 @@
 
 #include "objects/records.hpp"  // from LAKE_LIQUID_SOURCE_DIR/src (see tests/CMakeLists.txt)
 
+#include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
 #include "lake/api/mcp.hpp"
@@ -47,20 +48,20 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/drive_share_links.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/metering.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
+#include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "workspace_fixture.hpp"
-#include "api/workspace_records_api.hpp"
-#include "lake/control/drive_share_links.hpp"
-#include "repository_test_support.hpp"
 
 using nlohmann::json;
 using namespace lake::api;
@@ -371,7 +372,9 @@ TEST(Metering, CapabilityReportsExactStorageAndIdempotentBuildCompute) {
     const ApiResult first = surface.call("metering_usage", input);
     ASSERT_TRUE(first.ok) << first.error.message;
     ASSERT_FALSE(first.value.at("items").empty());
-    EXPECT_EQ(first.value.at("items").back().at("stored_bytes"), 123);
+    // Storage has no hourly history (lake#348); the build result counts from the repository.
+    EXPECT_FALSE(first.value.at("items").back().contains("stored_bytes"));
+    EXPECT_EQ(first.value.at("summary").at("storage").at("repositories_bytes"), 123);
     EXPECT_EQ(first.value.at("items").front().at("compute_seconds"), 2);
     EXPECT_EQ(first.value.at("cost_micros"), 10);
     EXPECT_TRUE(first.value.at("over_quota"));
@@ -391,6 +394,7 @@ TEST(Metering, CapabilityReportsExactStorageAndIdempotentBuildCompute) {
     const std::string not_measured = summary.at("not_measured").dump();
     EXPECT_NE(not_measured.find("Container images"), std::string::npos);
     EXPECT_NE(not_measured.find("no workspaces"), std::string::npos);
+    EXPECT_NE(not_measured.find("Repository storage over time"), std::string::npos);
 }
 
 namespace {
@@ -5472,9 +5476,11 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     const auto customer =
         control->create_customer({"individual", user->id, "", "postgres-sync-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = control->create_repository({customer->id, "project", "", "private",
-                                                        lake::test::repository_workspace(
-                                                            *control, customer->id)});
+    // The repository's workspace Zetta keeps its transfer records (lake#348).
+    lake::test::RecordWorkspaces workspaces(control, database_uri);
+    const std::string workspace_id = workspaces.create(customer->id, "home");
+    const auto repository =
+        control->create_repository({customer->id, "project", "", "private", workspace_id});
     ASSERT_TRUE(repository) << repository.error().message;
 
     auto source =
@@ -5491,6 +5497,8 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     options.store_root = (temporary.path() / "lake").string();
     options.store = control;
+    options.workspaces = workspaces.service;
+    options.metering_flush_interval = std::chrono::milliseconds(0);
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string url =
@@ -5511,17 +5519,68 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     EXPECT_NE(metering_response.find(" 200 "), std::string::npos) << metering_response;
     const json metering = response_json(metering_response);
     ASSERT_TRUE(metering.value("ok", false)) << metering.dump();
-    ASSERT_FALSE(metering.at("value").at("items").empty());
+    ASSERT_EQ(metering.at("value").at("items").size(), 1U);
     const std::uint64_t accounted =
         unique_pack_raw_bytes(temporary.path() / "lake" / customer->id / "store" / "packs");
     EXPECT_GT(accounted, 0U);
-    EXPECT_EQ(metering.at("value").at("items").back().at("stored_bytes").get<std::uint64_t>(),
+    // Storage is measured live, never recorded per hour.
+    EXPECT_EQ(metering.at("value")
+                  .at("summary")
+                  .at("storage")
+                  .at("repositories_bytes")
+                  .get<std::uint64_t>(),
               accounted);
-    EXPECT_GT(metering.at("value").at("items").back().at("transfer_in_bytes").get<std::uint64_t>(),
-              0U);
-    EXPECT_GT(metering.at("value").at("items").back().at("transfer_out_bytes").get<std::uint64_t>(),
-              0U);
+    EXPECT_FALSE(metering.at("value").at("items").back().contains("stored_bytes"));
+    // Not yet written: the report includes this process's pending transfer.
+    const std::uint64_t uploaded =
+        metering.at("value").at("items").back().at("transfer_in_bytes").get<std::uint64_t>();
+    const std::uint64_t downloaded =
+        metering.at("value").at("items").back().at("transfer_out_bytes").get<std::uint64_t>();
+    EXPECT_GT(uploaded, 0U);
+    EXPECT_GT(downloaded, 0U);
+    EXPECT_TRUE(workspaces.records(workspace_id).rows("metering_usage").empty())
+        << "a sync request writes nothing to the workspace";
+
+    // The owner loop writes it to the workspace's hourly record; lake's PostgreSQL holds none.
+    server.drain();
+    EXPECT_EQ(workspaces.records(workspace_id).rows("metering_usage").size(), 1U);
+    {
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM metering_usage WHERE customer_id = "
+                                 "$1::uuid",
+                                 customer->id)[0][0]
+                      .as<int>(),
+                  0);
+    }
+    const json written = response_json(http_get(server.port(),
+                                                "/v1/metering_usage?customer_id=" + customer->id,
+                                                "Bearer postgres-sync-admin"));
+    ASSERT_EQ(written.at("value").at("items").size(), 1U) << written.dump();
+    EXPECT_EQ(written.at("value").at("items").back().at("transfer_in_bytes"), uploaded)
+        << "flushed once, counted once";
+    EXPECT_EQ(written.at("value").at("items").back().at("transfer_out_bytes"), downloaded);
+
+    // A second pull counted after the flush is written when the server stops (the drain).
+    auto again =
+        liquid::runtime::block_on(liquid::repository::create(temporary.path() / "postgres-again"));
+    ASSERT_TRUE(again) << again.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(endpoint.pull(*again)));
     server.stop();
+    {
+        auto context = lake::api::ApiContext{};
+        context.store = control.get();
+        context.workspaces = workspaces.service.get();
+        context.instance_kek = options.instance_kek;
+        auto records = lake::api::workspace_records(context, customer->id, workspace_id);
+        ASSERT_TRUE(records);
+        const auto transfer =
+            liquid::runtime::block_on(lake::control::list_metered_transfer(*records, customer->id));
+        ASSERT_TRUE(transfer && *transfer);
+        ASSERT_EQ((*transfer)->size(), 1U);
+        EXPECT_GT((*transfer)->front().transfer_out_bytes, downloaded)
+            << "the stop flushed the second pull";
+    }
 
     const auto source_tree = liquid::runtime::block_on(source->root());
     const auto destination_tree = liquid::runtime::block_on(destination->root());

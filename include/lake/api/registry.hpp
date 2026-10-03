@@ -112,6 +112,7 @@ struct MeteringConfig {
 };
 
 class Registry;
+class MeteringRecorder;
 
 struct WorkspaceCallTiming {
     std::atomic<std::size_t> count{0};
@@ -169,6 +170,9 @@ struct ApiContext {
     WebhookSender webhook_sender;
     SyncStore* sync_store = nullptr;
     MeteringConfig metering;
+    // Repository transfer and build records on their way to the workspace Zettas (lake#348,
+    // docs/api/metering.md). Null: this lake records no repository usage (no workspaces).
+    MeteringRecorder* metering_recorder = nullptr;
     // Unique bytes the OCI registry holds below `<space>/` (images and their build cache), each
     // digest counted once (docs/api/metering.md). Injected by the HTTP server, which owns the
     // registry storage; null when no registry is configured, so usage reports images unmeasured.

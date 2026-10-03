@@ -291,7 +291,10 @@ Usage itself is never cached. The performance fixture creates four repositories 
 must report nonzero stored bytes. Its elapsed time remains in the evidence output, while the
 router-derived Metering samples carry the same 500 ms p95 guard as every other page.
 Since lake#444 the Usage page (`/metering`) also reads each workspace's `list_datasets` and
-`list_runs` concurrently, so its budget is two calls in one round for the fixture's one workspace.
+`list_runs` concurrently. Since lake#348 and lake#349 it reads, in the same round, one
+`list_records` each of the workspace's repository transfer and build records, so its budget is four
+calls in one round for the fixture's one workspace. A sync request makes no workspace call: its
+transfer is written by the owner loop ([metering](../api/metering.md#transfer-off-the-request-path)).
 
 The fixture now supplies 50 datasets, 21 methodologies, 20 solutions and three generators, not
 empty catalogues. It measures 71 HTML patterns, including populated Metering, all canonical

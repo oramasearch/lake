@@ -166,12 +166,14 @@ public:
     Result<audit::Event> latest_audit_event() override;
     Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) override;
     Result<void> set_audit_retention_days(const std::string& customer_id, int days) override;
-    Result<MeteringUsage> upsert_metering_usage(const MeteringUpdate& update) override;
-    Result<bool> record_metered_build(const MeteredBuild& build) override;
-    Result<std::vector<MeteringUsage>> list_metering_usage(const std::string& customer_id,
-                                                           const std::string& from_hour,
-                                                           const std::string& to_hour,
-                                                           int limit) override;
+    Result<void> assign_legacy_metering() override;
+    Result<std::vector<LegacyMeteringUsage>> legacy_metering_usage(const std::string& after_id,
+                                                                   int limit) override;
+    Result<std::vector<LegacyMeteredBuild>>
+    legacy_metering_build_records(const std::string& after_id, int limit) override;
+    // Rows of the retired metering tables, as an earlier lake wrote them (tests of the copy).
+    void seed_legacy_metering_usage(MeteringUsage usage);
+    void seed_legacy_metered_build(MeteredBuild build);
     Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) override;
     Result<std::vector<Workspace>> list_workspaces(const std::string& customer_id) override;
     Result<Workspace> get_workspace(const std::string& id) override;
@@ -556,7 +558,10 @@ private:
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
-    std::vector<MeteringUsage> metering_usage_;
+    std::vector<MeteringUsage> legacy_metering_usage_;
+    std::vector<MeteredBuild> legacy_metered_builds_;
+    std::map<std::string, std::pair<std::string, std::string>>
+        legacy_metering_assignments_; // workspace, outcome
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
@@ -571,7 +576,6 @@ private:
     std::vector<StreamOwner> legacy_stream_owners_;
     std::map<std::string, std::pair<std::string, std::string>> legacy_stream_assignments_; // workspace, outcome
     std::vector<ManagedStore> stores_;
-    std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;
     std::vector<PkiCertificateRecord> pki_certificates_;

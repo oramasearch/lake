@@ -111,3 +111,7 @@ Repositories carry the workspace they belong to (migration `0051_repository_work
 Both stores refuse `create_repository` without a live workspace of the repository's space and
 filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store
 interface because the routing trigger keeps a repository's space fixed.
+Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`). Neither store
+writes or reads metering rows any more; `assign_legacy_metering` reruns migration `0053`'s owner
+assignment and `legacy_metering_usage`/`legacy_metering_build_records` page the retired rows for
+the copy (usage rows without transfer are left out).

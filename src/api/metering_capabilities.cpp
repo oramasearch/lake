@@ -5,15 +5,21 @@
 #include <cstdint>
 #include <format>
 #include <limits>
+#include <map>
+#include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "lake/api/metering_recorder.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/builds.hpp"
+#include "lake/control/metering.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -26,11 +32,6 @@ ApiResult store_error(const control::StoreError& error) {
 
 ApiResult sync_error(const SyncStoreError& error) {
     return ApiResult::failure(error.code, error.message);
-}
-
-std::string current_hour() {
-    return std::format("{:%FT%H}:00:00Z",
-                       std::chrono::floor<std::chrono::hours>(std::chrono::system_clock::now()));
 }
 
 std::optional<std::string> hour_of(const RepositoryArtifact& artifact) {
@@ -75,11 +76,18 @@ std::uint64_t multiply_saturated(std::uint64_t left, std::uint64_t right) {
                : static_cast<std::uint64_t>(value);
 }
 
-std::uint64_t cost_of(const control::MeteringUsage& usage, const MeteringConfig& pricing) {
+// One hour of repository usage.
+struct HourUsage {
+    std::uint64_t transfer_in_bytes = 0;
+    std::uint64_t transfer_out_bytes = 0;
+    std::uint64_t compute_seconds = 0;
+};
+
+// Repository storage has no hourly history (it is measured live, lake#348), so an hour prices
+// transfer and build time only. This keeps the configured prices; it decides no billing.
+std::uint64_t cost_of(const HourUsage& usage, const MeteringConfig& pricing) {
     constexpr std::uint64_t gib = std::uint64_t{1} << 30U;
-    std::uint64_t cost = priced_units(usage.stored_bytes, gib, pricing.storage_gib_hour_micros);
-    cost = add_saturated(
-        cost, priced_units(usage.transfer_in_bytes, gib, pricing.transfer_in_gib_micros));
+    std::uint64_t cost = priced_units(usage.transfer_in_bytes, gib, pricing.transfer_in_gib_micros);
     cost = add_saturated(
         cost, priced_units(usage.transfer_out_bytes, gib, pricing.transfer_out_gib_micros));
     return add_saturated(cost,
@@ -205,17 +213,69 @@ std::expected<json, std::string> workspace_answer(WorkspaceRead& read) {
     return std::move(**read.value);
 }
 
-// Stored dataset bytes and recorded run time in each of the customer's workspace Zettas. The
-// numbers are read from the workspace each time and never copied into lake's control store.
-liquid::runtime::task<json>
+// What one workspace's metering records hold for the space, as JSON for the concurrent read.
+liquid::runtime::task<control::ZettaControlResult<json>>
+transfer_records(std::shared_ptr<control::WorkspaceRecords> records,
+                 std::string customer_id,
+                 std::int64_t since_us) {
+    auto listed = control::settled(
+        co_await control::list_metered_transfer(*records, std::move(customer_id), since_us));
+    if (!listed) {
+        co_return control::ZettaControlResult<json>(std::unexpected(listed.error()));
+    }
+    json rows = json::array();
+    for (const control::MeteredTransfer& transfer : *listed) {
+        rows.push_back({{"hour", transfer.hour},
+                        {"transfer_in_bytes", transfer.transfer_in_bytes},
+                        {"transfer_out_bytes", transfer.transfer_out_bytes}});
+    }
+    co_return control::ZettaControlResult<json>(std::move(rows));
+}
+
+liquid::runtime::task<control::ZettaControlResult<json>>
+build_records(std::shared_ptr<control::WorkspaceRecords> records,
+              std::string customer_id,
+              std::int64_t since_us) {
+    auto listed = control::settled(
+        co_await control::list_metered_builds(*records, std::move(customer_id), since_us));
+    if (!listed) {
+        co_return control::ZettaControlResult<json>(std::unexpected(listed.error()));
+    }
+    json rows = json::array();
+    for (const control::MeteredBuild& build : *listed) {
+        rows.push_back({{"result_id", build.result_id},
+                        {"hour", build.hour},
+                        {"compute_seconds", build.compute_seconds}});
+    }
+    co_return control::ZettaControlResult<json>(std::move(rows));
+}
+
+liquid::runtime::task<control::ZettaControlResult<json>> refused(control::ZettaControlError error) {
+    co_return control::ZettaControlResult<json>(std::unexpected(std::move(error)));
+}
+
+// Each live workspace's measurements and its repository usage records.
+struct WorkspaceUsage {
+    json entries = json::array();              // the summary's `workspaces[]`
+    json transfer = json::array();             // every transfer record of every workspace read
+    json builds = json::array();               // every build record of every workspace read
+    std::set<std::string> recorded_workspaces; // workspaces whose build records were read
+    std::vector<std::string> unrecorded;       // why a workspace's records could not be read
+};
+
+// Stored dataset bytes and recorded run time in each of the customer's workspace Zettas, and the
+// repository transfer and build records lake keeps there (lake#348, lake#349). The four reads of
+// every workspace run concurrently, in one round. Nothing read here is copied into lake's control
+// store.
+liquid::runtime::task<WorkspaceUsage>
 workspace_usage(ApiContext& context, const std::string& customer_id, const Window& window) {
-    json workspaces = json::array();
+    WorkspaceUsage usage;
     if (!context.workspaces || !context.store) {
-        co_return workspaces;
+        co_return usage;
     }
     const auto rows = context.store->list_workspaces(customer_id);
     if (!rows) {
-        co_return workspaces;
+        co_return usage;
     }
     std::vector<control::Workspace> live;
     for (const control::Workspace& row : *rows) {
@@ -223,10 +283,12 @@ workspace_usage(ApiContext& context, const std::string& customer_id, const Windo
             live.push_back(row);
         }
     }
+    constexpr std::size_t reads_per_workspace = 4;
+    const std::int64_t since_us = window.from ? *window.from * 1000 : 0;
     std::vector<ApiContext> contexts;
     contexts.reserve(live.size() * 2);
     std::vector<boost::capy::io_task<WorkspaceRead>> pending;
-    pending.reserve(live.size() * 2);
+    pending.reserve(live.size() * reads_per_workspace);
     for (const control::Workspace& row : live) {
         for (const char* capability : {"list_datasets", "list_runs"}) {
             contexts.push_back(context);
@@ -234,9 +296,19 @@ workspace_usage(ApiContext& context, const std::string& customer_id, const Windo
             pending.push_back(complete_workspace_read(
                 call_workspace(contexts.back(), customer_id, capability, true, json::object())));
         }
+        auto opened = workspace_records(context, customer_id, row.id);
+        if (!opened) {
+            pending.push_back(complete_workspace_read(refused(opened.error())));
+            pending.push_back(complete_workspace_read(refused(opened.error())));
+            continue;
+        }
+        auto records = std::make_shared<control::WorkspaceRecords>(std::move(*opened));
+        pending.push_back(
+            complete_workspace_read(transfer_records(records, customer_id, since_us)));
+        pending.push_back(complete_workspace_read(build_records(records, customer_id, since_us)));
     }
     if (pending.empty()) {
-        co_return workspaces;
+        co_return usage;
     }
     auto [wait_error, reads] = co_await liquid::runtime::when_all(std::move(pending));
     for (std::size_t index = 0; index < live.size(); ++index) {
@@ -251,14 +323,31 @@ workspace_usage(ApiContext& context, const std::string& customer_id, const Windo
                    {"message", ""}};
         if (wait_error) {
             entry["message"] = wait_error.message();
-            workspaces.push_back(std::move(entry));
+            usage.unrecorded.push_back("Repository transfer and builds in workspace " + row.name +
+                                       ": " + wait_error.message());
+            usage.entries.push_back(std::move(entry));
             continue;
         }
-        auto datasets = workspace_answer(reads[index * 2]);
-        auto runs = workspace_answer(reads[index * 2 + 1]);
+        WorkspaceRead* read = &reads[index * reads_per_workspace];
+        auto transfer = workspace_answer(read[2]);
+        auto builds = workspace_answer(read[3]);
+        if (transfer && builds) {
+            for (json& record : *transfer) {
+                usage.transfer.push_back(std::move(record));
+            }
+            for (json& record : *builds) {
+                usage.builds.push_back(std::move(record));
+            }
+            usage.recorded_workspaces.insert(row.id);
+        } else {
+            usage.unrecorded.push_back("Repository transfer and builds in workspace " + row.name +
+                                       ": " + (!transfer ? transfer.error() : builds.error()));
+        }
+        auto datasets = workspace_answer(read[0]);
+        auto runs = workspace_answer(read[1]);
         if (!datasets || !runs) {
             entry["message"] = !datasets ? datasets.error() : runs.error();
-            workspaces.push_back(std::move(entry));
+            usage.entries.push_back(std::move(entry));
             continue;
         }
         std::uint64_t data_bytes = 0;
@@ -293,38 +382,48 @@ workspace_usage(ApiContext& context, const std::string& customer_id, const Windo
         entry["datasets"] = dataset_count;
         entry["run_seconds"] = run_seconds;
         entry["runs"] = run_count;
-        workspaces.push_back(std::move(entry));
+        usage.entries.push_back(std::move(entry));
     }
-    co_return workspaces;
+    co_return usage;
 }
 
-ApiResult reconcile_builds(const std::string& customer_id, ApiContext& context) {
+// Every build result of the space's repositories, each with its repository's workspace (empty for
+// a repository migration 0051 left without one), read from the repositories on every request.
+struct RepositoryBuild {
+    std::string workspace_id;
+    control::MeteredBuild build;
+};
+
+std::expected<std::vector<RepositoryBuild>, ApiResult> repository_builds(
+    const std::string& customer_id, ApiContext& context, std::size_t& without_workspace) {
     const auto repositories = context.store->list_repositories(customer_id, 1000);
     if (!repositories) {
-        return store_error(repositories.error());
+        return std::unexpected(store_error(repositories.error()));
     }
+    std::vector<RepositoryBuild> builds;
     for (const control::Repository& repository : *repositories) {
+        if (repository.workspace_id.empty()) {
+            ++without_workspace;
+        }
         RepositoryArtifactFilter filter;
         filter.limit = 1000;
         for (;;) {
             const auto page =
                 context.sync_store->repository_artifacts(customer_id, repository.id, filter);
             if (!page) {
-                return sync_error(page.error());
+                return std::unexpected(sync_error(page.error()));
             }
             for (const RepositoryArtifact& artifact : page->items) {
                 const auto hour = hour_of(artifact);
                 if (!hour) {
                     continue;
                 }
-                const auto recorded = context.store->record_metered_build(
-                    {.customer_id = customer_id,
-                     .result_id = artifact.id,
-                     .hour = *hour,
-                     .compute_seconds = compute_seconds(artifact)});
-                if (!recorded) {
-                    return store_error(recorded.error());
-                }
+                builds.push_back({repository.workspace_id,
+                                  {.customer_id = customer_id,
+                                   .result_id = artifact.id,
+                                   .hour = *hour,
+                                   .compute_seconds = compute_seconds(artifact),
+                                   .repository_id = repository.id}});
             }
             if (page->done || page->next_cursor.empty()) {
                 break;
@@ -332,7 +431,12 @@ ApiResult reconcile_builds(const std::string& customer_id, ApiContext& context) 
             filter.cursor = page->next_cursor;
         }
     }
-    return ApiResult::success(json::object());
+    return builds;
+}
+
+bool in_window(const std::string& hour, const Window& window) {
+    const auto at_us = control::metering_hour_us(hour);
+    return at_us && window.contains(*at_us / 1000);
 }
 
 std::expected<std::string, ApiError> customer_object(const json& input, ApiContext& context) {
@@ -450,33 +554,79 @@ void register_metering_capabilities(Registry& registry) {
             if (!stored_bytes) {
                 co_return sync_error(stored_bytes.error());
             }
-            const auto current =
-                context.store->upsert_metering_usage({.customer_id = customer_id,
-                                                      .hour = current_hour(),
-                                                      .stored_bytes = *stored_bytes});
-            if (!current) {
-                co_return store_error(current.error());
+            // Repository usage: transfer and build records from each workspace, this process's
+            // transfer not yet written, and every build result the repositories hold now. A
+            // result not yet recorded counts here and is queued for its workspace.
+            const Window window = window_of(input);
+            std::size_t without_workspace = 0;
+            auto repository_results = repository_builds(customer_id, context, without_workspace);
+            if (!repository_results) {
+                co_return repository_results.error();
             }
-            const ApiResult reconciled = reconcile_builds(customer_id, context);
-            if (!reconciled.ok) {
-                co_return reconciled;
+            auto read = co_await workspace_usage(context, customer_id, window);
+            if (!read) {
+                co_return ApiResult::failure("store_error", read.error().message);
+            }
+            WorkspaceUsage measured = std::move(*read);
+            std::map<std::string, HourUsage> hours;
+            const auto add_transfer =
+                [&](const std::string& hour, std::uint64_t in, std::uint64_t out) {
+                    if (!in_window(hour, window)) {
+                        return;
+                    }
+                    HourUsage& usage = hours[hour];
+                    usage.transfer_in_bytes = add_saturated(usage.transfer_in_bytes, in);
+                    usage.transfer_out_bytes = add_saturated(usage.transfer_out_bytes, out);
+                };
+            for (const json& record : measured.transfer) {
+                add_transfer(record.value("hour", std::string()),
+                             record.value("transfer_in_bytes", std::uint64_t{0}),
+                             record.value("transfer_out_bytes", std::uint64_t{0}));
+            }
+            if (context.metering_recorder) {
+                for (const PendingTransfer& transfer :
+                     context.metering_recorder->pending_transfers(customer_id)) {
+                    add_transfer(
+                        transfer.hour, transfer.transfer_in_bytes, transfer.transfer_out_bytes);
+                }
+            }
+            std::set<std::string> counted;
+            const auto add_build = [&](const std::string& result_id,
+                                       const std::string& hour,
+                                       std::uint64_t seconds) {
+                if (!in_window(hour, window) || !counted.insert(result_id).second) {
+                    return false;
+                }
+                hours[hour].compute_seconds = add_saturated(hours[hour].compute_seconds, seconds);
+                return true;
+            };
+            for (const json& record : measured.builds) {
+                add_build(record.value("result_id", std::string()),
+                          record.value("hour", std::string()),
+                          record.value("compute_seconds", std::uint64_t{0}));
+            }
+            for (RepositoryBuild& result : *repository_results) {
+                if (add_build(
+                        result.build.result_id, result.build.hour, result.build.compute_seconds) &&
+                    context.metering_recorder &&
+                    measured.recorded_workspaces.contains(result.workspace_id)) {
+                    context.metering_recorder->add_build(result.workspace_id,
+                                                         std::move(result.build));
+                }
             }
             const int limit = std::clamp(input.value("limit", 744), 1, 10000);
-            const auto usage = context.store->list_metering_usage(
-                customer_id, input.value("from", ""), input.value("to", ""), limit);
-            if (!usage) {
-                co_return store_error(usage.error());
-            }
             json items = json::array();
             std::uint64_t cost_micros = 0;
             std::uint64_t repository_build_seconds = 0;
-            for (const control::MeteringUsage& row : *usage) {
+            for (const auto& [hour, row] : hours) {
+                if (static_cast<int>(items.size()) >= limit) {
+                    break;
+                }
                 const std::uint64_t row_cost = cost_of(row, context.metering);
                 cost_micros = add_saturated(cost_micros, row_cost);
                 repository_build_seconds =
                     add_saturated(repository_build_seconds, row.compute_seconds);
-                items.push_back({{"hour", row.hour},
-                                 {"stored_bytes", row.stored_bytes},
+                items.push_back({{"hour", hour},
                                  {"transfer_in_bytes", row.transfer_in_bytes},
                                  {"transfer_out_bytes", row.transfer_out_bytes},
                                  {"compute_seconds", row.compute_seconds},
@@ -484,9 +634,25 @@ void register_metering_capabilities(Registry& registry) {
             }
             const bool over_quota = quota_bytes != 0 && *stored_bytes >= quota_bytes;
 
-            // What the hourly repository rows leave out, measured now from where it lives.
-            const Window window = window_of(input);
+            // What repository usage leaves out, measured now from where it lives.
             json not_measured = json::array();
+            not_measured.push_back(
+                "Repository storage over time: only the current size is measured, so it is not "
+                "in the hourly table or the estimated charge.");
+            if (!context.metering_recorder) {
+                not_measured.push_back(
+                    "Repository transfer: this lake has no workspaces to record it in.");
+            }
+            if (without_workspace > 0) {
+                not_measured.push_back(std::format(
+                    "Repository transfer of {} {} without a workspace: not recorded until a "
+                    "workspace is chosen.",
+                    without_workspace,
+                    without_workspace == 1 ? "repository" : "repositories"));
+            }
+            for (const std::string& line : measured.unrecorded) {
+                not_measured.push_back(line);
+            }
             std::optional<std::uint64_t> image_bytes;
             const auto customer = context.store->get_customer(customer_id);
             if (context.registry_space_bytes && customer) {
@@ -502,11 +668,7 @@ void register_metering_capabilities(Registry& registry) {
             } else {
                 not_measured.push_back("Image build time: " + builds.error().message);
             }
-            auto measured = co_await workspace_usage(context, customer_id, window);
-            if (!measured) {
-                not_measured.push_back("Workspace data and runs: " + measured.error().message);
-            }
-            json workspaces = measured ? std::move(*measured) : json::array();
+            json workspaces = std::move(measured.entries);
             std::uint64_t workspace_bytes = 0;
             std::uint64_t run_seconds = 0;
             std::uint64_t run_count = 0;
@@ -537,8 +699,7 @@ void register_metering_capabilities(Registry& registry) {
                 image_builds.value("seconds", std::uint64_t{0});
             const std::uint64_t total_seconds = add_saturated(
                 add_saturated(repository_build_seconds, image_build_seconds), run_seconds);
-            const bool priced = context.metering.storage_gib_hour_micros != 0 ||
-                                context.metering.transfer_in_gib_micros != 0 ||
+            const bool priced = context.metering.transfer_in_gib_micros != 0 ||
                                 context.metering.transfer_out_gib_micros != 0 ||
                                 context.metering.compute_second_micros != 0;
             json summary{{"storage",

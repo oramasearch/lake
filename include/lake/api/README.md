@@ -41,6 +41,11 @@ storage exists: it returns the unique bytes the OCI registry holds below `<space
 `metering_usage` summary calls it, so the registry layout stays inside the adapter. See
 [metering.md](../../../docs/api/metering.md).
 
+`metering_recorder.hpp` declares `MeteringRecorder`, the bounded in-process buffer of repository
+transfer and build records on their way to the workspace Zettas (lake#348, lake#349).
+`ApiContext::metering_recorder` points at the server's; `ServerOptions::metering_flush_interval`
+and `metering_max_pending` configure it. A null recorder (no workspaces) records nothing.
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 

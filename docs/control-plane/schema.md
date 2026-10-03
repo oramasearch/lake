@@ -197,8 +197,8 @@ The migration follows forge/export/import migration `0012`.
 
 | Table | Purpose |
 |---|---|
-| `metering_usage` | One row per customer and UTC hour. Unique stored bytes are a gauge; inbound transfer, outbound transfer, and compute seconds are counters. |
-| `metering_build_records` | Customer/result idempotency ledger that adds a build's rounded compute seconds to its hour once. |
+| `metering_usage` | Retired by `0053_metering_workspaces` (lake#348): repository transfer lives in the repository's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. It held one row per customer and UTC hour: a unique-stored-bytes gauge and transfer and compute counters. |
+| `metering_build_records` | Retired by `0053_metering_workspaces` (lake#349): build records live in the repository's workspace Zetta. It was the customer/result idempotency ledger that added a build's rounded compute seconds to its hour once. |
 | `metering_guard` | Guard table for this migration. |
 
 Both data tables use the metering area prefix. Customer deletion cascades its usage and ledger.
@@ -619,3 +619,19 @@ an unassigned repository is assigned only by a reviewed migration. Nothing is dr
 guard `repository_workspaces_guard`. The operator reads no repository table, but vendors the schema
 and selects that guard before the binary is deployed. See
 [`../api/repositories.md`](../api/repositories.md#the-owning-workspace).
+
+## Metering workspaces migration
+
+`0053_metering_workspaces` (lake#348, lake#349) retires `metering_usage` and
+`metering_build_records`: lake no longer writes or reads them. Repository transfer and build
+records live in the workspace Zetta of the repository's workspace
+([`../api/metering.md`](../api/metering.md)), and repository storage is measured live on each read
+and stored nowhere until lake#380 makes stores per workspace. The migration only records each row's
+owner in `workspace_assignments` for the operator's copy: a space with exactly one live workspace
+owns its rows (`sole_workspace`), every other row is `needs_selection` and reported by a warning.
+A usage row's `object_id` is `md5(customer_id || E'\n' || hour)` with the hour printed as
+`YYYY-MM-DDTHH:MI:SSZ` in UTC, a build row's `md5(customer_id || E'\n' || result_id)`, both as a
+UUID, since neither table has an id column; lake computes the same. Usage rows without transfer
+(only the retired gauge and compute) are not assigned. No column is added and nothing is dropped;
+`metering_guard` stays. Idempotent; guard `metering_workspaces_guard`. The operator reads neither
+table, but vendors the schema and selects that guard before the binary is deployed.

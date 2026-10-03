@@ -5,6 +5,7 @@
 // OpenAPI document and MCP (POST /mcp). Every capability call goes through
 // Registry::call so authorization, validation and audit remain centralized.
 
+#include "lake/api/metering_recorder.hpp"
 #include "lake/api/server.hpp"
 #include "lake/thread.hpp"
 
@@ -5151,6 +5152,10 @@ struct ApiServer::Impl {
     telemetry::Metrics metrics;
     std::chrono::steady_clock::time_point next_topic_reap{};
     std::size_t reported_bus_reaps = 0;
+    // Repository usage on its way to the workspace Zettas (lake#348); null without workspaces.
+    std::unique_ptr<MeteringRecorder> metering_recorder;
+    std::chrono::steady_clock::time_point next_metering_flush{};
+    MeteringRecorder::Totals reported_metering;
     mutable LiquidCustomerStores sync_store;
     ArtifactRegistry artifacts;
     Registry registry;
@@ -5703,6 +5708,7 @@ struct ApiServer::Impl {
         ctx.instance_kek = options.instance_kek;
         ctx.sync_store = &sync_store;
         ctx.metering = options.metering;
+        ctx.metering_recorder = metering_recorder.get();
         if (artifacts.available()) {
             ctx.registry_space_bytes = [this](const std::string& space) {
                 return artifacts.space_stored_bytes(space);
@@ -15173,6 +15179,51 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    // Writes the repository usage counted since the last flush to the workspace Zettas, off the
+    // request path (lake#348), and reports what was written, kept or dropped as counters.
+    void flush_metering() {
+        if (!metering_recorder) {
+            return;
+        }
+        static_cast<void>(liquid::runtime::block_on(metering_recorder->flush()));
+        const MeteringRecorder::Totals now = metering_recorder->totals();
+        const auto report = [this](const char* name,
+                                   const telemetry::Labels& labels,
+                                   std::uint64_t current,
+                                   std::uint64_t& reported) {
+            if (current > reported) {
+                metrics.increment_counter(name, labels, static_cast<double>(current - reported));
+                reported = current;
+            }
+        };
+        report("lake_metering_records_written_total",
+               {{"collection", "metering_usage"}},
+               now.flushed_transfers,
+               reported_metering.flushed_transfers);
+        report("lake_metering_records_written_total",
+               {{"collection", "metering_build_records"}},
+               now.flushed_builds,
+               reported_metering.flushed_builds);
+        report("lake_metering_flush_errors_total",
+               {},
+               now.flush_errors,
+               reported_metering.flush_errors);
+        report("lake_metering_dropped_bytes_total",
+               {{"reason", "dropped"}},
+               now.dropped_bytes,
+               reported_metering.dropped_bytes);
+        report("lake_metering_dropped_bytes_total",
+               {{"reason", "no_workspace"}},
+               now.unattributed_bytes,
+               reported_metering.unattributed_bytes);
+        report("lake_metering_dropped_builds_total",
+               {},
+               now.dropped_builds,
+               reported_metering.dropped_builds);
+        metrics.set_gauge(
+            "lake_metering_pending", {}, static_cast<double>(metering_recorder->pending()));
+    }
+
     void log_store_owner(nlohmann::json event) const {
         event["event"] = "store_owner";
         event["node"] = options.node_name;
@@ -17270,6 +17321,15 @@ bool ApiServer::start() {
         return false;
     }
     impl.bound_port = impl.server->local_endpoint().port();
+    if (impl.options.store && impl.options.workspaces && !impl.options.instance_kek.empty()) {
+        impl.metering_recorder =
+            std::make_unique<MeteringRecorder>(impl.options.store.get(),
+                                               impl.options.workspaces.get(),
+                                               impl.options.instance_kek,
+                                               impl.options.metering_max_pending);
+        impl.next_metering_flush =
+            std::chrono::steady_clock::now() + impl.options.metering_flush_interval;
+    }
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
     impl.is_running.store(true);
@@ -17308,6 +17368,8 @@ void ApiServer::stop() {
     if (impl.owner_thread.joinable())
         impl.owner_thread.join();
     impl.work_cv.notify_all();
+    // In-flight requests have finished: write the repository usage they counted (lake#348).
+    impl.flush_metering();
     // In-flight requests have finished: close every store (releasing liquid's per-store owner
     // locks), then the root lock, so the next owner opens a store nobody is writing.
     const bool owned = impl.store_owner.held();
@@ -17360,6 +17422,12 @@ void ApiServer::drain() {
         impl_->renew_due_timestamps();
     }
     const auto now = std::chrono::steady_clock::now();
+    if (impl_->metering_recorder &&
+        (now >= impl_->next_metering_flush ||
+         impl_->metering_recorder->pending() * 2 >= impl_->options.metering_max_pending)) {
+        impl_->next_metering_flush = now + impl_->options.metering_flush_interval;
+        impl_->flush_metering();
+    }
     if (impl_->options.store && impl_->options.workspaces && now >= impl_->next_topic_reap) {
         impl_->next_topic_reap = now + std::chrono::minutes(1);
         if (impl_->options.agent_bus) {

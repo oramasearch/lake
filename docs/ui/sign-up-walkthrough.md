@@ -26,7 +26,9 @@ native Liquid binary supplied the documented identity export command.
    `stored_bytes`, `transfer_in_bytes`, `transfer_out_bytes`, `compute_seconds`, and `cost_micros`
    are all `0`. This run configured all four unit prices to `1000` and the storage quota to
    `1073741824` bytes, so zero cost cannot be explained by free prices. No customer quota
-   override was present.
+   override was present. Since lake#348 the report has no hourly rows before any transfer or
+   build (`items` is empty), and storage is `summary.storage.repositories_bytes`, measured live;
+   the recorded run and the SQL below predate that.
 6. Since lake#315 a repository belongs to a workspace: a space without one is sent to
    **Workspaces** first, and the form then chooses the workspace instead of the customer. The
    recorded run below predates that. In **Create a repository**, keep the personal customer, enter `my-first-repository`, and

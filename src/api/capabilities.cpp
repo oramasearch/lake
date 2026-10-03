@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/api/metering_recorder.hpp"
 #include "lake/version.hpp"
 
 #include <algorithm>
@@ -1306,28 +1307,21 @@ ApiResult from_sync_error(ApiContext& context, SyncStoreError error) {
     return ApiResult::failure(code, message);
 }
 
-std::string current_metering_hour() {
-    return std::format("{:%FT%H}:00:00Z",
-                       std::chrono::floor<std::chrono::hours>(std::chrono::system_clock::now()));
-}
-
-std::optional<ApiResult> record_transfer(ApiContext& context,
-                                         const std::string& customer_id,
-                                         std::uint64_t incoming,
-                                         std::uint64_t outgoing,
-                                         std::optional<std::uint64_t> stored_bytes = std::nullopt) {
-    const auto usage = context.store->upsert_metering_usage({.customer_id = customer_id,
-                                                             .hour = current_metering_hour(),
-                                                             .stored_bytes = stored_bytes,
-                                                             .transfer_in_bytes = incoming,
-                                                             .transfer_out_bytes = outgoing});
-    if (!usage) {
-        return from_store_error(usage.error());
+// Counts a sync request's bytes for its repository's workspace (lake#348, docs/api/metering.md):
+// an in-memory increment the recorder writes to that workspace's hourly record off the request
+// path. The repository's stored bytes are measured on each usage read, not here.
+void record_transfer(ApiContext& context,
+                     const control::Repository& repository,
+                     std::uint64_t incoming,
+                     std::uint64_t outgoing) {
+    if (context.metering_recorder) {
+        context.metering_recorder->add_transfer(repository, incoming, outgoing);
     }
-    context.audit_details["metering"] = {{"stored_bytes", usage->stored_bytes},
-                                         {"transfer_in_bytes", incoming},
-                                         {"transfer_out_bytes", outgoing}};
-    return std::nullopt;
+    context.audit_details["metering"] = {
+        {"transfer_in_bytes", incoming},
+        {"transfer_out_bytes", outgoing},
+        {"workspace_id", repository.workspace_id},
+        {"recorded", context.metering_recorder != nullptr && !repository.workspace_id.empty()}};
 }
 
 SyncStoreResult<void> record_branch_protection_event(ApiContext& context,
@@ -3922,12 +3916,8 @@ void register_repository_capabilities(Registry& registry) {
                 return from_sync_error(context, response.error());
             }
             context.sync_response = std::move(*response);
-            if (auto error = record_transfer(context,
-                                             repository->customer_id,
-                                             context.sync_request.size(),
-                                             context.sync_response.size())) {
-                return *error;
-            }
+            record_transfer(
+                context, *repository, context.sync_request.size(), context.sync_response.size());
             return ApiResult::success({{"bytes", context.sync_response.size()}});
         }});
     registry.add(Capability{
@@ -3986,17 +3976,8 @@ void register_repository_capabilities(Registry& registry) {
                 }
             }
             context.sync_response = std::move(*response);
-            auto stored_bytes = context.sync_store->unique_stored_bytes(repository->customer_id);
-            if (!stored_bytes) {
-                return from_sync_error(context, stored_bytes.error());
-            }
-            if (auto error = record_transfer(context,
-                                             repository->customer_id,
-                                             context.sync_request.size(),
-                                             context.sync_response.size(),
-                                             *stored_bytes)) {
-                return *error;
-            }
+            record_transfer(
+                context, *repository, context.sync_request.size(), context.sync_response.size());
             return ApiResult::success({{"bytes", context.sync_response.size()}});
         }});
     registry.add(
@@ -4024,12 +4005,10 @@ void register_repository_capabilities(Registry& registry) {
                            return from_sync_error(context, response.error());
                        }
                        context.sync_response = std::move(*response);
-                       if (auto error = record_transfer(context,
-                                                        repository->customer_id,
-                                                        context.sync_request.size(),
-                                                        context.sync_response.size())) {
-                           return *error;
-                       }
+                       record_transfer(context,
+                                       *repository,
+                                       context.sync_request.size(),
+                                       context.sync_response.size());
                        return ApiResult::success({{"bytes", context.sync_response.size()}});
                    }});
     registry.add(Capability{
@@ -4064,10 +4043,8 @@ void register_repository_capabilities(Registry& registry) {
                 }
                 return from_sync_error(context, stored.error());
             }
-            if (auto error = record_transfer(
-                    context, repository->customer_id, context.sync_request.size(), 0, *stored)) {
-                return *error;
-            }
+            record_transfer(context, *repository, context.sync_request.size(), 0);
+            context.audit_details["metering"]["stored_bytes"] = *stored;
             return ApiResult::success({{"bytes", context.sync_request.size()}});
         }});
     registry.add(Capability{
@@ -4114,10 +4091,7 @@ void register_repository_capabilities(Registry& registry) {
                 return from_sync_error(context, response.error());
             }
             context.sync_response = std::move(*response);
-            if (auto error = record_transfer(
-                    context, repository->customer_id, 0, context.sync_response.size())) {
-                return *error;
-            }
+            record_transfer(context, *repository, 0, context.sync_response.size());
             return ApiResult::success({{"bytes", context.sync_response.size()}});
         }});
 }

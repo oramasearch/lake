@@ -34,8 +34,12 @@ panel routes (`/ask/agents`, `/train/agents/list`, `/ship/indexes/datasets`, lak
 script fills them in, and `?inline=1` renders Agents and Indexes in place without JavaScript.
 Startup warms existing repository indexes for Metering without
 caching usage. `metering_capabilities.cpp` is asynchronous: its summary reads every workspace's
-datasets and runs concurrently, and `http_server.cpp` injects `registry_space_bytes` so registry
-image bytes are counted where the registry storage lives. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
+datasets, runs, and repository transfer and build records concurrently (lake#348, lake#349), and
+`http_server.cpp` injects `registry_space_bytes` so registry image bytes are counted where the
+registry storage lives. `metering_recorder.cpp` is the `MeteringRecorder`: the sync capabilities in
+`capabilities.cpp` add each request's bytes to it without I/O, `ApiServer::drain` flushes it to the
+workspace Zettas every `metering_flush_interval`, and `ApiServer::stop` flushes it once more after
+in-flight requests finish. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
 and [metering](../../docs/api/metering.md).
 
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine

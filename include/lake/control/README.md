@@ -75,3 +75,9 @@ event and delivery-attempt codecs and the claim/settle pair that sends each atte
 `Repository::workspace_id` and `NewRepository::workspace_id` carry the workspace a repository belongs
 to (migration `0051_repository_workspaces`, lake#315); `list_repositories` takes an optional
 workspace, and `transfer_repository` is no longer part of `Store`.
+
+`metering.hpp` holds repository usage in workspace Zettas (lake#348, lake#349): the
+`lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
+`lake_metering_build_records` per-result records, written `if_absent`, plus the legacy row ids
+migration `0053` shares. `store.hpp` replaces the metering store methods with
+`assign_legacy_metering` and the two `legacy_metering_*` reads, which serve only the copy.

@@ -48,8 +48,9 @@ list with Zetta's real `system.datasets` column, `dataset`.
 The loose wall guard is p95 below 500 ms over 20 renders at 30 ms of workspace latency. Its
 populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering case
 with four repositories and 128 files. The first Metering request checks populated-byte correctness;
-the measured Metering route receives the same p95 guard as every other page and a budget of two
-workspace calls in one round (its usage summary reads datasets and runs). `Workspaces.Registry*` and
+the measured Metering route receives the same p95 guard as every other page and a budget of four
+workspace calls in one round (its usage summary reads datasets, runs, and the repository transfer
+and build records of lake#348 and lake#349). `Workspaces.Registry*` and
 `Workspaces.PipelineDefinitionCache*` cover expiry, change invalidation, input isolation,
 readiness/credential changes, errors and stale in-flight replies. Run with PostgreSQL in both
 native builds; [performance.md](../docs/ui/performance.md) explains the evidence rows.
@@ -406,3 +407,12 @@ workspace that is not ready, deletion, and an attempt claimed by another caller 
 stores; `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy` migration
 `0049_application_webhook_workspaces`. `stream_fixture.hpp`'s `ready_workspace` makes a Ready
 workspace over either store for tests that sign into an application pool.
+
+Repository usage in workspace Zettas (lake#348, lake#349): `test_workspace_records.cpp`'s
+`RepositoryUsageStaysInEachRepositorysWorkspace` covers `MeteringRecorder` across two spaces with
+two workspaces each (nothing written on the request path, merged counters, a second replica's
+conditional increment, not-ready and deleted workspaces, a repository without a workspace, the
+bound, build records once), and `TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace` the copy.
+`PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy` covers `0053_metering_workspaces`, and
+`PostgresSync.PushAndPullUsePostgresControlPlane` a real push and pull flushed into the
+repository's workspace, nothing in PostgreSQL, and the flush on stop.

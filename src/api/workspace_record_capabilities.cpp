@@ -2,13 +2,15 @@
 // (docs/architecture/workspace-records.md, lake#370). One operator capability serves every
 // collection that moves: each follow-up adds its collection to `copy_collections` and a copier
 // (opportunities, lake#376; stream_owners, lake#379; drive_share_links, lake#350;
-// auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357). A collection
+// auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357; metering_usage
+// and metering_build_records, lake#348 and lake#349). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
 #include <algorithm>
 #include <array>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -16,6 +18,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/drive_share_links.hpp"
+#include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/stream_owners.hpp"
@@ -26,9 +29,13 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 5> copy_collections = {
-    "opportunities", "stream_owners", "drive_share_links", "auth_app_webhook_events",
-    "auth_app_webhook_deliveries"};
+constexpr std::array<std::string_view, 7> copy_collections = {"opportunities",
+                                                              "stream_owners",
+                                                              "drive_share_links",
+                                                              "auth_app_webhook_events",
+                                                              "auth_app_webhook_deliveries",
+                                                              "metering_usage",
+                                                              "metering_build_records"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -38,9 +45,15 @@ struct WorkspaceTally {
 };
 
 // The answer of one page of a copy, the same for every collection.
-ApiResult copy_result(std::string_view collection, const std::string& mode, std::size_t rows,
-                      int limit, const std::string& last_id, json unresolved,
-                      const std::map<std::string, WorkspaceTally>& tallies) {
+// `blocking`: whether the unresolved rows keep the page from being complete (by default, any).
+ApiResult copy_result(std::string_view collection,
+                      const std::string& mode,
+                      std::size_t rows,
+                      int limit,
+                      const std::string& last_id,
+                      json unresolved,
+                      const std::map<std::string, WorkspaceTally>& tallies,
+                      std::optional<bool> blocking = std::nullopt) {
     json workspaces = json::array();
     std::size_t copied = 0, already_present = 0, verified = 0, failed = 0;
     json missing = json::array(), mismatched = json::array();
@@ -70,7 +83,7 @@ ApiResult copy_result(std::string_view collection, const std::string& mode, std:
         }
         workspaces.push_back(std::move(entry));
     }
-    const bool all_assigned = unresolved.empty();
+    const bool all_assigned = blocking ? !*blocking : unresolved.empty();
     json value{{"collection", std::string(collection)},
                {"mode", mode},
                {"rows", rows},
@@ -602,6 +615,189 @@ liquid::runtime::task<ApiResult> copy_application_webhook_deliveries(ApiContext&
                                              limit, DeliveryCopy{});
 }
 
+// The rows of one retired metering table grouped by the workspace that owns them. Rows whose
+// workspace was deleted are reported but do not block completion: their records went with it.
+template <class Row>
+std::map<std::string, std::vector<const Row*>>
+by_owner(const std::vector<Row>& rows,
+         json& unresolved,
+         bool& blocking,
+         const std::string& (*customer)(const Row&)) {
+    std::map<std::string, std::vector<const Row*>> owned;
+    for (const Row& row : rows) {
+        if (row.workspace_id.empty()) {
+            unresolved.push_back(
+                {{"id", row.id}, {"customer_id", customer(row)}, {"outcome", row.outcome}});
+            blocking = blocking || row.outcome != "workspace_deleted";
+        } else {
+            owned[row.workspace_id].push_back(&row);
+        }
+    }
+    return owned;
+}
+
+const std::string& usage_customer(const control::LegacyMeteringUsage& row) {
+    return row.usage.customer_id;
+}
+const std::string& build_customer(const control::LegacyMeteredBuild& row) {
+    return row.build.customer_id;
+}
+
+// One page of metering_usage (lake#348): assignments first, then per workspace one listing of the
+// space's transfer records and an `if_absent` put of each missing row under its legacy id. Only
+// transfer moves: the hourly storage gauge is retired (storage is measured live), and compute is
+// in the build records.
+liquid::runtime::task<ApiResult> copy_metering_usage(ApiContext& context,
+                                                     const std::string& mode,
+                                                     const std::string& after,
+                                                     int limit) {
+    if (auto assigned = context.store->assign_legacy_metering(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_metering_usage(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    bool blocking = false;
+    const auto owned = by_owner(*rows, unresolved, blocking, &usage_customer);
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned_rows] : owned) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned_rows.front()->usage.customer_id;
+        tally.rows = owned_rows.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        auto present =
+            control::settled(co_await control::list_metered_transfer(*records, tally.customer_id));
+        if (!present) {
+            tally.error = present.error().code + ": " + present.error().message;
+            continue;
+        }
+        std::map<std::string, control::MeteredTransfer> stored;
+        for (control::MeteredTransfer& transfer : *present) {
+            const std::string id = transfer.id;
+            stored.emplace(id, std::move(transfer));
+        }
+        for (const control::LegacyMeteringUsage* row : owned_rows) {
+            const auto found = stored.find(row->id);
+            if (mode == "verify") {
+                if (found == stored.end()) {
+                    tally.missing.push_back(row->id);
+                } else if (found->second.hour != row->usage.hour ||
+                           found->second.transfer_in_bytes != row->usage.transfer_in_bytes ||
+                           found->second.transfer_out_bytes != row->usage.transfer_out_bytes) {
+                    tally.mismatched.push_back(row->id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (found != stored.end()) {
+                ++tally.already_present;
+                continue;
+            }
+            auto copied = control::settled(co_await control::copy_metered_transfer(*records, *row));
+            if (!copied) {
+                tally.error = copied.error().code + ": " + copied.error().message;
+                break;
+            }
+            ++(*copied ? tally.copied : tally.already_present);
+        }
+    }
+    co_return copy_result("metering_usage",
+                          mode,
+                          rows->size(),
+                          limit,
+                          rows->empty() ? std::string() : rows->back().id,
+                          std::move(unresolved),
+                          tallies,
+                          blocking);
+}
+
+// One page of metering_build_records (lake#349): per workspace one listing of the space's build
+// records and an `if_absent` put of each missing result under the key a usage read also writes,
+// so a result recorded since the cutover is not counted twice.
+liquid::runtime::task<ApiResult> copy_metering_build_records(ApiContext& context,
+                                                             const std::string& mode,
+                                                             const std::string& after,
+                                                             int limit) {
+    if (auto assigned = context.store->assign_legacy_metering(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_metering_build_records(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    bool blocking = false;
+    const auto owned = by_owner(*rows, unresolved, blocking, &build_customer);
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned_rows] : owned) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned_rows.front()->build.customer_id;
+        tally.rows = owned_rows.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        auto present =
+            control::settled(co_await control::list_metered_builds(*records, tally.customer_id));
+        if (!present) {
+            tally.error = present.error().code + ": " + present.error().message;
+            continue;
+        }
+        std::map<std::string, control::MeteredBuild> stored;
+        for (control::MeteredBuild& build : *present) {
+            const std::string id = build.result_id;
+            stored.emplace(id, std::move(build));
+        }
+        for (const control::LegacyMeteredBuild* row : owned_rows) {
+            const auto found = stored.find(row->build.result_id);
+            if (mode == "verify") {
+                if (found == stored.end()) {
+                    tally.missing.push_back(row->id);
+                } else if (found->second.hour != row->build.hour ||
+                           found->second.compute_seconds != row->build.compute_seconds) {
+                    tally.mismatched.push_back(row->id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (found != stored.end()) {
+                ++tally.already_present;
+                continue;
+            }
+            auto copied =
+                control::settled(co_await control::record_metered_build(*records, row->build));
+            if (!copied) {
+                tally.error = copied.error().code + ": " + copied.error().message;
+                break;
+            }
+            ++(*copied ? tally.copied : tally.already_present);
+        }
+    }
+    co_return copy_result("metering_build_records",
+                          mode,
+                          rows->size(),
+                          limit,
+                          rows->empty() ? std::string() : rows->back().id,
+                          std::move(unresolved),
+                          tallies,
+                          blocking);
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -665,6 +861,12 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "auth_app_webhook_events") {
                 co_return co_await copy_application_webhook_events(context, mode, after, limit);
+            }
+            if (input.at("collection") == "metering_usage") {
+                co_return co_await copy_metering_usage(context, mode, after, limit);
+            }
+            if (input.at("collection") == "metering_build_records") {
+                co_return co_await copy_metering_build_records(context, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_webhook_deliveries") {
                 co_return co_await copy_application_webhook_deliveries(context, mode, after,

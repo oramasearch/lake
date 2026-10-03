@@ -22,6 +22,12 @@ The exported metric families are:
 - `lake_http_request_duration_seconds{method,route,status}`
 - `lake_store_calls_total{store,operation,result}`
 - `lake_store_call_duration_seconds{store,operation,result}`
+- `lake_metering_records_written_total{collection}`, `lake_metering_flush_errors_total`,
+  `lake_metering_dropped_bytes_total{reason}` (`dropped`: the buffer bound or a deleted
+  workspace; `no_workspace`: a repository without a workspace),
+  `lake_metering_dropped_builds_total` and the gauge `lake_metering_pending`: repository usage on
+  its way to the workspace Zettas, written by the owner loop
+  ([metering](../api/metering.md#transfer-off-the-request-path), lake#348)
 
 `route` is the registered route pattern, or `unmatched` for the trailing 404, never a caller's raw
 path. Store `result` is `ok` on success and the store error code on failure.
