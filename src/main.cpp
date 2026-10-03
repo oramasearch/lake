@@ -4,6 +4,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <memory>
+#include <stop_token>
 #include <print>
 #include <string>
 #include <string_view>
@@ -20,6 +21,7 @@
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
+#include "lake/thread.hpp"
 #include "lake/version.hpp"
 
 namespace {
@@ -389,10 +391,12 @@ int main(int argc, char** argv) {
             .dump());
     // Recover lost dispatch and expire overdue tasks. Workspace event publication applies
     // progress directly; this loop does not read an event topic on the bus.
-    std::jthread bus_loop;
+    std::stop_source bus_stop;
+    lake::Thread bus_loop;
     if (opts.agent_bus) {
-        bus_loop = std::jthread([bus = opts.agent_bus,
-                                 workspaces = opts.workspaces](std::stop_token stop) {
+        bus_loop = lake::Thread([bus = opts.agent_bus,
+                                 workspaces = opts.workspaces,
+                                 stop = bus_stop.get_token()] {
             bool started = false;
             while (!stop.stop_requested()) {
                 if (!started) {
@@ -461,7 +465,7 @@ int main(int argc, char** argv) {
         server.drain();
     }
     if (bus_loop.joinable()) {
-        bus_loop.request_stop();
+        bus_stop.request_stop();
         bus_loop.join();
     }
     // SIGTERM: stop accepting, drain in-flight requests, close the stores and release the store

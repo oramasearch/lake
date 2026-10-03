@@ -10,6 +10,10 @@ limited to six jobs. Keep each proof page aligned with the tests it names.
 Lake's targets and test binaries build with `-Werror=return-type`, so a `liquid::runtime::task<T>`
 coroutine cannot flow off its end without a result; [local.md](local.md) says why (lake#476).
 
+Threads lake starts are `lake::Thread`s with an explicit 8 MiB stack, so a Debug build on macOS
+does not overflow the platform's 512 KiB default; [local.md](local.md#debug-builds-and-thread-stacks)
+records the measured peaks (lake#478).
+
 The native Zetta client target includes the authorized checkout's runtime event support required
 by its HTTP transport; [local.md](local.md) records this without changing the bridge pin.
 

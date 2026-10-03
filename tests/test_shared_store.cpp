@@ -41,6 +41,7 @@
 #include "lake/api/store_owner.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/thread.hpp"
 #include "lake/transparency/log.hpp"
 #include "objects/records.hpp"
 #include "postgres_fixture.hpp"
@@ -356,6 +357,12 @@ struct Acknowledged {
     std::map<std::string, std::string> manifests;    // OCI tag -> manifest
     std::map<std::string, std::string> blobs;        // OCI digest -> contents
     std::map<std::uint64_t, std::string> log_leaves; // leaf index -> attestation
+
+    // True once every subsystem has acknowledged at least one write.
+    bool every_kind() {
+        std::lock_guard lock(mutex);
+        return !pushed.empty() && !drive.empty() && !blobs.empty() && !log_leaves.empty();
+    }
 };
 
 struct Fixture {
@@ -490,7 +497,7 @@ public:
 
     void stop() {
         stopping_ = true;
-        for (std::thread& thread : threads_) {
+        for (lake::Thread& thread : threads_) {
             thread.join();
         }
         threads_.clear();
@@ -684,7 +691,8 @@ private:
     std::filesystem::path scratch_;
     Acknowledged& acknowledged_;
     Outcomes& outcomes_;
-    std::vector<std::thread> threads_;
+    // Writers run liquid clients, so they take lake's thread stack, not the platform's (lake#478).
+    std::vector<lake::Thread> threads_;
     std::atomic<bool> stopping_{false};
     std::atomic<std::uint64_t> attempts_{0};
 };
@@ -913,6 +921,13 @@ TEST(StoreOwner, SuccessorTakesOverFromTheDrainingOwnerWithoutRefusingARequest) 
     Workload workload(endpoints, 2, fixture, scratch, acknowledged, outcomes);
     workload.start();
     std::this_thread::sleep_for(1500ms);
+    // The hand-off is only tested against writes that were acknowledged. A push takes over a second
+    // in a Debug build under a parallel suite, so wait for one of each kind rather than trusting
+    // the fixed window above (lake#478).
+    const auto acknowledged_deadline = std::chrono::steady_clock::now() + 60s;
+    while (!acknowledged.every_kind() && std::chrono::steady_clock::now() < acknowledged_deadline) {
+        std::this_thread::sleep_for(50ms);
+    }
 
     // The surge pod. It must become Ready while A still owns the store root.
     LakeChild b(store_root, database, kek, scratch / "b.stderr");

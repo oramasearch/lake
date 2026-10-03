@@ -44,6 +44,39 @@ reads and destroys uninitialized memory. That is how `report_on_asking_turn` abo
 `AgentRuns.AgentTurnReachesLibraryNativeAndPythonAgents` in about half of its runs (lake#476). End
 every such coroutine with an explicit `co_return`.
 
+### Debug builds and thread stacks
+
+A Debug build is the same configure with `-DCMAKE_BUILD_TYPE=Debug` (use a separate build
+directory, such as `build-debug`). Run the full suite against it when a change touches coroutines,
+threads or anything liquid runs; the unoptimised code shows problems that Release hides.
+
+Every thread lake starts — the HTTP server's `io_context` thread, the store-root owner thread
+(which opens and warms liquid stores), the outbound HTTP client's thread, the agent-bus loop in `main.cpp`, and the writer threads in `test_shared_store.cpp` — is a
+`lake::Thread` (`include/lake/thread.hpp`) with an explicit 8 MiB stack, not a `std::thread`.
+`std::thread` takes the platform default for a secondary thread, which is 8 MiB on glibc Linux but
+512 KiB on macOS. Those threads run request handling and, through `liquid::runtime::block_on`, a
+whole nested liquid runtime, so their demand is lake's and liquid's to set (lake#478).
+
+In a Debug build, liquid's `chunk_index::compact` reserves 516 KiB of stack in one frame: its two
+65,537-entry `std::uint32_t` fanout arrays live in the heap coroutine frame, but at `-O0` the
+coroutine's ramp function also reserves stack for them. A push or drive write whose index flush
+compacted therefore hit the macOS guard page at `compact`'s entry, as `EXC_BAD_ACCESS (code=2)`,
+which the shell reports as `Bus error`. Release keeps the frames on the heap (the ramp is 64
+bytes), and Linux threads had 8 MiB, so the Release image was never exposed.
+
+The size comes from measurement. Each thread's high-water mark was read from its untouched stack
+pages after the thread finished, over the full suite with 64 MiB stacks (2026-10-02, macOS arm64,
+Homebrew Clang):
+
+| Build | Threads measured | Peak stack |
+|---|---|---|
+| Debug | 378 | 546,064 bytes (533 KiB) |
+| Release | 387 | 68,560 bytes (67 KiB) |
+
+8 MiB is fifteen times the Debug peak and equals the glibc default the Linux image already ran
+with, so the deployed behaviour does not change. Raise it only from a new measurement; a frame
+that needs more belongs on the heap.
+
 ## Test
 
 ```sh
