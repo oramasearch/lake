@@ -1,5 +1,9 @@
 # Tests
 
+`lake-ui-fixture-pages` (lake#497) starts `lake-ui-fixture` and requests every page it seeds and
+every registered GET route; a fixture that cannot start, a seeded page that is not 200 HTML, or a
+5xx anywhere fails the suite. See [tools/ui/README.md](../tools/ui/README.md).
+
 `test_shared_store.cpp` (lake#467, lake#479) checks that one lake process owns a store root and
 hands it over. The PostgreSQL cases start real `lake` binaries on one root: a successor started
 beside a serving owner must become Ready while it waits, hold a drive write sent to it until the

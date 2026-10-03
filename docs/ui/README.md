@@ -124,7 +124,8 @@ Repository-page details and the liquid #166 deferrals are recorded in
 
 The reproducible seeded screenshot workflow and complete before/after page inventory are recorded
 in [`design-system.md`](design-system.md). The fixture uses the production HTTP and renderer paths;
-it does not add a fixture route to the server.
+it does not add a fixture route to the server. The `lake-ui-fixture-pages` test starts it and fails
+on a startup error, a seeded page that is not 200, or a 5xx from any registered GET route (lake#497).
 Its shell section also records the root scroll padding that keeps a `#fragment` target below the
 sticky top bar (lake#438).
 

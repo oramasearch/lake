@@ -13422,17 +13422,18 @@ struct ApiServer::Impl {
     boost::http::route_task serve_drive_share_link_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
+        // The renderer is a coroutine that takes these by reference, so they live in this frame
+        // until it finishes; passing temporaries left it reading destroyed strings (lake#497).
+        const std::string repository_id = query_value(route, "repository_id");
         const std::string ref =
             query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        return render_drive_share_link_page(route,
-                                            std::move(context),
-                                            query_value(route, "repository_id"),
-                                            ref,
-                                            query_value(route, "path"),
-                                            query_value(route, "workspace_id"),
-                                            query_value(route, "link_id"));
+        const std::string path = query_value(route, "path");
+        const std::string workspace_id = query_value(route, "workspace_id");
+        const std::string link_id = query_value(route, "link_id");
+        co_return co_await render_drive_share_link_page(
+            route, std::move(context), repository_id, ref, path, workspace_id, link_id);
     }
 
     boost::http::route_task serve_shared_with_me_page(boost::http::route_params& route) {

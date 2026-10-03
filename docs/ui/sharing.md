@@ -43,7 +43,10 @@ workspace whose links it lists and links to the space's other workspaces.
 ## Manage and inspect links
 
 The folder page lists every link on that folder with its audience, allowed use, expiry, and active,
-expired, or revoked state. GET /drive/share/link?...&workspace_id=<id>&link_id=<id> is the individual link page.
+expired, or revoked state. GET /drive/share/link?...&workspace_id=<id>&link_id=<id> is the individual link page. Its handler
+keeps the query values in its own coroutine frame until the page renders; before lake#497 it passed
+temporaries by reference, and the page answered 400 with "workspace_id must name a workspace Zetta
+in this space".
 It repeats the four answers and provides POST /drive/share/revoke only while the link is active.
 That route calls revoke_drive_share_link; it never changes policy directly.
 
