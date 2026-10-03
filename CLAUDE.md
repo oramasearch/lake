@@ -59,7 +59,10 @@ conditional write; seeds and secrets stay secrets envelopes inside the seal; the
 finds the workspace by the application id). Its settings follow (lake#351, migration `0059`): name,
 origins, redirect URIs and theme are one sealed record in the application's workspace, and
 `auth_applications` stays as the content-free routing row (id, space, pool, custom sign-in host,
-workspace). Each PostgreSQL table stays until a
+workspace). Its one-use authorization codes follow (lake#363, migration `0061`): issued `if_absent`
+in the application's workspace, redeemed once by a delete at the revision read (the relying party's
+exchange finds the workspace from the routing row), and expired by the collection's five-minute
+retention. Each PostgreSQL table stays until a
 later migration drops it after the copy is verified on dev.
 Repository usage follows (lake#348, lake#349, migration `0053`): exact hourly transfer counters and
 one build record per result in the repository's workspace Zetta, written from a bounded in-process

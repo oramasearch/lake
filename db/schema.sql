@@ -3060,3 +3060,52 @@ CREATE TABLE IF NOT EXISTS platform_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0060_platform_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0061_application_authorization_code_workspaces: an application's one-use OIDC authorization
+-- codes (lake#363) live in the workspace Zetta of the application's workspace
+-- (auth_applications.workspace_id, 0049; docs/api/apps.md, docs/architecture/workspace-records.md),
+-- in the collection lake_auth_app_authorization_codes: issued with if_absent, redeemed by a delete
+-- at the revision read, so a code is redeemed at most once, and expired by the collection's
+-- five-minute retention. Lake no longer writes or reads auth_app_authorization_codes; the
+-- operator's one-shot copy (copy_workspace_records) moves each live code into that workspace and
+-- verifies it. (app_authorization_codes, lake's own protected-app forward-auth handoff, is
+-- multitenancy and stays.)
+--
+-- Only live codes (unused, unexpired) have an owner to record; used and expired codes are never
+-- copied. Each live code's owner is recorded in workspace_assignments under md5(code_hash) as a
+-- UUID: the application's workspace (application_workspace), needs_selection while the application
+-- has none (reported, and resolved by the copy once the application is assigned), or
+-- workspace_deleted when that workspace is gone. Nothing is dropped here; a later migration drops
+-- the table once the copy has been verified on every environment.
+-- ---------------------------------------------------------------------------------------------
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                   WHERE version = '0061_application_authorization_code_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'auth_app_authorization_codes', md5(c.code_hash)::uuid, a.customer_id,
+                   CASE WHEN w.desired = 'deleted' THEN NULL ELSE a.workspace_id END,
+                   CASE WHEN a.workspace_id IS NULL THEN 'needs_selection'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'application_workspace' END
+            FROM auth_app_authorization_codes c
+                 JOIN auth_applications a ON a.id = c.application_id
+                 LEFT JOIN workspaces w ON w.id = a.workspace_id
+            WHERE c.used_at IS NULL AND c.expires_at > now()
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments WHERE workspace_id IS NULL
+                           AND object_table = 'auth_app_authorization_codes' LOOP
+            RAISE WARNING 'application authorization code not copied (%): object=%, customer=%',
+                unresolved.outcome, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS application_authorization_code_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0061_application_authorization_code_workspaces')
+    ON CONFLICT DO NOTHING;

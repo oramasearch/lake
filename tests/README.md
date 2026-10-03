@@ -488,3 +488,12 @@ least privilege, a moved record not opening, not ready and deletion;
 `0059_application_settings_workspaces`. `stream_fixture.hpp`'s `seed_application_settings` writes
 the settings of an application a test creates directly in a store, and `test_webauthn.cpp` calls
 the passkey ceremonies asynchronously.
+Application authorization codes (lake#363): `test_apps.cpp`
+(`AuthorizationCodesLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each,
+sealed records under blind keys, retention, one redemption, racing exchanges (through
+`record_fixture.hpp`'s `before_delete`, a delete landing between a read and a conditional delete),
+expiry, missing, malformed and unknown `application_id`, least privilege, not ready and deletion;
+`WorkspaceRecordStores.TheOneShotCopyMovesLiveApplicationAuthorizationCodes` the copy in both
+stores (`seed_legacy_application_authorization_code`);
+`PostgresApplicationAuthorizationCodes.MigrationRecordsEachLiveCodesOwnerForTheCopy` migration
+`0061_application_authorization_code_workspaces`.

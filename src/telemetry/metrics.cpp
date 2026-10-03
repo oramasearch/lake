@@ -486,16 +486,21 @@ public:
         return call("legacy_application_webhook_deliveries",
                     [&] { return store_->legacy_application_webhook_deliveries(after_id, limit); });
     }
-    control::Result<void> create_application_authorization_code(
-        const control::ApplicationAuthorizationCode& value) override {
-        return call("create_application_authorization_code",
-                    [&] { return store_->create_application_authorization_code(value); });
+    control::Result<void> assign_legacy_application_authorization_codes() override {
+        return call("assign_legacy_application_authorization_codes",
+                    [&] { return store_->assign_legacy_application_authorization_codes(); });
     }
-    control::Result<control::ApplicationAuthorizationCode>
-    consume_application_authorization_code(const std::string& application_id,
-                                           const std::string& code_hash) override {
-        return call("consume_application_authorization_code", [&] {
-            return store_->consume_application_authorization_code(application_id, code_hash);
+    control::Result<std::vector<control::LegacyApplicationAuthorizationCode>>
+    legacy_application_authorization_codes(const std::string& after_code_hash,
+                                           int limit) override {
+        return call("legacy_application_authorization_codes", [&] {
+            return store_->legacy_application_authorization_codes(after_code_hash, limit);
+        });
+    }
+    control::Result<void>
+    record_legacy_application_authorization_code_copied(const std::string& code_hash) override {
+        return call("record_legacy_application_authorization_code_copied", [&] {
+            return store_->record_legacy_application_authorization_code_copied(code_hash);
         });
     }
     control::Result<control::DriveShareLinkRoute>

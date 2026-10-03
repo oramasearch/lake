@@ -151,11 +151,16 @@ public:
     // Tests: rows of the retired tables as an earlier lake wrote them (id, instant and owner kept).
     void seed_legacy_application_webhook_event(ApplicationWebhookEvent event);
     void seed_legacy_application_webhook_delivery(ApplicationWebhookDelivery delivery);
+    Result<void> assign_legacy_application_authorization_codes() override;
+    Result<std::vector<LegacyApplicationAuthorizationCode>>
+    legacy_application_authorization_codes(const std::string& after_code_hash,
+                                           int limit) override;
     Result<void>
-    create_application_authorization_code(const ApplicationAuthorizationCode& value) override;
-    Result<ApplicationAuthorizationCode>
-    consume_application_authorization_code(const std::string& application_id,
-                                           const std::string& code_hash) override;
+    record_legacy_application_authorization_code_copied(const std::string& code_hash) override;
+    // Tests: a code of the retired table as an earlier lake wrote it (`expires_us` and a used
+    // flag kept; only an unused, unexpired code is listed).
+    void seed_legacy_application_authorization_code(ApplicationAuthorizationCode code,
+                                                    bool used = false);
     audit::Result<audit::Identity> current_lake_identity() override;
     audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) override;
     audit::Result<void> create_lake_identity(const audit::Identity& identity) override;
@@ -545,12 +550,15 @@ private:
     std::vector<ApplicationWebhookDelivery> application_webhook_deliveries_;
     // Retired rows' owners: event id -> workspace, outcome (migration 0049).
     std::map<std::string, std::pair<std::string, std::string>> legacy_application_event_assignments_;
+    // Retired auth_app_authorization_codes rows (0061) and their owners: code hash -> workspace,
+    // outcome.
     struct ApplicationAuthorizationCodeRecord {
         ApplicationAuthorizationCode code;
-        std::chrono::steady_clock::time_point expires_at;
         bool used = false;
     };
     std::vector<ApplicationAuthorizationCodeRecord> application_authorization_codes_;
+    std::map<std::string, std::pair<std::string, std::string>>
+        legacy_application_code_assignments_;
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;

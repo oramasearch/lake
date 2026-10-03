@@ -317,7 +317,7 @@ one-shot copy moves the retired rows.
 | Table or change | Purpose |
 |---|---|
 | `identity_taap_assertions` | One-use digest ledger binding each accepted liquid-key sign-in assertion to its lake user and pool. |
-| `auth_app_authorization_codes` | Five-minute application code hashes with exact redirect, PKCE S256 challenge, nonce, user, and one-use timestamp. |
+| `auth_app_authorization_codes` | Five-minute application code hashes with exact redirect, PKCE S256 challenge, nonce, user, and one-use timestamp. Retired by `0061` (lake#363): codes are issued and redeemed in the application's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. |
 | `pki_certificates.revoked_at` and `agent` profile | Immediate agent-certificate status plus rotation linkage through the existing `renewed_from_id`. |
 | `secrets_dynamic_leases` | Encrypted generated credential, role, bounded expiry, revocation, and renewal count for each mount lease. Since 0057 the value is sealed with the mount data key read from the mount's workspace; retired by `0058_secret_lease_workspaces` (lake#362), when leases moved into that workspace. |
 | `identity_exit_guard` | Guard table for migration `0020_identity_exit`. |
@@ -747,3 +747,21 @@ while the application has no workspace (warned, and resolved by the copy once it
 `workspace_deleted` (warned; it does not hold the copy back). Nothing is dropped. Idempotent; guard
 `application_settings_workspaces_guard`. Mechanism and cutover:
 [`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-settings-dev-cluster).
+
+## Application authorization code workspaces migration
+
+`0061_application_authorization_code_workspaces` (lake#363) moves an application's one-use OIDC
+authorization codes into the workspace Zetta of the application's workspace
+(`auth_applications.workspace_id`, `0049`): issued `if_absent`, redeemed by a delete at the revision
+read, expired by the collection's five-minute retention. Lake no longer writes or reads
+`auth_app_authorization_codes` except through the operator-only `copy_workspace_records`
+(collection `auth_app_authorization_codes`), which considers only live codes (unused, unexpired)
+and reapplies the assignment before each run. The migration records each live code's owner in
+`workspace_assignments` under `object_table = 'auth_app_authorization_codes'` and
+`object_id = md5(code_hash)::uuid`: `application_workspace`, `needs_selection` while the application
+has no workspace (warned, and resolved by the copy once it is assigned), or `workspace_deleted`
+(warned; it does not hold the copy back). The copy sets a code's outcome to `copied` before it
+writes it, and never writes a `copied` code again. Used and expired codes are not recorded. Nothing
+is dropped. Idempotent; guard `application_authorization_code_workspaces_guard`. Mechanism and
+cutover:
+[`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-authorization-codes-dev-cluster).

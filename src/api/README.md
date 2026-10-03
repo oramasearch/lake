@@ -293,3 +293,8 @@ without a workspace call to a caller who may read no environment of the reposito
 `/deployments`, `/environments` and `/environment` pages call the registry asynchronously, and the
 owner loop hands `PlatformService::sync` an opener over the workspace caller.
 `copy_workspace_records` copies `platform_mirror` and then `platform_environments`.
+`app_capabilities.cpp` issues and redeems application authorization codes in the application's
+workspace (lake#363): `begin_application_authorization` writes the code there, and
+`exchange_application_authorization_code` reads the routing row for the workspace before it redeems
+the code. `copy_workspace_records` also copies `auth_app_authorization_codes`
+(`copy_application_authorization_codes`: live codes only, each written at most once).

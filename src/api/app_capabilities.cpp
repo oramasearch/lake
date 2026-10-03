@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_user_records.hpp"
@@ -1130,16 +1131,20 @@ void register_application_capabilities(Registry& registry) {
             if (user.status != "active") {
                 co_return ApiResult::failure("unauthorized", "application user is suspended");
             }
+            // The code is issued into the application's workspace (lake#363), written only if
+            // absent and expired there by the collection's retention; only its hash is kept.
             const std::string code = control::identity_crypto::random_secret();
-            auto stored = context.store->create_application_authorization_code(
-                {application->id,
-                 context.acting_user_id,
-                 redirect_uri,
-                 control::identity_crypto::sha256_hex(code),
-                 input.at("code_challenge"),
-                 input.at("nonce")});
+            control::ApplicationAuthorizationCode issued;
+            issued.application_id = application->id;
+            issued.user_id = context.acting_user_id;
+            issued.redirect_uri = redirect_uri;
+            issued.code_hash = control::identity_crypto::sha256_hex(code);
+            issued.code_challenge = input.at("code_challenge");
+            issued.nonce = input.at("nonce");
+            auto stored = control::settled(co_await control::issue_application_authorization_code(
+                *records, std::move(issued)));
             if (!stored) {
-                co_return from_store_error(stored.error());
+                co_return from_records_error(stored.error());
             }
             context.audit_customer_id = application->customer_id;
             context.audit_kind = "authentication";
@@ -1152,7 +1157,10 @@ void register_application_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "exchange_application_authorization_code",
         .title = "Exchange application authorization code",
-        .description = "Exchange a one-use OIDC authorization code and PKCE verifier for tokens.",
+        .description =
+            "Exchange a one-use OIDC authorization code and PKCE verifier for tokens. Called by "
+            "the relying party's backend with the application id and the code; the code is "
+            "redeemed in the workspace Zetta of the application's workspace, at most once.",
         .input_schema =
             input_schema({{"application_id", {{"type", "string"}}},
                           {"code", {{"type", "string"}}},
@@ -1167,25 +1175,29 @@ void register_application_capabilities(Registry& registry) {
         .resolve_object = application_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            auto code = context.store->consume_application_authorization_code(
-                input.at("application_id"),
-                control::identity_crypto::sha256_hex(input.at("code").get<std::string>()));
+            // The application's routing row names the workspace its codes live in (lake#363).
+            auto application = context.store->get_application(input.at("application_id"));
+            if (!application) {
+                co_return ApiResult::failure(application.error().code,
+                                             application.error().message, "/application_id");
+            }
+            auto records = application_records(*application, context);
+            if (!records) {
+                co_return records.error();
+            }
+            // Read, then deleted at the revision read: of two racing exchanges only one redeems.
+            auto code = control::settled(co_await control::redeem_application_authorization_code(
+                *records,
+                application->id,
+                control::identity_crypto::sha256_hex(input.at("code").get<std::string>())));
             if (!code) {
-                co_return from_store_error(code.error());
+                co_return from_records_error(code.error());
             }
             if (code->redirect_uri != input.at("redirect_uri").get<std::string>() ||
                 code->code_challenge != control::identity_crypto::sha256_base64url(
                                             input.at("code_verifier").get<std::string>())) {
                 co_return ApiResult::failure(
                     "unauthorized", "authorization code redirect or PKCE verifier is invalid");
-            }
-            auto application = context.store->get_application(code->application_id);
-            if (!application) {
-                co_return from_store_error(application.error());
-            }
-            auto records = application_records(*application, context);
-            if (!records) {
-                co_return records.error();
             }
             auto user = co_await application_user(*records, application->id, code->user_id);
             if (!user) {

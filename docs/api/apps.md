@@ -33,8 +33,8 @@ denial, and failure.
 | `rotate_application_signing_key` | application `admin`; `workspace_id` must be the application's | new key ID and version |
 | `application_jwks` | public; by `application_id` alone | all retained public verification keys |
 | `issue_application_jwt` | application `write`; `workspace_id` must be the application's | short-lived user access token |
-| `begin_application_authorization` | application `write` | one-use code, state, and exact registered redirect for the signed-in lake user |
-| `exchange_application_authorization_code` | public client | EdDSA access and ID tokens after exact redirect and PKCE S256 verification |
+| `begin_application_authorization` | application `write` | one-use code, state, and exact registered redirect for the signed-in lake user; the code is issued into the application's workspace |
+| `exchange_application_authorization_code` | public client; by `application_id` and the code | EdDSA access and ID tokens after exact redirect and PKCE S256 verification; the code is redeemed once, in the application's workspace |
 | `list_application_users`, `export_application_user` | application `read`; `workspace_id` must be the application's | pool user profiles and status, newest first |
 | `suspend_application_user`, `delete_application_user` | application `admin`; `workspace_id` must be the application's | suspended profile or deletion confirmation |
 | `list_application_organizations` | application `read`; `workspace_id` must be the application's | application-owned organizations, newest first |
@@ -182,8 +182,10 @@ keys so already-issued tokens continue to verify.
 
 The OIDC code path uses `begin_application_authorization` after lake session resolution. It
 registers the lake user in the application, requires an exact configured redirect, accepts only
-PKCE S256, and persists only the code hash with a five-minute expiry. Exchange consumes the code
-before checking its redirect and verifier, so every completion attempt is one-use. The ID token
+PKCE S256, and persists only the code hash with a five-minute expiry, in the application's
+workspace ([Where authorization codes live](#where-authorization-codes-live-lake363)). Exchange
+consumes the code before checking its redirect and verifier, so every completion attempt is
+one-use. The ID token
 adds the request nonce and uses `https://<application host>/v1/apps/<id>` as issuer, the application
 UUID as audience, and the same keys published by `application_jwks` and the raw JWKS route.
 
@@ -216,6 +218,39 @@ parsed, err := jwt.Parse(token, keyFunc,
 
 Rust applications can use `jsonwebtoken` with an EdDSA decoding key selected from the JWKS and
 set `Validation.algorithms`, `Validation.aud`, and `Validation.iss` before decoding.
+
+### Where authorization codes live (lake#363)
+
+An application's one-use OIDC authorization codes live in the workspace Zetta of the application's
+workspace: the sealed collection `lake_auth_app_authorization_codes`, found by the application
+(`application:<id>`) ([workspace-records.md](../architecture/workspace-records.md)). A code's
+record key is the blind index of the application and the code's SHA-256, so the workspace holds
+neither the code nor its hash in the clear; the sealed body holds the user, the redirect URI, the
+PKCE challenge, the nonce and the expiry. Nothing falls back to PostgreSQL, to another workspace or
+to the lake Zetta. (`app_authorization_codes`, lake's own protected-app forward-auth handoff, is a
+different table: it is multitenancy and stays central.)
+
+- **Issue.** `begin_application_authorization` writes the code into the application's workspace
+  with `if_absent`. The workspace is the application's (`auth_applications.workspace_id`, `0049`),
+  so the capability takes no `workspace_id`.
+- **Exchange.** The relying party's backend calls `exchange_application_authorization_code` with the
+  application id and the code only. Lake reads the application's routing row for its workspace,
+  reads the code there and deletes it at the revision it read (`delete_record` with
+  `if_revision`). Of two exchanges racing for one code only one delete succeeds; the other gets
+  `conflict` or `not_found` and is refused with `unauthorized`, so a code is redeemed at most once.
+  The redirect and PKCE verifier are checked after the code is consumed, as before.
+- **Expiry.** The collection's retention is the code lifetime, five minutes after the write, and
+  the engine hides and removes an expired record. Lake also refuses a code whose own expiry has
+  passed (and removes it), which holds for a copied code that was written after it was issued.
+- **Refusals.** A code that is absent, of another application, expired or already redeemed is
+  `unauthorized`. A missing `application_id` is `invalid_input` at `/application_id`; an unknown or
+  malformed one is refused at `/application_id`. An application without a workspace, or whose
+  workspace is not ready, answers `workspace_not_ready`; a deleted workspace takes its codes with
+  it.
+- **Before the copy.** A code issued in the five minutes before the deploy is in the retired table
+  until the operator's copy writes it into the workspace; until then its exchange is refused
+  (cutover:
+  [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-authorization-codes-dev-cluster)).
 
 ## Lifecycle webhooks
 
@@ -338,7 +373,7 @@ page is [the Ship Apps UI](../ui/apps.md).
 cmake --build build
 LAKE_TEST_DB_URI=postgresql://lake:password@127.0.0.1:5432/lake_test \
   ctest --test-dir build --output-on-failure \
-    -R 'ApplicationAuth|ApplicationHttp|PostgresApplications|PostgresApplicationUsers|PostgresApplicationSettings|TheOneShotCopyMovesApplication'
+    -R 'ApplicationAuth|ApplicationHttp|PostgresApplications|PostgresApplicationUsers|PostgresApplicationSettings|PostgresApplicationAuthorizationCodes|TheOneShotCopyMovesApplication|TheOneShotCopyMovesLiveApplicationAuthorizationCodes|IdentityExit'
 ```
 
 `ApplicationAuth` verifies a real Ed25519 JWT against the returned JWKS and checks its audience,
@@ -382,6 +417,15 @@ covers migration `0049`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicati
 the copy in both stores. `PostgresApplicationCredentials.MigrationRecordsEachRowsOwnerForTheCopy`
 covers migration `0056`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicationKeysAndWebhooks`
 the key and webhook copy in both stores, including signing with copied keys and secrets.
+`ApplicationAuth.AuthorizationCodesLiveInTheApplicationsWorkspace` covers codes in two spaces with
+two workspaces each: one sealed record under a blind key only at the application's endpoint and the
+collection's retention, an exchange through another application refused, one redemption and a
+replay refused, two racing exchanges (the other's delete first, and a stale revision) refused, an
+expired code refused and removed, `if_absent` issue, a record moved under another application's key
+not opening, missing, malformed and unknown `application_id`, least privilege, a workspace that is
+not ready, and deletion. `WorkspaceRecordStores.TheOneShotCopyMovesLiveApplicationAuthorizationCodes`
+covers the copy of live codes in both stores, and
+`PostgresApplicationAuthorizationCodes.MigrationRecordsEachLiveCodesOwnerForTheCopy` migration `0061`.
 `IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` starts from a liquid TAAP-key lake
 session, completes the PKCE code exchange as a test relying party, and validates the ID token
 signature and claims against the application's JWKS.

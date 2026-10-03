@@ -13,11 +13,13 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/web_ui.hpp"
+#include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "stream_fixture.hpp"
 
@@ -1371,6 +1373,221 @@ TEST(ApplicationAuth, AConcurrentRotationIsRereadNotLost) {
         lake::control::get_application_signing_keys(*records, other.value.at("id"))));
     ASSERT_TRUE(moved);
     EXPECT_FALSE(*moved);
+}
+
+// lake#363: an application's one-use authorization codes live in the workspace Zetta of its
+// workspace, among two spaces with two workspaces each. Issue writes `if_absent`; the relying
+// party's exchange (application id and code only) finds the workspace from the routing row and
+// redeems by a delete at the revision read, so a code is redeemed at most once; the collection's
+// retention expires codes.
+TEST(ApplicationAuth, AuthorizationCodesLiveInTheApplicationsWorkspace) {
+    ApplicationSurface surface;
+    const std::string home = surface.workspace_id;
+    const std::string lab = surface.workspaces->add(surface.owned, surface.customer_id, "lab");
+    const auto other_owner = surface.store.create_user(
+        {"taap:1:ed25519:code-other", "code-other@example.test", "Other"});
+    ASSERT_TRUE(other_owner);
+    const auto other_customer =
+        surface.store.create_customer({"individual", other_owner->id, "", "code-other"});
+    ASSERT_TRUE(other_customer);
+    const std::string theirs = surface.workspaces->add(surface.owned, other_customer->id, "theirs");
+    const std::string theirs_too =
+        surface.workspaces->add(surface.owned, other_customer->id, "theirs-too");
+    const ApiResult first = surface.register_application("Client one", home);
+    const ApiResult second = surface.register_application("Client two", lab);
+    ASSERT_TRUE(first.ok) << first.error.message;
+    ASSERT_TRUE(second.ok) << second.error.message;
+    const auto their_app = surface.call(
+        "register_application",
+        {{"customer_id", other_customer->id},
+         {"workspace_id", theirs_too},
+         {"name", "Their client"},
+         {"allowed_origins", json::array({"https://their.example.test"})},
+         {"redirect_uris", json::array({"https://their.example.test/callback"})}});
+    ASSERT_TRUE(their_app.ok) << their_app.error.message;
+    const std::string first_id = first.value.at("id");
+    const std::string second_id = second.value.at("id");
+    const std::string their_id = their_app.value.at("id");
+
+    // The signed-in lake user authorizes; the relying party's backend exchanges anonymously.
+    const auto person = surface.store.create_user(
+        {"taap:1:ed25519:code-person", "code-person@example.test", "Code person"});
+    ASSERT_TRUE(person);
+    surface.context.acting_user_id = person->id;
+    const std::string verifier = "authorization-code-verifier-0123456789abcdef";
+    const auto authorize = [&](const std::string& application_id, const std::string& redirect) {
+        return surface.call(
+            "begin_application_authorization",
+            {{"application_id", application_id},
+             {"redirect_uri", redirect},
+             {"code_challenge", lake::control::identity_crypto::sha256_base64url(verifier)},
+             {"code_challenge_method", "S256"},
+             {"state", "state-1"},
+             {"nonce", "nonce-1"}});
+    };
+    const auto exchange = [&](const json& application_id, const json& code,
+                              const std::string& redirect = "https://client.example.test/callback") {
+        lake::api::ApiContext anonymous;
+        anonymous.store = &surface.store;
+        anonymous.workspaces = surface.context.workspaces;
+        anonymous.instance_kek = surface.context.instance_kek;
+        anonymous.public_host = surface.context.public_host;
+        anonymous.request_id = lake::control::new_uuid_v4();
+        json input{{"code", code}, {"redirect_uri", redirect}, {"code_verifier", verifier}};
+        if (!application_id.is_null()) {
+            input["application_id"] = application_id;
+        }
+        auto completed = liquid::runtime::block_on(surface.registry.call_async(
+            "exchange_application_authorization_code", input, anonymous));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : ApiResult::failure("store_error", "did not complete");
+    };
+    const std::string home_url = "http://workspace.test";
+    const std::string lab_url = "http://lab.test";
+
+    // Issued only into the application's own workspace, sealed and under a blind key: neither the
+    // code, nor its hash, nor the redirect or nonce is readable there, and the control store keeps
+    // no row. The collection is declared with the code lifetime as its retention.
+    const ApiResult issued = authorize(first_id, "https://client.example.test/callback");
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    const std::string code = issued.value.at("code");
+    const std::string code_hash = lake::control::identity_crypto::sha256_hex(code);
+    ASSERT_EQ(surface.records(home_url, "auth_app_authorization_codes").size(), 1U);
+    for (const auto& [key, record] : surface.records(home_url, "auth_app_authorization_codes")) {
+        EXPECT_EQ(key.find(code_hash), std::string::npos) << "blind key";
+        for (const std::string& secret : {code, code_hash, std::string("client.example.test"),
+                                          std::string("nonce-1"), person->id}) {
+            EXPECT_EQ(record.dump().find(secret), std::string::npos) << secret;
+        }
+    }
+    EXPECT_EQ(surface.workspaces->caller->records[home_url]
+                  .collections.at("lake_auth_app_authorization_codes")
+                  .retention_ms,
+              lake::control::ApplicationAuthorizationCodeCodec::lifetime_ms);
+    for (const std::string url : {lab_url, std::string("http://theirs.test"),
+                                  std::string("http://theirs-too.test")}) {
+        EXPECT_TRUE(surface.records(url, "auth_app_authorization_codes").empty()) << url;
+    }
+    EXPECT_TRUE(surface.store.legacy_application_authorization_codes("", 5000)->empty());
+    EXPECT_EQ(authorize(first_id, "https://evil.example.test/callback").error.path,
+              "/redirect_uri");
+
+    // Another application's id finds another workspace, where the code is not: refused, and the
+    // code is still redeemable through its own application exactly once.
+    EXPECT_EQ(exchange(second_id, code).error.code, "unauthorized");
+    EXPECT_EQ(exchange(their_id, code).error.code, "unauthorized");
+    const ApiResult tokens = exchange(first_id, code);
+    ASSERT_TRUE(tokens.ok) << tokens.error.message;
+    EXPECT_FALSE(tokens.value.at("id_token").get<std::string>().empty());
+    EXPECT_TRUE(surface.records(home_url, "auth_app_authorization_codes").empty())
+        << "redeemed by deleting it";
+    const ApiResult replay = exchange(first_id, code);
+    EXPECT_EQ(replay.error.code, "unauthorized") << "a code is redeemed once";
+
+    // Two exchanges racing for one code: the other's delete lands between this one's read and its
+    // conditional delete. Only one gets tokens.
+    const auto race = [&](std::function<void(lake::test::RecordTables&)> other) {
+        const ApiResult raced = authorize(first_id, "https://client.example.test/callback");
+        EXPECT_TRUE(raced.ok) << raced.error.message;
+        auto& tables = surface.workspaces->caller->records[home_url];
+        const std::string key = tables.rows("auth_app_authorization_codes").begin()->first;
+        tables.before_delete[key] = std::move(other);
+        return exchange(first_id, raced.value.at("code"));
+    };
+    const auto lost = race([](lake::test::RecordTables& tables) {
+        tables.rows("auth_app_authorization_codes").clear(); // the other exchange redeemed it
+    });
+    EXPECT_EQ(lost.error.code, "unauthorized");
+    const auto stale = race([](lake::test::RecordTables& tables) {
+        for (auto& [key, record] : tables.rows("auth_app_authorization_codes")) {
+            record["revision"] = record.at("revision").get<std::int64_t>() + 1000;
+        }
+    });
+    EXPECT_EQ(stale.error.code, "unauthorized") << "a delete at a stale revision is refused";
+    surface.records(home_url, "auth_app_authorization_codes").clear();
+
+    // An expired code is refused, and removed.
+    auto records = lake::api::workspace_records(surface.context, surface.customer_id, home);
+    ASSERT_TRUE(records) << records.error().message;
+    lake::control::ApplicationAuthorizationCode old;
+    old.application_id = first_id;
+    old.user_id = person->id;
+    old.redirect_uri = "https://client.example.test/callback";
+    old.code_hash = lake::control::identity_crypto::sha256_hex("an-old-code");
+    old.code_challenge = lake::control::identity_crypto::sha256_base64url(verifier);
+    old.nonce = "nonce-old";
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    old.at_us = now_us - 6LL * 60 * 1'000'000;
+    const auto written = lake::control::settled(liquid::runtime::block_on(
+        lake::control::issue_application_authorization_code(*records, old)));
+    ASSERT_TRUE(written) << written.error().message;
+    EXPECT_EQ(written->expires_us, old.at_us + 5LL * 60 * 1'000'000);
+    const auto twice = lake::control::settled(liquid::runtime::block_on(
+        lake::control::issue_application_authorization_code(*records, old)));
+    ASSERT_FALSE(twice);
+    EXPECT_EQ(twice.error().code, "conflict") << "issued if_absent";
+    EXPECT_EQ(exchange(first_id, "an-old-code").error.code, "unauthorized");
+    EXPECT_TRUE(surface.records(home_url, "auth_app_authorization_codes").empty());
+
+    // A code copied under another application's key does not open as that application's.
+    const ApiResult moved = authorize(first_id, "https://client.example.test/callback");
+    ASSERT_TRUE(moved.ok);
+    const ApiResult second_code = authorize(second_id, "https://client.example.test/callback");
+    ASSERT_TRUE(second_code.ok);
+    {
+        auto& rows = surface.records(home_url, "auth_app_authorization_codes");
+        const auto& value = rows.begin()->second.at("value");
+        auto& lab_rows = surface.records(lab_url, "auth_app_authorization_codes");
+        lab_rows.begin()->second["value"] = value;
+    }
+    EXPECT_EQ(exchange(second_id, second_code.value.at("code")).error.code, "unauthorized");
+    EXPECT_TRUE(exchange(first_id, moved.value.at("code")).ok);
+
+    // Missing, malformed and unknown application ids are refused at /application_id.
+    for (const json& wrong : {json(nullptr), json("not-an-application"),
+                              json(lake::control::new_uuid_v4())}) {
+        const auto refused = exchange(wrong, code);
+        EXPECT_FALSE(refused.ok) << wrong;
+        EXPECT_EQ(refused.error.path, "/application_id") << wrong;
+    }
+
+    // Least privilege: a reader of the application cannot issue a code for it.
+    const auto reader = surface.store.create_user(
+        {"taap:1:ed25519:code-reader", "code-reader@example.test", "Reader"});
+    ASSERT_TRUE(reader);
+    const auto object = surface.store.find_policy_object("application", first_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant({reader->taap_id, object->id, "read",
+                                            "code-reader-attestation", "admin",
+                                            "code-reader-request"}));
+    surface.context.operator_credential = false;
+    surface.context.acting_identity = reader->taap_id;
+    surface.context.acting_user_id = reader->id;
+    EXPECT_EQ(authorize(first_id, "https://client.example.test/callback").error.code,
+              "unauthorized");
+    surface.context.operator_credential = true;
+    surface.context.acting_identity = "admin";
+    surface.context.acting_user_id = person->id;
+
+    // A workspace that is not ready refuses issue and exchange instead of falling back.
+    const ApiResult pending = authorize(second_id, "https://client.example.test/callback");
+    ASSERT_TRUE(pending.ok) << pending.error.message;
+    const auto lab_row = surface.store.get_workspace(lab);
+    ASSERT_TRUE(surface.store.set_service_status(lab_row->zetta_service_id, "Provisioning", "",
+                                                 lab_url));
+    EXPECT_EQ(authorize(second_id, "https://client.example.test/callback").error.code,
+              "workspace_not_ready");
+    EXPECT_EQ(exchange(second_id, pending.value.at("code")).error.code, "workspace_not_ready");
+    ASSERT_TRUE(surface.store.set_service_status(lab_row->zetta_service_id, "Ready", "", lab_url));
+
+    // Deleting a workspace takes its codes with it; the other workspace keeps its own.
+    const ApiResult kept = authorize(first_id, "https://client.example.test/callback");
+    ASSERT_TRUE(kept.ok);
+    ASSERT_TRUE(surface.store.update_workspace(lab, {.desired = "deleted"}));
+    EXPECT_FALSE(exchange(second_id, pending.value.at("code")).ok);
+    EXPECT_TRUE(exchange(first_id, kept.value.at("code")).ok);
 }
 
 } // namespace

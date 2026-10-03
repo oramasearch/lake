@@ -200,6 +200,7 @@ add_library(lake-core STATIC
   src/control/application_user_records.cpp
   src/control/secret_records.cpp
   src/control/application_webhook_records.cpp
+  src/control/application_authorization_codes.cpp
   src/control/application_credential_records.cpp
   src/control/application_settings_records.cpp
   src/control/metering.cpp

@@ -3,6 +3,7 @@
 // (lake#376): sealing, structural isolation between workspaces and spaces, conditional writes,
 // workspace deletion, and the operator's one-shot copy.
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,7 @@
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_settings_records.hpp"
@@ -32,6 +34,7 @@
 #include "lake/control/apps.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/drive_share_links.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/forge_records.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
@@ -1802,6 +1805,221 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationKeysAndWebhooks) {
     const auto tampered = copy("auth_app_webhooks", "verify");
     EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
     EXPECT_FALSE(tampered.value["complete"]);
+}
+
+// lake#363: the one-shot copy moves each live (unused, unexpired) authorization code of the retired
+// auth_app_authorization_codes table into its application's workspace, under the blind key lake
+// redeems it by and with its own expiry; used and expired codes are never copied.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesLiveApplicationAuthorizationCodes) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    const auto application = [&](const std::string& customer, const std::string& workspace) {
+        const std::string id = lake::control::new_uuid_v4();
+        auto created = t.store->create_application({.id = id,
+                                                    .customer_id = customer,
+                                                    .pool_id = "app:" + id,
+                                                    .workspace_id = workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        return id;
+    };
+    const std::string lab_app = application(first.customer_id, first.workspaces[1]);
+    const std::string their_app = application(second.customer_id, second.workspaces[0]);
+    const std::string gone_app = application(first.customer_id, first.workspaces[0]);
+    const auto user = t.store->create_user(
+        {"taap:1:ed25519:code-copy-" + lake::control::new_uuid_v4(), "", "Code copy user"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    struct Legacy {
+        lake::control::ApplicationAuthorizationCode code;
+        bool used = false;
+    };
+    std::vector<Legacy> legacy;
+    const auto code_of = [&](const std::string& application_id, std::int64_t expires_in_us,
+                             bool used = false) {
+        lake::control::ApplicationAuthorizationCode code;
+        code.application_id = application_id;
+        code.user_id = user->id;
+        code.redirect_uri = "https://rp.example.test/" + application_id;
+        code.code_hash = lake::control::identity_crypto::sha256_hex(lake::control::new_uuid_v4());
+        code.code_challenge = "challenge-" + application_id;
+        code.nonce = "nonce-" + application_id;
+        // Whole seconds, as PostgreSQL's timestamptz keeps microseconds exactly.
+        code.expires_us = (now_us / 1'000'000) * 1'000'000 + expires_in_us;
+        code.at_us = code.expires_us - 5LL * 60 * 1'000'000;
+        legacy.push_back({code, used});
+        return code;
+    };
+    const auto lab_code = code_of(lab_app, 4LL * 60 * 1'000'000);
+    const auto their_code = code_of(their_app, 4LL * 60 * 1'000'000);
+    code_of(gone_app, 4LL * 60 * 1'000'000);
+    code_of(lab_app, 4LL * 60 * 1'000'000, true); // used: never copied
+    code_of(lab_app, -60LL * 1'000'000);          // expired: never copied
+    std::string legacy_app; // PostgreSQL only: an application from before migration 0049
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        legacy_app = lake::control::new_uuid_v4();
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'legacy', "
+                       "'[\"https://legacy.example.test\"]'::jsonb)",
+                       legacy_app, second.customer_id, "app:" + legacy_app);
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        code_of(legacy_app, 4LL * 60 * 1'000'000);
+        for (const Legacy& row : legacy) {
+            tx.exec_params(
+                "INSERT INTO auth_app_authorization_codes (code_hash, application_id, user_id, "
+                "redirect_uri, code_challenge, nonce, expires_at, used_at) VALUES ($1, $2::uuid, "
+                "$3::uuid, $4, $5, $6, to_timestamp($7::double precision / 1000000), "
+                "CASE WHEN $8 THEN now() END)",
+                row.code.code_hash, row.code.application_id, row.code.user_id,
+                row.code.redirect_uri, row.code.code_challenge, row.code.nonce,
+                row.code.expires_us, row.used);
+        }
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        for (const Legacy& row : legacy) {
+            memory.seed_legacy_application_authorization_code(row.code, row.used);
+        }
+    }
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[0], {.desired = "deleted"}));
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    const auto copy = [&](std::string mode, std::string after = {}, int limit = 1000) {
+        operator_context.request_id = lake::control::new_uuid_v4();
+        json input{{"collection", "auth_app_authorization_codes"}, {"mode", mode},
+                   {"limit", limit}};
+        if (!after.empty()) {
+            input["after"] = after;
+        }
+        const auto completed = liquid::runtime::block_on(
+            t.registry.call_async("copy_workspace_records", input, operator_context));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : lake::api::ApiResult::failure("store_error", "incomplete");
+    };
+
+    // Live codes only: the used and the expired one are not rows. The deleted workspace's code is
+    // reported and does not block; the legacy application's does.
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], GetParam() ? 4 : 3);
+    EXPECT_EQ(plan.value["unresolved"].size(), GetParam() ? 2U : 1U);
+    const auto before = copy("verify");
+    EXPECT_EQ(before.value["missing"].size(), 2U);
+    EXPECT_FALSE(before.value["complete"]);
+    // Paged by code hash, one row a page.
+    std::size_t paged = 0;
+    for (std::string after;;) {
+        const auto page = copy("plan", after, 1);
+        ASSERT_TRUE(page.ok) << page.error.message;
+        paged += page.value["rows"].get<std::size_t>();
+        if (page.value["next_after"].is_null()) {
+            break;
+        }
+        after = page.value["next_after"];
+    }
+    EXPECT_EQ(paged, GetParam() ? 4U : 3U);
+    const auto copied = copy("copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 2);
+    const auto rerun = copy("copy");
+    EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+    EXPECT_EQ(rerun.value["already_present"], 2);
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_TRUE(verified.value["missing"].empty());
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_EQ(verified.value["complete"], !GetParam());
+
+    // Each code is only in its own application's workspace, sealed under a blind key.
+    const std::string lab_url = "http://" + first.workspaces[1] + ".test";
+    const std::string their_url = "http://" + second.workspaces[0] + ".test";
+    ASSERT_EQ(t.zetta->records[lab_url].rows("auth_app_authorization_codes").size(), 1U);
+    ASSERT_EQ(t.zetta->records[their_url].rows("auth_app_authorization_codes").size(), 1U);
+    EXPECT_TRUE(t.zetta->records["http://" + second.workspaces[1] + ".test"].collections.empty());
+    for (const auto& [key, record] : t.zetta->records[lab_url].rows("auth_app_authorization_codes")) {
+        EXPECT_EQ(key.find(lab_code.code_hash), std::string::npos);
+        EXPECT_EQ(record.dump().find(lab_code.code_hash), std::string::npos);
+        EXPECT_EQ(record.dump().find(lab_code.nonce), std::string::npos);
+    }
+
+    // A copied code is redeemed once through its application's workspace, with its own expiry; a
+    // code redeemed after the copy is missing until its row expires and leaves the listing.
+    {
+        auto records = lake::api::workspace_records(operator_context, first.customer_id,
+                                                    first.workspaces[1]);
+        ASSERT_TRUE(records) << records.error().message;
+        const auto redeemed = lake::control::settled(liquid::runtime::block_on(
+            lake::control::redeem_application_authorization_code(*records, lab_app,
+                                                                 lab_code.code_hash)));
+        ASSERT_TRUE(redeemed) << redeemed.error().message;
+        EXPECT_EQ(redeemed->user_id, user->id);
+        EXPECT_EQ(redeemed->nonce, lab_code.nonce);
+        EXPECT_EQ(redeemed->expires_us, lab_code.expires_us);
+        EXPECT_EQ(redeemed->at_us, lab_code.at_us);
+        const auto again = lake::control::settled(liquid::runtime::block_on(
+            lake::control::redeem_application_authorization_code(*records, lab_app,
+                                                                 lab_code.code_hash)));
+        ASSERT_FALSE(again);
+        EXPECT_EQ(again.error().code, "unauthorized");
+    }
+    // The redeemed code is never written again (its row is still live in the table), and verify
+    // counts it: a copied code that left the workspace was redeemed or expired there.
+    const auto after_redemption = copy("copy");
+    EXPECT_EQ(after_redemption.value["copied"], 0) << "a redeemed code is not made redeemable again";
+    EXPECT_TRUE(t.zetta->records[lab_url].rows("auth_app_authorization_codes").empty());
+    const auto still = copy("verify");
+    EXPECT_EQ(still.value["verified"], 2);
+    EXPECT_TRUE(still.value["missing"].empty());
+
+    if (GetParam()) {
+        // Assigning the legacy application its workspace resolves its code on the next run.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       legacy_app, second.workspaces[1]);
+        tx.commit();
+        const auto resolved = copy("copy");
+        EXPECT_EQ(resolved.value["copied"], 1) << "only the legacy code";
+        EXPECT_EQ(resolved.value["unresolved"].size(), 1U) << "only the deleted workspace's";
+        EXPECT_TRUE(copy("verify").value["complete"]);
+    }
+
+    // A changed copy is reported, never silently accepted: a present code that no longer matches
+    // its row is mismatched.
+    auto& their_rows = t.zetta->records[their_url].rows("auth_app_authorization_codes");
+    ASSERT_EQ(their_rows.size(), 1U);
+    {
+        auto records = lake::api::workspace_records(operator_context, second.customer_id,
+                                                    second.workspaces[0]);
+        ASSERT_TRUE(records) << records.error().message;
+        auto changed = their_code;
+        changed.nonce = "another-nonce";
+        their_rows.clear();
+        ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(
+            lake::control::issue_application_authorization_code(*records, changed))));
+    }
+    const auto tampered = copy("verify");
+    EXPECT_EQ(tampered.value["mismatched"].size(), 1U);
+    EXPECT_FALSE(tampered.value["complete"]);
+
+    // Only the operator copies.
+    operator_context.operator_credential = false;
+    operator_context.acting_identity = first.principal.taap_id;
+    EXPECT_EQ(copy("plan").error.code, "unauthorized");
 }
 
 // lake#351: the one-shot copy moves the settings each application's auth_applications row still

@@ -587,38 +587,98 @@ InMemoryStore::legacy_application_webhook_deliveries(const std::string& after_id
     return rows;
 }
 
-Result<void>
-InMemoryStore::create_application_authorization_code(const ApplicationAuthorizationCode& value) {
-    if (value.application_id.empty() || value.user_id.empty() || value.redirect_uri.empty() ||
-        value.code_hash.empty() || value.code_challenge.empty() || value.nonce.empty()) {
-        return std::unexpected(
-            StoreError{"invalid_input", "authorization-code fields are required"});
-    }
+namespace {
+
+std::int64_t memory_now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+} // namespace
+
+void InMemoryStore::seed_legacy_application_authorization_code(ApplicationAuthorizationCode code,
+                                                               bool used) {
     std::lock_guard lock(mutex_);
-    if (std::ranges::any_of(application_authorization_codes_, [&](const auto& candidate) {
-            return candidate.code.code_hash == value.code_hash;
-        })) {
-        return std::unexpected(StoreError{"conflict", "authorization code already exists"});
+    application_authorization_codes_.push_back({std::move(code), used});
+}
+
+Result<void> InMemoryStore::assign_legacy_application_authorization_codes() {
+    std::lock_guard lock(mutex_);
+    const std::int64_t now = memory_now_us();
+    for (const ApplicationAuthorizationCodeRecord& row : application_authorization_codes_) {
+        if (row.used || row.code.expires_us <= now) {
+            continue;
+        }
+        const auto application = std::ranges::find_if(applications_, [&](const Application& value) {
+            return value.id == row.code.application_id;
+        });
+        if (application == applications_.end()) {
+            continue;
+        }
+        auto& assigned = legacy_application_code_assignments_[row.code.code_hash];
+        if (!assigned.first.empty() || assigned.second == "workspace_deleted") {
+            continue;
+        }
+        const bool deleted = std::ranges::any_of(workspaces_, [&](const Workspace& value) {
+            return value.id == application->workspace_id && value.desired == "deleted";
+        });
+        if (application->workspace_id.empty()) {
+            assigned = {"", "needs_selection"};
+        } else if (deleted) {
+            assigned = {"", "workspace_deleted"};
+        } else {
+            assigned = {application->workspace_id, "application_workspace"};
+        }
     }
-    application_authorization_codes_.push_back(
-        {value, std::chrono::steady_clock::now() + std::chrono::minutes(5), false});
     return {};
 }
 
-Result<ApplicationAuthorizationCode>
-InMemoryStore::consume_application_authorization_code(const std::string& application_id,
-                                                      const std::string& code_hash) {
+Result<void>
+InMemoryStore::record_legacy_application_authorization_code_copied(const std::string& code_hash) {
     std::lock_guard lock(mutex_);
-    for (auto& candidate : application_authorization_codes_) {
-        if (candidate.code.application_id == application_id &&
-            candidate.code.code_hash == code_hash && !candidate.used &&
-            candidate.expires_at > std::chrono::steady_clock::now()) {
-            candidate.used = true;
-            return candidate.code;
+    const auto found = legacy_application_code_assignments_.find(code_hash);
+    if (found == legacy_application_code_assignments_.end() || found->second.first.empty()) {
+        return std::unexpected(
+            StoreError{"not_found", "authorization code has no workspace to be copied to"});
+    }
+    found->second.second = "copied";
+    return {};
+}
+
+Result<std::vector<LegacyApplicationAuthorizationCode>>
+InMemoryStore::legacy_application_authorization_codes(const std::string& after_code_hash,
+                                                      int limit) {
+    std::lock_guard lock(mutex_);
+    const std::int64_t now = memory_now_us();
+    std::vector<ApplicationAuthorizationCode> live;
+    for (const ApplicationAuthorizationCodeRecord& row : application_authorization_codes_) {
+        if (!row.used && row.code.expires_us > now &&
+            (after_code_hash.empty() || row.code.code_hash > after_code_hash)) {
+            live.push_back(row.code);
         }
     }
-    return std::unexpected(
-        StoreError{"unauthorized", "authorization code is invalid, expired, or already used"});
+    std::ranges::sort(live, {}, &ApplicationAuthorizationCode::code_hash);
+    std::vector<LegacyApplicationAuthorizationCode> rows;
+    for (ApplicationAuthorizationCode& code : live) {
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        LegacyApplicationAuthorizationCode row{std::move(code), "", "", "needs_selection"};
+        const auto application = std::ranges::find_if(applications_, [&](const Application& value) {
+            return value.id == row.code.application_id;
+        });
+        if (application != applications_.end()) {
+            row.customer_id = application->customer_id;
+        }
+        if (const auto found = legacy_application_code_assignments_.find(row.code.code_hash);
+            found != legacy_application_code_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 } // namespace lake::control

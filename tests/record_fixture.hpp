@@ -36,6 +36,9 @@ public:
     // Run once, just before the next put_record of that key is decided: another writer's change
     // landing between a caller's read and its conditional write. It edits `collections` directly.
     std::map<std::string, std::function<void(RecordTables&)>> before_put;
+    // The same, just before the next delete_record of that key is decided: another caller's
+    // conditional delete (a racing redemption) landing first.
+    std::map<std::string, std::function<void(RecordTables&)>> before_delete;
 
     static bool handles(std::string_view capability, const json&) {
         return capability == "create_collection" || capability == "put_record" ||
@@ -73,6 +76,12 @@ public:
                 capability == "put_record" && hook != before_put.end()) {
                 auto change = std::move(hook->second);
                 before_put.erase(hook);
+                change(*this);
+            }
+            if (const auto hook = before_delete.find(key);
+                capability == "delete_record" && hook != before_delete.end()) {
+                auto change = std::move(hook->second);
+                before_delete.erase(hook);
                 change(*this);
             }
             const auto existing = collection.records.find(key);

@@ -240,6 +240,11 @@ struct LegacyApplicationWebhook {
     std::string outcome;
 };
 
+// A one-use OIDC authorization code of an application (lake#363): issued to a signed-in user and
+// redeemed once by the relying party's backend within five minutes. It lives in the workspace Zetta
+// of the application's workspace, keyed by the blind index of its hash; the code itself is never
+// kept. `at_us` is when it was issued and `expires_us` when it stops being redeemable, both in
+// microseconds since the Unix epoch; `revision` is the engine revision it was read at.
 struct ApplicationAuthorizationCode {
     std::string application_id;
     std::string user_id;
@@ -247,6 +252,20 @@ struct ApplicationAuthorizationCode {
     std::string code_hash;
     std::string code_challenge;
     std::string nonce;
+    std::int64_t at_us = 0;
+    std::int64_t expires_us = 0;
+    std::int64_t revision = 0;
+};
+
+// A live (unused, unexpired) row of the retired auth_app_authorization_codes table with its
+// recorded owner (migration 0061), for the one-shot copy only: the application's workspace
+// (`application_workspace`, or `copied` once the copy has written it), or empty with the reason it
+// is not (`needs_selection`, `workspace_deleted`).
+struct LegacyApplicationAuthorizationCode {
+    ApplicationAuthorizationCode code;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
 };
 
 namespace apps {
