@@ -35,7 +35,7 @@ part of the [cutover](#cutover-runbook-ask_messages-dev-cluster).
 | Labelled time series (#1231) | `create_metric`, `record_metric`, `query_metric` | Replicated | Label filter, group-by, steps | n/a | Metering and request metrics (#348, #349, #384) |
 | SQL tables | `sql` (GET, or POST since #1233) | Rows in the replicated catalogue | Full scan, one predicate | None | Workspace data people query; not lake's records |
 | Pub/sub topics | `create_topic`, `publish_event`, `browse_topic`, … | Node-local, best effort | By sequence | `update_event` only | Event streams with retention (`agent-events`, `app-events.*`, `build-events.*`) |
-| Connections | `create_connection` | Credential stored **in plaintext** | By name | None | Never use for secrets |
+| Connections | `create_connection` | Credential sealed at rest since zetta#1230 | By name | None | Not used for lake secrets (lake seals its own) |
 
 The record store's measured latency on 50,000 records is a `list_records` of 50 records at under
 1 ms in the registry ([zetta `docs/data/record-store.md`](https://github.com/oramasearch/zetta/blob/dev/docs/data/record-store.md)).
@@ -49,7 +49,7 @@ A page that reads one collection therefore pays one workspace round trip.
 | Mutable rows found by id | `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341), `platform_environments` (#358), `opportunities` (#376) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363), `offline_recovery_attempts` (#336), `agent_task_status` claims (#375) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
 | Unique names | repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
-| Secrets and credentials | `secrets_*` (#328–#332), `keystore` (#324), `pki_authorities` (#342), `custodial_identities` (#364), `auth_app_signing_keys` (#352), `oauth_providers` (#325) | Records whose sealed body holds the secrets subsystem's existing envelope ciphertext. Zetta's connection store is plaintext and is never used. |
+| Secrets and credentials | `secrets_*` (#328–#332), `keystore` (#324), `pki_authorities` (#342), `custodial_identities` (#364), `auth_app_signing_keys` (#352), `oauth_providers` (#325) | Records whose sealed body holds the secrets subsystem's existing envelope ciphertext. Zetta's connection store is not used (lake seals its own secrets). |
 | Metrics and usage series | `metering_usage` (#348), `metering_build_records` (#349), Prometheus series (#384) | Zetta's labelled time series (`create_metric`/`record_metric`/`query_metric`). The first metering follow-up adds a typed wrapper beside `WorkspaceRecords`. |
 | Event streams | `agent-events`, `app-events.*`, `build-events.*` | Workspace topics with retention, as in #311. |
 
@@ -256,12 +256,11 @@ to it, one store per workspace endpoint.
    schema doc and `db/README.md`, and write the cutover steps in the pull request.
 10. Once the copy is verified on dev, file or ship the migration that drops the table.
 
-## Zetta follow-ups (not blocking)
+## Zetta follow-ups and limits
 
-- **Per-statement SQL authorization.** UPDATE, DELETE, TRUNCATE and DDL skip the
-  `sql:write`/`sql:ddl` check that INSERT receives (`src/core/query/executor.cpp`). Lake no longer
-  depends on SQL for records, but the gap affects workspace data.
-- **Plaintext connections.** `zetta_connect.connections` stores credentials in plaintext.
+- **Fixed in Zetta dev `9798f159` (zetta#1229, zetta#1230):** every data-changing SQL statement now
+  checks `sql:write`/`sql:ddl`, and connector credentials are sealed at rest and never returned.
+  The connection store is still not used for lake secrets; lake seals its own.
 - **Membership-change window.** During a membership change, two owners can briefly both accept a
   conditional write to the same key. Lake's claims are safe only on a fully meshed StatefulSet,
   which is what the operator runs.
