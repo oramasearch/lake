@@ -155,3 +155,8 @@ The stores write and read only the routing columns of `auth_applications` (`crea
 leaves the settings columns NULL, and `update_application_theme` is gone);
 `assign_legacy_application_settings` reruns migration `0059`'s owner assignment and
 `legacy_application_settings` pages the rows that still hold settings, for the copy only.
+`application_authorization_codes.cpp` keeps an application's authorization codes in its workspace
+(lake#363). The stores no longer write or read `auth_app_authorization_codes` except for the copy:
+`assign_legacy_application_authorization_codes` reruns migration `0061`'s owner assignment of live
+codes, `legacy_application_authorization_codes` pages the live codes by hash, and
+`record_legacy_application_authorization_code_copied` marks a code `copied` before it is written.

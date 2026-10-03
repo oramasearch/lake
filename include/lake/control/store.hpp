@@ -1103,11 +1103,19 @@ public:
     legacy_application_webhook_events(const std::string& after_id, int limit) = 0;
     virtual Result<std::vector<LegacyApplicationWebhookDelivery>>
     legacy_application_webhook_deliveries(const std::string& after_id, int limit) = 0;
+    // The retired auth_app_authorization_codes table (lake#363), for the one-shot copy into
+    // workspace Zettas only: codes are issued and redeemed in the application's workspace
+    // (control/application_authorization_codes.hpp). Assigning records the owner of each live
+    // (unused, unexpired) code not yet recorded, as migration 0061 does, and resolves
+    // needs_selection rows whose application has since been assigned a workspace. Listing returns
+    // only live codes, paged by code hash.
+    // Recording a code as copied (outcome `copied`, before it is written) keeps the copy from
+    // ever writing it again, so a code redeemed in the workspace cannot be made redeemable twice.
+    virtual Result<void> assign_legacy_application_authorization_codes() = 0;
+    virtual Result<std::vector<LegacyApplicationAuthorizationCode>>
+    legacy_application_authorization_codes(const std::string& after_code_hash, int limit) = 0;
     virtual Result<void>
-    create_application_authorization_code(const ApplicationAuthorizationCode& value) = 0;
-    virtual Result<ApplicationAuthorizationCode>
-    consume_application_authorization_code(const std::string& application_id,
-                                           const std::string& code_hash) = 0;
+    record_legacy_application_authorization_code_copied(const std::string& code_hash) = 0;
 
     virtual audit::Result<audit::Identity> current_lake_identity() = 0;
     virtual audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) = 0;

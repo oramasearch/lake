@@ -3253,6 +3253,164 @@ TEST(PostgresApplicationCredentials, MigrationRecordsEachRowsOwnerForTheCopy) {
     EXPECT_GT(hooks.at(owned_hook).webhook.at_us, 0);
 }
 
+// Migration 0061 (lake#363) records the owner of each live (unused, unexpired) application
+// authorization code under md5(code_hash): the application's workspace, needs_selection while it
+// has none, workspace_deleted when that workspace is gone. Used and expired codes are not recorded
+// or listed. The copy's assignment records a code written after it and resolves an application
+// assigned after review; recording a code as copied keeps it from being written twice.
+TEST(PostgresApplicationAuthorizationCodes, MigrationRecordsEachLiveCodesOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "application-code-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "app-code-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    const auto person = store->create_user({"taap:code-person-" + suffix, "", "Person"});
+    ASSERT_TRUE(person) << person.error().message;
+    const auto registered = [&](const std::string& customer, const std::string& workspace) {
+        const std::string id = lake::control::new_uuid_v4();
+        const auto created = store->create_application({.id = id,
+                                                        .customer_id = customer,
+                                                        .pool_id = "app:" + id,
+                                                        .workspace_id = workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        return id;
+    };
+    const std::string owned = registered(customers[0], workspaces[0][0]);
+    const std::string gone = registered(customers[1], workspaces[1][1]);
+    const std::string ambiguous = lake::control::new_uuid_v4();
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'migration', "
+                       "'[\"https://m.example.test\"]'::jsonb)",
+                       ambiguous, customers[1], "app:" + ambiguous);
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        tx.commit();
+    }
+    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
+    // `state`: live, used or expired.
+    const auto insert_code = [&](const std::string& application, const std::string& state) {
+        const std::string hash = lake::control::identity_crypto::sha256_hex(
+            "code-" + lake::control::new_uuid_v4());
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO auth_app_authorization_codes (code_hash, application_id, "
+                       "user_id, redirect_uri, code_challenge, nonce, expires_at, used_at) VALUES "
+                       "($1, $2::uuid, $3::uuid, 'https://m.example.test/cb', 'challenge', "
+                       "'nonce', now() + CASE WHEN $4 = 'expired' THEN interval '-1 minute' ELSE "
+                       "interval '4 minutes' END, CASE WHEN $4 = 'used' THEN now() END)",
+                       hash, application, person->id, state);
+        tx.commit();
+        return hash;
+    };
+    const std::string owned_code = insert_code(owned, "live");
+    const std::string used_code = insert_code(owned, "used");
+    const std::string expired_code = insert_code(owned, "expired");
+    const std::string ambiguous_code = insert_code(ambiguous, "live");
+    const std::string gone_code = insert_code(gone, "live");
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = "
+                "'0061_application_authorization_code_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0061_application_authorization_code_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    using Outcome = std::pair<std::string, std::string>;
+    const auto outcome = [&](const std::string& hash) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'auth_app_authorization_codes' AND object_id = md5($1)::uuid",
+            hash);
+        return found.empty() ? Outcome{}
+                             : Outcome{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    // The schema section from 0061 on, twice: the second run changes nothing.
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(owned_code), (Outcome{"application_workspace", workspaces[0][0]}));
+        EXPECT_EQ(outcome(ambiguous_code), (Outcome{"needs_selection", ""}));
+        EXPECT_EQ(outcome(gone_code), (Outcome{"workspace_deleted", ""}));
+        EXPECT_TRUE(outcome(used_code).first.empty()) << "a used code is never copied";
+        EXPECT_TRUE(outcome(expired_code).first.empty()) << "an expired code is never copied";
+    }
+    const std::string late = insert_code(owned, "live");
+    EXPECT_TRUE(outcome(late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_application_authorization_codes());
+    EXPECT_EQ(outcome(late), (Outcome{"application_workspace", workspaces[0][0]}))
+        << "a code issued after the migration";
+
+    // A reviewed assignment of the unassigned application resolves its code.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       ambiguous, workspaces[1][0]);
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_application_authorization_codes());
+    EXPECT_EQ(outcome(ambiguous_code), (Outcome{"application_workspace", workspaces[1][0]}));
+    EXPECT_EQ(outcome(gone_code), (Outcome{"workspace_deleted", ""}));
+
+    // Recording a copy needs a workspace; a copied code says so in its listing.
+    ASSERT_TRUE(store->record_legacy_application_authorization_code_copied(owned_code));
+    EXPECT_EQ(outcome(owned_code), (Outcome{"copied", workspaces[0][0]}));
+    EXPECT_FALSE(store->record_legacy_application_authorization_code_copied(gone_code));
+    ASSERT_TRUE(store->assign_legacy_application_authorization_codes());
+    EXPECT_EQ(outcome(owned_code).first, "copied") << "a rerun keeps the record of the copy";
+
+    // Live codes only, paged by hash.
+    std::map<std::string, lake::control::LegacyApplicationAuthorizationCode> codes;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_application_authorization_codes(after, 1);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        ASSERT_EQ(page->size(), 1U);
+        EXPECT_GT(page->front().code.code_hash, after);
+        codes.emplace(page->front().code.code_hash, page->front());
+        after = page->back().code.code_hash;
+    }
+    EXPECT_FALSE(codes.contains(used_code));
+    EXPECT_FALSE(codes.contains(expired_code));
+    ASSERT_TRUE(codes.contains(owned_code));
+    ASSERT_TRUE(codes.contains(late));
+    const auto& row = codes.at(owned_code).code;
+    EXPECT_EQ(codes.at(owned_code).outcome, "copied");
+    EXPECT_EQ(codes.at(owned_code).customer_id, customers[0]);
+    EXPECT_EQ(row.application_id, owned);
+    EXPECT_EQ(row.user_id, person->id);
+    EXPECT_EQ(row.redirect_uri, "https://m.example.test/cb");
+    EXPECT_EQ(row.at_us, row.expires_us - 5LL * 60 * 1'000'000);
+    EXPECT_EQ(codes.at(gone_code).outcome, "workspace_deleted");
+    EXPECT_TRUE(codes.at(gone_code).workspace_id.empty());
+}
+
 // Migration 0059 (lake#351) records the owner of each application's settings that the retired
 // auth_applications columns still hold: the application's workspace, needs_selection while it has
 // none, workspace_deleted when that workspace is gone. A routing row written after it holds no

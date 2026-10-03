@@ -185,3 +185,15 @@ workspace (resolved by the copy once it has one), or `workspace_deleted`; a mirr
 repository is reported. Nothing is dropped. The latest guard is `platform_workspaces_guard`; the
 operator must vendor this schema and update its guard before rollout. See
 [platform.md](../docs/api/platform.md#where-environments-live-lake358-lake359).
+Migration `0061_application_authorization_code_workspaces` moves an application's one-use OIDC
+authorization codes (lake#363) into the workspace Zetta of the application's workspace, where they
+are issued `if_absent`, redeemed once by a delete at the revision read, and expired by the
+collection's five-minute retention. Each live (unused, unexpired) code of
+`auth_app_authorization_codes` has its owner recorded in `workspace_assignments` under
+`object_table = 'auth_app_authorization_codes'` and `object_id = md5(code_hash)::uuid` for
+`copy_workspace_records`: `application_workspace`, `needs_selection` while the application has no
+workspace, or `workspace_deleted`; the copy marks a code `copied` before writing it. Nothing is
+dropped. `app_authorization_codes` (protected-app forward auth) is unrelated and unchanged. The
+latest guard is `application_authorization_code_workspaces_guard`; the operator must vendor this
+schema and update its guard before rollout. See
+[apps.md](../docs/api/apps.md#where-authorization-codes-live-lake363).

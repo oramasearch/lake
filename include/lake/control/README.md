@@ -131,3 +131,12 @@ declares `ApplicationSettings`, `apply_settings` and the `LegacyApplicationSetti
 reads, and documents which `Application` fields are routing; `NewApplication` carries routing only.
 `store.hpp` drops `update_application_theme` and declares `assign_legacy_application_settings` and
 `legacy_application_settings`, which serve only the copy.
+`application_authorization_codes.hpp` holds an application's one-use authorization codes in its
+workspace (lake#363): the codec (keyed by the blind index of the application and the code hash,
+found by the application, with the five-minute lifetime as the collection's retention),
+`issue_application_authorization_code` (`if_absent`) and `redeem_application_authorization_code`
+(read, then `remove` at the revision read; every refusal of the code is `unauthorized`). `apps.hpp`
+adds the code's instants and revision and the `LegacyApplicationAuthorizationCode` rows the copy
+reads; `store.hpp` replaces `create_/consume_application_authorization_code` with
+`assign_legacy_application_authorization_codes`, `legacy_application_authorization_codes` and
+`record_legacy_application_authorization_code_copied`, which serve only the copy.

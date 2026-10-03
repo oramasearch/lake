@@ -193,6 +193,25 @@ constexpr std::string_view legacy_application_credential_resolution_sql =
     "ON a.id = c.application_id JOIN workspaces w ON w.id = a.workspace_id AND w.desired <> "
     "'deleted' WHERE s.object_table = c.object_table AND s.object_id = c.object_id AND "
     "s.workspace_id IS NULL AND s.outcome = 'needs_selection'";
+// Migration 0061's assignment of the retired auth_app_authorization_codes rows (db/schema.sql,
+// lake#363), rerun before each copy: each live (unused, unexpired) code belongs to its application's
+// workspace, recorded under md5(code_hash) as a UUID; needs_selection while the application has
+// none, workspace_deleted when that workspace is gone. The second statement resolves recorded
+// needs_selection codes once their application has been assigned a live workspace.
+constexpr std::string_view legacy_application_code_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'auth_app_authorization_codes', md5(c.code_hash)::uuid, a.customer_id, CASE "
+    "WHEN w.desired = 'deleted' THEN NULL ELSE a.workspace_id END, CASE WHEN a.workspace_id IS "
+    "NULL THEN 'needs_selection' WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE "
+    "'application_workspace' END FROM auth_app_authorization_codes c JOIN auth_applications a ON "
+    "a.id = c.application_id LEFT JOIN workspaces w ON w.id = a.workspace_id WHERE c.used_at IS "
+    "NULL AND c.expires_at > now() ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_application_code_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = a.workspace_id, outcome = "
+    "'application_workspace' FROM auth_app_authorization_codes c JOIN auth_applications a ON a.id "
+    "= c.application_id JOIN workspaces w ON w.id = a.workspace_id AND w.desired <> 'deleted' "
+    "WHERE s.object_table = 'auth_app_authorization_codes' AND s.object_id = "
+    "md5(c.code_hash)::uuid AND s.workspace_id IS NULL AND s.outcome = 'needs_selection'";
 
 // Migration 0054's assignment of the retired forge_records rows (db/schema.sql), rerun before each
 // copy: each row belongs to its repository's workspace, is needs_selection while the repository
@@ -3839,45 +3858,68 @@ public:
             });
     }
 
-    Result<void>
-    create_application_authorization_code(const ApplicationAuthorizationCode& value) override {
+    Result<void> assign_legacy_application_authorization_codes() override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            tx.exec_params(
-                "INSERT INTO auth_app_authorization_codes "
-                "(code_hash, application_id, user_id, redirect_uri, code_challenge, nonce) "
-                "VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6)",
-                value.code_hash,
-                value.application_id,
-                value.user_id,
-                value.redirect_uri,
-                value.code_challenge,
-                value.nonce);
+            tx.exec(std::string(legacy_application_code_assignment_sql));
+            tx.exec(std::string(legacy_application_code_resolution_sql));
             return {};
         });
     }
 
-    Result<ApplicationAuthorizationCode>
-    consume_application_authorization_code(const std::string& application_id,
-                                           const std::string& code_hash) override {
-        return with_tx<ApplicationAuthorizationCode>(
-            [&](pqxx::work& tx) -> Result<ApplicationAuthorizationCode> {
+    Result<void>
+    record_legacy_application_authorization_code_copied(const std::string& code_hash) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result updated = tx.exec_params(
+                "UPDATE workspace_assignments SET outcome = 'copied' "
+                "WHERE object_table = 'auth_app_authorization_codes' "
+                "AND object_id = md5($1)::uuid AND workspace_id IS NOT NULL",
+                code_hash);
+            if (updated.affected_rows() == 0) {
+                return std::unexpected(StoreError{
+                    "not_found", "authorization code has no workspace to be copied to"});
+            }
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyApplicationAuthorizationCode>>
+    legacy_application_authorization_codes(const std::string& after_code_hash,
+                                           int limit) override {
+        return with_tx<std::vector<LegacyApplicationAuthorizationCode>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyApplicationAuthorizationCode>> {
                 const pqxx::result rows = tx.exec_params(
-                    "UPDATE auth_app_authorization_codes SET used_at = now() "
-                    "WHERE application_id = $1::uuid AND code_hash = $2 AND used_at IS NULL "
-                    "AND expires_at > now() RETURNING application_id::text, user_id::text, "
-                    "redirect_uri, code_hash, code_challenge, nonce",
-                    application_id,
-                    code_hash);
-                if (rows.empty()) {
-                    return std::unexpected(StoreError{
-                        "unauthorized", "authorization code is invalid, expired, or already used"});
+                    "SELECT c.code_hash, c.application_id::text, c.user_id::text, "
+                    "c.redirect_uri, c.code_challenge, c.nonce, "
+                    "(extract(epoch FROM c.expires_at) * 1000000)::bigint, "
+                    "COALESCE(app.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                    "COALESCE(a.outcome, 'needs_selection') FROM auth_app_authorization_codes c "
+                    "LEFT JOIN auth_applications app ON app.id = c.application_id "
+                    "LEFT JOIN workspace_assignments a "
+                    "ON a.object_table = 'auth_app_authorization_codes' "
+                    "AND a.object_id = md5(c.code_hash)::uuid "
+                    "WHERE c.used_at IS NULL AND c.expires_at > now() "
+                    "AND ($1 = '' OR c.code_hash > $1) ORDER BY c.code_hash LIMIT $2",
+                    after_code_hash,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyApplicationAuthorizationCode> codes;
+                for (const pqxx::row& row : rows) {
+                    LegacyApplicationAuthorizationCode legacy;
+                    legacy.code.code_hash = row[0].as<std::string>();
+                    legacy.code.application_id = row[1].as<std::string>();
+                    legacy.code.user_id = row[2].as<std::string>();
+                    legacy.code.redirect_uri = row[3].as<std::string>();
+                    legacy.code.code_challenge = row[4].as<std::string>();
+                    legacy.code.nonce = row[5].as<std::string>();
+                    legacy.code.expires_us = row[6].as<std::int64_t>();
+                    // The table kept no issue instant: a code was issued five minutes before it
+                    // expired (its column default).
+                    legacy.code.at_us = legacy.code.expires_us - 5LL * 60 * 1'000'000;
+                    legacy.customer_id = row[7].as<std::string>();
+                    legacy.workspace_id = row[8].as<std::string>();
+                    legacy.outcome = row[9].as<std::string>();
+                    codes.push_back(std::move(legacy));
                 }
-                return ApplicationAuthorizationCode{rows[0][0].as<std::string>(),
-                                                    rows[0][1].as<std::string>(),
-                                                    rows[0][2].as<std::string>(),
-                                                    rows[0][3].as<std::string>(),
-                                                    rows[0][4].as<std::string>(),
-                                                    rows[0][5].as<std::string>()};
+                return codes;
             });
     }
 

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_settings_records.hpp"
@@ -40,7 +41,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 21> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 22> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -60,7 +61,8 @@ constexpr std::array<std::string_view, 21> copy_collections = {"opportunities",
                                                                "secrets_dynamic_leases",
                                                                "auth_applications",
                                                                "platform_environments",
-                                                               "platform_mirror"};
+                                                               "platform_mirror",
+                                                               "auth_app_authorization_codes"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -1014,6 +1016,125 @@ liquid::runtime::task<ApiResult> copy_application_webhooks(ApiContext& context,
     }
     co_return co_await copy_application_rows(context, "auth_app_webhooks", mode, *rows, limit,
                                              WebhookCopy{});
+}
+
+bool same_authorization_code(const control::ApplicationAuthorizationCode& stored,
+                             const control::ApplicationAuthorizationCode& source) {
+    return stored.application_id == source.application_id && stored.user_id == source.user_id &&
+           stored.redirect_uri == source.redirect_uri &&
+           stored.code_challenge == source.code_challenge && stored.nonce == source.nonce &&
+           stored.expires_us == source.expires_us && stored.at_us == source.at_us;
+}
+
+// One page of the live codes of the retired auth_app_authorization_codes table (lake#363). Each is
+// written into its application's workspace under the blind key lake redeems it by, with the instant
+// it was issued and the instant it expires, so a copied code is redeemable for no longer than it
+// was. A code is recorded as copied (outcome `copied`) before it is written, and a copied code is
+// never written again: a code redeemed in the workspace after the copy is gone for good, so a
+// rerun cannot make it redeemable twice. For the same reason verify counts a copied code that is no
+// longer in the workspace (redeemed, or expired there) as verified; one present must be unchanged.
+liquid::runtime::task<ApiResult> copy_application_authorization_codes(ApiContext& context,
+                                                                      const std::string& mode,
+                                                                      const std::string& after,
+                                                                      int limit) {
+    using Row = control::LegacyApplicationAuthorizationCode;
+    if (auto assigned = context.store->assign_legacy_application_authorization_codes();
+        !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_authorization_codes(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    // A code whose application's workspace was deleted went with it and does not block.
+    bool blocking = false;
+    std::map<std::string, std::map<std::string, std::vector<const Row*>>> by_workspace;
+    for (const Row& row : *rows) {
+        if (row.workspace_id.empty()) {
+            blocking = blocking || row.outcome != "workspace_deleted";
+            unresolved.push_back({{"id", row.code.code_hash},
+                                  {"customer_id", row.customer_id},
+                                  {"outcome", row.outcome}});
+        } else {
+            by_workspace[row.workspace_id][row.code.application_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, applications] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = applications.begin()->second.front()->customer_id;
+        for (const auto& [application_id, owned] : applications) {
+            tally.rows += owned.size();
+        }
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const auto& [application_id, owned] : applications) {
+            // One read per application, shared by its codes.
+            auto codes = control::settled(
+                co_await control::list_application_authorization_codes(*records, application_id));
+            if (!codes) {
+                tally.error = codes.error().code + ": " + codes.error().message;
+                break;
+            }
+            std::map<std::string, control::ApplicationAuthorizationCode> present;
+            for (auto& code : *codes) {
+                const std::string hash = code.code_hash;
+                present.emplace(hash, std::move(code));
+            }
+            for (const Row* row : owned) {
+                const bool copied = row->outcome == "copied";
+                const auto found = present.find(row->code.code_hash);
+                if (mode == "verify") {
+                    if (found != present.end()) {
+                        if (same_authorization_code(found->second, row->code)) {
+                            ++tally.verified;
+                        } else {
+                            tally.mismatched.push_back(row->code.code_hash);
+                        }
+                    } else if (copied) {
+                        ++tally.verified; // redeemed or expired in the workspace since the copy
+                    } else {
+                        tally.missing.push_back(row->code.code_hash);
+                    }
+                    continue;
+                }
+                if (found != present.end() || copied) {
+                    ++tally.already_present;
+                    continue;
+                }
+                if (auto marked = context.store->record_legacy_application_authorization_code_copied(
+                        row->code.code_hash);
+                    !marked) {
+                    tally.error = marked.error().code + ": " + marked.error().message;
+                    break;
+                }
+                auto written = control::settled(
+                    co_await control::issue_application_authorization_code(*records, row->code));
+                if (!written && written.error().code == "conflict") {
+                    ++tally.already_present; // a concurrent copy; verify compares it
+                    continue;
+                }
+                if (!written) {
+                    tally.error = written.error().code + ": " + written.error().message;
+                    break;
+                }
+                ++tally.copied;
+            }
+            if (!tally.error.empty()) {
+                break;
+            }
+        }
+    }
+    co_return copy_result("auth_app_authorization_codes", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().code.code_hash,
+                          std::move(unresolved), tallies, blocking);
 }
 
 // The rows of one retired metering table grouped by the workspace that owns them. Rows whose
@@ -1990,6 +2111,10 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "auth_app_signing_keys") {
                 co_return co_await copy_application_signing_keys(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_app_authorization_codes") {
+                co_return co_await copy_application_authorization_codes(context, mode, after,
+                                                                        limit);
             }
             if (input.at("collection") == "auth_app_webhooks") {
                 co_return co_await copy_application_webhooks(context, mode, after, limit);
