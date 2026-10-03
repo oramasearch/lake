@@ -61,6 +61,10 @@ a stateful fake caller against the authorized engine contract and an opt-in brow
 response validation also uses these fixtures. See
 [API](../docs/api/experiments.md) and [UI](../docs/ui/experiments.md) contracts.
 
+`test_audit_isolation.cpp` also runs `ActivityIsNewestFirstNamedAndQuiet` on both stores:
+`my_audit` ordering, principal names (an acting agent included), a workspace call's inner
+capability and the hidden successful reads (lake#445).
+
 `test_streams.cpp` covers Streams space/system/creator permissions, non-consuming browse,
 retention, revisions, REST/MCP parity with one call per operation, UI control mappings and
 selected navigation. Its 1,000-topic case checks the 50-row default page, cursor and prefix

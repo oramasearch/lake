@@ -96,6 +96,99 @@ TEST_P(AuditIsolation, ExactRequestAndCursorSurviveEarlierEvents) {
     EXPECT_TRUE(unknown_cursor->empty());
 }
 
+// lake#445: a person's activity is newest first, names who acted (the agent working for them
+// included), shows what a workspace call did, and leaves out the reads a browser polls.
+TEST_P(AuditIsolation, ActivityIsNewestFirstNamedAndQuiet) {
+    const std::string taap_id = "taap:1:ed25519:activity-" + lake::control::new_uuid_v4();
+    const auto person = store->create_user(
+        {.taap_id = taap_id, .email = taap_id + "@example.test", .display_name = "Ada Lovelace"});
+    ASSERT_TRUE(person) << person.error().message;
+    const lake::audit::IdentityOptions options{.instance_kek = context.instance_kek};
+    for (const lake::audit::EventDraft& draft :
+         {lake::audit::EventDraft{.kind = "capability",
+                                  .principal = taap_id,
+                                  .object = "repository/r",
+                                  .action = "create_repository",
+                                  .outcome = "success"},
+          lake::audit::EventDraft{.kind = "capability",
+                                  .principal = taap_id,
+                                  .object = "capability/list_users",
+                                  .action = "list_users",
+                                  .outcome = "success"},
+          lake::audit::EventDraft{.kind = "capability",
+                                  .principal = taap_id,
+                                  .object = "capability/list_users",
+                                  .action = "list_users",
+                                  .outcome = "denied"},
+          lake::audit::EventDraft{.kind = "workspace.act",
+                                  .principal = taap_id,
+                                  .object = "customer/c",
+                                  .action = "workspace_act",
+                                  .outcome = "success",
+                                  .details = {{"capability", "create_agent"},
+                                              {"acting_agent", "agent-project"}}}}) {
+        const auto recorded = lake::audit::record(*store, draft, options);
+        ASSERT_TRUE(recorded) << recorded.error().message;
+    }
+
+    lake::api::ApiContext own;
+    own.store = store.get();
+    own.authorized = true;
+    own.acting_user_id = person->id;
+    own.acting_identity = taap_id;
+    own.instance_kek = context.instance_kek;
+    const auto actions = [](const nlohmann::json& items) {
+        std::vector<std::string> out;
+        for (const nlohmann::json& item : items) {
+            if (item.at("action") != "my_audit") {
+                out.push_back(item.at("action").get<std::string>() + "/" +
+                              item.at("outcome").get<std::string>());
+            }
+        }
+        return out;
+    };
+
+    const auto quiet = registry.call("my_audit", {{"limit", 100}}, own);
+    ASSERT_TRUE(quiet.ok) << quiet.error.message;
+    const nlohmann::json& items = quiet.value.at("items");
+    EXPECT_EQ(actions(items),
+              (std::vector<std::string>{
+                  "workspace_act/success", "list_users/denied", "create_repository/success"}))
+        << "newest first, the successful read left out, the denied read kept";
+    ASSERT_FALSE(items.empty());
+    EXPECT_EQ(items.front().at("principal_name"), "Project Agent for Ada Lovelace");
+    EXPECT_EQ(items.front().at("capability"), "create_agent");
+    EXPECT_EQ(items.back().at("principal_name"), "Ada Lovelace");
+    EXPECT_FALSE(items.back().contains("capability"));
+
+    const auto everything =
+        registry.call("my_audit", {{"limit", 100}, {"include_reads", true}}, own);
+    ASSERT_TRUE(everything.ok) << everything.error.message;
+    EXPECT_EQ(actions(everything.value.at("items")),
+              (std::vector<std::string>{"workspace_act/success",
+                                        "list_users/denied",
+                                        "list_users/success",
+                                        "create_repository/success"}));
+    EXPECT_EQ(everything.value.at("items").front().at("action"), "my_audit")
+        << "the earlier my_audit read is the newest event once reads are included";
+
+    const auto oldest = registry.call(
+        "my_audit", {{"limit", 100}, {"order", "oldest"}, {"include_reads", true}}, own);
+    ASSERT_TRUE(oldest.ok) << oldest.error.message;
+    EXPECT_EQ(actions(oldest.value.at("items")),
+              (std::vector<std::string>{"create_repository/success",
+                                        "list_users/success",
+                                        "list_users/denied",
+                                        "workspace_act/success"}));
+
+    const auto operator_view =
+        registry.call("audit", {{"principal", taap_id}, {"limit", 1}}, context);
+    ASSERT_TRUE(operator_view.ok) << operator_view.error.message;
+    ASSERT_EQ(operator_view.value.at("items").size(), 1U);
+    EXPECT_EQ(operator_view.value.at("items").front().at("action"), "my_audit")
+        << "the operator's audit query is newest first and keeps reads";
+}
+
 TEST_P(AuditIsolation, CustomerLookupFiltersBeforeLimiting) {
     const auto initial = lake::test::audit_events(*store);
     ASSERT_TRUE(initial);

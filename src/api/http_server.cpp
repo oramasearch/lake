@@ -14321,14 +14321,20 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
             return redirect(route, "/sign-in");
+        // Newest first, and without the successful reads a browser polls, unless asked
+        // (lake#445).
+        const bool include_reads = query_value(route, "reads") == "all";
         const audit::Filter filter{
             .object = query_value(route, "object"),
             .outcome = query_value(route, "outcome"),
             .from = query_value(route, "from"),
             .to = query_value(route, "to"),
             .limit = 500,
+            .newest_first = query_value(route, "order") != "oldest",
         };
-        nlohmann::json input = {{"limit", filter.limit}};
+        nlohmann::json input = {{"limit", filter.limit},
+                                {"order", filter.newest_first ? "newest" : "oldest"},
+                                {"include_reads", include_reads}};
         for (const auto& [key, value] :
              {std::pair<const char*, const std::string&>{"object", filter.object},
               {"outcome", filter.outcome},
@@ -14341,13 +14347,18 @@ struct ApiServer::Impl {
         if (!result.ok) {
             return serve_page_error(route, result);
         }
+        const nlohmann::json items = result.value.value("items", nlohmann::json::array());
         std::vector<audit::Event> events;
-        for (const nlohmann::json& item : result.value.value("items", nlohmann::json::array())) {
+        for (const nlohmann::json& item : items) {
             events.push_back(audit::event_from_json(item));
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_audit(events, filter, nlohmann::json::object(), viewer_for(ctx)),
+                         web_ui_audit(events,
+                                      filter,
+                                      nlohmann::json::object(),
+                                      viewer_for(ctx),
+                                      audit_page_view(items, include_reads)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -14363,8 +14374,10 @@ struct ApiServer::Impl {
             .from = query_value(route, "from"),
             .to = query_value(route, "to"),
             .limit = 500,
+            .newest_first = query_value(route, "order") != "oldest",
         };
-        nlohmann::json input = {{"limit", filter.limit}};
+        nlohmann::json input = {{"limit", filter.limit},
+                                {"order", filter.newest_first ? "newest" : "oldest"}};
         if (!filter.principal.empty())
             input["principal"] = filter.principal;
         if (!filter.object.empty())
@@ -14379,8 +14392,9 @@ struct ApiServer::Impl {
         if (!result.ok) {
             return serve_page_error(route, result);
         }
+        const nlohmann::json items = result.value.value("items", nlohmann::json::array());
         std::vector<audit::Event> events;
-        for (const nlohmann::json& item : result.value.value("items", nlohmann::json::array())) {
+        for (const nlohmann::json& item : items) {
             events.push_back(audit::event_from_json(item));
         }
         nlohmann::json log_configuration;
@@ -14394,7 +14408,11 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_audit(events, filter, log_configuration, viewer_for(ctx)),
+                         web_ui_audit(events,
+                                      filter,
+                                      log_configuration,
+                                      viewer_for(ctx),
+                                      audit_page_view(items)),
                          "text/html; charset=utf-8",
                          "no-store");
     }

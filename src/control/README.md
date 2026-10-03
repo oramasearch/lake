@@ -29,6 +29,8 @@ before publishing account rows. See `docs/api/provisioning.md`.
 Customer lists optionally filter by user ID before the limit. Audit lists apply exact request
 filters and event-ID cursors before the limit in both stores. The test regressions and fixture
 rules are in `docs/build/testing.md`; the public query contract is in `docs/api/audit.md`.
+`audit::Filter` also selects newest-first order and leaves out the successful events of named
+actions, and `Store::principal_names` names TAAP identities, in both stores (lake#445).
 
 PostgreSQL session authentication uses a unique public lookup UUID and constant-time SHA-256
 verification of one random bearer. Legacy sessions are invalidated by migration `0022_session_lookup`.

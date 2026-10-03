@@ -57,6 +57,12 @@ struct Filter {
     std::string request_id;
     // Continue after this event in append order, independently of timestamps.
     std::string after_id;
+    // Return the newest matching events first (lake#445). Chain verification, export and
+    // after_id paging keep append order.
+    bool newest_first = false;
+    // Leave out the successful events of these actions: the reads a browser polls, so a
+    // person's activity shows what changed (lake#445). Failed and denied reads still appear.
+    std::vector<std::string> omit_successful_actions;
 };
 
 struct Identity {

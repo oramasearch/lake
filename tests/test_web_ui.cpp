@@ -1412,6 +1412,35 @@ TEST(WebUi, AuditPageFiltersAndEscapesEvents) {
     EXPECT_NE(page.find("Effective mode: <code>witnessed</code>"), std::string::npos);
 }
 
+TEST(WebUi, ActivityPageNamesPrincipalsAndWorkspaceCapabilities) {
+    lake::audit::Event event{
+        .id = "event-1",
+        .occurred_at = "2026-10-01T00:00:00.000000Z",
+        .draft = {.kind = "workspace.act",
+                  .principal = "taap:1:ed25519:person",
+                  .object = "customer/c",
+                  .action = "workspace_act",
+                  .outcome = "success"},
+        .digest = "abcdef",
+    };
+    const nlohmann::json items = nlohmann::json::array(
+        {{{"id", "event-1"},
+          {"principal_name", "Project Agent for <Ada>"},
+          {"capability", "create_agent"}}});
+    lake::api::WebUiViewer viewer{true, false};
+    viewer.path = "/activity";
+    const lake::audit::Filter filter{.newest_first = true};
+    const std::string page = lake::api::web_ui_audit(
+        {event}, filter, nlohmann::json::object(), viewer, lake::api::audit_page_view(items, false));
+    EXPECT_NE(page.find("Project Agent for &lt;Ada&gt;"), std::string::npos);
+    EXPECT_NE(page.find("title=\"taap:1:ed25519:person\""), std::string::npos);
+    EXPECT_NE(page.find("workspace_act <code>create_agent</code>"), std::string::npos);
+    EXPECT_NE(page.find("value=\"newest\" selected"), std::string::npos);
+    EXPECT_NE(page.find("name=\"reads\" value=\"all\">"), std::string::npos)
+        << "reads are offered, unchecked";
+    EXPECT_NE(page.find("Successful reads"), std::string::npos);
+}
+
 TEST(WebUi, TransparencyPageRendersVerifiedIdentityMatches) {
     const nlohmann::json scan{
         {"duration_ms", 12.5},

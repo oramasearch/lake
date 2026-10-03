@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -801,6 +802,10 @@ public:
     virtual Result<User> create_user(const NewUser&) = 0;
     virtual Result<std::vector<User>> list_users(int limit) = 0;
     virtual Result<User> get_user(const std::string& id) = 0;
+    // What people call these TAAP identities: a user's display name (else email) or an
+    // organization's display name. Unknown identities are absent from the map (lake#445).
+    virtual Result<std::map<std::string, std::string>>
+    principal_names(const std::vector<std::string>& taap_ids) = 0;
 
     virtual Result<Organization> create_organization(const NewOrganization&) = 0;
     virtual Result<std::vector<Organization>> list_organizations(int limit) = 0;

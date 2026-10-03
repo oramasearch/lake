@@ -206,6 +206,11 @@ TEST_F(Streams, TaskCredentialCannotSelectAnotherWorkspaceInTheSameSpace) {
     const auto refused = call("list_streams", {{"customer_id", customer}, {"workspace_id", second}});
     EXPECT_EQ(refused.error.code, "unauthorized");
     EXPECT_NE(refused.error.message.find("workspace"), std::string::npos);
+    // The audit event names the agent the task credential belongs to (lake#445).
+    const auto events = store->list_audit_events({.limit = 1, .newest_first = true});
+    ASSERT_TRUE(events && events->size() == 1U);
+    EXPECT_EQ(events->front().draft.action, "list_streams");
+    EXPECT_EQ(events->front().draft.details.value("acting_agent", ""), "agent-project");
 }
 
 TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {
